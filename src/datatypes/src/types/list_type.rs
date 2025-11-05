@@ -49,8 +49,16 @@ impl DataType for ListType {
 
 fn get_type_name(dt: &ConcreteDatatype) -> String {
     match dt {
+        ConcreteDatatype::Float32(_) => "Float32",
         ConcreteDatatype::Float64(_) => "Float64",
+        ConcreteDatatype::Int8(_) => "Int8",
+        ConcreteDatatype::Int16(_) => "Int16",
+        ConcreteDatatype::Int32(_) => "Int32",
         ConcreteDatatype::Int64(_) => "Int64",
+        ConcreteDatatype::Uint8(_) => "Uint8",
+        ConcreteDatatype::Uint16(_) => "Uint16",
+        ConcreteDatatype::Uint32(_) => "Uint32",
+        ConcreteDatatype::Uint64(_) => "Uint64",
         ConcreteDatatype::String(_) => "String",
         ConcreteDatatype::Bool(_) => "Boolean",
         ConcreteDatatype::Struct(_) => "Struct",

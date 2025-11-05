@@ -87,8 +87,16 @@ impl DataType for StructType {
 
 fn get_type_name(dt: &ConcreteDatatype) -> String {
     match dt {
+        ConcreteDatatype::Float32(_) => "Float32",
         ConcreteDatatype::Float64(_) => "Float64",
+        ConcreteDatatype::Int8(_) => "Int8",
+        ConcreteDatatype::Int16(_) => "Int16",
+        ConcreteDatatype::Int32(_) => "Int32",
         ConcreteDatatype::Int64(_) => "Int64",
+        ConcreteDatatype::Uint8(_) => "Uint8",
+        ConcreteDatatype::Uint16(_) => "Uint16",
+        ConcreteDatatype::Uint32(_) => "Uint32",
+        ConcreteDatatype::Uint64(_) => "Uint64",
         ConcreteDatatype::String(_) => "String",
         ConcreteDatatype::Bool(_) => "Boolean",
         ConcreteDatatype::Struct(_) => "Struct",
@@ -99,8 +107,16 @@ fn get_type_name(dt: &ConcreteDatatype) -> String {
 
 fn get_default_value(dt: &ConcreteDatatype) -> Value {
     match dt {
-        ConcreteDatatype::Float64(_) => Value::Float64(0.0),
+        ConcreteDatatype::Int8(_) => Value::Int8(0),
+        ConcreteDatatype::Int16(_) => Value::Int16(0),
+        ConcreteDatatype::Int32(_) => Value::Int32(0),
         ConcreteDatatype::Int64(_) => Value::Int64(0),
+        ConcreteDatatype::Float32(_) => Value::Float32(0.0),
+        ConcreteDatatype::Float64(_) => Value::Float64(0.0),
+        ConcreteDatatype::Uint8(_) => Value::Uint8(0),
+        ConcreteDatatype::Uint16(_) => Value::Uint16(0),
+        ConcreteDatatype::Uint32(_) => Value::Uint32(0),
+        ConcreteDatatype::Uint64(_) => Value::Uint64(0),
         ConcreteDatatype::String(_) => Value::String(String::new()),
         ConcreteDatatype::Bool(_) => Value::Bool(false),
         ConcreteDatatype::Struct(_) => {

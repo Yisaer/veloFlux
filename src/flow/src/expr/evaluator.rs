@@ -4,7 +4,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::array::{ArrayRef, Int64Array, Float64Array, StringArray, BooleanArray};
 use datafusion::execution::context::SessionContext;
 use datafusion_common::{DataFusionError, Result as DataFusionResult, ScalarValue, ToDFSchema};
-use datafusion_expr::{Expr, execution_props::ExecutionProps};
+use datafusion_expr::{Expr, execution_props::ExecutionProps, lit};
 use datatypes::{Value, ConcreteDatatype};
 use std::sync::Arc;
 
@@ -50,13 +50,26 @@ impl DataFusionEvaluator {
 
     /// Evaluate a DataFusion function by name
     pub fn evaluate_df_function(&self, function_name: &str, args: &[ScalarExpr], tuple: &Tuple) -> DataFusionResult<Value> {
+        // First, evaluate all arguments using regular ScalarExpr::eval to get their values
+        let mut arg_values = Vec::new();
+        for arg in args {
+            // Use regular ScalarExpr evaluation for arguments
+            match arg.eval(self, tuple) {
+                Ok(value) => arg_values.push(value),
+                Err(eval_error) => return Err(DataFusionError::Execution(format!("Failed to evaluate argument: {}", eval_error))),
+            }
+        }
+        
         // Convert tuple to RecordBatch
         let record_batch = tuple_to_record_batch(tuple)?;
         
-        // Convert arguments to DataFusion expressions
-        let df_args: DataFusionResult<Vec<Expr>> = args
+        // Convert the evaluated argument values to DataFusion literals
+        let df_args: DataFusionResult<Vec<Expr>> = arg_values
             .iter()
-            .map(|arg| scalar_expr_to_datafusion_expr(arg, tuple.schema()))
+            .map(|value| {
+                let scalar_value = value_to_scalar_value(value)?;
+                Ok(lit(scalar_value))
+            })
             .collect();
         let df_args = df_args?;
         
@@ -126,6 +139,10 @@ impl DataFusionEvaluator {
                         arrow::datatypes::DataType::Boolean => {
                             let bool_array = arrow::array::as_boolean_array(&array);
                             ScalarValue::Boolean(Some(bool_array.value(0)))
+                        }
+                        arrow::datatypes::DataType::UInt8 => {
+                            let uint8_array = arrow::array::as_primitive_array::<arrow::datatypes::UInt8Type>(&array);
+                            ScalarValue::UInt8(Some(uint8_array.value(0)))
                         }
                         _ => return Err(DataFusionError::NotImplemented(
                             format!("Array type {:?} conversion not implemented", array.data_type())
@@ -231,6 +248,20 @@ fn values_to_array(values: Vec<Value>, datatype: &ConcreteDatatype) -> DataFusio
                 })
                 .collect::<DataFusionResult<_>>()?;
             Ok(Arc::new(BooleanArray::from(bool_values)) as ArrayRef)
+        }
+        ConcreteDatatype::Uint8(_) => {
+            let uint8_values: Vec<u8> = values
+                .into_iter()
+                .map(|v| match v {
+                    Value::Uint8(u) => Ok(u),
+                    _ => Err(DataFusionError::Internal(
+                        format!("Expected Uint8 value, got {:?}", v)
+                    )),
+                })
+                .collect::<DataFusionResult<_>>()?;
+            // Use UInt8Array from arrow
+            use arrow::array::UInt8Array;
+            Ok(Arc::new(UInt8Array::from(uint8_values)) as ArrayRef)
         }
         _ => Err(DataFusionError::NotImplemented(
             format!("Array conversion for type {:?} not implemented", datatype)
