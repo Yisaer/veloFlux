@@ -127,6 +127,10 @@ impl DataFusionEvaluator {
                             let bool_array = arrow::array::as_boolean_array(&array);
                             ScalarValue::Boolean(Some(bool_array.value(0)))
                         }
+                        arrow::datatypes::DataType::UInt8 => {
+                            let uint8_array = arrow::array::as_primitive_array::<arrow::datatypes::UInt8Type>(&array);
+                            ScalarValue::UInt8(Some(uint8_array.value(0)))
+                        }
                         _ => return Err(DataFusionError::NotImplemented(
                             format!("Array type {:?} conversion not implemented", array.data_type())
                         )),
@@ -231,6 +235,20 @@ fn values_to_array(values: Vec<Value>, datatype: &ConcreteDatatype) -> DataFusio
                 })
                 .collect::<DataFusionResult<_>>()?;
             Ok(Arc::new(BooleanArray::from(bool_values)) as ArrayRef)
+        }
+        ConcreteDatatype::Uint8(_) => {
+            let uint8_values: Vec<u8> = values
+                .into_iter()
+                .map(|v| match v {
+                    Value::Uint8(u) => Ok(u),
+                    _ => Err(DataFusionError::Internal(
+                        format!("Expected Uint8 value, got {:?}", v)
+                    )),
+                })
+                .collect::<DataFusionResult<_>>()?;
+            // Use UInt8Array from arrow
+            use arrow::array::UInt8Array;
+            Ok(Arc::new(UInt8Array::from(uint8_values)) as ArrayRef)
         }
         _ => Err(DataFusionError::NotImplemented(
             format!("Array conversion for type {:?} not implemented", datatype)

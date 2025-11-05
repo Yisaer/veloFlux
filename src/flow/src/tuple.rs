@@ -139,12 +139,31 @@ fn json_value_to_value(json_val: &JsonValue, data_type: &ConcreteDatatype) -> Re
                 })
                 .map(Value::Float64)
         }
+        (JsonValue::Number(n), ConcreteDatatype::Uint8(_)) => {
+            n.as_u64()
+                .and_then(|u| if u <= u8::MAX as u64 { Some(u as u8) } else { None })
+                .ok_or_else(|| JsonError::TypeMismatch {
+                    expected: "Uint8".to_string(),
+                    actual: format!("{}", n),
+                })
+                .map(Value::Uint8)
+        }
         (JsonValue::String(s), ConcreteDatatype::String(_)) => Ok(Value::String(s.clone())),
         (JsonValue::Number(n), dt) => {
             // Try to convert number to the expected type
             if let Some(i) = n.as_i64() {
                 match dt {
                     ConcreteDatatype::Float64(_) => Ok(Value::Float64(i as f64)),
+                    ConcreteDatatype::Uint8(_) => {
+                        if i >= 0 && i <= u8::MAX as i64 {
+                            Ok(Value::Uint8(i as u8))
+                        } else {
+                            Err(JsonError::TypeMismatch {
+                                expected: "Uint8".to_string(),
+                                actual: format!("{}", n),
+                            })
+                        }
+                    }
                     ConcreteDatatype::String(_) => Ok(Value::String(i.to_string())),
                     _ => Err(JsonError::TypeMismatch {
                         expected: format!("{:?}", dt),
@@ -154,7 +173,37 @@ fn json_value_to_value(json_val: &JsonValue, data_type: &ConcreteDatatype) -> Re
             } else if let Some(f) = n.as_f64() {
                 match dt {
                     ConcreteDatatype::Int64(_) => Ok(Value::Int64(f as i64)),
+                    ConcreteDatatype::Uint8(_) => {
+                        if f >= 0.0 && f <= u8::MAX as f64 && f.fract() == 0.0 {
+                            Ok(Value::Uint8(f as u8))
+                        } else {
+                            Err(JsonError::TypeMismatch {
+                                expected: "Uint8".to_string(),
+                                actual: format!("{}", n),
+                            })
+                        }
+                    }
                     ConcreteDatatype::String(_) => Ok(Value::String(f.to_string())),
+                    _ => Err(JsonError::TypeMismatch {
+                        expected: format!("{:?}", dt),
+                        actual: format!("{}", n),
+                    }),
+                }
+            } else if let Some(u) = n.as_u64() {
+                match dt {
+                    ConcreteDatatype::Int64(_) => Ok(Value::Int64(u as i64)),
+                    ConcreteDatatype::Float64(_) => Ok(Value::Float64(u as f64)),
+                    ConcreteDatatype::Uint8(_) => {
+                        if u <= u8::MAX as u64 {
+                            Ok(Value::Uint8(u as u8))
+                        } else {
+                            Err(JsonError::TypeMismatch {
+                                expected: "Uint8".to_string(),
+                                actual: format!("{}", n),
+                            })
+                        }
+                    }
+                    ConcreteDatatype::String(_) => Ok(Value::String(u.to_string())),
                     _ => Err(JsonError::TypeMismatch {
                         expected: format!("{:?}", dt),
                         actual: format!("{}", n),
@@ -171,6 +220,7 @@ fn json_value_to_value(json_val: &JsonValue, data_type: &ConcreteDatatype) -> Re
             match dt {
                 ConcreteDatatype::Int64(_) => Ok(Value::Int64(if *b { 1 } else { 0 })),
                 ConcreteDatatype::Float64(_) => Ok(Value::Float64(if *b { 1.0 } else { 0.0 })),
+                ConcreteDatatype::Uint8(_) => Ok(Value::Uint8(if *b { 1 } else { 0 })),
                 ConcreteDatatype::String(_) => Ok(Value::String(b.to_string())),
                 _ => Err(JsonError::TypeMismatch {
                     expected: format!("{:?}", dt),
@@ -193,6 +243,14 @@ fn json_value_to_value(json_val: &JsonValue, data_type: &ConcreteDatatype) -> Re
                         .map(Value::Float64)
                         .map_err(|_| JsonError::TypeMismatch {
                             expected: "Float64".to_string(),
+                            actual: s.clone(),
+                        })
+                }
+                ConcreteDatatype::Uint8(_) => {
+                    s.parse::<u8>()
+                        .map(Value::Uint8)
+                        .map_err(|_| JsonError::TypeMismatch {
+                            expected: "Uint8".to_string(),
                             actual: s.clone(),
                         })
                 }
@@ -224,6 +282,7 @@ fn get_default_value(data_type: &ConcreteDatatype) -> Value {
     match data_type {
         ConcreteDatatype::Int64(t) => t.default_value(),
         ConcreteDatatype::Float64(t) => t.default_value(),
+        ConcreteDatatype::Uint8(t) => t.default_value(),
         ConcreteDatatype::String(t) => t.default_value(),
         ConcreteDatatype::Bool(t) => t.default_value(),
         ConcreteDatatype::Struct(t) => t.default_value(),

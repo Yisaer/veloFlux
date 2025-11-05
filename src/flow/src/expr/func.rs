@@ -155,25 +155,50 @@ impl BinaryFunc {
         match (left, right) {
             (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
             (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
+            (Value::Uint8(a), Value::Uint8(b)) => Some(a.cmp(b)),
             (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
             (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
             // If types don't match, try to cast to a common type
             _ => {
+                // Try Int64 first
+                if let (Some(a), Some(b)) = (Self::try_cast_to_int64(left), Self::try_cast_to_int64(right)) {
+                    return Some(a.cmp(&b));
+                }
+                
+                // Try Float64
+                if let (Some(a), Some(b)) = (Self::try_cast_to_float64(left), Self::try_cast_to_float64(right)) {
+                    return a.partial_cmp(&b);
+                }
+                
+                // Try String
+                if let (Some(a), Some(b)) = (Self::try_cast_to_string(left), Self::try_cast_to_string(right)) {
+                    return Some(a.cmp(&b));
+                }
+                
                 None
             }
         }
     }
 
     /// Try to cast both values to a numeric type for arithmetic operations
-    /// Returns (left, right) as either (Int64, Int64) or (Float64, Float64)
+    /// Returns (left, right) as either (Int64, Int64), (Float64, Float64), or (Uint8, Uint8)
     fn try_cast_to_numeric(left: Value, right: Value) -> Result<(Value, Value), EvalError> {
         // If types match, return directly
         match (&left, &right) {
             (Value::Int64(_), Value::Int64(_)) => return Ok((left, right)),
             (Value::Float64(_), Value::Float64(_)) => return Ok((left, right)),
+            (Value::Uint8(_), Value::Uint8(_)) => return Ok((left, right)),
             _ => {}
         }
-        
+
+        // Try Int64 first (preferred for integer operations)
+        if let (Some(left_i), Some(right_i)) = (
+            Self::try_cast_to_int64(&left),
+            Self::try_cast_to_int64(&right),
+        ) {
+            return Ok((Value::Int64(left_i), Value::Int64(right_i)));
+        }
+
         // Try Float64
         if let (Some(left_f), Some(right_f)) = (
             Self::try_cast_to_float64(&left),
@@ -185,7 +210,7 @@ impl BinaryFunc {
         let left_debug = format!("{:?}", &left);
         let right_debug = format!("{:?}", &right);
         Err(EvalError::TypeMismatch {
-            expected: "Int64 or Float64".to_string(),
+            expected: "Int64, Float64, or Uint8".to_string(),
             actual: format!("{} and {}", left_debug, right_debug),
         })
     }
@@ -228,6 +253,7 @@ impl BinaryFunc {
                 match (&left, &right) {
                     (Value::Int64(a), Value::Int64(b)) => return Ok(Value::Int64(a + b)),
                     (Value::Float64(a), Value::Float64(b)) => return Ok(Value::Float64(a + b)),
+                    (Value::Uint8(a), Value::Uint8(b)) => return Ok(Value::Uint8(a.saturating_add(*b))),
                     (Value::String(left_str), Value::String(right_str)) => {
                         return Ok(Value::String(format!("{}{}", left_str, right_str)));
                     }
@@ -239,6 +265,7 @@ impl BinaryFunc {
                     match (left_num, right_num) {
                         (Value::Int64(a), Value::Int64(b)) => return Ok(Value::Int64(a + b)),
                         (Value::Float64(a), Value::Float64(b)) => return Ok(Value::Float64(a + b)),
+                        (Value::Uint8(a), Value::Uint8(b)) => return Ok(Value::Uint8(a.saturating_add(b))),
                         _ => unreachable!(),
                     }
                 }
@@ -255,6 +282,7 @@ impl BinaryFunc {
                 match (&left, &right) {
                     (Value::Int64(a), Value::Int64(b)) => return Ok(Value::Int64(a - b)),
                     (Value::Float64(a), Value::Float64(b)) => return Ok(Value::Float64(a - b)),
+                    (Value::Uint8(a), Value::Uint8(b)) => return Ok(Value::Int64(*a as i64 - *b as i64)),
                     _ => {}
                 }
 
@@ -263,6 +291,7 @@ impl BinaryFunc {
                 match (left_num, right_num) {
                     (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a - b)),
                     (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a - b)),
+                    (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Int64(a as i64 - b as i64)),
                     _ => unreachable!(),
                 }
             }
@@ -271,6 +300,7 @@ impl BinaryFunc {
                 match (&left, &right) {
                     (Value::Int64(a), Value::Int64(b)) => return Ok(Value::Int64(a * b)),
                     (Value::Float64(a), Value::Float64(b)) => return Ok(Value::Float64(a * b)),
+                    (Value::Uint8(a), Value::Uint8(b)) => return Ok(Value::Uint8(a.saturating_mul(*b))),
                     _ => {}
                 }
 
@@ -279,6 +309,7 @@ impl BinaryFunc {
                 match (left_num, right_num) {
                     (Value::Int64(a), Value::Int64(b)) => Ok(Value::Int64(a * b)),
                     (Value::Float64(a), Value::Float64(b)) => Ok(Value::Float64(a * b)),
+                    (Value::Uint8(a), Value::Uint8(b)) => Ok(Value::Uint8(a.saturating_mul(b))),
                     _ => unreachable!(),
                 }
             }
@@ -297,18 +328,24 @@ impl BinaryFunc {
                         }
                         return Ok(Value::Float64(a / b));
                     }
+                    (Value::Uint8(a), Value::Uint8(b)) => {
+                        if *b == 0 {
+                            return Err(EvalError::DivisionByZero);
+                        }
+                        return Ok(Value::Float64(*a as f64 / *b as f64));
+                    }
                     _ => {}
                 }
 
                 // If types don't match, convert to Float64 for precise results
                 let left_f = Self::try_cast_to_float64(&left)
                     .ok_or_else(|| EvalError::TypeMismatch {
-                        expected: "Int64 or Float64".to_string(),
+                        expected: "Int64, Float64, or Uint8".to_string(),
                         actual: format!("{:?}", left),
                     })?;
                 let right_f = Self::try_cast_to_float64(&right)
                     .ok_or_else(|| EvalError::TypeMismatch {
-                        expected: "Int64 or Float64".to_string(),
+                        expected: "Int64, Float64, or Uint8".to_string(),
                         actual: format!("{:?}", right),
                     })?;
 
@@ -333,6 +370,12 @@ impl BinaryFunc {
                         }
                         return Ok(Value::Float64(a % b));
                     }
+                    (Value::Uint8(a), Value::Uint8(b)) => {
+                        if *b == 0 {
+                            return Err(EvalError::DivisionByZero);
+                        }
+                        return Ok(Value::Uint8(a % b));
+                    }
                     _ => {}
                 }
 
@@ -351,6 +394,13 @@ impl BinaryFunc {
                             Err(EvalError::DivisionByZero)
                         } else {
                             Ok(Value::Float64(a % b))
+                        }
+                    }
+                    (Value::Uint8(a), Value::Uint8(b)) => {
+                        if b == 0 {
+                            Err(EvalError::DivisionByZero)
+                        } else {
+                            Ok(Value::Uint8(a % b))
                         }
                     }
                     _ => unreachable!(),

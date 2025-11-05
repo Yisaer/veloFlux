@@ -84,6 +84,7 @@ fn value_to_concrete_datatype(value: &Value) -> ConcreteDatatype {
     match value {
         Value::Int64(_) => ConcreteDatatype::Int64(datatypes::Int64Type),
         Value::Float64(_) => ConcreteDatatype::Float64(datatypes::Float64Type),
+        Value::Uint8(_) => ConcreteDatatype::Uint8(datatypes::Uint8Type),
         Value::String(_) => ConcreteDatatype::String(datatypes::StringType),
         Value::Bool(_) => ConcreteDatatype::Bool(datatypes::BooleanType),
         Value::Struct(_) => panic!("Struct type not supported in simple schema"),

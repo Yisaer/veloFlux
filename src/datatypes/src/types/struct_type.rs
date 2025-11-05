@@ -93,12 +93,14 @@ fn get_type_name(dt: &ConcreteDatatype) -> String {
         ConcreteDatatype::Bool(_) => "Boolean",
         ConcreteDatatype::Struct(_) => "Struct",
         ConcreteDatatype::List(_) => "List",
+        ConcreteDatatype::Uint8(_) => "UInt8",
     }
     .to_string()
 }
 
 fn get_default_value(dt: &ConcreteDatatype) -> Value {
     match dt {
+        ConcreteDatatype::Uint8(_) => Value::Uint8(0),
         ConcreteDatatype::Float64(_) => Value::Float64(0.0),
         ConcreteDatatype::Int64(_) => Value::Int64(0),
         ConcreteDatatype::String(_) => Value::String(String::new()),

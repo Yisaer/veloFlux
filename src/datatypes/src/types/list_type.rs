@@ -55,6 +55,7 @@ fn get_type_name(dt: &ConcreteDatatype) -> String {
         ConcreteDatatype::Bool(_) => "Boolean",
         ConcreteDatatype::Struct(_) => "Struct",
         ConcreteDatatype::List(_) => "List",
+        ConcreteDatatype::Uint8(_) => "Uint8"
     }
     .to_string()
 }

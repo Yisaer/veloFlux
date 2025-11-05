@@ -16,6 +16,7 @@ pub fn value_to_scalar_value(value: &Value) -> DataFusionResult<ScalarValue> {
     match value {
         Value::Int64(v) => Ok(ScalarValue::Int64(Some(*v))),
         Value::Float64(v) => Ok(ScalarValue::Float64(Some(*v))),
+        Value::Uint8(v) => Ok(ScalarValue::UInt8(Some(*v))),
         Value::String(v) => Ok(ScalarValue::Utf8(Some(v.clone()))),
         Value::Bool(v) => Ok(ScalarValue::Boolean(Some(*v))),
         Value::Struct(_) => Err(DataFusionError::NotImplemented(
@@ -32,6 +33,7 @@ pub fn scalar_value_to_value(scalar: &ScalarValue) -> DataFusionResult<Value> {
     match scalar {
         ScalarValue::Int64(Some(v)) => Ok(Value::Int64(*v)),
         ScalarValue::Float64(Some(v)) => Ok(Value::Float64(*v)),
+        ScalarValue::UInt8(Some(v)) => Ok(Value::Uint8(*v)),
         ScalarValue::Utf8(Some(v)) => Ok(Value::String(v.clone())),
         ScalarValue::Boolean(Some(v)) => Ok(Value::Bool(*v)),
         _ => Err(DataFusionError::NotImplemented(
@@ -45,6 +47,7 @@ pub fn concrete_datatype_to_arrow_type(datatype: &ConcreteDatatype) -> DataFusio
     match datatype {
         ConcreteDatatype::Int64(_) => Ok(DataType::Int64),
         ConcreteDatatype::Float64(_) => Ok(DataType::Float64),
+        ConcreteDatatype::Uint8(_) => Ok(DataType::UInt8),
         ConcreteDatatype::String(_) => Ok(DataType::Utf8),
         ConcreteDatatype::Bool(_) => Ok(DataType::Boolean),
         ConcreteDatatype::Struct(_) => Err(DataFusionError::NotImplemented(
@@ -61,6 +64,7 @@ pub fn arrow_type_to_concrete_datatype(data_type: &DataType) -> DataFusionResult
     match data_type {
         DataType::Int64 => Ok(ConcreteDatatype::Int64(datatypes::Int64Type)),
         DataType::Float64 => Ok(ConcreteDatatype::Float64(datatypes::Float64Type)),
+        DataType::UInt8 => Ok(ConcreteDatatype::Uint8(datatypes::Uint8Type)),
         DataType::Utf8 => Ok(ConcreteDatatype::String(datatypes::StringType)),
         DataType::Boolean => Ok(ConcreteDatatype::Bool(datatypes::BooleanType)),
         _ => Err(DataFusionError::NotImplemented(
@@ -105,6 +109,10 @@ fn value_to_array(value: &Value, datatype: &ConcreteDatatype) -> DataFusionResul
         }
         (Value::Float64(v), ConcreteDatatype::Float64(_)) => {
             Ok(Arc::new(Float64Array::from(vec![*v])) as ArrayRef)
+        }
+        (Value::Uint8(v), ConcreteDatatype::Uint8(_)) => {
+            use arrow::array::UInt8Array;
+            Ok(Arc::new(UInt8Array::from(vec![*v])) as ArrayRef)
         }
         (Value::String(v), ConcreteDatatype::String(_)) => {
             Ok(Arc::new(StringArray::from(vec![v.as_str()])) as ArrayRef)

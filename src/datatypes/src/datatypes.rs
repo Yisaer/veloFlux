@@ -1,4 +1,4 @@
-use crate::types::{BooleanType, Float64Type, Int64Type, ListType, StringType, StructType};
+use crate::types::{BooleanType, Float64Type, Int64Type, ListType, StringType, StructType, Uint8Type};
 use crate::value::Value;
 
 /// Data type abstraction trait
@@ -21,6 +21,8 @@ pub enum ConcreteDatatype {
     Float64(Float64Type),
     /// 64-bit signed integer
     Int64(Int64Type),
+    /// 8-bit unsigned integer
+    Uint8(Uint8Type),
     /// String type
     String(StringType),
     /// Struct type, containing field definitions

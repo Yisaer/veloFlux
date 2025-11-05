@@ -54,6 +54,8 @@ pub enum Value {
     Float64(f64),
     /// 64-bit signed integer
     Int64(i64),
+    /// 8-bit unsigned integer
+    Uint8(u8),
     /// String type
     String(String),
     /// Boolean type
