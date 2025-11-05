@@ -3,11 +3,10 @@
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
-use datafusion::{prelude::*};
 use datafusion_common::{DataFusionError, Result as DataFusionResult, ScalarValue};
-use datafusion_expr::{Expr, col, lit, ExprSchemable};
+use datafusion_expr::Expr;
 use datatypes::{ConcreteDatatype, Value, Schema as FlowSchema};
-use crate::expr::{ScalarExpr, BinaryFunc, UnaryFunc};
+
 use crate::tuple::Tuple;
 use std::sync::Arc;
 
@@ -144,69 +143,6 @@ fn value_to_array(value: &Value, datatype: &ConcreteDatatype) -> DataFusionResul
         _ => Err(DataFusionError::NotImplemented(
             format!("Array conversion for value {:?} with type {:?} not implemented", value, datatype)
         )),
-    }
-}
-
-/// Convert ScalarExpr to DataFusion Expr with schema context
-pub fn scalar_expr_to_datafusion_expr(expr: &ScalarExpr, schema: &FlowSchema) -> DataFusionResult<Expr> {
-    match expr {
-        ScalarExpr::Column(index) => {
-            // Get the actual column name from schema
-            let column_schemas = schema.column_schemas();
-            if *index < column_schemas.len() {
-                let col_name = &column_schemas[*index].name;
-                Ok(col(col_name))
-            } else {
-                Err(DataFusionError::Plan(format!("Column index {} out of bounds for schema with {} columns", index, column_schemas.len())))
-            }
-        },
-        ScalarExpr::Literal(value, _datatype) => {
-            let scalar_value = value_to_scalar_value(value)?;
-            Ok(lit(scalar_value))
-        }
-        ScalarExpr::CallUnary { func, expr } => {
-            let inner_expr = scalar_expr_to_datafusion_expr(expr, schema)?;
-            match func {
-                UnaryFunc::Not => Ok(inner_expr.not()),
-                UnaryFunc::IsNull => Ok(inner_expr.is_null()),
-                UnaryFunc::IsTrue => Ok(inner_expr.eq(lit(true))),
-                UnaryFunc::IsFalse => Ok(inner_expr.eq(lit(false))),
-                UnaryFunc::Cast(target_type) => {
-                    let arrow_type = concrete_datatype_to_arrow_type(target_type)?;
-                    Ok(inner_expr.cast_to(&arrow_type, &datafusion_common::DFSchema::empty())?)
-                }
-            }
-        }
-        ScalarExpr::CallBinary { func, expr1, expr2 } => {
-            let left = scalar_expr_to_datafusion_expr(expr1, schema)?;
-            let right = scalar_expr_to_datafusion_expr(expr2, schema)?;
-            
-
-            match func {
-                BinaryFunc::Eq => Ok(left.eq(right)),
-                BinaryFunc::NotEq => Ok(left.not_eq(right)),
-                BinaryFunc::Lt => Ok(left.lt(right)),
-                BinaryFunc::Lte => Ok(left.lt_eq(right)),
-                BinaryFunc::Gt => Ok(left.gt(right)),
-                BinaryFunc::Gte => Ok(left.gt_eq(right)),
-                BinaryFunc::Add => Ok(left + right),
-                BinaryFunc::Sub => Ok(left - right),
-                BinaryFunc::Mul => Ok(left * right),
-                BinaryFunc::Div => Ok(left / right),
-                BinaryFunc::Mod => Ok(left % right),
-            }
-        }
-        ScalarExpr::CallDf { function_name, args } => {
-            // Convert arguments to DataFusion expressions
-            let df_args: DataFusionResult<Vec<Expr>> = args
-                .iter()
-                .map(|arg| scalar_expr_to_datafusion_expr(arg, schema))
-                .collect();
-            let df_args = df_args?;
-            
-            // Create a DataFusion function call by name
-            create_df_function_call(function_name.clone(), df_args)
-        }
     }
 }
 
