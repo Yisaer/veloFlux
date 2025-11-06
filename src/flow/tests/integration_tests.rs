@@ -194,9 +194,9 @@ fn test_type_conversion() {
     assert_eq!(scalar, ScalarValue::Utf8(Some("test".to_string())));
 
     // Test ScalarValue to Value conversion
-    let scalar = ScalarValue::Float64(Some(3.14));
+    let scalar = ScalarValue::Float64(Some(3.15));
     let value = scalar_value_to_value(&scalar).unwrap();
-    assert_eq!(value, Value::Float64(3.14));
+    assert_eq!(value, Value::Float64(3.15));
 }
 
 #[test]

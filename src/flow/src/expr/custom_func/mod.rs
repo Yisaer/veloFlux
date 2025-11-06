@@ -1,3 +1,3 @@
-pub mod concat;
+pub mod string_func;
 
-pub use concat::ConcatFunc;
+pub use string_func::ConcatFunc;
