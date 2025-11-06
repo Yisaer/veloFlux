@@ -32,7 +32,7 @@ fn test_float32_type_casting() {
     assert_eq!(float32_type.try_cast(Value::Bool(false)), Some(Value::Float32(0.0)));
     
     // Test casting from Float64
-    assert_eq!(float32_type.try_cast(Value::Float64(3.14159)), Some(Value::Float32(3.14159)));
+    assert_eq!(float32_type.try_cast(Value::Float64(3.15)), Some(Value::Float32(3.15)));
     
     // Test casting from string
     assert_eq!(float32_type.try_cast(Value::String("123.45".to_string())), Some(Value::Float32(123.45)));

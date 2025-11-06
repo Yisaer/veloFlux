@@ -3,6 +3,7 @@
 use datafusion_common::ScalarValue;
 use flow::*;
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, StringType, Float64Type, BooleanType, Value};
+use std::sync::Arc;
 
 fn create_test_schema() -> datatypes::Schema {
     datatypes::Schema::new(vec![
@@ -193,9 +194,9 @@ fn test_type_conversion() {
     assert_eq!(scalar, ScalarValue::Utf8(Some("test".to_string())));
 
     // Test ScalarValue to Value conversion
-    let scalar = ScalarValue::Float64(Some(3.14));
+    let scalar = ScalarValue::Float64(Some(3.15));
     let value = scalar_value_to_value(&scalar).unwrap();
-    assert_eq!(value, Value::Float64(3.14));
+    assert_eq!(value, Value::Float64(3.15));
 }
 
 #[test]
@@ -374,4 +375,149 @@ fn test_abs_plus_abs_with_addition() {
     assert!(abs2_result.is_ok(), "Second abs() should work");
     // Verify the result: abs(95.5 + 95.5) = abs(191.0) = 191.0
     assert_eq!(abs2_result.unwrap(), Value::Float64(191.0));
+}
+
+#[test]
+fn test_call_func_custom_implementation() {
+    // Example of a custom function that multiplies two integers
+    #[derive(Debug)]
+    struct MultiplyFunc;
+    
+    impl CustomFunc for MultiplyFunc {
+        fn validate(&self, args: &[Value]) -> Result<(), flow::expr::func::EvalError> {
+            if args.len() != 2 {
+                return Err(flow::expr::func::EvalError::TypeMismatch {
+                    expected: "2 arguments".to_string(),
+                    actual: format!("{} arguments", args.len()),
+                });
+            }
+            Ok(())
+        }
+
+        fn eval(&self, args: &[Value]) -> Result<Value, flow::expr::func::EvalError> {
+            
+            let left = match &args[0] {
+                Value::Int64(v) => *v,
+                Value::Int32(v) => *v as i64,
+                Value::Int16(v) => *v as i64,
+                Value::Int8(v) => *v as i64,
+                _ => {
+                    return Err(flow::expr::func::EvalError::TypeMismatch {
+                        expected: "Int64".to_string(),
+                        actual: format!("{:?}", args[0]),
+                    });
+                }
+            };
+            
+            let right = match &args[1] {
+                Value::Int64(v) => *v,
+                Value::Int32(v) => *v as i64,
+                Value::Int16(v) => *v as i64,
+                Value::Int8(v) => *v as i64,
+                _ => {
+                    return Err(flow::expr::func::EvalError::TypeMismatch {
+                        expected: "Int64".to_string(),
+                        actual: format!("{:?}", args[1]),
+                    });
+                }
+            };
+            
+            Ok(Value::Int64(left * right))
+        }
+        
+        fn name(&self) -> &str {
+            "multiply"
+        }
+    }
+    
+    let evaluator = DataFusionEvaluator::new();
+    let tuple = create_test_tuple();
+    
+    // Test multiply(id, age) = multiply(1, 25) = 25
+    let id_col = ScalarExpr::column(0); // id = 1
+    let age_col = ScalarExpr::column(3); // age = 25
+    let multiply_func = Arc::new(MultiplyFunc);
+    let multiply_expr = ScalarExpr::call_func(multiply_func, vec![id_col, age_col]);
+    
+    let result = multiply_expr.eval(&evaluator, &tuple);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Value::Int64(25));
+}
+
+#[test]
+fn test_concat_func_custom_implementation() {
+    let evaluator = DataFusionEvaluator::new();
+    let tuple = create_test_tuple();
+    
+    // Test concat(first_name, last_name) using CallFunc with ConcatFunc
+    let first_name_col = ScalarExpr::column(1); // first_name column = "John"
+    let last_name_col = ScalarExpr::column(2); // last_name column = "Doe"
+    let concat_func = Arc::new(ConcatFunc);
+    let concat_expr = ScalarExpr::call_func(concat_func, vec![first_name_col, last_name_col]);
+    
+    let result = concat_expr.eval(&evaluator, &tuple);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Value::String("JohnDoe".to_string()));
+}
+
+#[test]
+fn test_concat_func_with_literal() {
+    let evaluator = DataFusionEvaluator::new();
+    let tuple = create_test_tuple();
+    
+    // Test concat("Hello, ", first_name) using CallFunc
+    let hello_lit = ScalarExpr::literal(Value::String("Hello, ".to_string()), ConcreteDatatype::String(StringType));
+    let first_name_col = ScalarExpr::column(1); // first_name column = "John"
+    let concat_func = Arc::new(ConcatFunc);
+    let concat_expr = ScalarExpr::call_func(concat_func, vec![hello_lit, first_name_col]);
+    
+    let result = concat_expr.eval(&evaluator, &tuple);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), Value::String("Hello, John".to_string()));
+}
+
+#[test]
+fn test_concat_func_with_int() {
+    let evaluator = DataFusionEvaluator::new();
+    let tuple = create_test_tuple();
+    
+    // Test concat with int argument should return an error (only String is supported)
+    let age_col = ScalarExpr::column(3); // age column = 25 (Int64)
+    let years_lit = ScalarExpr::literal(Value::String(" years old".to_string()), ConcreteDatatype::String(StringType));
+    let concat_func = Arc::new(ConcatFunc);
+    let concat_expr = ScalarExpr::call_func(concat_func, vec![age_col, years_lit]);
+    
+    let result = concat_expr.eval(&evaluator, &tuple);
+    // Should fail because age_col is Int64, not String
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_concat_func_multiple_args() {
+    let evaluator = DataFusionEvaluator::new();
+    let tuple = create_test_tuple();
+    
+    // Test concat with multiple arguments (3 args) should return an error (only 2 args supported)
+    let first_name_col = ScalarExpr::column(1); // "John"
+    let space_lit = ScalarExpr::literal(Value::String(" ".to_string()), ConcreteDatatype::String(StringType));
+    let last_name_col = ScalarExpr::column(2); // "Doe"
+    let concat_func = Arc::new(ConcatFunc);
+    let concat_expr = ScalarExpr::call_func(concat_func, vec![first_name_col, space_lit, last_name_col]);
+    
+    let result = concat_expr.eval(&evaluator, &tuple);
+    // Should fail because ConcatFunc only accepts 2 arguments
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_concat_func_empty_args() {
+    let evaluator = DataFusionEvaluator::new();
+    let tuple = create_test_tuple();
+    
+    // Test concat with no arguments should return an error
+    let concat_func = Arc::new(ConcatFunc);
+    let concat_expr = ScalarExpr::call_func(concat_func, vec![]);
+    
+    let result = concat_expr.eval(&evaluator, &tuple);
+    assert!(result.is_err());
 }

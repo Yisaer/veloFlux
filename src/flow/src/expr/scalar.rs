@@ -3,9 +3,41 @@ use datatypes::{ConcreteDatatype, Value};
 use crate::expr::func::{BinaryFunc, EvalError, UnaryFunc};
 use crate::expr::evaluator::DataFusionEvaluator;
 use crate::tuple::Tuple;
+use std::sync::Arc;
+
+/// Custom function that can be implemented by users
+/// This trait allows users to define their own functions for evaluation
+pub trait CustomFunc: Send + Sync + std::fmt::Debug {
+    /// Validate the function arguments before evaluation
+    /// 
+    /// # Arguments
+    /// 
+    /// * `args` - A slice of evaluated argument values to validate
+    /// 
+    /// # Returns
+    /// 
+    /// Returns Ok(()) if arguments are valid, or an error if validation fails.
+    /// This method should check argument count, types, and other constraints.
+    fn validate(&self, args: &[Value]) -> Result<(), EvalError>;
+    
+    /// Evaluate the function with the given arguments
+    /// 
+    /// # Arguments
+    /// 
+    /// * `args` - A slice of evaluated argument values
+    /// 
+    /// # Returns
+    /// 
+    /// Returns the evaluated result, or an error if evaluation fails.
+    /// Note: This method assumes arguments have been validated by validate().
+    fn eval(&self, args: &[Value]) -> Result<Value, EvalError>;
+    
+    /// Get the function name for debugging purposes
+    fn name(&self) -> &str;
+}
 
 /// A scalar expression, which can be evaluated to a value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub enum ScalarExpr {
     /// A column reference by index
     Column(usize),
@@ -26,6 +58,13 @@ pub enum ScalarExpr {
     CallDf {
         /// The name of the DataFusion function (e.g., "concat", "upper", "lower")
         function_name: String,
+        /// The arguments to the function
+        args: Vec<ScalarExpr>,
+    },
+    /// A call to a custom user-implemented function
+    CallFunc {
+        /// The custom function implementation
+        func: Arc<dyn CustomFunc>,
         /// The arguments to the function
         args: Vec<ScalarExpr>,
     },
@@ -78,6 +117,17 @@ impl ScalarExpr {
                     }),
                 }
             }
+            ScalarExpr::CallFunc { func, args } => {
+                // Recursively evaluate all argument expressions
+                let mut arg_values = Vec::new();
+                for arg in args {
+                    arg_values.push(arg.eval(evaluator, tuple)?);
+                }
+                // Validate arguments before evaluation
+                CustomFunc::validate(func.as_ref(), &arg_values)?;
+                // Call the custom function with evaluated arguments
+                func.eval(&arg_values)
+            }
         }
     }
 
@@ -116,6 +166,14 @@ impl ScalarExpr {
         }
     }
 
+    /// Create a custom function call expression
+    pub fn call_func(func: Arc<dyn CustomFunc>, args: Vec<ScalarExpr>) -> Self {
+        ScalarExpr::CallFunc {
+            func,
+            args,
+        }
+    }
+
     /// Check if this expression is a column reference
     pub fn is_column(&self) -> bool {
         matches!(self, ScalarExpr::Column(_))
@@ -141,6 +199,49 @@ impl ScalarExpr {
             Some(val)
         } else {
             None
+        }
+    }
+}
+
+impl std::fmt::Debug for ScalarExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ScalarExpr::Column(index) => write!(f, "Column({})", index),
+            ScalarExpr::Literal(val, typ) => write!(f, "Literal({:?}, {:?})", val, typ),
+            ScalarExpr::CallUnary { func, expr } => write!(f, "CallUnary({:?}, {:?})", func, expr),
+            ScalarExpr::CallBinary { func, expr1, expr2 } => {
+                write!(f, "CallBinary({:?}, {:?}, {:?})", func, expr1, expr2)
+            }
+            ScalarExpr::CallDf { function_name, args } => {
+                write!(f, "CallDf({}, {:?})", function_name, args)
+            }
+            ScalarExpr::CallFunc { func, args } => {
+                write!(f, "CallFunc({}, {:?})", func.name(), args)
+            }
+        }
+    }
+}
+
+impl PartialEq for ScalarExpr {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (ScalarExpr::Column(a), ScalarExpr::Column(b)) => a == b,
+            (ScalarExpr::Literal(va, ta), ScalarExpr::Literal(vb, tb)) => va == vb && ta == tb,
+            (ScalarExpr::CallUnary { func: fa, expr: ea }, ScalarExpr::CallUnary { func: fb, expr: eb }) => {
+                fa == fb && ea == eb
+            }
+            (
+                ScalarExpr::CallBinary { func: fa, expr1: e1a, expr2: e2a },
+                ScalarExpr::CallBinary { func: fb, expr1: e1b, expr2: e2b },
+            ) => fa == fb && e1a == e1b && e2a == e2b,
+            (ScalarExpr::CallDf { function_name: na, args: aa }, ScalarExpr::CallDf { function_name: nb, args: ab }) => {
+                na == nb && aa == ab
+            }
+            (ScalarExpr::CallFunc { func: fa, args: aa }, ScalarExpr::CallFunc { func: fb, args: ab }) => {
+                // Compare custom functions by name and arguments
+                fa.name() == fb.name() && aa == ab
+            }
+            _ => false,
         }
     }
 }
