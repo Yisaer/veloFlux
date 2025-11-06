@@ -2,7 +2,7 @@ use flow::sql_conversion::extract_select_expressions;
 use flow::expr::{DataFusionEvaluator, ScalarExpr, BinaryFunc};
 use flow::tuple::Tuple;
 use flow::row::Row;
-use datatypes::{Value, ConcreteDatatype, Int64Type, Schema, ColumnSchema, StringType};
+use datatypes::{Value, ConcreteDatatype, Int64Type, Schema, ColumnSchema};
 use parser::{extract_expressions_from_sql, analyze_sql_expressions};
 
 fn main() {
@@ -42,8 +42,9 @@ fn demonstrate_complete_workflow() {
     // Step 3: Convert to ScalarExpr using flow crate
     let schema = Schema::new(vec![
         ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
-        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type))
     ]);
+    
     match extract_select_expressions(sql, &schema) {
         Ok(flow_expressions) => {
             println!("3. Flow converter created {} ScalarExpr(s)", flow_expressions.len());
@@ -120,20 +121,15 @@ fn test_expression_varieties() {
         ("SELECT CONCAT(a, b)", "Function call"),
     ];
     
+    let schema = Schema::new(vec![
+        ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
+        ColumnSchema::new("c".to_string(), ConcreteDatatype::Int64(Int64Type))
+    ]);
+    
     for (sql, description) in test_cases {
         println!("Testing: {} ({})", sql, description);
         
-        // Create a schema with common column names for testing
-        let schema = Schema::new(vec![
-            ColumnSchema::new("a".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("b".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("c".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("d".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("x".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("y".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("z".to_string(), ConcreteDatatype::Int64(Int64Type)),
-            ColumnSchema::new("name".to_string(), ConcreteDatatype::String(StringType)),
-        ]);
         match extract_select_expressions(sql, &schema) {
             Ok(expressions) => {
                 println!("  ✓ Success - {} expression(s)", expressions.len());

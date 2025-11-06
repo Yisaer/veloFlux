@@ -1,10 +1,11 @@
 use sqlparser::ast::{Expr, Visit, Visitor};
 use sqlparser::parser::Parser;
-use sqlparser::dialect::GenericDialect;
+
+use crate::dialect::StreamDialect;
 
 /// Extract all expressions from SQL statements
 pub fn extract_expressions_from_sql(sql: &str) -> Result<Vec<String>, String> {
-    let dialect = GenericDialect {};
+    let dialect = StreamDialect::new();
     let statements = Parser::parse_sql(&dialect, sql)
         .map_err(|e| format!("Parse error: {}", e))?;
     
@@ -19,7 +20,7 @@ pub fn extract_expressions_from_sql(sql: &str) -> Result<Vec<String>, String> {
 
 /// Extract SELECT expressions from SQL
 pub fn extract_select_expressions_simple(sql: &str) -> Result<Vec<String>, String> {
-    let dialect = GenericDialect {};
+    let dialect = StreamDialect::new();
     let statements = Parser::parse_sql(&dialect, sql)
         .map_err(|e| format!("Parse error: {}", e))?;
     
@@ -80,7 +81,7 @@ impl Visitor for SelectExpressionExtractor {
 
 /// Helper function to parse and analyze SQL expressions
 pub fn analyze_sql_expressions(sql: &str) -> Result<ExpressionAnalysis, String> {
-    let dialect = GenericDialect {};
+    let dialect = StreamDialect::new();
     let statements = Parser::parse_sql(&dialect, sql)
         .map_err(|e| format!("Parse error: {}", e))?;
     

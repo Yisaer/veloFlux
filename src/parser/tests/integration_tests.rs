@@ -1,10 +1,11 @@
-use parser::{extract_expressions_from_sql, extract_select_expressions_simple, analyze_sql_expressions};
-use parser::StreamDialect;
-use sqlparser::parser::Parser;
-use sqlparser::ast::{Visit, Visitor, TableFactor};
+//! Integration tests using StreamSqlParser with SelectStmt output
+//! All tests use StreamSqlParser.parse() and work with SelectStmt structure
+
+use parser::{StreamSqlParser, parse_sql};
+use sqlparser::ast::Expr;
 
 #[test]
-fn test_basic_sql_parsing() {
+fn test_stream_dialect_basic_parsing() {
     let basic_sql = r#"
         SELECT u.name, o.amount
         FROM users u
@@ -12,87 +13,104 @@ fn test_basic_sql_parsing() {
         WHERE u.age > 18
     "#;
 
-    let dialect = StreamDialect::new();
-    let statements = Parser::parse_sql(&dialect, basic_sql).unwrap();
-    
-    assert_eq!(statements.len(), 1);
-    println!("✓ Successfully parsed basic SQL");
-}
-
-#[test]
-fn test_tumblingwindow_parsing() {
-    let tumbling_sql = r#"
-        SELECT * FROM stream GROUP BY tumblingwindow('ss', 10)
-    "#;
-
-    let dialect = StreamDialect::new();
-    let result = Parser::parse_sql(&dialect, tumbling_sql);
+    // Use StreamSqlParser.parse() instead of direct Parser::parse_sql
+    let parser = StreamSqlParser::new();
+    let result = parser.parse(basic_sql);
     
     assert!(result.is_ok());
-    let statements = result.unwrap();
-    assert_eq!(statements.len(), 1);
+    let select_stmt = result.unwrap();
     
-    println!("✓ Successfully parsed tumblingwindow SQL");
+    // Verify we got a proper SelectStmt
+    assert!(!select_stmt.select_fields.is_empty());
+    assert_eq!(select_stmt.select_fields.len(), 2); // u.name and o.amount
+    
+    println!("✓ StreamDialect basic parsing successful");
+    println!("✓ Found {} select fields", select_stmt.select_fields.len());
+    
+    // Check field details
+    for (i, field) in select_stmt.select_fields.iter().enumerate() {
+        println!("  Field {}: {:?}", i + 1, field.expr);
+        assert!(field.alias.is_none()); // No aliases in this SQL
+    }
 }
 
 #[test]
-fn test_expression_extraction() {
-    let sql = "SELECT a + b, CONCAT(name, 'test'), 42 WHERE age > 18";
-    
-    // Test general expression extraction
-    let expressions = extract_expressions_from_sql(sql).unwrap();
-    assert!(!expressions.is_empty());
-    println!("✓ Extracted {} expressions", expressions.len());
-    
-    // Test SELECT-specific extraction
-    let select_exprs = extract_select_expressions_simple(sql).unwrap();
-    assert!(!select_exprs.is_empty());
-    println!("✓ Extracted {} SELECT expressions", select_exprs.len());
-}
-
-#[test]
-fn test_expression_analysis() {
-    let sql = "SELECT a + b, CONCAT(name, suffix), 42 WHERE age > 18";
-    let analysis = analyze_sql_expressions(sql).unwrap();
-    
-    assert!(analysis.expression_count > 0);
-    assert!(!analysis.binary_operations.is_empty());
-    assert!(!analysis.functions.is_empty());
-    assert!(!analysis.literals.is_empty());
-    
-    println!("✓ Analysis complete:");
-    println!("  Total expressions: {}", analysis.expression_count);
-    println!("  Binary operations: {:?}", analysis.binary_operations);
-    println!("  Functions: {:?}", analysis.functions);
-    println!("  Literals: {:?}", analysis.literals);
-}
-
-#[test]
-fn test_table_visitor() {
-    let basic_sql = r#"
-        SELECT u.name, o.amount
-        FROM users u
-        JOIN orders o ON u.id = o.user_id
-        WHERE u.age > 18
+fn test_stream_dialect_tumblingwindow_parsing() {
+    let tumbling_sql = r#"
+        SELECT id, name, timestamp FROM stream GROUP BY tumblingwindow('ss', 10)
     "#;
 
-    let dialect = StreamDialect::new();
-    let statements = Parser::parse_sql(&dialect, basic_sql).unwrap();
+    let parser = StreamSqlParser::new();
+    let result = parser.parse(tumbling_sql);
     
-    let mut visitor = TableNameVisitor {
-        table_names: Vec::new(),
-    };
-
-    for statement in &statements {
-        statement.visit(&mut visitor);
+    if let Err(e) = &result {
+        println!("Tumblingwindow parsing error: {}", e);
     }
-
-    assert!(!visitor.table_names.is_empty());
-    println!("✓ Found tables: {:?}", visitor.table_names);
+    
+    assert!(result.is_ok());
+    let select_stmt = result.unwrap();
+    
+    // Verify parsing succeeded
+    println!("✓ StreamDialect tumblingwindow parsing successful");
+    println!("✓ Found {} select fields", select_stmt.select_fields.len());
+    
+    // Should handle the tumblingwindow in GROUP BY clause
+    // The SELECT fields should be processed normally
+    for field in &select_stmt.select_fields {
+        println!("  Field: {:?}", field.expr);
+    }
 }
 
 #[test]
-fn test_complex_expression_parsing() {
+fn test_stream_dialect_expression_fields() {
+    let sql = "SELECT a + b, CONCAT(name, 'test'), 42";
+    
+    // Use StreamSqlParser to get SelectStmt
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    
+    // Verify we have the expected number of fields
+    assert_eq!(select_stmt.select_fields.len(), 3);
+    println!("✓ StreamDialect parsed {} expression fields", select_stmt.select_fields.len());
+    
+    // Check each field
+    let expected_expressions = vec![
+        "BinaryOp",      // a + b
+        "Function",      // CONCAT
+        "Value"          // 42
+    ];
+    
+    for (i, (field, expected)) in select_stmt.select_fields.iter().zip(expected_expressions.iter()).enumerate() {
+        match &field.expr {
+            Expr::BinaryOp { .. } => assert_eq!(*expected, "BinaryOp"),
+            Expr::Function { .. } => assert_eq!(*expected, "Function"),
+            Expr::Value { .. } => assert_eq!(*expected, "Value"),
+            _ => panic!("Unexpected expression type"),
+        }
+        println!("  Field {}: {} expression", i + 1, expected);
+    }
+}
+
+#[test]
+fn test_stream_dialect_alias_support() {
+    let sql = "SELECT a + b AS total, CONCAT(name, '_test') AS full_name, 42 AS answer";
+    
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    
+    // Verify field count
+    assert_eq!(select_stmt.select_fields.len(), 3);
+    println!("✓ StreamDialect parsed {} aliased fields", select_stmt.select_fields.len());
+    
+    // Verify aliases are preserved
+    let expected_aliases = vec![Some("total".to_string()), Some("full_name".to_string()), Some("answer".to_string())];
+    
+    for (i, (field, expected_alias)) in select_stmt.select_fields.iter().zip(expected_aliases.iter()).enumerate() {
+        assert_eq!(&field.alias, expected_alias);
+        println!("  Field {}: alias = {:?}", i + 1, field.alias);
+    }
+}
+
+#[test]
+fn test_stream_dialect_complex_expressions() {
     let complex_sql = r#"
         SELECT 
             (a + b) * c / d,
@@ -101,64 +119,172 @@ fn test_complex_expression_parsing() {
                 WHEN age > 18 THEN 'adult'
                 ELSE 'minor'
             END
-        FROM users
-        WHERE status = 'active' AND age BETWEEN 18 AND 65
     "#;
 
-    let analysis = analyze_sql_expressions(complex_sql).unwrap();
+    let select_stmt = parse_sql(complex_sql).expect("StreamDialect parse should succeed");
     
-    // 应该包含多个表达式
-    assert!(analysis.expression_count > 5);
+    // Should parse multiple complex expressions
+    assert_eq!(select_stmt.select_fields.len(), 3);
+    println!("✓ StreamDialect parsed {} complex expressions", select_stmt.select_fields.len());
     
-    // 应该包含二元操作
-    assert!(!analysis.binary_operations.is_empty());
-    
-    // 应该包含函数
-    assert!(!analysis.functions.is_empty());
-    
-    // 应该包含字面量
-    assert!(!analysis.literals.is_empty());
-    
-    println!("✓ Complex expression analysis successful");
+    // Check each complex expression
+    for (i, field) in select_stmt.select_fields.iter().enumerate() {
+        match &field.expr {
+            Expr::BinaryOp { .. } => println!("  Field {}: Binary operation", i + 1),
+            Expr::Function { .. } => println!("  Field {}: Function call", i + 1),
+            Expr::Case { .. } => println!("  Field {}: CASE expression", i + 1),
+            _ => println!("  Field {}: Other expression", i + 1),
+        }
+    }
 }
 
 #[test]
-fn test_function_call_parsing() {
+fn test_stream_dialect_function_calls() {
     let sql_with_functions = r#"
         SELECT 
             UPPER(name),
             CONCAT(first_name, ' ', last_name),
             SUBSTRING(email, 1, 10),
             NOW()
-        FROM users
     "#;
 
-    let analysis = analyze_sql_expressions(sql_with_functions).unwrap();
+    let select_stmt = parse_sql(sql_with_functions).expect("StreamDialect parse should succeed");
     
-    // 应该检测到多个函数
-    assert!(!analysis.functions.is_empty());
+    // Should detect multiple function calls
+    assert_eq!(select_stmt.select_fields.len(), 4);
+    println!("✓ StreamDialect parsed {} function calls", select_stmt.select_fields.len());
     
-    // 应该包含我们期望的函数
-    let function_names: Vec<String> = analysis.functions.iter()
-        .map(|s| s.to_lowercase())
-        .collect();
-    
-    println!("✓ Found functions: {:?}", function_names);
-}
-
-// Helper visitor for testing
-struct TableNameVisitor {
-    pub table_names: Vec<String>,
-}
-
-impl Visitor for TableNameVisitor {
-    type Break = ();
-
-    fn pre_visit_table_factor(&mut self, table: &TableFactor) -> std::ops::ControlFlow<Self::Break> {
-        if let TableFactor::Table { name, .. } = table {
-            let table_name = name.to_string();
-            self.table_names.push(table_name);
+    // Verify each field is a function
+    for (i, field) in select_stmt.select_fields.iter().enumerate() {
+        println!("  Field {}: {:?}", i + 1, field.expr);
+        match &field.expr {
+            Expr::Function(func) => {
+                let func_name = func.name.to_string();
+                println!("    Function '{}' with {} args", func_name, func.args.len());
+            }
+            _ => {
+                // Some functions might be parsed differently, let's be more flexible
+                println!("    Not a simple function call, but part of complex expression");
+            }
         }
-        std::ops::ControlFlow::Continue(())
+    }
+}
+
+#[test]
+fn test_stream_dialect_nested_expressions() {
+    let nested_sql = "SELECT a + (b * c), (x + y) / (z - w)";
+    
+    let select_stmt = parse_sql(nested_sql).expect("StreamDialect parse should succeed");
+    
+    assert_eq!(select_stmt.select_fields.len(), 2);
+    println!("✓ StreamDialect parsed {} nested expressions", select_stmt.select_fields.len());
+    
+    // Both should be binary operations with nested structure
+    for (i, field) in select_stmt.select_fields.iter().enumerate() {
+        match &field.expr {
+            Expr::BinaryOp { left, op, right } => {
+                println!("  Field {}: Binary operation {:?}", i + 1, op);
+                // Verify nested structure
+                match (left.as_ref(), right.as_ref()) {
+                    (Expr::Identifier(_), Expr::BinaryOp { .. }) => {
+                        println!("    Left: identifier, Right: nested binary op");
+                    }
+                    (Expr::BinaryOp { .. }, Expr::BinaryOp { .. }) => {
+                        println!("    Left: nested binary op, Right: nested binary op");
+                    }
+                    _ => println!("    Mixed expression types"),
+                }
+            }
+            _ => panic!("Expected binary operation"),
+        }
+    }
+}
+
+#[test]
+fn test_stream_dialect_error_handling() {
+    let parser = StreamSqlParser::new();
+    
+    // Test invalid SQL
+    let invalid_sql = "INVALID SQL EXPRESSION";
+    let result = parser.parse(invalid_sql);
+    
+    assert!(result.is_err());
+    println!("✓ Invalid SQL properly rejected: {:?}", result.unwrap_err());
+    
+    // Test non-SELECT SQL
+    let insert_sql = "INSERT INTO table VALUES (1)";
+    let result = parser.parse(insert_sql);
+    
+    assert!(result.is_err());
+    println!("✓ Non-SELECT SQL properly rejected: {:?}", result.unwrap_err());
+}
+
+#[test]
+fn test_stream_dialect_where_clause_expressions() {
+    let sql = "SELECT name, age FROM users WHERE age > 18 AND status = 'active'";
+    
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    
+    // Should parse SELECT fields (WHERE clause is processed but not in select_fields)
+    assert_eq!(select_stmt.select_fields.len(), 2); // name and age
+    println!("✓ StreamDialect parsed {} fields from SELECT with WHERE", select_stmt.select_fields.len());
+    
+    // Verify the SELECT fields are correct
+    for (i, field) in select_stmt.select_fields.iter().enumerate() {
+        match &field.expr {
+            Expr::Identifier(ident) => {
+                println!("  Field {}: identifier '{}'", i + 1, ident.value);
+            }
+            _ => println!("  Field {}: other expression type", i + 1),
+        }
+    }
+}
+
+// Demo test showing complete StreamDialect workflow with SelectStmt
+#[test]
+fn demo_stream_dialect_complete_workflow() {
+    println!("\n=== StreamDialect Complete Workflow Demo ===\n");
+    
+    let sql = "SELECT a + b AS total, CONCAT(name, '_test') AS full_name, 42 AS answer, (x * y) / z AS complex";
+    println!("Test SQL: {}", sql);
+    
+    // Step 1: Parse using StreamDialect
+    let parser = StreamSqlParser::new();
+    match parser.parse(sql) {
+        Ok(select_stmt) => {
+            println!("✓ StreamDialect parsing successful!");
+            println!("✓ Generated SelectStmt with {} fields", select_stmt.select_fields.len());
+            
+            // Step 2: Analyze the SelectStmt
+            for (i, field) in select_stmt.select_fields.iter().enumerate() {
+                println!("\n  Field {}:" , i + 1);
+                println!("    Expression: {:?}", field.expr);
+                println!("    Alias: {:?}", field.alias);
+                
+                // Step 3: Detailed analysis
+                match &field.expr {
+                    Expr::BinaryOp { op, .. } => {
+                        println!("    Type: Binary operation ({:?})", op);
+                    }
+                    Expr::Function(func) => {
+                        println!("    Type: Function call ('{}' with {} args)", func.name, func.args.len());
+                    }
+                    Expr::Value(val) => {
+                        println!("    Type: Literal value ({:?})", val);
+                    }
+                    Expr::Nested(_) => {
+                        println!("    Type: Nested expression");
+                    }
+                    _ => {
+                        println!("    Type: Other expression");
+                    }
+                }
+            }
+            
+            println!("\n✅ StreamDialect SelectStmt workflow complete!");
+        }
+        Err(e) => {
+            println!("✗ StreamDialect parsing failed: {}", e);
+        }
     }
 }

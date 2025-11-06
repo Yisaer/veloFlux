@@ -1,8 +1,11 @@
-use sqlparser::ast::{Expr, BinaryOperator, Visit, Visitor};
-use sqlparser::parser::Parser;
-use sqlparser::dialect::GenericDialect;
+//! Expression conversion tests using StreamDialect Parser
+//! This tests the conversion from StreamDialect parsed expressions to custom formats
 
-// Custom expression format that you might want to convert to
+use sqlparser::ast::{Expr, BinaryOperator};
+
+use parser::{parse_sql, SelectStmt};
+
+// Custom expression format that we convert StreamDialect parsed expressions to
 #[derive(Debug, Clone, PartialEq)]
 pub enum CustomExpr {
     Column(String),
@@ -55,207 +58,248 @@ impl From<&BinaryOperator> for CustomBinaryOp {
     }
 }
 
-// Visitor to convert sqlparser expressions to custom format
-struct ExpressionConverter {
-    converted_expressions: Vec<CustomExpr>,
+/// Convert StreamDialect parsed SelectStmt to custom expressions recursively
+pub fn convert_select_stmt_to_custom(select_stmt: &SelectStmt) -> Vec<CustomExpr> {
+    let mut results = Vec::new();
+    
+    for field in &select_stmt.select_fields {
+        let converted = convert_expr_recursive(&field.expr);
+        results.push(converted);
+    }
+    
+    results
 }
 
-impl ExpressionConverter {
-    fn new() -> Self {
-        Self {
-            converted_expressions: Vec::new(),
+/// Convert parsed SQL directly to custom expressions using StreamDialect
+pub fn parse_sql_to_custom_expressions(sql: &str) -> Result<Vec<CustomExpr>, String> {
+    let select_stmt = parse_sql(sql)?;
+    Ok(convert_select_stmt_to_custom(&select_stmt))
+}
+
+/// Helper function to extract Expr from FunctionArgExpr
+fn func_arg_expr_as_expr(func_arg_expr: &sqlparser::ast::FunctionArgExpr) -> Option<&Expr> {
+    match func_arg_expr {
+        sqlparser::ast::FunctionArgExpr::Expr(expr) => Some(expr),
+        _ => None,
+    }
+}
+
+/// Recursively convert sqlparser Expr to custom format
+fn convert_expr_recursive(expr: &Expr) -> CustomExpr {
+    match expr {
+        Expr::Identifier(ident) => {
+            CustomExpr::Column(ident.value.clone())
+        }
+        Expr::Value(value) => {
+            CustomExpr::Literal(format!("{:?}", value))
+        }
+        Expr::BinaryOp { left, op, right } => {
+            let left_expr = convert_expr_recursive(left);
+            let right_expr = convert_expr_recursive(right);
+            CustomExpr::BinaryOp {
+                left: Box::new(left_expr),
+                op: CustomBinaryOp::from(op),
+                right: Box::new(right_expr),
+            }
+        }
+        Expr::Function(func) => {
+            let mut args = Vec::new();
+            for arg in &func.args {
+                match arg {
+                    sqlparser::ast::FunctionArg::Unnamed(func_arg_expr) => {
+                        if let Some(expr) = func_arg_expr_as_expr(func_arg_expr) {
+                            args.push(convert_expr_recursive(expr));
+                        }
+                    }
+                    sqlparser::ast::FunctionArg::Named { arg: func_arg_expr, .. } => {
+                        if let Some(expr) = func_arg_expr_as_expr(func_arg_expr) {
+                            args.push(convert_expr_recursive(expr));
+                        }
+                    }
+                }
+            }
+            CustomExpr::Function {
+                name: func.name.to_string(),
+                args,
+            }
+        }
+        Expr::Nested(inner) => {
+            // Handle nested expressions by converting the inner expression
+            convert_expr_recursive(inner)
+        }
+        _ => CustomExpr::Literal("unsupported".to_string()),
+    }
+}
+
+#[test]
+fn test_stream_dialect_simple_expression_conversion() {
+    let sql = "SELECT a + b";
+    
+    // Step 1: Parse using StreamDialect
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    assert_eq!(select_stmt.select_fields.len(), 1);
+    
+    // Step 2: Convert to custom expressions
+    let custom_exprs = convert_select_stmt_to_custom(&select_stmt);
+    
+    // Step 3: Verify conversion
+    assert_eq!(custom_exprs.len(), 1);
+    match &custom_exprs[0] {
+        CustomExpr::BinaryOp { op, .. } => {
+            assert_eq!(*op, CustomBinaryOp::Add);
+            println!("Simple binary operation converted: {:?}", custom_exprs[0]);
+        }
+        _ => panic!("Expected binary operation"),
+    }
+}
+
+#[test]
+fn test_stream_dialect_literal_conversion() {
+    let sql = "SELECT 42, 'hello', true";
+    
+    // Parse using StreamDialect
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    assert_eq!(select_stmt.select_fields.len(), 3);
+    
+    // Convert to custom expressions
+    let custom_exprs = convert_select_stmt_to_custom(&select_stmt);
+    
+    // Verify literals
+    let literals: Vec<&CustomExpr> = custom_exprs.iter()
+        .filter(|expr| matches!(expr, CustomExpr::Literal(_)))
+        .collect();
+    
+    assert_eq!(literals.len(), 3);
+    println!("Found {} literal expressions", literals.len());
+    
+    // Test direct conversion function
+    let direct_result = parse_sql_to_custom_expressions(sql);
+    assert!(direct_result.is_ok());
+    assert_eq!(direct_result.unwrap().len(), 3);
+}
+
+#[test]
+fn test_stream_dialect_function_conversion() {
+    let sql = "SELECT CONCAT(a, b), UPPER(name)";
+    
+    // Parse using StreamDialect
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    assert_eq!(select_stmt.select_fields.len(), 2);
+    
+    // Convert to custom expressions
+    let custom_exprs = convert_select_stmt_to_custom(&select_stmt);
+    
+    // Verify functions
+    let functions: Vec<&CustomExpr> = custom_exprs.iter()
+        .filter(|expr| matches!(expr, CustomExpr::Function { .. }))
+        .collect();
+    
+    assert_eq!(functions.len(), 2);
+    
+    // Check function names
+    for func in functions {
+        if let CustomExpr::Function { name, args } = func {
+            assert!(!name.is_empty());
+            println!("Function: {} with {} args", name, args.len());
         }
     }
 }
 
-impl Visitor for ExpressionConverter {
-    type Break = ();
-
-    fn pre_visit_expr(&mut self, expr: &Expr) -> std::ops::ControlFlow<Self::Break> {
-        let converted = match expr {
-            Expr::Identifier(ident) => {
-                CustomExpr::Column(ident.value.clone())
-            }
-            Expr::Value(value) => {
-                CustomExpr::Literal(format!("{:?}", value))
-            }
-            Expr::BinaryOp { left: _, op, right: _ } => {
-                // For simplicity, we'll create a placeholder - 
-                // in real implementation you'd recursively convert left and right
-                CustomExpr::BinaryOp {
-                    left: Box::new(CustomExpr::Column("left".to_string())),
-                    op: CustomBinaryOp::from(op),
-                    right: Box::new(CustomExpr::Column("right".to_string())),
+#[test]
+fn test_stream_dialect_complex_expression_conversion() {
+    let sql = "SELECT (a + b) * c";
+    
+    // Parse using StreamDialect
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    assert_eq!(select_stmt.select_fields.len(), 1);
+    
+    // Convert to custom expressions
+    let custom_exprs = convert_select_stmt_to_custom(&select_stmt);
+    
+    // Should handle complex nested expressions
+    assert_eq!(custom_exprs.len(), 1);
+    match &custom_exprs[0] {
+        CustomExpr::BinaryOp { op, left, .. } => {
+            assert_eq!(*op, CustomBinaryOp::Multiply);
+            println!("Complex expression converted: multiplication with nested operands");
+            
+            // Verify nested structure
+            match left.as_ref() {
+                CustomExpr::BinaryOp { op: inner_op, .. } => {
+                    assert_eq!(*inner_op, CustomBinaryOp::Add);
+                    println!("Left operand is addition: (a + b)");
                 }
+                _ => panic!("Expected nested binary operation"),
             }
-            Expr::Function(func) => {
-                CustomExpr::Function {
-                    name: func.name.to_string(),
-                    args: vec![], // Simplified for test
-                }
-            }
-            _ => CustomExpr::Literal("unsupported".to_string()),
-        };
-        
-        self.converted_expressions.push(converted);
-        std::ops::ControlFlow::Continue(())
+        }
+        _ => panic!("Expected binary operation"),
     }
 }
 
 #[test]
-fn test_simple_expression_parsing() {
-    let sql = "SELECT a + b";
-    
-    let dialect = GenericDialect {};
-    let statements = Parser::parse_sql(&dialect, sql).unwrap();
-    
-    let mut converter = ExpressionConverter::new();
-    
-    for statement in &statements {
-        statement.visit(&mut converter);
-    }
-    
-    // Should have converted some expressions
-    assert!(!converter.converted_expressions.is_empty());
-    
-    println!("✓ Converted expressions: {:?}", converter.converted_expressions);
-}
-
-#[test]
-fn test_literal_expression_parsing() {
-    let sql = "SELECT 42, 'hello', true";
-    
-    let dialect = GenericDialect {};
-    let statements = Parser::parse_sql(&dialect, sql).unwrap();
-    
-    let mut converter = ExpressionConverter::new();
-    
-    for statement in &statements {
-        statement.visit(&mut converter);
-    }
-    
-    // Should have literal expressions
-    let literals: Vec<&CustomExpr> = converter.converted_expressions.iter()
-        .filter(|expr| matches!(expr, CustomExpr::Literal(_)))
-        .collect();
-    
-    assert!(!literals.is_empty());
-    println!("✓ Found {} literal expressions", literals.len());
-}
-
-#[test]
-fn test_function_call_parsing() {
-    let sql = "SELECT CONCAT(a, b), UPPER(name)";
-    
-    let dialect = GenericDialect {};
-    let statements = Parser::parse_sql(&dialect, sql).unwrap();
-    
-    let mut converter = ExpressionConverter::new();
-    
-    for statement in &statements {
-        statement.visit(&mut converter);
-    }
-    
-    // Should have function expressions
-    let functions: Vec<&CustomExpr> = converter.converted_expressions.iter()
-        .filter(|expr| matches!(expr, CustomExpr::Function { .. }))
-        .collect();
-    
-    assert!(!functions.is_empty());
-    println!("✓ Found {} function expressions", functions.len());
-}
-
-#[test]
-fn test_complex_expression_parsing() {
-    let sql = "SELECT (a + b) * c, CASE WHEN x > 0 THEN 'positive' ELSE 'negative' END";
-    
-    let dialect = GenericDialect {};
-    let statements = Parser::parse_sql(&dialect, sql).unwrap();
-    
-    let mut converter = ExpressionConverter::new();
-    
-    for statement in &statements {
-        statement.visit(&mut converter);
-    }
-    
-    // Should handle complex expressions
-    assert!(!converter.converted_expressions.is_empty());
-    println!("✓ Handled complex expressions: {} found", converter.converted_expressions.len());
-}
-
-#[test]
-fn test_nested_expression_structure() {
+fn test_stream_dialect_nested_expression_conversion() {
     let sql = "SELECT a + (b * c)";
     
-    let dialect = GenericDialect {};
-    let statements = Parser::parse_sql(&dialect, sql).unwrap();
+    // Parse using StreamDialect
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    assert_eq!(select_stmt.select_fields.len(), 1);
     
-    let mut converter = ExpressionConverter::new();
-    
-    for statement in &statements {
-        statement.visit(&mut converter);
-    }
+    // Convert to custom expressions
+    let custom_exprs = convert_select_stmt_to_custom(&select_stmt);
     
     // Should handle nested structure
-    let binary_ops: Vec<&CustomExpr> = converter.converted_expressions.iter()
-        .filter(|expr| matches!(expr, CustomExpr::BinaryOp { .. }))
-        .collect();
-    
-    println!("✓ Found {} binary operations in nested expression", binary_ops.len());
+    assert_eq!(custom_exprs.len(), 1);
+    match &custom_exprs[0] {
+        CustomExpr::BinaryOp { op, left: _, right } => {
+            assert_eq!(*op, CustomBinaryOp::Add);
+            
+            // Right operand should be multiplication
+            match right.as_ref() {
+                CustomExpr::BinaryOp { op: inner_op, .. } => {
+                    assert_eq!(*inner_op, CustomBinaryOp::Multiply);
+                    println!("Nested expression converted: right operand is (b * c)");
+                }
+                _ => panic!("Expected nested binary operation"),
+            }
+        }
+        _ => panic!("Expected binary operation"),
+    }
 }
 
-// Helper function that was originally in expression_example.rs - now for testing
-pub fn parse_and_analyze_expressions() {
-    println!("=== Expression Parsing and Analysis Test ===");
+#[test]
+fn test_stream_dialect_alias_preservation() {
+    let sql = "SELECT a + b AS total, c * 2 AS doubled";
     
-    // Test simple binary operation
-    let simple_expr = "SELECT a + b";
-    println!("Testing simple expression: {}", simple_expr);
+    // Parse using StreamDialect
+    let select_stmt = parse_sql(sql).expect("StreamDialect parse should succeed");
+    assert_eq!(select_stmt.select_fields.len(), 2);
     
-    let dialect = GenericDialect {};
-    let statements = Parser::parse_sql(&dialect, simple_expr).unwrap();
+    // Verify aliases are preserved in SelectStmt
+    assert_eq!(select_stmt.select_fields[0].alias, Some("total".to_string()));
+    assert_eq!(select_stmt.select_fields[1].alias, Some("doubled".to_string()));
     
-    let mut converter = ExpressionConverter::new();
-    for statement in &statements {
-        statement.visit(&mut converter);
-    }
+    println!("Aliases preserved in StreamDialect parsing: total, doubled");
     
-    println!("✓ Parsed and converted simple expression");
-    println!("  Found {} expressions", converter.converted_expressions.len());
+    // Convert to custom expressions
+    let custom_exprs = convert_select_stmt_to_custom(&select_stmt);
+    assert_eq!(custom_exprs.len(), 2);
     
-    // Test with literals
-    let literal_expr = "SELECT 42, 'hello', true";
-    println!("\nTesting literal expression: {}", literal_expr);
+    println!("Expression conversion completed for aliased fields");
+}
+
+#[test]
+fn test_stream_dialect_error_handling() {
+    // Test invalid SQL
+    let invalid_sql = "INVALID SQL EXPRESSION";
+    let result = parse_sql_to_custom_expressions(invalid_sql);
     
-    let mut literal_converter = ExpressionConverter::new();
-    let literal_statements = Parser::parse_sql(&dialect, literal_expr).unwrap();
+    assert!(result.is_err());
+    println!("Invalid SQL properly rejected: {:?}", result.unwrap_err());
     
-    for statement in &literal_statements {
-        statement.visit(&mut literal_converter);
-    }
+    // Test non-SELECT SQL
+    let insert_sql = "INSERT INTO table VALUES (1)";
+    let result = parse_sql_to_custom_expressions(insert_sql);
     
-    let literals: Vec<&CustomExpr> = literal_converter.converted_expressions.iter()
-        .filter(|expr| matches!(expr, CustomExpr::Literal(_)))
-        .collect();
-    
-    println!("✓ Parsed and converted literal expressions");
-    println!("  Found {} literal expressions", literals.len());
-    
-    // Test with function calls
-    let function_expr = "SELECT CONCAT(a, b), UPPER(name)";
-    println!("\nTesting function expression: {}", function_expr);
-    
-    let mut function_converter = ExpressionConverter::new();
-    let function_statements = Parser::parse_sql(&dialect, function_expr).unwrap();
-    
-    for statement in &function_statements {
-        statement.visit(&mut function_converter);
-    }
-    
-    let functions: Vec<&CustomExpr> = function_converter.converted_expressions.iter()
-        .filter(|expr| matches!(expr, CustomExpr::Function { .. }))
-        .collect();
-    
-    println!("✓ Parsed and converted function expressions");
-    println!("  Found {} function expressions", functions.len());
+    assert!(result.is_err());
+    println!("Non-SELECT SQL properly rejected: {:?}", result.unwrap_err());
 }

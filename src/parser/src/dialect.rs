@@ -1,13 +1,11 @@
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, GroupByExpr, SetExpr, Statement, Value};
-use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::ParserError;
 
 use super::window;
 pub use window::{TimeWindow, parse_tumbling_window, window_to_expr};
 
 /// Stream processing dialect that supports tumbling window functions
-/// Similar to GreptimeDbDialect, this dialect extends GenericDialect
-/// to support custom window functions like tumblingwindow in GROUP BY clauses
+/// This dialect supports custom window functions like tumblingwindow in GROUP BY clauses
 #[derive(Debug, Clone)]
 pub struct StreamDialect {}
 
