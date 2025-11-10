@@ -2575,7 +2575,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "synapseFlow"
+name = "synapse-flow"
 version = "0.1.0"
 dependencies = [
  "datatypes",
