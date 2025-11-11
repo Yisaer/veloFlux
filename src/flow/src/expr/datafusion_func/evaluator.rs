@@ -6,7 +6,6 @@ use datafusion_common::{DataFusionError, Result as DataFusionResult, ScalarValue
 use datafusion_expr::{lit, Expr, ColumnarValue};
 use datatypes::{Value, ListValue, ConcreteDatatype};
 
-use crate::expr::scalar::ScalarExpr;
 use crate::model::Collection;
 
 /// DataFusion-based expression evaluator
@@ -19,28 +18,6 @@ impl DataFusionEvaluator {
     pub fn new() -> Self {
         Self {
             session_ctx: SessionContext::new(),
-        }
-    }
-
-    /// Evaluate a ScalarExpr against a Collection using DataFusion (vectorized)
-    /// This method handles CallDf expressions with true vectorized evaluation
-    pub fn evaluate_expr_vectorized(&self, expr: &ScalarExpr, _collection: &dyn Collection) -> DataFusionResult<Vec<Value>> {
-        match expr {
-            ScalarExpr::CallDf { .. } => {
-                // Only handle CallDf expressions - this is the main purpose of DataFusionEvaluator
-                // For CallDf, we need to evaluate the arguments first, then call the function
-                // But this should not be called directly from eval_vectorized
-                Err(DataFusionError::Internal(
-                    "evaluate_expr_vectorized should not be called directly for CallDf expressions. Use evaluate_df_function_vectorized instead.".to_string()
-                ))
-            }
-            _ => {
-                // For non-CallDf expressions, we should not handle them here
-                Err(DataFusionError::Plan(format!(
-                    "DataFusionEvaluator should only handle CallDf expressions, got {:?}", 
-                    std::mem::discriminant(expr)
-                )))
-            }
         }
     }
 
