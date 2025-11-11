@@ -59,7 +59,7 @@ mod tests {
     use super::*;
     use sqlparser::parser::Parser;
     use crate::dialect::StreamDialect;
-    use sqlparser::ast::{Statement, Visit};
+    use sqlparser::ast::Visit;
 
     #[test]
     fn test_extract_single_table() {
@@ -68,7 +68,7 @@ mod tests {
         let ast = Parser::parse_sql(&dialect, sql).unwrap();
         
         let mut visitor = TableInfoVisitor::new();
-        ast[0].visit(&mut visitor);
+        let _ = ast[0].visit(&mut visitor);
         
         let sources = visitor.get_sources();
         assert_eq!(sources.len(), 1);
@@ -83,7 +83,7 @@ mod tests {
         let ast = Parser::parse_sql(&dialect, sql).unwrap();
         
         let mut visitor = TableInfoVisitor::new();
-        ast[0].visit(&mut visitor);
+        let _ = ast[0].visit(&mut visitor);
         
         let sources = visitor.get_sources();
         assert_eq!(sources.len(), 1);
@@ -98,7 +98,7 @@ mod tests {
         let ast = Parser::parse_sql(&dialect, sql).unwrap();
         
         let mut visitor = TableInfoVisitor::new();
-        ast[0].visit(&mut visitor);
+        let _ = ast[0].visit(&mut visitor);
         
         let sources = visitor.get_sources();
         assert_eq!(sources.len(), 2);

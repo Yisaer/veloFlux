@@ -5,7 +5,7 @@ use sqlparser::ast::Visit;
 use crate::dialect::StreamDialect;
 use crate::select_stmt::{SelectStmt, SelectField};
 use crate::aggregate_transformer::transform_aggregate_functions;
-use crate::table_visitor::TableInfoVisitor;
+use crate::visitor::TableInfoVisitor;
 
 /// SQL Parser based on StreamDialect
 pub struct StreamSqlParser {

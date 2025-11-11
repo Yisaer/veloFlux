@@ -6,7 +6,7 @@
 
 use sqlparser::ast::{Expr, Ident, FunctionArg, FunctionArgExpr};
 use crate::select_stmt::SelectStmt;
-use crate::aggregate_visitor::extract_aggregates_with_visitor;
+use crate::visitor::extract_aggregates_with_visitor;
 use std::collections::HashMap;
 
 /// Transform aggregate functions in a SELECT statement and return aggregate mappings
