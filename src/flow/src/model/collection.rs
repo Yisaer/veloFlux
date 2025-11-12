@@ -51,6 +51,21 @@ pub trait Collection: Send + Sync + Any {
     /// - Expression evaluation should be batched for better performance
     fn apply_projection(&self, fields: &[PhysicalProjectField]) -> Result<Box<dyn Collection>, CollectionError>;
     
+    /// Apply a filter expression to this collection
+    /// This creates a new collection containing only the rows that satisfy the filter condition
+    /// 
+    /// # Arguments
+    /// * `filter_expr` - A ScalarExpr that evaluates to a boolean value for each row
+    /// 
+    /// # Returns
+    /// A new collection with only the rows that satisfy the filter condition, or an error if filtering fails
+    /// 
+    /// # Note
+    /// This is an abstract method that must be implemented by specific collection types.
+    /// The filter expression should evaluate to boolean values (true for rows to keep, false for rows to discard).
+    /// Implementations should consider the collection's storage characteristics for optimal performance.
+    fn apply_filter(&self, filter_expr: &crate::expr::ScalarExpr) -> Result<Box<dyn Collection>, CollectionError>;
+    
     /// Clone this collection
     fn clone_box(&self) -> Box<dyn Collection>;
 }
@@ -142,6 +157,10 @@ pub enum CollectionError {
         expected: String,
         actual: String,
     },
+    /// Filter expression error
+    FilterError {
+        message: String,
+    },
     /// Other error
     Other(String),
 }
@@ -163,6 +182,9 @@ impl std::fmt::Display for CollectionError {
             }
             CollectionError::TypeMismatch { expected, actual } => {
                 write!(f, "Type mismatch: expected {}, got {}", expected, actual)
+            }
+            CollectionError::FilterError { message } => {
+                write!(f, "Filter error: {}", message)
             }
             CollectionError::Other(msg) => write!(f, "Collection error: {}", msg),
         }

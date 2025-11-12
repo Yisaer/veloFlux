@@ -3,6 +3,7 @@ use super::RecordBatch;
 use datatypes::Value;
 use crate::planner::physical::PhysicalProjectField;
 use crate::expr::datafusion_func::DataFusionEvaluator;
+use crate::expr::ScalarExpr;
 
 impl Collection for RecordBatch {
     fn num_rows(&self) -> usize {
@@ -130,6 +131,78 @@ impl Collection for RecordBatch {
     fn clone_box(&self) -> Box<dyn Collection> {
         Box::new(self.clone())
     }
+    
+    fn apply_filter(&self, filter_expr: &ScalarExpr) -> Result<Box<dyn Collection>, CollectionError> {
+        // Create DataFusion evaluator for expression evaluation
+        let evaluator = DataFusionEvaluator::new();
+        
+        // Evaluate the filter expression to get boolean results for each row
+        let filter_results = filter_expr.eval_vectorized(&evaluator, self)
+            .map_err(|eval_error| {
+                CollectionError::FilterError { 
+                    message: format!(
+                        "Failed to evaluate filter expression: {}",
+                        eval_error
+                    )
+                }
+            })?;
+        
+        // Collect indices of rows that satisfy the filter condition (true values)
+        let mut selected_indices = Vec::new();
+        for (i, result) in filter_results.iter().enumerate() {
+            if let Value::Bool(true) = result {
+                selected_indices.push(i);
+            } else if let Value::Bool(false) = result {
+                // This is a valid false value, continue
+                continue;
+            } else {
+                // Non-boolean result from filter expression
+                return Err(CollectionError::FilterError { 
+                    message: format!(
+                        "Filter expression must return boolean values, got {:?} at row {}",
+                        result, i
+                    )
+                });
+            }
+        }
+        
+        // If no rows satisfy the filter, return batch with same columns but no rows
+        if selected_indices.is_empty() {
+            let mut empty_columns = Vec::with_capacity(self.columns().len());
+            for column in self.columns() {
+                empty_columns.push(Column::new(
+                    column.name.clone(),
+                    column.source_name.clone(),
+                    Vec::new()
+                ));
+            }
+            let empty_batch = RecordBatch::new(empty_columns)?;
+            return Ok(Box::new(empty_batch));
+        }
+        
+        // Create new columns with only the selected rows
+        let mut new_columns = Vec::with_capacity(self.columns().len());
+        
+        for column in self.columns() {
+            let mut new_data = Vec::with_capacity(selected_indices.len());
+            for &idx in &selected_indices {
+                if let Some(value) = column.get(idx) {
+                    new_data.push(value.clone());
+                } else {
+                    new_data.push(Value::Null);
+                }
+            }
+            new_columns.push(Column::new(
+                column.name.clone(),
+                column.source_name.clone(),
+                new_data
+            ));
+        }
+        
+        // Create new RecordBatch with filtered columns
+        let new_batch = RecordBatch::new(new_columns)?;
+        Ok(Box::new(new_batch))
+    }
 }
 
 #[cfg(test)]
@@ -192,5 +265,94 @@ mod tests {
 
         assert_eq!(col1.values(),vec![Value::Int64(11), Value::Int64(21), Value::Int64(31)],"" );
         assert_eq!(col2.values(),vec![Value::Int64(102), Value::Int64(202), Value::Int64(302)],"" );
+    }
+    
+    #[test]
+    fn test_recordbatch_apply_filter_basic() {
+        // Create test data: a=10,20,30, b=100,200,300
+        let col_a_values = vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)];
+        let col_b_values = vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)];
+        
+        let column_a = Column::new("a".to_string(), "".to_string(), col_a_values);
+        let column_b = Column::new("b".to_string(), "".to_string(), col_b_values);
+        
+        let batch = RecordBatch::new(vec![column_a, column_b]).expect("Failed to create RecordBatch");
+        
+        // Create filter expression: a > 15
+        use crate::expr::{ScalarExpr, func::BinaryFunc};
+        let filter_expr = ScalarExpr::CallBinary {
+            func: BinaryFunc::Gt,
+            expr1: Box::new(ScalarExpr::column("", "a")),
+            expr2: Box::new(ScalarExpr::literal(Value::Int64(15), datatypes::ConcreteDatatype::Int64(datatypes::Int64Type))),
+        };
+        
+        // Apply filter
+        let result = batch.apply_filter(&filter_expr);
+        assert!(result.is_ok(), "apply_filter should succeed");
+        
+        let filtered_collection = result.unwrap();
+        
+        // Should have 2 rows (a=20, a=30) and 2 columns
+        assert_eq!(filtered_collection.num_rows(), 2, "Should have 2 filtered rows");
+        assert_eq!(filtered_collection.num_columns(), 2, "Should have 2 columns");
+        
+        // Check filtered values
+        let col_a = filtered_collection.column(0).expect("Should have column a");
+        let col_b = filtered_collection.column(1).expect("Should have column b");
+        
+        assert_eq!(col_a.values(), &vec![Value::Int64(20), Value::Int64(30)]);
+        assert_eq!(col_b.values(), &vec![Value::Int64(200), Value::Int64(300)]);
+    }
+    
+    #[test]
+    fn test_recordbatch_apply_filter_no_match() {
+        // Create test data
+        let col_a_values = vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)];
+        let column_a = Column::new("a".to_string(), "".to_string(), col_a_values);
+        let batch = RecordBatch::new(vec![column_a]).expect("Failed to create RecordBatch");
+        
+        // Create filter expression: a > 100 (no matches)
+        use crate::expr::{ScalarExpr, func::BinaryFunc};
+        let filter_expr = ScalarExpr::CallBinary {
+            func: BinaryFunc::Gt,
+            expr1: Box::new(ScalarExpr::column("", "a")),
+            expr2: Box::new(ScalarExpr::literal(Value::Int64(100), datatypes::ConcreteDatatype::Int64(datatypes::Int64Type))),
+        };
+        
+        // Apply filter
+        let result = batch.apply_filter(&filter_expr);
+        assert!(result.is_ok(), "apply_filter should succeed even with no matches");
+        
+        let filtered_collection = result.unwrap();
+        assert_eq!(filtered_collection.num_rows(), 0, "Should have 0 rows when no matches");
+        assert_eq!(filtered_collection.num_columns(), 1, "Should still have 1 column");
+    }
+    
+    #[test]
+    fn test_recordbatch_apply_filter_all_match() {
+        // Create test data
+        let col_a_values = vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)];
+        let column_a = Column::new("a".to_string(), "".to_string(), col_a_values);
+        let batch = RecordBatch::new(vec![column_a]).expect("Failed to create RecordBatch");
+        
+        // Create filter expression: a > 5 (all matches)
+        use crate::expr::{ScalarExpr, func::BinaryFunc};
+        let filter_expr = ScalarExpr::CallBinary {
+            func: BinaryFunc::Gt,
+            expr1: Box::new(ScalarExpr::column("", "a")),
+            expr2: Box::new(ScalarExpr::literal(Value::Int64(5), datatypes::ConcreteDatatype::Int64(datatypes::Int64Type))),
+        };
+        
+        // Apply filter
+        let result = batch.apply_filter(&filter_expr);
+        assert!(result.is_ok(), "apply_filter should succeed");
+        
+        let filtered_collection = result.unwrap();
+        assert_eq!(filtered_collection.num_rows(), 3, "Should have all 3 rows");
+        assert_eq!(filtered_collection.num_columns(), 1, "Should have 1 column");
+        
+        // Check that values are unchanged
+        let col_a = filtered_collection.column(0).expect("Should have column a");
+        assert_eq!(col_a.values(), &vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)]);
     }
 }
