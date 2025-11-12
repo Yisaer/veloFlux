@@ -71,7 +71,7 @@ pub fn create_logical_plan(select_stmt: SelectStmt) -> Result<Arc<dyn LogicalPla
     
     // 3. Create Project from select_fields
     let mut project_fields = Vec::new();
-    for (_i, select_field) in select_stmt.select_fields.iter().enumerate() {
+    for select_field in select_stmt.select_fields.iter() {
         let field_name = select_field.alias.clone()
             .unwrap_or_else(|| select_field.expr.to_string());
         

@@ -223,14 +223,10 @@ pub fn create_processor_from_physical_plan(
     id: impl Into<String>,
     plan: Arc<dyn PhysicalPlan>,
 ) -> Option<DataSourceProcessor> {
-    if let Some(ds) = plan.as_any().downcast_ref::<PhysicalDataSource>() {
-        Some(DataSourceProcessor::new(
-            id,
-            Arc::new(ds.clone()),
-        ))
-    } else {
-        None
-    }
+    plan.as_any().downcast_ref::<PhysicalDataSource>().map(|ds| DataSourceProcessor::new(
+        id,
+        Arc::new(ds.clone()),
+    ))
 }
 
 /// Internal structure to track processors created from PhysicalPlan nodes

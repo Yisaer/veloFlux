@@ -8,14 +8,14 @@
 //! - All processors communicate via StreamData through tokio mspc channels
 
 pub mod stream_data;
-pub mod processor;
+pub mod base;
 pub mod control_source_processor;
 pub mod datasource_processor;
 pub mod result_sink_processor;
 pub mod processor_builder;
 
 pub use stream_data::{StreamData, StreamError, ControlSignal};
-pub use processor::{Processor, ProcessorError};
+pub use base::{Processor, ProcessorError};
 pub use control_source_processor::ControlSourceProcessor;
 pub use datasource_processor::DataSourceProcessor;
 pub use result_sink_processor::ResultSinkProcessor;

@@ -45,11 +45,7 @@ impl DataSourceProcessor {
         id: impl Into<String>,
         plan: Arc<dyn crate::planner::physical::PhysicalPlan>,
     ) -> Option<Self> {
-        if let Some(ds) = plan.as_any().downcast_ref::<PhysicalDataSource>() {
-            Some(Self::new(id, Arc::new(ds.clone())))
-        } else {
-            None
-        }
+        plan.as_any().downcast_ref::<PhysicalDataSource>().map(|ds| Self::new(id, Arc::new(ds.clone())))
     }
 }
 

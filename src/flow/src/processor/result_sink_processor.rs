@@ -61,7 +61,7 @@ impl Processor for ResultSinkProcessor {
                 let mut received_any = false;
                 
                 // Check all input channels
-                for (_idx, input) in inputs.iter_mut().enumerate() {
+                for input in inputs.iter_mut() {
                     match input.try_recv() {
                         Ok(data) => {
                             all_closed = false;

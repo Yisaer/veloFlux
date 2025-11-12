@@ -119,10 +119,7 @@ impl StreamData {
     
     /// Check if this is a terminal signal (StreamEnd)
     pub fn is_terminal(&self) -> bool {
-        match self {
-            StreamData::Control(ControlSignal::StreamEnd) => true,
-            _ => false,
-        }
+        matches!(self, StreamData::Control(ControlSignal::StreamEnd))
     }
     
     /// Extract Collection if present
