@@ -6,7 +6,7 @@
 
 use sqlparser::ast::{Expr, Ident, FunctionArg, FunctionArgExpr};
 use crate::select_stmt::SelectStmt;
-use crate::aggregate_visitor::extract_aggregates_with_visitor;
+use crate::visitor::extract_aggregates_with_visitor;
 use std::collections::HashMap;
 
 /// Transform aggregate functions in a SELECT statement and return aggregate mappings
@@ -21,7 +21,10 @@ pub fn transform_aggregate_functions(
     // Process select fields: extract aggregates and replace in one step
     for field in &mut select_stmt.select_fields {
         let (new_expr, field_aggregates) = extract_and_replace_aggregates(&field.expr, &mut replacement_counter)?;
-        
+
+        if !field_aggregates.is_empty() && field.alias.is_none() {
+            field.alias = Some(field.expr.to_string());
+        }
         // Update the field expression
         field.expr = new_expr;
         
@@ -191,8 +194,6 @@ mod tests {
 
     #[test]
     fn test_simple_aggregate_transformation() {
-        println!("\n=== Testing Simple Aggregate Transformation ===");
-        
         // Create a simple SELECT with aggregate
         let expr = Expr::Function(Function {
             name: ObjectName(vec![Ident::new("sum")]),

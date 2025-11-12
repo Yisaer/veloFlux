@@ -1,12 +1,12 @@
 use std::any::Any;
 use std::sync::Arc;
 use crate::planner::logical::{LogicalPlan, BaseLogicalPlan};
-use crate::expr::ScalarExpr;
+use sqlparser::ast::Expr;
 
 #[derive(Debug, Clone)]
 pub struct ProjectField {
     pub field_name: String,
-    pub expr: ScalarExpr,
+    pub expr: Expr,
 }
 
 #[derive(Debug, Clone)]

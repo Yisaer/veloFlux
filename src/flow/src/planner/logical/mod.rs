@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::fmt::Debug;
 use std::any::Any;
 use parser::SelectStmt;
-use crate::expr::sql_conversion::convert_expr_to_scalar;
 
 pub trait LogicalPlan: Send + Sync + Debug {
     fn children(&self) -> &[Arc<dyn LogicalPlan>];
@@ -72,17 +71,13 @@ pub fn create_logical_plan(select_stmt: SelectStmt) -> Result<Arc<dyn LogicalPla
     
     // 3. Create Project from select_fields
     let mut project_fields = Vec::new();
-    for (i, select_field) in select_stmt.select_fields.iter().enumerate() {
-        // Convert sqlparser Expr to ScalarExpr
-        let scalar_expr = convert_expr_to_scalar(&select_field.expr)
-            .map_err(|e| format!("Failed to convert select field {}: {}", i, e))?;
-        
+    for select_field in select_stmt.select_fields.iter() {
         let field_name = select_field.alias.clone()
             .unwrap_or_else(|| select_field.expr.to_string());
         
         project_fields.push(project::ProjectField {
             field_name,
-            expr: scalar_expr,
+            expr: select_field.expr.clone(), // Keep original sqlparser expression
         });
     }
     
