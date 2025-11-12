@@ -7,7 +7,8 @@ use tokio::sync::mpsc;
 use std::sync::Arc;
 use crate::processor::{
     Processor, ProcessorError, 
-    ControlSourceProcessor, DataSourceProcessor, ResultSinkProcessor
+    ControlSourceProcessor, DataSourceProcessor, ResultSinkProcessor,
+    StreamData,
 };
 use crate::planner::physical::{PhysicalPlan, PhysicalDataSource};
 
@@ -68,6 +69,10 @@ impl PlanProcessor {
 /// - Middle processors: created from PhysicalPlan nodes (can be various types)
 /// - ResultSinkProcessor: data flow ending point
 pub struct ProcessorPipeline {
+    /// Pipeline input channel (send data into ControlSourceProcessor)
+    pub input: mpsc::Sender<StreamData>,
+    /// Pipeline output channel (receive data from ResultSinkProcessor)
+    pub output: mpsc::Receiver<StreamData>,
     /// Control source processor (data head)
     pub control_source: ControlSourceProcessor,
     /// Middle processors created from PhysicalPlan (various types)
@@ -347,6 +352,9 @@ pub fn create_processor_pipeline(
 ) -> Result<ProcessorPipeline, ProcessorError> {
     // 1. Create ControlSourceProcessor (data head)
     let mut control_source = ControlSourceProcessor::new("control_source");
+    // Set up pipeline input channel (single input for control source)
+    let (pipeline_input_sender, control_input_receiver) = mpsc::channel(100);
+    control_source.add_input(control_input_receiver);
     
     // 2. Build processors for all nodes in the tree
     let mut processor_map = ProcessorMap::new();
@@ -370,10 +378,16 @@ pub fn create_processor_pipeline(
         ));
     }
     
-    // 6. Collect all processors
+    // 6. Set up pipeline output channel (single output from result sink)
+    let (result_output_sender, pipeline_output_receiver) = mpsc::channel(100);
+    result_sink.add_output(result_output_sender);
+    
+    // 7. Collect all processors
     let middle_processors = processor_map.get_all_processors();
     
     Ok(ProcessorPipeline {
+        input: pipeline_input_sender,
+        output: pipeline_output_receiver,
         control_source,
         middle_processors,
         result_sink,
