@@ -2762,6 +2762,7 @@ dependencies = [
  "flow",
  "parser",
  "sqlparser 0.40.0",
+ "tokio",
 ]
 
 [[package]]

@@ -16,6 +16,7 @@ parser = { path = "src/parser" }
 flow = { path = "src/flow" }
 datatypes = { path = "src/datatypes" }
 sqlparser = { version = "0.40", features = ["serde", "visitor"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
 
 [[bin]]
 name = "synapse-flow"
