@@ -2,7 +2,10 @@
 //!
 //! This processor receives data from upstream processors and forwards it to a single output.
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
+use std::sync::Arc;
+use std::pin::Pin;
+use futures::stream::{FuturesUnordered, StreamExt};
 use crate::processor::{Processor, ProcessorError, StreamData};
 
 /// ResultSinkProcessor - forwards received data to a single output
@@ -44,7 +47,7 @@ impl Processor for ResultSinkProcessor {
     
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let _id = self.id.clone();
-        let mut inputs = std::mem::take(&mut self.inputs);
+        let inputs = std::mem::take(&mut self.inputs);
         let output = self.output.take()
             .ok_or_else(|| ProcessorError::InvalidConfiguration(
                 "ResultSinkProcessor output must be set before starting".to_string()
@@ -56,48 +59,54 @@ impl Processor for ResultSinkProcessor {
                 Err(e) => return Err(e),
             };
             
-            loop {
-                let mut all_closed = true;
-                let mut received_any = false;
-                
-                // Check all input channels
-                for input in inputs.iter_mut() {
-                    match input.try_recv() {
-                        Ok(data) => {
-                            all_closed = false;
-                            received_any = true;
-                            
-                            // Forward data to the single output
-                            if output.send(data.clone()).await.is_err() {
-                                return Err(ProcessorError::ChannelClosed);
-                            }
-                            
-                            // Check if this is a terminal signal
-                            if data.is_terminal() {
-                                // Forward StreamEnd to output before exiting
-                                let _ = output.send(StreamData::stream_end()).await;
-                                return Ok(());
-                            }
+            // Wrap receivers in Arc<Mutex<>> to allow re-adding futures
+            let receivers: Vec<Arc<Mutex<mpsc::Receiver<StreamData>>>> = 
+                inputs.into_iter().map(|r| Arc::new(Mutex::new(r))).collect();
+            let mut futures = FuturesUnordered::new();
+            
+            // Create initial futures for all receivers
+            for (idx, receiver) in receivers.iter().enumerate() {
+                let receiver_clone = receiver.clone();
+                futures.push(Box::pin(async move {
+                    let mut receiver_guard = receiver_clone.lock().await;
+                    (idx, receiver_guard.recv().await)
+                }) as Pin<Box<dyn std::future::Future<Output = (usize, Option<StreamData>)> + Send>>);
+            }
+            
+            // Process data from any ready channel
+            while let Some((idx, result)) = futures.next().await {
+                match result {
+                    Some(data) => {
+                        // Forward data to the single output
+                        if output.send(data.clone()).await.is_err() {
+                            return Err(ProcessorError::ChannelClosed);
                         }
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            all_closed = false;
+                        
+                        // Check if this is a terminal signal
+                        if data.is_terminal() {
+                            // Forward StreamEnd to output before exiting
+                            let _ = output.send(StreamData::stream_end()).await;
+                            return Ok(());
                         }
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            // Channel disconnected
+                        
+                        // Re-add future for this receiver
+                        if let Some(receiver) = receivers.get(idx) {
+                            let receiver_clone = receiver.clone();
+                            futures.push(Box::pin(async move {
+                                let mut receiver_guard = receiver_clone.lock().await;
+                                (idx, receiver_guard.recv().await)
+                            }) as Pin<Box<dyn std::future::Future<Output = (usize, Option<StreamData>)> + Send>>);
                         }
                     }
+                    None => {
+                        // Channel disconnected, continue with other channels
+                    }
                 }
-                
-                // If all channels are closed and we haven't received anything, exit
-                if all_closed && !received_any {
-                    // Send StreamEnd to output before exiting
-                    let _ = output.send(StreamData::stream_end()).await;
-                    return Ok(());
-                }
-                
-                // Yield to allow other tasks to run
-                tokio::task::yield_now().await;
             }
+            
+            // All channels closed, send StreamEnd to output before exiting
+            let _ = output.send(StreamData::stream_end()).await;
+            Ok(())
         })
     }
     

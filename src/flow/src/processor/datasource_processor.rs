@@ -4,8 +4,10 @@
 //! as StreamData::Collection. It supports both traditional control-signal-based
 //! data sources and subscription-based sources (e.g., MQTT) with decoders.
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use std::sync::Arc;
+use std::pin::Pin;
+use futures::stream::{FuturesUnordered, StreamExt};
 use crate::processor::{Processor, ProcessorError, StreamData};
 use crate::connector::SubscriptionSource;
 use crate::codec::Decoder;
@@ -84,7 +86,7 @@ impl Processor for DataSourceProcessor {
     }
     
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
-        let mut inputs = std::mem::take(&mut self.inputs);
+        let inputs = std::mem::take(&mut self.inputs);
         let outputs = self.outputs.clone();
         let subscription_source = self.subscription_source.take();
         let decoder = self.decoder.clone();
@@ -92,13 +94,13 @@ impl Processor for DataSourceProcessor {
         
         tokio::spawn(async move {
             // Start subscription if available
-            let mut subscription_receiver: Option<mpsc::Receiver<Vec<u8>>> = None;
+            let mut subscription_receiver: Option<Arc<Mutex<mpsc::Receiver<Vec<u8>>>>> = None;
             let mut subscription_source_handle: Option<Box<dyn SubscriptionSource>> = None;
             
             if let (Some(mut source), Some(_)) = (subscription_source, decoder.as_ref()) {
                 match source.subscribe().await {
                     Ok(receiver) => {
-                        subscription_receiver = Some(receiver);
+                        subscription_receiver = Some(Arc::new(Mutex::new(receiver)));
                         subscription_source_handle = Some(source);
                     }
                     Err(e) => {
@@ -117,85 +119,86 @@ impl Processor for DataSourceProcessor {
             
             let decoder = decoder.clone();
             
-            // Main loop: monitor both inputs and subscription simultaneously
-            loop {
-                let mut all_inputs_closed = true;
-                
-                // Check subscription receiver if available
-                if let Some(ref mut sub_receiver) = subscription_receiver {
-                    match sub_receiver.try_recv() {
-                        Ok(bytes) => {
-                            // Decode bytes to RecordBatch
-                            if let Some(ref decoder) = decoder {
-                                match decoder.decode(&bytes).await {
-                                    Ok(record_batch) => {
-                                        // Send RecordBatch downstream
-                                        let stream_data = StreamData::collection(Box::new(record_batch));
-                                        for output in &outputs {
-                                            if output.send(stream_data.clone()).await.is_err() {
-                                                return Err(ProcessorError::ChannelClosed);
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // Send error downstream
-                                        let error_data = StreamData::error(
-                                            crate::processor::StreamError::new(format!(
-                                                "Decoder '{}' failed: {}", decoder.name(), e
-                                            )).with_source(source_name.clone())
-                                        );
-                                        for output in &outputs {
-                                            if output.send(error_data.clone()).await.is_err() {
-                                                return Err(ProcessorError::ChannelClosed);
-                                            }
-                                        }
+            // Wrap input receivers in Arc<Mutex<>> to allow re-adding futures
+            let input_receivers: Vec<Arc<Mutex<mpsc::Receiver<StreamData>>>> = 
+                inputs.into_iter().map(|r| Arc::new(Mutex::new(r))).collect();
+            let mut futures = FuturesUnordered::new();
+            
+            // Create initial futures for all input receivers
+            for (idx, receiver) in input_receivers.iter().enumerate() {
+                let receiver_clone = receiver.clone();
+                futures.push(Box::pin(async move {
+                    let mut receiver_guard = receiver_clone.lock().await;
+                    (None, Some(idx), receiver_guard.recv().await)
+                }) as Pin<Box<dyn std::future::Future<Output = (Option<Vec<u8>>, Option<usize>, Option<StreamData>)> + Send>>);
+            }
+            
+            // Add subscription receiver future if available
+            if let Some(sub_receiver) = &subscription_receiver {
+                let sub_receiver_clone = sub_receiver.clone();
+                futures.push(Box::pin(async move {
+                    let mut receiver_guard = sub_receiver_clone.lock().await;
+                    (receiver_guard.recv().await, None, None)
+                }) as Pin<Box<dyn std::future::Future<Output = (Option<Vec<u8>>, Option<usize>, Option<StreamData>)> + Send>>);
+            }
+            
+            // Process data from any ready channel
+            while let Some((bytes_opt, input_idx_opt, stream_data_opt)) = futures.next().await {
+                // Handle subscription data
+                if let Some(bytes) = bytes_opt {
+                    // Decode bytes to RecordBatch
+                    if let Some(ref decoder) = decoder {
+                        match decoder.decode(&bytes).await {
+                            Ok(record_batch) => {
+                                // Send RecordBatch downstream
+                                let stream_data = StreamData::collection(Box::new(record_batch));
+                                for output in &outputs {
+                                    if output.send(stream_data.clone()).await.is_err() {
+                                        return Err(ProcessorError::ChannelClosed);
                                     }
                                 }
                             }
-                        }
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            // No data available, continue
-                        }
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            // Subscription channel closed
-                            if let Some(mut source) = subscription_source_handle.take() {
-                                let _ = source.stop().await;
+                            Err(e) => {
+                                // Send error downstream
+                                let error_data = StreamData::error(
+                                    crate::processor::StreamError::new(format!(
+                                        "Decoder '{}' failed: {}", decoder.name(), e
+                                    )).with_source(source_name.clone())
+                                );
+                                for output in &outputs {
+                                    if output.send(error_data.clone()).await.is_err() {
+                                        return Err(ProcessorError::ChannelClosed);
+                                    }
+                                }
                             }
-                            subscription_receiver = None;
                         }
                     }
-                }
-                
-                // Check all input channels
-                for input in &mut inputs {
-                    match input.try_recv() {
-                        Ok(data) => {
-                            all_inputs_closed = false;
-                            
-                            // Handle control signals
-                            if let Some(control) = data.as_control() {
-                                match control {
-                                    crate::processor::ControlSignal::StreamEnd => {
-                                        // Forward StreamEnd to outputs and stop subscription
-                                        if let Some(mut source) = subscription_source_handle.take() {
-                                            let _ = source.stop().await;
-                                        }
-                                        for output in &outputs {
-                                            let _ = output.send(data.clone()).await;
-                                        }
-                                        return Ok(());
-                                    }
-                                    _ => {
-                                        // Forward other control signals
-                                        for output in &outputs {
-                                            if output.send(data.clone()).await.is_err() {
-                                                return Err(ProcessorError::ChannelClosed);
-                                            }
-                                        }
-                                    }
+                    
+                    // Re-add subscription future
+                    if let Some(sub_receiver) = &subscription_receiver {
+                        let sub_receiver_clone = sub_receiver.clone();
+                        futures.push(Box::pin(async move {
+                            let mut receiver_guard = sub_receiver_clone.lock().await;
+                            (receiver_guard.recv().await, None, None)
+                        }) as Pin<Box<dyn std::future::Future<Output = (Option<Vec<u8>>, Option<usize>, Option<StreamData>)> + Send>>);
+                    }
+                } else if let (Some(input_idx), Some(data)) = (input_idx_opt, stream_data_opt) {
+                    // Handle input data
+                    // Handle control signals
+                    if let Some(control) = data.as_control() {
+                        match control {
+                            crate::processor::ControlSignal::StreamEnd => {
+                                // Forward StreamEnd to outputs and stop subscription
+                                if let Some(mut source) = subscription_source_handle.take() {
+                                    let _ = source.stop().await;
                                 }
-                            } else {
-                                // Forward non-control data (Collection or Error)
+                                for output in &outputs {
+                                    let _ = output.send(data.clone()).await;
+                                }
+                                return Ok(());
+                            }
+                            _ => {
+                                // Forward other control signals
                                 for output in &outputs {
                                     if output.send(data.clone()).await.is_err() {
                                         return Err(ProcessorError::ChannelClosed);
@@ -203,23 +206,37 @@ impl Processor for DataSourceProcessor {
                                 }
                             }
                         }
-                        Err(mpsc::error::TryRecvError::Empty) => {
-                            all_inputs_closed = false;
-                        }
-                        Err(mpsc::error::TryRecvError::Disconnected) => {
-                            // Channel disconnected
+                    } else {
+                        // Forward non-control data (Collection or Error)
+                        for output in &outputs {
+                            if output.send(data.clone()).await.is_err() {
+                                return Err(ProcessorError::ChannelClosed);
+                            }
                         }
                     }
+                    
+                    // Re-add future for this input receiver
+                    if let Some(receiver) = input_receivers.get(input_idx) {
+                        let receiver_clone = receiver.clone();
+                        futures.push(Box::pin(async move {
+                            let mut receiver_guard = receiver_clone.lock().await;
+                            (None, Some(input_idx), receiver_guard.recv().await)
+                        }) as Pin<Box<dyn std::future::Future<Output = (Option<Vec<u8>>, Option<usize>, Option<StreamData>)> + Send>>);
+                    }
+                } else {
+                    // Channel disconnected
+                    // If subscription channel closed
+                    if bytes_opt.is_none() && subscription_receiver.is_some() {
+                        if let Some(mut source) = subscription_source_handle.take() {
+                            let _ = source.stop().await;
+                        }
+                        subscription_receiver = None;
+                    }
                 }
-                
-                // If all input channels are closed and no subscription, exit
-                if all_inputs_closed && subscription_receiver.is_none() {
-                    return Ok(());
-                }
-                
-                // Yield to allow other tasks to run
-                tokio::task::yield_now().await;
             }
+            
+            // All channels closed
+            Ok(())
         })
     }
     

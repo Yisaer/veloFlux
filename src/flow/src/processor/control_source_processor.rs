@@ -97,8 +97,8 @@ impl Processor for ControlSourceProcessor {
             };
             
             loop {
-                match input.try_recv() {
-                    Ok(data) => {
+                match input.recv().await {
+                    Some(data) => {
                         // Forward to all outputs
                         for output in &outputs {
                             if output.send(data.clone()).await.is_err() {
@@ -110,10 +110,7 @@ impl Processor for ControlSourceProcessor {
                             return Ok(());
                         }
                     }
-                    Err(mpsc::error::TryRecvError::Empty) => {
-                        // Channel not empty but no data ready, continue
-                    }
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                    None => {
                         // Channel disconnected, send StreamEnd to all outputs and exit
                         for output in &outputs {
                             let _ = output.send(StreamData::stream_end()).await;
@@ -121,9 +118,6 @@ impl Processor for ControlSourceProcessor {
                         return Ok(());
                     }
                 }
-                
-                // Yield to allow other tasks to run
-                tokio::task::yield_now().await;
             }
         })
     }
