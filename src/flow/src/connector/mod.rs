@@ -45,6 +45,7 @@ pub enum ConnectorError {
 }
 
 pub use sink::mock::{MockSinkConnector, MockSinkHandle};
+pub use sink::mqtt::{MqttSinkConfig, MqttSinkConnector};
 pub use sink::{SinkConnector, SinkConnectorError};
 pub use source::mock::{MockSourceConnector, MockSourceError, MockSourceHandle};
 /// MQTT-specific helpers and connector implementation.
