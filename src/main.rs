@@ -1,5 +1,4 @@
 use std::env;
-use std::fs;
 use std::net::SocketAddr;
 use std::process;
 use std::sync::Arc;
@@ -11,10 +10,8 @@ use flow::processor::{ProcessorPipeline, SinkProcessor};
 use flow::JsonEncoder;
 use flow::Processor;
 use once_cell::sync::Lazy;
-use procfs::process::Process;
-use prometheus::{register_gauge, Gauge, Registry};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use prometheus::{register_counter, register_gauge, Counter, Gauge};
+use sysinfo::System;
 use tokio::time::{sleep, Duration};
 
 const DEFAULT_BROKER_URL: &str = "tcp://127.0.0.1:1883";
@@ -24,94 +21,18 @@ const MQTT_QOS: u8 = 1;
 const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:9898";
 const DEFAULT_METRICS_INTERVAL_SECS: u64 = 5;
 
-#[derive(Clone)]
-struct ProcessCpuTimeMetrics {
-    total: prometheus::Counter,
-    user: prometheus::Counter,
-    system: prometheus::Counter,
-    last_user_ticks: Arc<AtomicU64>,
-    last_system_ticks: Arc<AtomicU64>,
-}
-
-impl ProcessCpuTimeMetrics {
-    fn new(registry: &Registry) -> Result<Self, prometheus::Error> {
-        let total = prometheus::Counter::new(
-            "process_cpu_seconds_total",
-            "Total CPU time spent by the process in seconds",
-        )?;
-        let user = prometheus::Counter::new(
-            "process_cpu_user_seconds_total",
-            "Total user CPU time spent by the process in seconds",
-        )?;
-        let system = prometheus::Counter::new(
-            "process_cpu_system_seconds_total",
-            "Total system CPU time spent by the process in seconds",
-        )?;
-
-        registry.register(Box::new(total.clone()))?;
-        registry.register(Box::new(user.clone()))?;
-        registry.register(Box::new(system.clone()))?;
-
-        Ok(Self {
-            total,
-            user,
-            system,
-            last_user_ticks: Arc::new(AtomicU64::new(0)),
-            last_system_ticks: Arc::new(AtomicU64::new(0)),
-        })
-    }
-
-    fn update(&self) -> Result<f64, Box<dyn std::error::Error>> {
-        let process = Process::myself()?;
-        let stat = process.stat()?;
-        let clock_ticks_per_second = procfs::ticks_per_second() as f64;
-
-        let current_user_ticks = stat.utime;
-        let current_system_ticks = stat.stime;
-
-        let last_user = self.last_user_ticks.load(Ordering::Relaxed);
-        let last_system = self.last_system_ticks.load(Ordering::Relaxed);
-
-        let user_delta = if current_user_ticks >= last_user {
-            current_user_ticks - last_user
-        } else {
-            current_user_ticks
-        };
-
-        let system_delta = if current_system_ticks >= last_system {
-            current_system_ticks - last_system
-        } else {
-            current_system_ticks
-        };
-
-        let user_secs = user_delta as f64 / clock_ticks_per_second;
-        let system_secs = system_delta as f64 / clock_ticks_per_second;
-        let total_secs = user_secs + system_secs;
-
-        if user_delta > 0 {
-            self.user.inc_by(user_secs);
-        }
-        if system_delta > 0 {
-            self.system.inc_by(system_secs);
-        }
-        if total_secs > 0.0 {
-            self.total.inc_by(total_secs);
-        }
-
-        self.last_user_ticks
-            .store(current_user_ticks, Ordering::Relaxed);
-        self.last_system_ticks
-            .store(current_system_ticks, Ordering::Relaxed);
-
-        let rss_bytes = (stat.rss.max(0) as f64) * procfs::page_size() as f64;
-        Ok(rss_bytes)
-    }
-}
+static CPU_TIME_COUNTER: Lazy<Counter> = Lazy::new(|| {
+    register_counter!(
+        "process_cpu_seconds_total",
+        "Total CPU time consumed by the synapse-flow process in seconds"
+    )
+    .expect("create cpu counter")
+});
 
 static MEMORY_USAGE_GAUGE: Lazy<Gauge> = Lazy::new(|| {
     register_gauge!(
         "synapse_memory_used_bytes",
-        "Resident memory used by the process in bytes (RSS from /proc/self/stat)"
+        "Resident memory used by the process in bytes"
     )
     .expect("create memory gauge")
 });
@@ -160,15 +81,23 @@ async fn init_metrics_exporter() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|secs| *secs > 0)
         .unwrap_or(DEFAULT_METRICS_INTERVAL_SECS);
 
-    let cpu_metrics = ProcessCpuTimeMetrics::new(prometheus::default_registry())?;
-    let memory_gauge = MEMORY_USAGE_GAUGE.clone();
-
     tokio::spawn(async move {
+        let mut system = System::new();
+        let pid = sysinfo::Pid::from_u32(process::id());
         loop {
-            match cpu_metrics.update() {
-                Ok(rss_bytes) => memory_gauge.set(rss_bytes),
-                Err(_) => memory_gauge.set(0.0),
+            system.refresh_process(pid);
+            if let Some(proc_info) = system.process(pid) {
+                let delta_secs = (proc_info.cpu_usage() as f64 / 100.0) * poll_interval as f64;
+                if delta_secs.is_finite() && delta_secs >= 0.0 {
+                    CPU_TIME_COUNTER.inc_by(delta_secs);
+                }
+
+                let rss_bytes = proc_info.memory() as f64 * 1024.0;
+                MEMORY_USAGE_GAUGE.set(rss_bytes);
+            } else {
+                MEMORY_USAGE_GAUGE.set(0.0);
             }
+
             sleep(Duration::from_secs(poll_interval)).await;
         }
     });

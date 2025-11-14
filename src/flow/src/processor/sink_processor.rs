@@ -6,6 +6,8 @@ use crate::model::Collection;
 use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
+use once_cell::sync::Lazy;
+use prometheus::{register_int_counter_vec, IntCounterVec};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -61,6 +63,24 @@ pub struct SinkProcessor {
     connectors: Vec<ConnectorBinding>,
 }
 
+static SINK_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "sink_processor_records_in_total",
+        "Rows received by sink processors",
+        &["processor"]
+    )
+    .expect("create sink records_in counter vec")
+});
+
+static SINK_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "sink_processor_records_out_total",
+        "Rows forwarded downstream by sink processors",
+        &["processor"]
+    )
+    .expect("create sink records_out counter vec")
+});
+
 impl SinkProcessor {
     /// Create a new sink processor with the provided identifier.
     pub fn new(id: impl Into<String>) -> Self {
@@ -84,14 +104,21 @@ impl SinkProcessor {
     }
 
     async fn handle_collection(
+        processor_id: &str,
         connectors: &mut [ConnectorBinding],
         collection: &dyn Collection,
     ) -> Result<(), ProcessorError> {
+        let row_count = collection.num_rows() as u64;
+        SINK_RECORDS_IN
+            .with_label_values(&[processor_id])
+            .inc_by(row_count);
         for connector in connectors.iter_mut() {
             connector.publish(collection).await?;
         }
 
-        // Forward downstream after successful delivery.
+        SINK_RECORDS_OUT
+            .with_label_values(&[processor_id])
+            .inc_by(row_count);
         Ok(())
     }
 
@@ -177,8 +204,10 @@ impl Processor for SinkProcessor {
 
         tokio::spawn(async move {
             for binding in connectors.iter_mut() {
+                println!("[SinkProcessor:{processor_id}] waiting for connector to be ready");
                 binding.ready().await?;
             }
+            println!("[SinkProcessor:{processor_id}] connectors ready, entering event loop");
             while let Some(item) = input_streams.next().await {
                 let data = match item {
                     Ok(data) => data,
@@ -190,7 +219,13 @@ impl Processor for SinkProcessor {
                     }
                 };
                 if let Some(collection) = data.as_collection() {
-                    if let Err(err) = Self::handle_collection(&mut connectors, collection).await {
+                    println!(
+                        "[SinkProcessor:{processor_id}] processing collection with {} rows",
+                        collection.num_rows()
+                    );
+                    if let Err(err) =
+                        Self::handle_collection(&processor_id, &mut connectors, collection).await
+                    {
                         let error = StreamData::error(
                             StreamError::new(err.to_string()).with_source(processor_id.clone()),
                         );
@@ -206,11 +241,17 @@ impl Processor for SinkProcessor {
                     .map_err(|_| ProcessorError::ChannelClosed)?;
 
                 if data.is_terminal() {
+                    println!(
+                        "[SinkProcessor:{processor_id}] received terminal signal, closing connectors"
+                    );
                     Self::handle_terminal(&mut connectors).await?;
                     return Ok(());
                 }
             }
 
+            println!(
+                "[SinkProcessor:{processor_id}] input stream closed, shutting down connectors"
+            );
             Self::handle_terminal(&mut connectors).await?;
             Ok(())
         })

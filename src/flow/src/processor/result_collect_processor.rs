@@ -58,6 +58,11 @@ impl Processor for ResultCollectProcessor {
             )
         });
 
+        println!(
+            "[ResultCollectProcessor:{}] event loop started with {} inputs",
+            self.id,
+            input_streams.len()
+        );
         tokio::spawn(async move {
             let output = match output {
                 Ok(output) => output,
@@ -79,12 +84,14 @@ impl Processor for ResultCollectProcessor {
                     .send(data.clone())
                     .await
                     .map_err(|_| ProcessorError::ChannelClosed)?;
+                println!("[ResultCollectProcessor] forwarded {}", data.description());
 
                 if data.is_terminal() {
                     output
                         .send(StreamData::stream_end())
                         .await
                         .map_err(|_| ProcessorError::ChannelClosed)?;
+                    println!("[ResultCollectProcessor] terminal signal sent");
                     return Ok(());
                 }
             }
@@ -93,6 +100,7 @@ impl Processor for ResultCollectProcessor {
                 .send(StreamData::stream_end())
                 .await
                 .map_err(|_| ProcessorError::ChannelClosed)?;
+            println!("[ResultCollectProcessor] inputs closed, sent StreamEnd");
             Ok(())
         })
     }

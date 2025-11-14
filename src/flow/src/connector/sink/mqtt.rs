@@ -2,6 +2,8 @@
 
 use super::{SinkConnector, SinkConnectorError};
 use async_trait::async_trait;
+use once_cell::sync::Lazy;
+use prometheus::{register_int_counter_vec, IntCounterVec};
 use rumqttc::{AsyncClient, ConnectionError, Event, EventLoop, MqttOptions, QoS, Transport};
 use tokio::task::JoinHandle;
 use url::Url;
@@ -65,6 +67,24 @@ pub struct MqttSinkConnector {
     config: MqttSinkConfig,
     client: Option<SinkClient>,
 }
+
+static MQTT_SINK_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "mqtt_sink_records_in_total",
+        "Number of records received by MQTT sink connectors",
+        &["connector"]
+    )
+    .expect("create mqtt sink records_in counter vec")
+});
+
+static MQTT_SINK_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "mqtt_sink_records_out_total",
+        "Number of records successfully published by MQTT sink connectors",
+        &["connector"]
+    )
+    .expect("create mqtt sink records_out counter vec")
+});
 
 enum SinkClient {
     Shared(SharedMqttClient),
@@ -207,6 +227,15 @@ impl SinkConnector for MqttSinkConnector {
         self.ensure_client().await?;
         let qos = self.publish_qos()?;
         if let Some(client) = &self.client {
+            MQTT_SINK_RECORDS_IN
+                .with_label_values(&[self.id.as_str()])
+                .inc();
+            println!(
+                "[MqttSinkConnector:{}] publishing {} bytes to {}",
+                self.id,
+                payload.len(),
+                self.config.topic
+            );
             client
                 .publish(
                     &self.config.topic,
@@ -215,6 +244,15 @@ impl SinkConnector for MqttSinkConnector {
                     payload.to_vec(),
                 )
                 .await
+                .map(|_| {
+                    MQTT_SINK_RECORDS_OUT
+                        .with_label_values(&[self.id.as_str()])
+                        .inc()
+                })
+                .map_err(|err| {
+                    println!("[MqttSinkConnector:{}] publish error: {}", self.id, err);
+                    err
+                })
         } else {
             Err(SinkConnectorError::Unavailable(format!(
                 "mqtt sink `{}` not connected",

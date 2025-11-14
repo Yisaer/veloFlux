@@ -9,6 +9,8 @@ use crate::model::{Collection, Column, RecordBatch};
 use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
+use once_cell::sync::Lazy;
+use prometheus::{register_int_counter_vec, IntCounterVec};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -29,6 +31,24 @@ pub struct DataSourceProcessor {
     /// External source connectors that feed this processor
     connectors: Vec<ConnectorBinding>,
 }
+
+static DATASOURCE_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "datasource_processor_records_in_total",
+        "Rows received by datasource processors",
+        &["processor"]
+    )
+    .expect("create datasource records_in counter vec")
+});
+
+static DATASOURCE_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_int_counter_vec!(
+        "datasource_processor_records_out_total",
+        "Rows emitted by datasource processors",
+        &["processor"]
+    )
+    .expect("create datasource records_out counter vec")
+});
 
 struct ConnectorBinding {
     connector: Box<dyn SourceConnector>,
@@ -148,8 +168,11 @@ impl Processor for DataSourceProcessor {
         let processor_id = self.source_name.clone();
         let mut base_inputs = std::mem::take(&mut self.inputs);
         base_inputs.extend(self.activate_connectors());
+        let input_count = base_inputs.len();
         let mut input_streams = fan_in_streams(base_inputs);
-
+        println!(
+            "[DataSourceProcessor:{processor_id}] starting event loop with {input_count} inputs"
+        );
         tokio::spawn(async move {
             while let Some(item) = input_streams.next().await {
                 let mut data = match item {
@@ -162,22 +185,40 @@ impl Processor for DataSourceProcessor {
                     }
                 };
                 if let StreamData::Collection(collection) = data {
+                    let rows = collection.num_rows() as u64;
+                    println!(
+                        "[DataSourceProcessor:{processor_id}] received batch with {} rows",
+                        rows
+                    );
+                    DATASOURCE_RECORDS_IN
+                        .with_label_values(&[processor_id.as_str()])
+                        .inc_by(rows);
                     let renamed =
                         DataSourceProcessor::rewrite_collection_sources(collection, &processor_id)?;
+                    DATASOURCE_RECORDS_OUT
+                        .with_label_values(&[processor_id.as_str()])
+                        .inc_by(rows);
                     data = StreamData::Collection(renamed);
                 }
                 output
                     .send(data.clone())
                     .map_err(|_| ProcessorError::ChannelClosed)?;
+                if data.is_terminal() {
+                    println!("[DataSourceProcessor:{processor_id}] forwarded terminal signal");
+                }
 
                 if matches!(
                     data.as_control(),
                     Some(crate::processor::ControlSignal::StreamEnd)
                 ) {
+                    println!(
+                        "[DataSourceProcessor:{processor_id}] stream end propagated, shutting down"
+                    );
                     return Ok(());
                 }
             }
 
+            println!("[DataSourceProcessor:{processor_id}] inputs closed, exiting event loop");
             Ok(())
         })
     }

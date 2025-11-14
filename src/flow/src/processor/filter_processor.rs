@@ -74,6 +74,10 @@ impl Processor for FilterProcessor {
         let output = self.output.clone();
         let filter_expr = self.physical_filter.scalar_predicate.clone();
 
+        println!(
+            "[FilterProcessor:{id}] event loop started with {} inputs",
+            input_streams.len()
+        );
         tokio::spawn(async move {
             while let Some(item) = input_streams.next().await {
                 let data = match item {
@@ -89,12 +93,17 @@ impl Processor for FilterProcessor {
                 if let Some(control) = data.as_control() {
                     match control {
                         crate::processor::ControlSignal::StreamEnd => {
+                            println!("[FilterProcessor:{id}] received StreamEnd, shutting down");
                             output
                                 .send(data.clone())
                                 .map_err(|_| ProcessorError::ChannelClosed)?;
                             return Ok(());
                         }
                         _ => {
+                            println!(
+                                "[FilterProcessor:{id}] forwarding control signal {:?}",
+                                control
+                            );
                             output
                                 .send(data.clone())
                                 .map_err(|_| ProcessorError::ChannelClosed)?;
@@ -104,6 +113,10 @@ impl Processor for FilterProcessor {
                 }
 
                 if let Some(collection) = data.as_collection() {
+                    println!(
+                        "[FilterProcessor:{id}] filtering batch with {} rows",
+                        collection.num_rows()
+                    );
                     match apply_filter(collection, &filter_expr) {
                         Ok(filtered_collection) => {
                             let filtered_data = StreamData::collection(filtered_collection);
@@ -127,6 +140,7 @@ impl Processor for FilterProcessor {
                 }
             }
 
+            println!("[FilterProcessor:{id}] input streams closed, exiting");
             Ok(())
         })
     }
