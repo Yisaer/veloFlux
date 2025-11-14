@@ -74,10 +74,6 @@ impl Processor for ProjectProcessor {
         let output = self.output.clone();
         let fields = self.physical_project.fields.clone();
 
-        println!(
-            "[ProjectProcessor:{id}] event loop started with {} inputs",
-            input_streams.len()
-        );
         tokio::spawn(async move {
             while let Some(item) = input_streams.next().await {
                 let data = match item {
@@ -91,34 +87,16 @@ impl Processor for ProjectProcessor {
                 };
 
                 if let Some(control) = data.as_control() {
-                    match control {
-                        crate::processor::ControlSignal::StreamEnd => {
-                            println!(
-                                "[ProjectProcessor:{id}] received StreamEnd, exiting event loop"
-                            );
-                            output
-                                .send(data.clone())
-                                .map_err(|_| ProcessorError::ChannelClosed)?;
-                            return Ok(());
-                        }
-                        _ => {
-                            println!(
-                                "[ProjectProcessor:{id}] forwarding control signal {:?}",
-                                control
-                            );
-                            output
-                                .send(data.clone())
-                                .map_err(|_| ProcessorError::ChannelClosed)?;
-                        }
+                    output
+                        .send(data.clone())
+                        .map_err(|_| ProcessorError::ChannelClosed)?;
+                    if matches!(control, crate::processor::ControlSignal::StreamEnd) {
+                        return Ok(());
                     }
                     continue;
                 }
 
                 if let Some(collection) = data.as_collection() {
-                    println!(
-                        "[ProjectProcessor:{id}] projecting batch with {} rows",
-                        collection.num_rows()
-                    );
                     match apply_projection(collection, &fields) {
                         Ok(projected_collection) => {
                             let projected_data = StreamData::collection(projected_collection);
@@ -142,7 +120,6 @@ impl Processor for ProjectProcessor {
                 }
             }
 
-            println!("[ProjectProcessor:{id}] input streams closed, exiting");
             Ok(())
         })
     }

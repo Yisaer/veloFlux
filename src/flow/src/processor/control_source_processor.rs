@@ -73,9 +73,7 @@ impl Processor for ControlSourceProcessor {
         });
         let output = self.output.clone();
 
-        let processor_id = self.id.clone();
         tokio::spawn(async move {
-            println!("[ControlSourceProcessor:{processor_id}] event loop started");
             let input = match input_result {
                 Ok(input) => input,
                 Err(e) => return Err(e),
@@ -92,15 +90,10 @@ impl Processor for ControlSourceProcessor {
                         )))
                     }
                 };
-                println!(
-                    "[ControlSourceProcessor:{processor_id}] forwarding {}",
-                    data.description()
-                );
                 output
                     .send(data.clone())
                     .map_err(|_| ProcessorError::ChannelClosed)?;
                 if data.is_terminal() {
-                    println!("[ControlSourceProcessor:{processor_id}] received terminal signal");
                     return Ok(());
                 }
             }
@@ -109,7 +102,6 @@ impl Processor for ControlSourceProcessor {
             output
                 .send(StreamData::stream_end())
                 .map_err(|_| ProcessorError::ChannelClosed)?;
-            println!("[ControlSourceProcessor:{processor_id}] input closed, sent StreamEnd");
             Ok(())
         })
     }

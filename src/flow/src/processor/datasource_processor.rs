@@ -168,11 +168,7 @@ impl Processor for DataSourceProcessor {
         let processor_id = self.source_name.clone();
         let mut base_inputs = std::mem::take(&mut self.inputs);
         base_inputs.extend(self.activate_connectors());
-        let input_count = base_inputs.len();
         let mut input_streams = fan_in_streams(base_inputs);
-        println!(
-            "[DataSourceProcessor:{processor_id}] starting event loop with {input_count} inputs"
-        );
         tokio::spawn(async move {
             while let Some(item) = input_streams.next().await {
                 let mut data = match item {
@@ -186,10 +182,6 @@ impl Processor for DataSourceProcessor {
                 };
                 if let StreamData::Collection(collection) = data {
                     let rows = collection.num_rows() as u64;
-                    println!(
-                        "[DataSourceProcessor:{processor_id}] received batch with {} rows",
-                        rows
-                    );
                     DATASOURCE_RECORDS_IN
                         .with_label_values(&[processor_id.as_str()])
                         .inc_by(rows);
@@ -203,22 +195,15 @@ impl Processor for DataSourceProcessor {
                 output
                     .send(data.clone())
                     .map_err(|_| ProcessorError::ChannelClosed)?;
-                if data.is_terminal() {
-                    println!("[DataSourceProcessor:{processor_id}] forwarded terminal signal");
-                }
 
                 if matches!(
                     data.as_control(),
                     Some(crate::processor::ControlSignal::StreamEnd)
                 ) {
-                    println!(
-                        "[DataSourceProcessor:{processor_id}] stream end propagated, shutting down"
-                    );
                     return Ok(());
                 }
             }
 
-            println!("[DataSourceProcessor:{processor_id}] inputs closed, exiting event loop");
             Ok(())
         })
     }

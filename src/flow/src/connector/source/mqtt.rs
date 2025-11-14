@@ -108,17 +108,10 @@ impl SourceConnector for MqttSourceConnector {
             tokio::spawn(async move {
                 match acquire_shared_client(&connector_key).await {
                     Ok(shared_client) => {
-                        println!(
-                            "[MqttSourceConnector:{metrics_id}] subscribed via shared client ({connector_key})"
-                        );
                         let mut events = shared_client.subscribe();
                         while let Ok(event) = events.recv().await {
                             match event {
                                 Ok(SharedMqttEvent::Payload(payload)) => {
-                                    println!(
-                                        "[MqttSourceConnector:{metrics_id}] received payload ({} bytes)",
-                                        payload.len()
-                                    );
                                     MQTT_SOURCE_RECORDS_IN
                                         .with_label_values(&[metrics_id.as_str()])
                                         .inc();
@@ -180,18 +173,10 @@ async fn run_standalone_loop(
         .subscribe(topic, qos)
         .await
         .map_err(|e| ConnectorError::Connection(e.to_string()))?;
-    println!(
-        "[MqttSourceConnector:{connector_id}] subscribed to {}",
-        config.topic
-    );
 
     loop {
         match event_loop.poll().await {
             Ok(Event::Incoming(Packet::Publish(publish))) => {
-                println!(
-                    "[MqttSourceConnector:{connector_id}] received publish ({} bytes)",
-                    publish.payload.len()
-                );
                 MQTT_SOURCE_RECORDS_IN
                     .with_label_values(&[connector_id.as_str()])
                     .inc();

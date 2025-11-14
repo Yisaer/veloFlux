@@ -57,12 +57,6 @@ impl SinkConnector for MockSinkConnector {
     }
 
     async fn send(&mut self, payload: &[u8]) -> Result<(), SinkConnectorError> {
-        println!(
-            "[mock_sink:{}] received payload: {}",
-            self.id,
-            String::from_utf8_lossy(payload)
-        );
-
         if let Some(sender) = self.sender.clone() {
             if sender.send(payload.to_vec()).await.is_err() {
                 self.sender = None;

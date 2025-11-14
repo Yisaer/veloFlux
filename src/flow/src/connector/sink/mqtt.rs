@@ -189,17 +189,9 @@ impl MqttSinkConnector {
             let client = acquire_shared_client(&connector_key)
                 .await
                 .map_err(|err| SinkConnectorError::Other(err.to_string()))?;
-            println!(
-                "[MqttSinkConnector:{}] connected via shared client (key={})",
-                self.id, connector_key
-            );
             self.client = Some(SinkClient::Shared(client));
         } else {
             let standalone = StandaloneMqttClient::new(&self.config).await?;
-            println!(
-                "[MqttSinkConnector:{}] connected standalone to {}",
-                self.id, self.config.broker_url
-            );
             self.client = Some(SinkClient::Standalone(standalone));
         }
         Ok(())
@@ -230,12 +222,6 @@ impl SinkConnector for MqttSinkConnector {
             MQTT_SINK_RECORDS_IN
                 .with_label_values(&[self.id.as_str()])
                 .inc();
-            println!(
-                "[MqttSinkConnector:{}] publishing {} bytes to {}",
-                self.id,
-                payload.len(),
-                self.config.topic
-            );
             client
                 .publish(
                     &self.config.topic,
@@ -248,10 +234,6 @@ impl SinkConnector for MqttSinkConnector {
                     MQTT_SINK_RECORDS_OUT
                         .with_label_values(&[self.id.as_str()])
                         .inc()
-                })
-                .map_err(|err| {
-                    println!("[MqttSinkConnector:{}] publish error: {}", self.id, err);
-                    err
                 })
         } else {
             Err(SinkConnectorError::Unavailable(format!(

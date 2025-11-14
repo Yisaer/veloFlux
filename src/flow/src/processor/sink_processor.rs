@@ -221,10 +221,8 @@ impl Processor for SinkProcessor {
 
         tokio::spawn(async move {
             for binding in connectors.iter_mut() {
-                println!("[SinkProcessor:{processor_id}] waiting for connector to be ready");
                 binding.ready().await?;
             }
-            println!("[SinkProcessor:{processor_id}] connectors ready, entering event loop");
             while let Some(item) = input_streams.next().await {
                 let data = match item {
                     Ok(data) => data,
@@ -236,10 +234,6 @@ impl Processor for SinkProcessor {
                     }
                 };
                 if let Some(collection) = data.as_collection() {
-                    println!(
-                        "[SinkProcessor:{processor_id}] processing collection with {} rows",
-                        collection.num_rows()
-                    );
                     if let Err(err) =
                         Self::handle_collection(&processor_id, &mut connectors, collection).await
                     {
@@ -262,17 +256,11 @@ impl Processor for SinkProcessor {
                 }
 
                 if data.is_terminal() {
-                    println!(
-                        "[SinkProcessor:{processor_id}] received terminal signal, closing connectors"
-                    );
                     Self::handle_terminal(&mut connectors).await?;
                     return Ok(());
                 }
             }
 
-            println!(
-                "[SinkProcessor:{processor_id}] input stream closed, shutting down connectors"
-            );
             Self::handle_terminal(&mut connectors).await?;
             Ok(())
         })
