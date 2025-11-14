@@ -1,4 +1,4 @@
-use datatypes::{ConcreteDatatype, Value};
+use datatypes::{ConcreteDatatype, StructField, StructType, StructValue, Value};
 
 use crate::expr::custom_func::CustomFunc;
 use crate::expr::datafusion_func::DataFusionEvaluator;
@@ -13,6 +13,11 @@ pub enum ScalarExpr {
     Column {
         source_name: String,
         column_name: String,
+    },
+    /// Wildcard reference (`*` or `source.*`)
+    Wildcard {
+        /// Optional source/table qualifier
+        source_name: Option<String>,
     },
     /// A literal value with its type
     Literal(Value, ConcreteDatatype),
@@ -96,6 +101,47 @@ impl ScalarExpr {
                     source: source_name.clone(),
                     column: column_name.clone(),
                 }),
+            ScalarExpr::Wildcard { source_name } => {
+                let selected_columns: Vec<_> = collection
+                    .columns()
+                    .iter()
+                    .filter(|column| {
+                        if let Some(prefix) = source_name {
+                            column.source_name() == prefix
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
+
+                if selected_columns.is_empty() && source_name.is_some() {
+                    return Err(EvalError::ColumnNotFound {
+                        source: source_name.clone().unwrap_or_default(),
+                        column: "*".to_string(),
+                    });
+                }
+
+                let fields: Vec<StructField> = selected_columns
+                    .iter()
+                    .map(|column| {
+                        let datatype = column.data_type().unwrap_or(ConcreteDatatype::Null);
+                        StructField::new(column.name().to_string(), datatype, true)
+                    })
+                    .collect();
+                let struct_type = StructType::new(std::sync::Arc::new(fields));
+
+                let mut rows = Vec::with_capacity(collection.num_rows());
+
+                for row_idx in 0..collection.num_rows() {
+                    let mut items = Vec::with_capacity(selected_columns.len());
+                    for column in &selected_columns {
+                        items.push(column.get(row_idx).cloned().unwrap_or(Value::Null));
+                    }
+                    rows.push(Value::Struct(StructValue::new(items, struct_type.clone())));
+                }
+
+                Ok(rows)
+            }
             ScalarExpr::Literal(val, _) => {
                 // Literal value - create a vector of the same value
                 Ok(vec![val.clone(); collection.num_rows()])
@@ -268,6 +314,18 @@ impl ScalarExpr {
         ScalarExpr::Literal(value, typ)
     }
 
+    /// Create an unqualified wildcard expression (`*`)
+    pub fn wildcard_all() -> Self {
+        ScalarExpr::Wildcard { source_name: None }
+    }
+
+    /// Create a qualified wildcard expression (`source.*`)
+    pub fn wildcard_for(source_name: impl Into<String>) -> Self {
+        ScalarExpr::Wildcard {
+            source_name: Some(source_name.into()),
+        }
+    }
+
     /// Create a unary function call expression
     pub fn call_unary(self, func: UnaryFunc) -> Self {
         ScalarExpr::CallUnary {
@@ -354,6 +412,9 @@ impl std::fmt::Debug for ScalarExpr {
                 source_name,
                 column_name,
             } => write!(f, "Column({}.{})", source_name, column_name),
+            ScalarExpr::Wildcard { source_name } => {
+                write!(f, "Wildcard({:?})", source_name)
+            }
             ScalarExpr::Literal(val, typ) => write!(f, "Literal({:?}, {:?})", val, typ),
             ScalarExpr::CallUnary { func, expr } => write!(f, "CallUnary({:?}, {:?})", func, expr),
             ScalarExpr::CallBinary { func, expr1, expr2 } => {
@@ -391,6 +452,10 @@ impl PartialEq for ScalarExpr {
                     column_name: cb,
                 },
             ) => sa == sb && ca == cb,
+            (
+                ScalarExpr::Wildcard { source_name: sa },
+                ScalarExpr::Wildcard { source_name: sb },
+            ) => sa == sb,
             (ScalarExpr::Literal(va, ta), ScalarExpr::Literal(vb, tb)) => va == vb && ta == tb,
             (
                 ScalarExpr::CallUnary { func: fa, expr: ea },

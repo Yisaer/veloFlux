@@ -198,6 +198,9 @@ pub fn convert_expr_to_scalar(expr: &Expr) -> Result<ScalarExpr, ConversionError
 /// Convert simple Identifier to Column reference
 fn convert_identifier_to_column(ident: &Ident) -> Result<ScalarExpr, ConversionError> {
     let column_name = &ident.value;
+    if column_name == "*" {
+        return Ok(ScalarExpr::wildcard_all());
+    }
     Ok(ScalarExpr::column("", column_name))
 }
 
@@ -206,6 +209,20 @@ fn convert_identifier_to_column(ident: &Ident) -> Result<ScalarExpr, ConversionE
 /// - Case 1: simple identifier (already handled by convert_identifier_to_column)
 /// - Case 2: table.column format where we use both source_name and column_name
 fn convert_compound_identifier_to_column(idents: &[Ident]) -> Result<ScalarExpr, ConversionError> {
+    if let Some(last_ident) = idents.last() {
+        if last_ident.value == "*" {
+            if idents.len() == 1 {
+                return Ok(ScalarExpr::wildcard_all());
+            }
+            let qualifier = idents[..idents.len() - 1]
+                .iter()
+                .map(|ident| ident.value.clone())
+                .collect::<Vec<_>>()
+                .join(".");
+            return Ok(ScalarExpr::wildcard_for(qualifier));
+        }
+    }
+
     match idents.len() {
         1 => {
             // Simple identifier case - delegate to existing function
@@ -322,16 +339,41 @@ fn convert_function_call(
             FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
                 scalar_args.push(convert_expr_to_scalar(expr)?);
             }
+            FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(object_name)) => {
+                let qualifier = object_name
+                    .0
+                    .iter()
+                    .map(|ident| ident.value.clone())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                scalar_args.push(ScalarExpr::wildcard_for(qualifier));
+            }
+            FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => {
+                scalar_args.push(ScalarExpr::wildcard_all());
+            }
             FunctionArg::Named {
                 arg: FunctionArgExpr::Expr(arg),
                 ..
             } => {
                 scalar_args.push(convert_expr_to_scalar(arg)?);
             }
-            _ => {
-                return Err(ConversionError::UnsupportedExpression(
-                    "Unsupported function argument type".to_string(),
-                ))
+            FunctionArg::Named {
+                arg: FunctionArgExpr::QualifiedWildcard(object_name),
+                ..
+            } => {
+                let qualifier = object_name
+                    .0
+                    .iter()
+                    .map(|ident| ident.value.clone())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                scalar_args.push(ScalarExpr::wildcard_for(qualifier));
+            }
+            FunctionArg::Named {
+                arg: FunctionArgExpr::Wildcard,
+                ..
+            } => {
+                scalar_args.push(ScalarExpr::wildcard_all());
             }
         }
     }
@@ -542,6 +584,30 @@ pub fn extract_select_expressions(sql: &str) -> Result<Vec<ScalarExpr>, Conversi
         _ => Err(ConversionError::UnsupportedExpression(
             "Expected SELECT statement".to_string(),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convert_identifier_wildcard_becomes_scalar_wildcard() {
+        let expr = Expr::Identifier(Ident::new("*"));
+        let scalar = convert_expr_to_scalar(&expr).expect("conversion");
+        assert!(matches!(scalar, ScalarExpr::Wildcard { source_name: None }));
+    }
+
+    #[test]
+    fn convert_compound_wildcard_tracks_prefix() {
+        let expr = Expr::CompoundIdentifier(vec![Ident::new("orders"), Ident::new("*")]);
+        let scalar = convert_expr_to_scalar(&expr).expect("conversion");
+        match scalar {
+            ScalarExpr::Wildcard {
+                source_name: Some(prefix),
+            } => assert_eq!(prefix, "orders"),
+            other => panic!("unexpected scalar expr: {:?}", other),
+        }
     }
 }
 

@@ -1,5 +1,4 @@
-use sqlparser::ast::Visit;
-use sqlparser::ast::{Query, Select, SelectItem, SetExpr, Statement};
+use sqlparser::ast::{Expr, Ident, Query, Select, SelectItem, SetExpr, Statement, Visit};
 use sqlparser::parser::Parser;
 
 use crate::aggregate_transformer::transform_aggregate_functions;
@@ -77,10 +76,12 @@ impl StreamSqlParser {
                     select_fields.push(SelectField::new(expr.clone(), Some(alias.value.clone())));
                 }
                 SelectItem::Wildcard(_) => {
-                    return Err("Wildcard (*) is not supported in select fields".to_string());
+                    select_fields.push(SelectField::new(Expr::Identifier(Ident::new("*")), None));
                 }
-                SelectItem::QualifiedWildcard(_, _) => {
-                    return Err("Qualified wildcard is not supported in select fields".to_string());
+                SelectItem::QualifiedWildcard(object_name, _) => {
+                    let mut idents = object_name.0.clone();
+                    idents.push(Ident::new("*"));
+                    select_fields.push(SelectField::new(Expr::CompoundIdentifier(idents), None));
                 }
             }
         }
