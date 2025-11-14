@@ -69,11 +69,8 @@ use crate::model::Column;
 use datatypes::Value;
 
 fn column_identifier(column: &Column) -> String {
-    if column.source_name().is_empty() {
-        column.name().to_string()
-    } else {
-        format!("{}.{}", column.source_name(), column.name())
-    }
+    let name = column.name();
+    name.to_string()
 }
 
 fn value_to_json(value: &Value) -> JsonValue {
@@ -142,8 +139,8 @@ mod tests {
         assert_eq!(
             json,
             serde_json::json!([
-                {"orders.amount":10, "orders.status":"ok"},
-                {"orders.amount":20, "orders.status":"fail"}
+                {"amount":10, "status":"ok"},
+                {"amount":20, "status":"fail"}
             ])
         );
     }

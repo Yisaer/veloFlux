@@ -151,7 +151,7 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&payload).expect("valid json");
         assert_eq!(
             json,
-            serde_json::json!([{"orders.amount":5}]),
+            serde_json::json!([{"amount":5}]),
             "encoded payload should wrap rows in an array"
         );
 
@@ -189,11 +189,6 @@ impl Processor for SinkProcessor {
                         )))
                     }
                 };
-                println!(
-                    "[SinkProcessor:{}] received {}",
-                    processor_id,
-                    data.description()
-                );
                 if let Some(collection) = data.as_collection() {
                     if let Err(err) = Self::handle_collection(&mut connectors, collection).await {
                         let error = StreamData::error(

@@ -207,11 +207,6 @@ impl SinkConnector for MqttSinkConnector {
         self.ensure_client().await?;
         let qos = self.publish_qos()?;
         if let Some(client) = &self.client {
-            println!(
-                "[MqttSinkConnector:{}] sending {} bytes",
-                self.id,
-                payload.len()
-            );
             client
                 .publish(
                     &self.config.topic,

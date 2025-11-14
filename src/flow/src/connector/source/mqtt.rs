@@ -84,23 +84,14 @@ impl SourceConnector for MqttSourceConnector {
         let connector_id = self.id.clone();
 
         if let Some(connector_key) = config.connector_key.clone() {
-            let connector_id = connector_id.clone();
+            let _connector_id = connector_id.clone();
             tokio::spawn(async move {
                 match acquire_shared_client(&connector_key).await {
                     Ok(shared_client) => {
-                        println!(
-                            "[MqttSourceConnector:{}] connected via shared client (key={})",
-                            connector_id, connector_key
-                        );
                         let mut events = shared_client.subscribe();
                         while let Ok(event) = events.recv().await {
                             match event {
                                 Ok(SharedMqttEvent::Payload(payload)) => {
-                                    println!(
-                                        "[MqttSourceConnector:{}] received {} bytes",
-                                        connector_id,
-                                        payload.len()
-                                    );
                                     if sender
                                         .send(Ok(ConnectorEvent::Payload(payload)))
                                         .await
@@ -127,10 +118,6 @@ impl SourceConnector for MqttSourceConnector {
             });
         } else {
             tokio::spawn(async move {
-                println!(
-                    "[MqttSourceConnector:{}] connecting standalone to {}",
-                    connector_id, config.broker_url
-                );
                 if let Err(err) =
                     run_standalone_loop(connector_id.clone(), config, sender.clone()).await
                 {
@@ -146,7 +133,7 @@ impl SourceConnector for MqttSourceConnector {
 }
 
 async fn run_standalone_loop(
-    connector_id: String,
+    _connector_id: String,
     config: MqttSourceConfig,
     sender: mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
 ) -> Result<(), ConnectorError> {
@@ -167,11 +154,6 @@ async fn run_standalone_loop(
         match event_loop.poll().await {
             Ok(Event::Incoming(Packet::Publish(publish))) => {
                 let payload = publish.payload.to_vec();
-                println!(
-                    "[MqttSourceConnector:{}] received {} bytes",
-                    connector_id,
-                    payload.len()
-                );
                 if sender
                     .send(Ok(ConnectorEvent::Payload(payload)))
                     .await
