@@ -8,6 +8,7 @@
 //! - All processors communicate via StreamData through tokio mspc channels
 
 pub mod base;
+pub mod collection_utils;
 pub mod control_source_processor;
 pub mod datasource_processor;
 pub mod filter_processor;

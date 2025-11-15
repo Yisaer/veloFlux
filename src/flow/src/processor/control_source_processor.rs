@@ -4,6 +4,7 @@
 //! that coordinate the entire stream processing pipeline.
 
 use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
+use crate::processor::collection_utils::rewrite_collection_sources;
 use crate::processor::{Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
 use tokio::sync::broadcast;
@@ -59,11 +60,13 @@ impl ControlSourceProcessor {
         processor_id: &str,
         data: StreamData,
     ) -> Result<(), ProcessorError> {
-        let _ = data;
-        Err(ProcessorError::InvalidConfiguration(format!(
-            "Targeted sends are not supported for control source outputs (requested: {})",
-            processor_id
-        )))
+        let data = match data {
+            StreamData::Collection(collection) => {
+                StreamData::Collection(rewrite_collection_sources(collection, processor_id))
+            }
+            other => other,
+        };
+        self.send(data).await
     }
 }
 

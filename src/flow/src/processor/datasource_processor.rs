@@ -145,33 +145,6 @@ impl DataSourceProcessor {
             }
         });
     }
-
-    fn rewrite_collection_sources(
-        mut collection: Arc<dyn Collection>,
-        source_name: &str,
-    ) -> Result<Arc<dyn Collection>, ProcessorError> {
-        if let Some(batch) = Arc::get_mut(&mut collection).and_then(|col| {
-            let any = col as &mut dyn Collection as &mut dyn Any;
-            any.downcast_mut::<RecordBatch>()
-        }) {
-            for tuple in batch.rows_mut() {
-                tuple.source_name = source_name.to_string();
-                for (src, _) in tuple.columns.iter_mut() {
-                    *src = source_name.to_string();
-                }
-            }
-            return Ok(collection);
-        }
-
-        let mut rows = collection.rows().to_vec();
-        for tuple in rows.iter_mut() {
-            tuple.source_name = source_name.to_string();
-            for (src, _) in tuple.columns.iter_mut() {
-                *src = source_name.to_string();
-            }
-        }
-        Ok(Arc::new(RecordBatch::from_rows(rows)))
-    }
 }
 
 impl Processor for DataSourceProcessor {
@@ -221,8 +194,6 @@ impl Processor for DataSourceProcessor {
                                     DATASOURCE_RECORDS_IN
                                         .with_label_values(&[processor_id.as_str()])
                                         .inc_by(rows);
-                                    // let renamed =
-                                    //     DataSourceProcessor::rewrite_collection_sources(collection, &processor_id)?;
                                     DATASOURCE_RECORDS_OUT
                                         .with_label_values(&[processor_id.as_str()])
                                         .inc_by(rows);
