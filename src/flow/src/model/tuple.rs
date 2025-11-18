@@ -6,22 +6,22 @@ use std::sync::Arc;
 #[derive(Debug)]
 pub struct Message {
     source: String,
-    values: Vec<Value>,
     index: HashMap<Arc<String>, usize>,
+    values: Vec<Value>,
 }
 
 impl Message {
     pub fn new(source: impl Into<String>, columns: Vec<(Arc<String>, Value)>) -> Self {
-        let mut values = Vec::with_capacity(columns.len());
         let mut index = HashMap::with_capacity(columns.len());
+        let mut values = Vec::with_capacity(columns.len());
         for (name, value) in columns {
             index.insert(name.clone(), values.len());
             values.push(value);
         }
         Self {
             source: source.into(),
-            values,
             index,
+            values,
         }
     }
 
@@ -40,34 +40,24 @@ impl Message {
             .get(&Arc::new(column.to_string()))
             .and_then(|idx| self.values.get(*idx))
     }
-
-    pub fn clone_arc(&self) -> Arc<Message> {
-        Arc::new(Message {
-            source: self.source.clone(),
-            columns: self.columns.clone(),
-            values: self.values.clone(),
-            index: self.index.clone(),
-        })
-    }
 }
 
 /// Derived columns without specific source binding.
 #[derive(Debug, Clone)]
 pub struct AffiliateRow {
-    keys: Vec<Arc<String>>,
-    values: Vec<Value>,
     index: HashMap<Arc<String>, usize>,
+    values: Vec<Value>,
 }
 
 impl AffiliateRow {
     pub fn new(entries: Vec<(Arc<String>, Value)>) -> Self {
-        let mut values = Vec::with_capacity(entries.len());
         let mut index = HashMap::with_capacity(entries.len());
+        let mut values = Vec::with_capacity(entries.len());
         for (key, value) in entries {
             index.insert(key.clone(), values.len());
             values.push(value);
         }
-        Self { values, index }
+        Self { index, values }
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (&Arc<String>, &Value)> {
