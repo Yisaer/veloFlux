@@ -1,6 +1,6 @@
 use super::RecordBatch;
 use crate::expr::ScalarExpr;
-use crate::model::{Collection, CollectionError, Column, Tuple};
+use crate::model::{Collection, CollectionError, Tuple};
 use crate::planner::physical::PhysicalProjectField;
 use datatypes::Value;
 use std::collections::HashMap;
@@ -23,17 +23,12 @@ impl Collection for RecordBatch {
             });
         }
         let new_rows = self.rows()[start..end].to_vec();
-        Ok(Box::new(RecordBatch::from_rows(new_rows)))
+        Ok(Box::new(RecordBatch::new(new_rows)?))
     }
 
     fn take(&self, indices: &[usize]) -> Result<Box<dyn Collection>, CollectionError> {
         if indices.is_empty() {
-            let empty_columns: Vec<Column> = self
-                .column_pairs()
-                .into_iter()
-                .map(|(source, name)| Column::new(source, name, Vec::new()))
-                .collect();
-            let new_batch = RecordBatch::new(empty_columns)?;
+            let new_batch = RecordBatch::new(Vec::new())?;
             return Ok(Box::new(new_batch));
         }
 
@@ -50,7 +45,7 @@ impl Collection for RecordBatch {
         for &idx in indices {
             new_rows.push(self.rows()[idx].clone());
         }
-        Ok(Box::new(RecordBatch::from_rows(new_rows)))
+        Ok(Box::new(RecordBatch::new(new_rows)?))
     }
 
     fn apply_projection(
@@ -109,7 +104,7 @@ impl Collection for RecordBatch {
             projected_rows.push(Tuple::new(projected_index, projected_values));
         }
 
-        Ok(Box::new(RecordBatch::from_rows(projected_rows)))
+        Ok(Box::new(RecordBatch::new(projected_rows)?))
     }
 
     fn apply_filter(
@@ -139,16 +134,11 @@ impl Collection for RecordBatch {
         }
 
         if selected_rows.is_empty() {
-            let empty_columns: Vec<Column> = self
-                .column_pairs()
-                .into_iter()
-                .map(|(source, name)| Column::new(source, name, Vec::new()))
-                .collect();
-            let empty_batch = RecordBatch::new(empty_columns)?;
+            let empty_batch = RecordBatch::new(Vec::new())?;
             return Ok(Box::new(empty_batch));
         }
 
-        Ok(Box::new(RecordBatch::from_rows(selected_rows)))
+        Ok(Box::new(RecordBatch::new(selected_rows)?))
     }
 
     fn clone_box(&self) -> Box<dyn Collection> {

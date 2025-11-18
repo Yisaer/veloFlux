@@ -2,8 +2,12 @@ use datatypes::types::{ListType, StructField, StructType};
 use datatypes::value::{ListValue, StructValue};
 use datatypes::{ConcreteDatatype, Int32Type, StringType, Value};
 use flow::expr::scalar::ScalarExpr;
-use flow::model::{Column, RecordBatch};
+use flow::model::{batch_from_columns, Column, RecordBatch};
 use std::sync::Arc;
+
+fn batch_from_cols(columns: Vec<Column>) -> RecordBatch {
+    batch_from_columns(columns).expect("valid batch")
+}
 
 /// Tests combined struct field access followed by list index access
 /// Test scenario: Create a struct containing a numbers field (Int32 list) and a name field (string),
@@ -46,7 +50,7 @@ fn test_struct_field_then_list_index() {
         "struct_col".to_string(),
         vec![struct_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create combined access expression: column(0).numbers[1]
     let column_expr = ScalarExpr::column("test_table", "struct_col");
@@ -107,7 +111,7 @@ fn test_list_index_then_struct_field() {
         "list_col".to_string(),
         vec![list_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create combined access expression: column(0)[1].y
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -196,7 +200,7 @@ fn test_complex_nested_access() {
         "complex_col".to_string(),
         vec![outer_struct_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create complex access expression: column(0).data[2].value
     let column_expr = ScalarExpr::column("test_table", "complex_col");
@@ -256,7 +260,7 @@ fn test_list_of_lists() {
         "list_of_lists".to_string(),
         vec![outer_list_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create nested list index expression: column(0)[1][2]
     let column_expr = ScalarExpr::column("test_table", "list_of_lists");

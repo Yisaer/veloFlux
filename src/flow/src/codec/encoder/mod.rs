@@ -123,7 +123,7 @@ fn number_from_f64(value: f64) -> JsonValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Column, RecordBatch, Tuple};
+    use crate::model::{batch_from_columns, Column, Tuple};
     use datatypes::Value;
 
     #[test]
@@ -141,7 +141,7 @@ mod tests {
                 Value::String("fail".to_string()),
             ],
         );
-        let batch = RecordBatch::new(vec![column_a, column_b]).expect("valid batch");
+        let batch = batch_from_columns(vec![column_a, column_b]).expect("valid batch");
 
         let encoder = JsonEncoder::new("json");
         let payload = encoder.encode(&batch).expect("encode collection");

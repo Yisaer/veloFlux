@@ -7,7 +7,7 @@ use datatypes::Value;
 use flow::connector::MockSinkConnector;
 use flow::create_pipeline;
 use flow::create_pipeline_with_log_sink;
-use flow::model::{Column, RecordBatch as FlowRecordBatch};
+use flow::model::{batch_from_columns, Column, RecordBatch as FlowRecordBatch};
 use flow::processor::{SinkProcessor, StreamData};
 use flow::JsonEncoder;
 use serde_json::json;
@@ -50,7 +50,7 @@ async fn run_test_case(test_case: TestCase) {
         columns.push(column);
     }
 
-    let test_batch = FlowRecordBatch::new(columns).expect(&format!(
+    let test_batch = batch_from_columns(columns).expect(&format!(
         "Failed to create test RecordBatch for: {}",
         test_case.name
     ));
@@ -77,7 +77,8 @@ async fn run_test_case(test_case: TestCase) {
 
     match received_data {
         StreamData::Collection(result_collection) => {
-            let batch = FlowRecordBatch::from_rows(result_collection.rows().to_vec());
+            let batch =
+                FlowRecordBatch::new(result_collection.rows().to_vec()).expect("valid rows");
 
             // Check basic properties
             assert_eq!(
@@ -318,7 +319,7 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let column = Column::new("".to_string(), "a".to_string(), vec![Value::Int64(10)]);
-    let batch = FlowRecordBatch::new(vec![column]).expect("record batch");
+    let batch = batch_from_columns(vec![column]).expect("record batch");
     pipeline
         .input
         .send(StreamData::collection(Box::new(batch)))

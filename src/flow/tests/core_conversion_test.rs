@@ -4,7 +4,7 @@
 //! Core flow: directly receive SelectStmt, convert to ScalarExpr, verify calculation results
 
 use datatypes::Value;
-use flow::model::{Column, RecordBatch};
+use flow::model::{batch_from_columns, Column};
 use flow::{ScalarExpr, StreamSqlConverter};
 use parser::parse_sql;
 use std::collections::HashMap;
@@ -74,7 +74,7 @@ fn test_core_conversion_flow() {
     data.insert(("".to_string(), "a".to_string()), Value::Int64(5)); // a = 5
     data.insert(("".to_string(), "b".to_string()), Value::Int64(3)); // b = 3
 
-    let collection = RecordBatch::new(vec![
+    let collection = batch_from_columns(vec![
         Column::new("".to_string(), "a".to_string(), vec![Value::Int64(5)]),
         Column::new("".to_string(), "b".to_string(), vec![Value::Int64(3)]),
     ])

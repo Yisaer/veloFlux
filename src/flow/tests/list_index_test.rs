@@ -1,8 +1,12 @@
 use datatypes::value::ListValue;
 use datatypes::{ConcreteDatatype, Int32Type, StringType, Value};
 use flow::expr::scalar::ScalarExpr;
-use flow::model::{Column, RecordBatch};
+use flow::model::{batch_from_columns, Column, RecordBatch};
 use std::sync::Arc;
+
+fn batch_from_cols(columns: Vec<Column>) -> RecordBatch {
+    batch_from_columns(columns).expect("valid batch")
+}
 
 /// Tests basic list index access functionality
 /// Test scenario: Accessing the first element of a list
@@ -22,7 +26,7 @@ fn test_list_index_simple() {
         "list_col".to_string(),
         vec![list_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create list index expression: test_table.list_col[0]
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -58,7 +62,7 @@ fn test_list_index_middle() {
         "list_col".to_string(),
         vec![list_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create list index expression: test_table.list_col[1]
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -94,7 +98,7 @@ fn test_list_index_last() {
         "list_col".to_string(),
         vec![list_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create list index expression: test_table.list_col[2]
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -133,7 +137,7 @@ fn test_list_index_string_list() {
         "list_col".to_string(),
         vec![list_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create list index expression: test_table.list_col[1]
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -169,7 +173,7 @@ fn test_list_index_out_of_bounds() {
         "list_col".to_string(),
         vec![list_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create list index expression: test_table.list_col[3] (out of bounds)
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -209,7 +213,7 @@ fn test_list_index_negative_index() {
         "list_col".to_string(),
         vec![list_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create list index expression: test_table.list_col[-1] (negative index)
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -243,7 +247,7 @@ fn test_list_index_not_list() {
         "int_col".to_string(),
         vec![Value::Int32(42)],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create list index expression on non-list value: test_table.int_col[0]
     let column_expr = ScalarExpr::column("test_table", "int_col");
@@ -283,7 +287,7 @@ fn test_list_index_invalid_index_type() {
         "list_col".to_string(),
         vec![list_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create list index expression with non-integer index: test_table.list_col["hello"]
     let column_expr = ScalarExpr::column("test_table", "list_col");
@@ -334,7 +338,7 @@ fn test_list_index_dynamic_index() {
         "index_col".to_string(),
         vec![Value::Int64(3)],
     );
-    let collection = RecordBatch::new(vec![list_column, index_column]).unwrap();
+    let collection = batch_from_cols(vec![list_column, index_column]);
 
     // Create list index expression: test_table.list_col[test_table.index_col] where index_col = 3
     let list_expr = ScalarExpr::column("test_table", "list_col");

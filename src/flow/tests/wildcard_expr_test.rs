@@ -1,6 +1,6 @@
 use datatypes::{StructField, StructType, StructValue, Value};
 use flow::expr::{func::EvalError, StreamSqlConverter};
-use flow::model::{Column, RecordBatch};
+use flow::model::{batch_from_columns, Column, RecordBatch};
 use parser::parse_sql;
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ fn build_orders_batch() -> RecordBatch {
         "amount".to_string(),
         vec![Value::Int64(10), Value::Int64(20)],
     );
-    RecordBatch::new(vec![orders_id, orders_amount]).expect("orders record batch")
+    batch_from_columns(vec![orders_id, orders_amount]).expect("orders record batch")
 }
 
 fn build_orders_users_batch() -> RecordBatch {
@@ -27,7 +27,7 @@ fn build_orders_users_batch() -> RecordBatch {
     );
 
     columns.push(users_name);
-    RecordBatch::new(columns).expect("orders & users record batch")
+    batch_from_columns(columns).expect("orders & users record batch")
 }
 
 fn eval_first_projection(sql: &str, batch: &RecordBatch) -> Result<Vec<Value>, EvalError> {

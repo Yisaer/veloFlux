@@ -2,8 +2,12 @@ use datatypes::types::{StructField, StructType};
 use datatypes::value::StructValue;
 use datatypes::{ConcreteDatatype, Int32Type, StringType, Value};
 use flow::expr::scalar::ScalarExpr;
-use flow::model::{Column, RecordBatch};
+use flow::model::{batch_from_columns, Column, RecordBatch};
 use std::sync::Arc;
+
+fn batch_from_cols(columns: Vec<Column>) -> RecordBatch {
+    batch_from_columns(columns).expect("valid batch")
+}
 
 /// Tests basic struct field access functionality
 /// Test scenario: Accessing an integer field from a struct
@@ -30,7 +34,7 @@ fn test_field_access_simple() {
         "struct_col".to_string(),
         vec![struct_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create field access expression: test_table.struct_col.x
     let column_expr = ScalarExpr::column("test_table", "struct_col");
@@ -69,7 +73,7 @@ fn test_field_access_string_field() {
         "struct_col".to_string(),
         vec![struct_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create field access expression: test_table.struct_col.y
     let column_expr = ScalarExpr::column("test_table", "struct_col");
@@ -124,7 +128,7 @@ fn test_field_access_nested() {
         "outer_struct".to_string(),
         vec![outer_struct_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create nested field access expression: test_table.outer_struct.inner.a
     let column_expr = ScalarExpr::column("test_table", "outer_struct");
@@ -167,7 +171,7 @@ fn test_field_access_field_not_found() {
         "struct_col".to_string(),
         vec![struct_value],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create field access expression for non-existent field: test_table.struct_col.y
     let column_expr = ScalarExpr::column("test_table", "struct_col");
@@ -197,7 +201,7 @@ fn test_field_access_not_struct() {
         "int_col".to_string(),
         vec![Value::Int32(42)],
     );
-    let collection = RecordBatch::new(vec![column]).unwrap();
+    let collection = batch_from_cols(vec![column]);
 
     // Create field access expression on non-struct value: test_table.int_col.x
     let column_expr = ScalarExpr::column("test_table", "int_col");

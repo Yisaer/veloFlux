@@ -5,7 +5,7 @@
 use datatypes::types::Int64Type;
 use datatypes::{ConcreteDatatype, Value};
 use flow::expr::{func::BinaryFunc, ScalarExpr};
-use flow::model::{Column, RecordBatch};
+use flow::model::{batch_from_columns, Column, RecordBatch};
 use flow::planner::physical::PhysicalFilter;
 use flow::processor::{FilterProcessor, Processor, StreamData};
 use std::sync::Arc;
@@ -22,7 +22,7 @@ async fn test_filter_processor_basic() {
     let column_a = Column::new("".to_string(), "a".to_string(), col_a_values);
     let column_b = Column::new("".to_string(), "b".to_string(), col_b_values);
 
-    let batch = RecordBatch::new(vec![column_a, column_b]).expect("Failed to create RecordBatch");
+    let batch = batch_from_columns(vec![column_a, column_b]).expect("Failed to create RecordBatch");
 
     // Create filter expression: a > 15
     let filter_expr = ScalarExpr::CallBinary {
@@ -99,7 +99,7 @@ async fn test_filter_processor_basic() {
 
     // Should have 2 rows (a=20, a=30) and 2 columns
     assert_eq!(filtered_collection.num_rows(), 2);
-    let batch = RecordBatch::from_rows(filtered_collection.rows().to_vec());
+    let batch = RecordBatch::new(filtered_collection.rows().to_vec()).expect("valid rows");
     let columns = batch.columns();
     assert_eq!(columns.len(), 2);
     let column_a = columns
@@ -123,7 +123,7 @@ async fn test_filter_processor_no_match() {
     // Create test data
     let col_a_values = vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)];
     let column_a = Column::new("".to_string(), "a".to_string(), col_a_values);
-    let batch = RecordBatch::new(vec![column_a]).expect("Failed to create RecordBatch");
+    let batch = batch_from_columns(vec![column_a]).expect("Failed to create RecordBatch");
 
     // Create filter expression: a > 100 (no matches)
     let filter_expr = ScalarExpr::CallBinary {
@@ -200,6 +200,6 @@ async fn test_filter_processor_no_match() {
 
     // Should have 0 rows but still 1 column
     assert_eq!(filtered_collection.num_rows(), 0);
-    let batch = RecordBatch::from_rows(filtered_collection.rows().to_vec());
+    let batch = RecordBatch::new(filtered_collection.rows().to_vec()).expect("valid rows");
     assert_eq!(batch.column_pairs().len(), 0);
 }

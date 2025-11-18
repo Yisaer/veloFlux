@@ -152,7 +152,7 @@ mod tests {
     use super::*;
     use crate::codec::encoder::JsonEncoder;
     use crate::connector::MockSinkConnector;
-    use crate::model::{Column, RecordBatch};
+    use crate::model::{batch_from_columns, Column};
     use crate::processor::StreamData;
     use datatypes::Value;
     use tokio::sync::broadcast;
@@ -176,7 +176,7 @@ mod tests {
             "amount".to_string(),
             vec![Value::Int64(5)],
         );
-        let batch = RecordBatch::new(vec![column]).expect("record batch");
+        let batch = batch_from_columns(vec![column]).expect("record batch");
 
         input_tx
             .send(StreamData::collection(Box::new(batch.clone())))

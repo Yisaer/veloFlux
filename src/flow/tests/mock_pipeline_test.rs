@@ -54,16 +54,24 @@ async fn test_mock_pipeline_with_datasource_connector() {
 
     match result {
         StreamData::Collection(collection) => {
-            let batch = RecordBatch::from_rows(collection.rows().to_vec());
+            let batch = RecordBatch::new(collection.rows().to_vec()).expect("valid rows");
             assert_eq!(batch.num_rows(), 3);
             let columns = batch.columns();
             assert_eq!(columns.len(), 2);
+            let col_a = columns
+                .iter()
+                .find(|col| col.name() == "a_plus_1")
+                .expect("a_plus_1 column");
             assert_eq!(
-                columns[0].values(),
+                col_a.values(),
                 &[Value::Int64(11), Value::Int64(21), Value::Int64(31)]
             );
+            let col_b = columns
+                .iter()
+                .find(|col| col.name() == "b_plus_2")
+                .expect("b_plus_2 column");
             assert_eq!(
-                columns[1].values(),
+                col_b.values(),
                 &[Value::Int64(102), Value::Int64(202), Value::Int64(302)]
             );
         }

@@ -24,5 +24,5 @@ pub fn rewrite_collection_sources(
     for tuple in rows.iter_mut() {
         tuple.rewrite_sources(source_name);
     }
-    Arc::new(RecordBatch::from_rows(rows))
+    Arc::new(RecordBatch::new(rows).expect("valid rows"))
 }

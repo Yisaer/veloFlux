@@ -9,15 +9,9 @@ pub struct RecordBatch {
 }
 
 impl RecordBatch {
-    /// Create a new RecordBatch from columnar data.
-    pub fn new(columns: Vec<Column>) -> Result<Self, CollectionError> {
-        let rows = columns_to_rows(&columns)?;
+    /// Create a new RecordBatch from row data.
+    pub fn new(rows: Vec<Tuple>) -> Result<Self, CollectionError> {
         Ok(Self { rows })
-    }
-
-    /// Create a RecordBatch from already materialized rows.
-    pub fn from_rows(rows: Vec<Tuple>) -> Self {
-        Self { rows }
     }
 
     /// Create an empty RecordBatch.
@@ -40,46 +34,10 @@ impl RecordBatch {
         self.rows.len()
     }
 
-    /// Number of logical columns derived from the rows.
-    pub fn num_columns(&self) -> usize {
-        self.column_pairs().len()
-    }
-
     /// Return a snapshot of the logical columns.
     pub fn columns(&self) -> Vec<Column> {
         let pairs = self.column_pairs();
         build_columns_from_rows(&self.rows, &pairs)
-    }
-
-    /// Get a column by index as a snapshot.
-    pub fn column(&self, index: usize) -> Option<Column> {
-        self.columns().into_iter().nth(index)
-    }
-
-    /// Get a column by source/column names.
-    pub fn column_by_name(&self, source_name: &str, column_name: &str) -> Option<Column> {
-        self.columns()
-            .into_iter()
-            .find(|col| col.source_name() == source_name && col.name() == column_name)
-    }
-
-    /// Get a single value by row/column index.
-    pub fn get_value(&self, row_index: usize, col_index: usize) -> Option<&Value> {
-        if row_index >= self.rows.len() {
-            return None;
-        }
-        let pairs = self.column_pairs();
-        let (source, name) = pairs.get(col_index)?;
-        self.rows[row_index].value_by_name(source, name)
-    }
-
-    /// Rename all tuple source identifiers.
-    pub fn with_source_name(&self, source_name: &str) -> Self {
-        let mut rows = self.rows.clone();
-        for tuple in rows.iter_mut() {
-            tuple.rewrite_sources(source_name);
-        }
-        Self { rows }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -104,13 +62,13 @@ impl PartialEq for RecordBatch {
     }
 }
 
-fn columns_to_rows(columns: &[Column]) -> Result<Vec<Tuple>, CollectionError> {
+pub fn rows_from_columns(columns: Vec<Column>) -> Result<Vec<Tuple>, CollectionError> {
     if columns.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut seen = HashSet::new();
-    for column in columns {
+    for column in &columns {
         let key = (column.source_name.clone(), column.name.clone());
         if !seen.insert(key.clone()) {
             return Err(CollectionError::Other(format!(
@@ -140,12 +98,17 @@ fn columns_to_rows(columns: &[Column]) -> Result<Vec<Tuple>, CollectionError> {
     let mut rows = Vec::with_capacity(num_rows);
     for row_idx in 0..num_rows {
         let mut values = Vec::with_capacity(columns.len());
-        for column in columns {
+        for column in &columns {
             values.push(column.get(row_idx).cloned().unwrap_or(Value::Null));
         }
         rows.push(Tuple::new(index_template.clone(), values));
     }
     Ok(rows)
+}
+
+pub fn batch_from_columns(columns: Vec<Column>) -> Result<RecordBatch, CollectionError> {
+    let rows = rows_from_columns(columns)?;
+    RecordBatch::new(rows)
 }
 
 pub fn collect_column_pairs(rows: &[Tuple]) -> Vec<(String, String)> {

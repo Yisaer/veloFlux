@@ -129,7 +129,7 @@ impl JsonDecoder {
         }
 
         let tuples = self.build_tuples_from_object_rows(rows)?;
-        Ok(RecordBatch::from_rows(tuples))
+        Ok(RecordBatch::new(tuples)?)
     }
 
     fn build_tuples_from_object_rows(

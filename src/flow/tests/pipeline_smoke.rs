@@ -1,5 +1,5 @@
 use datatypes::Value;
-use flow::model::{Column, RecordBatch};
+use flow::model::{batch_from_columns, Column};
 use flow::processor::StreamData;
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ async fn pipeline_smoke_receives_output() {
         "a".to_string(),
         vec![Value::Int64(1), Value::Int64(2)],
     );
-    let batch = RecordBatch::new(vec![column]).expect("batch");
+    let batch = batch_from_columns(vec![column]).expect("batch");
 
     pipeline
         .input
