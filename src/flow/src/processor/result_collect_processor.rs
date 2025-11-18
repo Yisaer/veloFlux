@@ -84,11 +84,12 @@ impl Processor for ResultCollectProcessor {
                                     )))
                                 }
                             };
+                            let is_terminal = control_data.is_terminal();
                             output
-                                .send(control_data.clone())
+                                .send(control_data)
                                 .await
                                 .map_err(|_| ProcessorError::ChannelClosed)?;
-                            if control_data.is_terminal() {
+                            if is_terminal {
                                 println!("[ResultCollectProcessor:{}] received StreamEnd (control)", processor_id);
                                 output
                                     .send(StreamData::stream_end())
@@ -104,11 +105,12 @@ impl Processor for ResultCollectProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(data)) => {
+                                let is_terminal = data.is_terminal();
                                 output
-                                    .send(data.clone())
+                                    .send(data)
                                     .await
                                     .map_err(|_| ProcessorError::ChannelClosed)?;
-                                if data.is_terminal() {
+                                if is_terminal {
                                     println!("[ResultCollectProcessor:{}] received StreamEnd (data)", processor_id);
                                     output
                                         .send(StreamData::stream_end())

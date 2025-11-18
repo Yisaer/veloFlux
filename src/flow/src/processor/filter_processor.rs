@@ -99,8 +99,9 @@ impl Processor for FilterProcessor {
                                     )))
                                 }
                             };
-                            let _ = control_output.send(control_data.clone());
-                            if control_data.is_terminal() {
+                            let is_terminal = control_data.is_terminal();
+                            let _ = control_output.send(control_data);
+                            if is_terminal {
                                 println!("[FilterProcessor:{id}] received StreamEnd (control)");
                                 return Ok(());
                             }
@@ -130,13 +131,11 @@ impl Processor for FilterProcessor {
                                         }
                                     }
                                 } else {
+                                    let is_terminal = data.is_terminal();
                                     output
-                                        .send(data.clone())
+                                        .send(data)
                                         .map_err(|_| ProcessorError::ChannelClosed)?;
-                                }
-                                if let Some(control) = data.as_control() {
-                                    if matches!(control, crate::processor::ControlSignal::StreamEnd)
-                                    {
+                                    if is_terminal {
                                         println!("[FilterProcessor:{id}] received StreamEnd (data)");
                                         return Ok(());
                                     }

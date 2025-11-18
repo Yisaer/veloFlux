@@ -245,8 +245,9 @@ impl Processor for SinkProcessor {
                                     )))
                                 }
                             };
-                            let _ = control_output.send(control_data.clone());
-                            if control_data.is_terminal() {
+                            let is_terminal = control_data.is_terminal();
+                            let _ = control_output.send(control_data);
+                            if is_terminal {
                                 println!("[SinkProcessor:{processor_id}] received StreamEnd (control)");
                                 Self::handle_terminal(&mut connectors).await?;
                                 return Ok(());
@@ -275,13 +276,14 @@ impl Processor for SinkProcessor {
                                     }
                                 }
 
+                                let is_terminal = data.is_terminal();
                                 if let Some(output_sender) = &output {
                                     output_sender
-                                        .send(data.clone())
+                                        .send(data)
                                         .map_err(|_| ProcessorError::ChannelClosed)?;
                                 }
 
-                                if data.is_terminal() {
+                                if is_terminal {
                                     println!("[SinkProcessor:{processor_id}] received StreamEnd (data)");
                                     Self::handle_terminal(&mut connectors).await?;
                                     return Ok(());

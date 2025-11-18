@@ -174,8 +174,9 @@ impl Processor for DataSourceProcessor {
                                     )))
                                 }
                             };
-                            let _ = control_output.send(control_data.clone());
-                            if control_data.is_terminal() {
+                            let is_terminal = control_data.is_terminal();
+                            let _ = control_output.send(control_data);
+                            if is_terminal {
                                 println!("[DataSourceProcessor:{}] received StreamEnd (control)", processor_id);
                                 return Ok(());
                             }
@@ -197,11 +198,12 @@ impl Processor for DataSourceProcessor {
                                         .inc_by(rows);
                                     data = StreamData::Collection(collection);
                                 }
+                                let is_terminal = data.is_terminal();
                                 output
-                                    .send(data.clone())
+                                    .send(data)
                                     .map_err(|_| ProcessorError::ChannelClosed)?;
 
-                                if data.is_control() && data.is_terminal() {
+                                if is_terminal {
                                     println!("[DataSourceProcessor:{}] received StreamEnd (data)", processor_id);
                                     return Ok(());
                                 }

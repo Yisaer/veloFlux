@@ -93,22 +93,23 @@ impl Processor for ControlSourceProcessor {
             let mut stream = BroadcastStream::new(input);
 
             while let Some(item) = stream.next().await {
-                let data = match item {
-                    Ok(data) => data,
-                    Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                        return Err(ProcessorError::ProcessingError(format!(
-                            "Control source input lagged by {} messages",
-                            skipped
-                        )))
-                    }
-                };
-                if data.is_control() {
-                    let _ = control_output.send(data.clone());
-                }
-                output
-                    .send(data.clone())
-                    .map_err(|_| ProcessorError::ChannelClosed)?;
-                if data.is_terminal() {
+                        let data = match item {
+                            Ok(data) => data,
+                            Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                                return Err(ProcessorError::ProcessingError(format!(
+                                    "Control source input lagged by {} messages",
+                                    skipped
+                                )))
+                            }
+                        };
+                        if data.is_control() {
+                            let _ = control_output.send(data.clone());
+                        }
+                        let is_terminal = data.is_terminal();
+                        output
+                            .send(data)
+                            .map_err(|_| ProcessorError::ChannelClosed)?;
+                if is_terminal {
                     println!("[ControlSourceProcessor:{processor_id}] received StreamEnd");
                     return Ok(());
                 }
