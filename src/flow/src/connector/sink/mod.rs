@@ -35,3 +35,4 @@ pub enum SinkConnectorError {
 
 pub mod mock;
 pub mod mqtt;
+pub mod nop;

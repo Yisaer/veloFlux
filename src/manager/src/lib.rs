@@ -3,13 +3,13 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, post},
 };
+use flow::connector::sink::nop::NopSinkConnector;
 use flow::connector::{MqttSinkConfig, MqttSinkConnector, MqttSourceConfig, MqttSourceConnector};
 use flow::processor::Processor;
 use flow::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use flow::{JsonDecoder, JsonEncoder, SinkProcessor, create_pipeline};
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -26,7 +26,7 @@ static MQTT_QOS: u8 = 0;
 enum PipelineStatus {
     Created,
     Running,
-    Stopped,
+    // Stopped,
 }
 
 struct PipelineEntry {
@@ -43,8 +43,10 @@ struct AppState {
 struct CreatePipelineRequest {
     id: String,
     sql: String,
+    // #[serde(default)]
+    // forward_to_result: bool,
     #[serde(default)]
-    forward_to_result: bool,
+    sinks: Option<Vec<String>>,
     #[serde(default)]
     source_broker: Option<String>,
     #[serde(default)]
@@ -183,18 +185,53 @@ fn build_pipeline(req: &CreatePipelineRequest) -> Result<ProcessorPipeline, Stri
     let sink_topic = req.sink_topic.as_deref().unwrap_or(SINK_TOPIC);
     let qos = req.qos.unwrap_or(MQTT_QOS);
 
-    let mut sink = SinkProcessor::new(format!("{}_sink", req.id));
-    sink.disable_result_forwarding();
-    let sink_config = MqttSinkConfig::new(sink.id(), broker, sink_topic, qos);
-    let sink_connector = MqttSinkConnector::new(format!("{}_sink_connector", req.id), sink_config);
-    sink.add_connector(
-        Box::new(sink_connector),
-        Arc::new(JsonEncoder::new(format!("{}_sink_encoder", req.id))),
-    );
-
-    let mut pipeline = create_pipeline(&req.sql, vec![sink]).map_err(|err| err.to_string())?;
+    let sinks = build_sinks(req, broker, sink_topic, qos)?;
+    let mut pipeline = create_pipeline(&req.sql, sinks).map_err(|err| err.to_string())?;
     attach_mqtt_sources(&mut pipeline, broker, source_topic, qos).map_err(|err| err.to_string())?;
     Ok(pipeline)
+}
+
+fn build_sinks(
+    req: &CreatePipelineRequest,
+    broker: &str,
+    sink_topic: &str,
+    qos: u8,
+) -> Result<Vec<SinkProcessor>, String> {
+    let sink_kinds = req
+        .sinks
+        .clone()
+        .unwrap_or_else(|| vec!["mqtt".to_string()]);
+    let mut sinks = Vec::new();
+    for (idx, kind) in sink_kinds.iter().enumerate() {
+        match kind.as_str() {
+            "mqtt" => {
+                let mut sink = SinkProcessor::new(format!("{}_sink_{idx}", req.id));
+                sink.disable_result_forwarding();
+                let sink_config = MqttSinkConfig::new(sink.id(), broker, sink_topic, qos);
+                let sink_connector =
+                    MqttSinkConnector::new(format!("{}_sink_connector_{idx}", req.id), sink_config);
+                sink.add_connector(
+                    Box::new(sink_connector),
+                    Arc::new(JsonEncoder::new(format!("{}_sink_encoder_{idx}", req.id))),
+                );
+                sinks.push(sink);
+            }
+            "nop" => {
+                let mut sink = SinkProcessor::new(format!("{}_nop_sink_{idx}", req.id));
+                sink.disable_result_forwarding();
+                sink.add_connector(
+                    Box::new(NopSinkConnector::new(format!(
+                        "{}_nop_connector_{idx}",
+                        req.id
+                    ))),
+                    Arc::new(JsonEncoder::new(format!("{}_nop_encoder_{idx}", req.id))),
+                );
+                sinks.push(sink);
+            }
+            other => return Err(format!("unsupported sink type: {}", other)),
+        }
+    }
+    Ok(sinks)
 }
 
 fn attach_mqtt_sources(

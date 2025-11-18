@@ -6,8 +6,7 @@ pub mod planner;
 pub mod processor;
 
 pub use codec::{
-    CodecError, CollectionEncoder, EncodeError, JsonDecoder, JsonEncoder,
-    RecordDecoder,
+    CodecError, CollectionEncoder, EncodeError, JsonDecoder, JsonEncoder, RecordDecoder,
 };
 pub use datatypes::Schema;
 pub use expr::sql_conversion;
