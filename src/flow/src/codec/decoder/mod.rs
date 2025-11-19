@@ -143,7 +143,11 @@ impl JsonDecoder {
                 keys.push(key);
                 values.push(json_to_value(&value));
             }
-            let message = Arc::new(Message::new(Arc::<str>::from(self.source_name.as_str()), keys, values));
+            let message = Arc::new(Message::new(
+                Arc::<str>::from(self.source_name.as_str()),
+                keys,
+                values,
+            ));
             tuples.push(Tuple::new(vec![message]));
         }
         Ok(tuples)

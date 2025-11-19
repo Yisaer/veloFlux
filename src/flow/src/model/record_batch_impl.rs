@@ -91,10 +91,7 @@ impl Collection for RecordBatch {
                         ))
                     })?;
 
-                projected_tuple.add_affiliate_column(
-                    Arc::new(field.field_name.clone()),
-                    value,
-                );
+                projected_tuple.add_affiliate_column(Arc::new(field.field_name.clone()), value);
             }
 
             if !projected_messages.is_empty() {

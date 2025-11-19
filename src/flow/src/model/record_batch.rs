@@ -76,14 +76,15 @@ pub fn rows_from_columns_simple(
                 let mut keys = Vec::with_capacity(cols.len());
                 let mut values_vec = Vec::with_capacity(cols.len());
                 for (col_name, values) in cols {
-                    let value = values
-                        .get(row_idx)
-                        .cloned()
-                        .unwrap_or(Value::Null);
+                    let value = values.get(row_idx).cloned().unwrap_or(Value::Null);
                     keys.push(col_name.clone());
                     values_vec.push(value);
                 }
-                Arc::new(Message::new(Arc::<str>::from(source.as_str()), keys, values_vec))
+                Arc::new(Message::new(
+                    Arc::<str>::from(source.as_str()),
+                    keys,
+                    values_vec,
+                ))
             })
             .collect();
         rows.push(Tuple::new(messages));

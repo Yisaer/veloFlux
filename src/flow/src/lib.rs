@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod codec;
 pub mod connector;
 pub mod expr;
@@ -5,10 +6,15 @@ pub mod model;
 pub mod planner;
 pub mod processor;
 
+pub use catalog::{global_catalog, Catalog, CatalogError};
 pub use codec::{
     CodecError, CollectionEncoder, EncodeError, JsonDecoder, JsonEncoder, RecordDecoder,
 };
-pub use datatypes::Schema;
+pub use datatypes::{
+    BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type, Int32Type,
+    Int64Type, Int8Type, ListType, Schema, StringType, StructField, StructType, Uint16Type,
+    Uint32Type, Uint64Type, Uint8Type,
+};
 pub use expr::sql_conversion;
 pub use expr::{
     convert_expr_to_scalar, convert_select_stmt_to_scalar, extract_select_expressions, BinaryFunc,

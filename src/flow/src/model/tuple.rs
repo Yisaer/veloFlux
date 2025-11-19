@@ -29,7 +29,10 @@ impl Message {
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (&str, &Value)> {
-        self.keys.iter().zip(self.values.iter()).map(|(k, v)| (k.as_str(), v))
+        self.keys
+            .iter()
+            .zip(self.values.iter())
+            .map(|(k, v)| (k.as_str(), v))
     }
 
     pub fn value(&self, column: &str) -> Option<&Value> {
@@ -133,7 +136,11 @@ impl Tuple {
     }
 
     pub fn len(&self) -> usize {
-        let aff_len = self.affiliate.as_ref().map(|aff| aff.index.len()).unwrap_or(0);
+        let aff_len = self
+            .affiliate
+            .as_ref()
+            .map(|aff| aff.index.len())
+            .unwrap_or(0);
         let msg_len: usize = self.messages.iter().map(|msg| msg.keys.len()).sum();
         aff_len + msg_len
     }

@@ -50,17 +50,16 @@ async fn run_test_case(test_case: TestCase) {
         .map(|(col_name, values)| ("stream".to_string(), col_name, values))
         .collect();
 
-    let test_batch = batch_from_columns_simple(columns)
-        .expect(&format!("Failed to create test RecordBatch for: {}", test_case.name));
+    let test_batch = batch_from_columns_simple(columns).expect(&format!(
+        "Failed to create test RecordBatch for: {}",
+        test_case.name
+    ));
 
     let stream_data = StreamData::collection(Box::new(test_batch));
     pipeline
         .send_stream_data("stream", stream_data)
         .await
-        .expect(&format!(
-            "Failed to send test data for: {}",
-            test_case.name
-        ));
+        .expect(&format!("Failed to send test data for: {}", test_case.name));
 
     // Receive and verify results
     let mut output = pipeline
@@ -69,8 +68,7 @@ async fn run_test_case(test_case: TestCase) {
     let timeout_duration = Duration::from_secs(5);
     let received_data = timeout(timeout_duration, output.recv())
         .await
-        .unwrap_or_else(|_| panic!("Timeout waiting for output for: {}",
-            test_case.name))
+        .unwrap_or_else(|_| panic!("Timeout waiting for output for: {}", test_case.name))
         .unwrap_or_else(|| panic!("Failed to receive output for: {}", test_case.name));
 
     match received_data {
@@ -110,11 +108,9 @@ async fn run_test_case(test_case: TestCase) {
                         values.push(value.clone());
                     }
                     assert_eq!(
-                        values,
-                        check.expected_values,
+                        values, check.expected_values,
                         "Wrong values in column {} for test: {}",
-                        check.expected_name,
-                        test_case.name
+                        check.expected_name, test_case.name
                     );
                 }
             }
