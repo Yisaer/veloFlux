@@ -4,7 +4,7 @@
 //! that coordinate the entire stream processing pipeline.
 
 use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
