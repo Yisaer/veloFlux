@@ -110,9 +110,9 @@ fn update_heap_metrics() {
         return;
     }
     let allocated = stats::allocated::read().unwrap_or(0);
-    let active = stats::active::read().unwrap_or(0);
+    let resident = stats::resident::read().unwrap_or(0);
     HEAP_IN_USE_GAUGE.set(clamp_usize_to_i64(allocated));
-    HEAP_IN_ALLOCATOR_GAUGE.set(clamp_usize_to_i64(active));
+    HEAP_IN_ALLOCATOR_GAUGE.set(clamp_usize_to_i64(resident));
 }
 
 #[cfg(target_env = "msvc")]
