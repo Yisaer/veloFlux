@@ -1,0 +1,43 @@
+name: release-binaries
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    name: ${{ matrix.asset_suffix }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            asset_suffix: linux-x86_64
+          - runner: macos-13
+            asset_suffix: macos-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: make release
+
+      - name: Prepare asset
+        run: |
+          BIN_PATH="target/release/synapse-flow"
+          ASSET_NAME="synapse-flow-${{ matrix.asset_suffix }}"
+          cp "$BIN_PATH" "$ASSET_NAME"
+          chmod +x "$ASSET_NAME"
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: synapse-flow-${{ matrix.asset_suffix }}
