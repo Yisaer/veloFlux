@@ -3,15 +3,20 @@
 # 默认目标
 .DEFAULT_GOAL := help
 
+SCRIPTS_DIR := $(CURDIR)/scripts
+export PATH := $(SCRIPTS_DIR):$(PATH)
+
 # 构建调试版本
 build:
 	@echo "Building debug version..."
 	@cargo build
 
 # 构建发布版本
+RELEASE_LEVEL ?= patch
+
 release:
-	@echo "Building release version..."
-	@cargo build --release
+	@echo "Running cargo release ($(RELEASE_LEVEL)) with size-optimized profile..."
+	@cargo release $(RELEASE_LEVEL) --workspace --profile release-min --no-tag --no-push --skip-publish --no-confirm --dry-run
 
 # 运行测试
 test:
