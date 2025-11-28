@@ -8,6 +8,7 @@ axum = { version = "0.7", features = ["macros", "json"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "net", "sync"] }
 flow = { path = "../flow" }
+parser = { path = "../parser" }
 
 [lib]
 path = "src/lib.rs"

@@ -85,11 +85,13 @@ fn create_physical_filter(
     }
 
     // Convert SQL Expr to ScalarExpr
-    let scalar_predicate = convert_expr_to_scalar_with_bindings(
-        &logical_filter.predicate,
-        bindings,
-    )
-    .map_err(|e| format!("Failed to convert filter predicate to scalar expression: {}", e))?;
+    let scalar_predicate =
+        convert_expr_to_scalar_with_bindings(&logical_filter.predicate, bindings).map_err(|e| {
+            format!(
+                "Failed to convert filter predicate to scalar expression: {}",
+                e
+            )
+        })?;
 
     let physical_filter = PhysicalFilter::new(
         logical_filter.predicate.clone(),

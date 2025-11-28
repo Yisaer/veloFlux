@@ -10,6 +10,7 @@ use flow::connector::{MqttSinkConfig, MqttSinkConnector, MqttSourceConfig, MqttS
 use flow::processor::Processor;
 use flow::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use flow::{JsonDecoder, JsonEncoder, SinkProcessor, create_pipeline};
+use parser::parse_sql;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ pub enum PipelineStatus {
 pub struct PipelineEntry {
     pub pipeline: ProcessorPipeline,
     pub status: PipelineStatus,
+    pub streams: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -80,7 +82,7 @@ pub async fn create_pipeline_handler(
             .into_response();
     }
 
-    let pipeline = match build_pipeline(&req) {
+    let (pipeline, streams) = match build_pipeline(&req) {
         Ok(p) => p,
         Err(err) => {
             println!("[manager] failed to create pipeline {}: {}", req.id, err);
@@ -93,6 +95,7 @@ pub async fn create_pipeline_handler(
         PipelineEntry {
             pipeline,
             status: PipelineStatus::Created,
+            streams,
         },
     );
     println!("[manager] pipeline {} created", req.id);
@@ -166,7 +169,13 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
     Json(list)
 }
 
-fn build_pipeline(req: &CreatePipelineRequest) -> Result<ProcessorPipeline, String> {
+fn build_pipeline(req: &CreatePipelineRequest) -> Result<(ProcessorPipeline, Vec<String>), String> {
+    let select_stmt = parse_sql(&req.sql).map_err(|err| err.to_string())?;
+    let streams: Vec<String> = select_stmt
+        .source_infos
+        .iter()
+        .map(|info| info.name.clone())
+        .collect();
     let broker = req.source_broker.as_deref().unwrap_or(DEFAULT_BROKER_URL);
     let source_topic = req.source_topic.as_deref().unwrap_or(SOURCE_TOPIC);
     let sink_topic = req.sink_topic.as_deref().unwrap_or(SINK_TOPIC);
@@ -176,7 +185,7 @@ fn build_pipeline(req: &CreatePipelineRequest) -> Result<ProcessorPipeline, Stri
     let mut pipeline = create_pipeline(&req.sql, sinks).map_err(|err| err.to_string())?;
     attach_mqtt_sources(&mut pipeline, broker, source_topic, qos).map_err(|err| err.to_string())?;
     pipeline.set_pipeline_id(req.id.clone());
-    Ok(pipeline)
+    Ok((pipeline, streams))
 }
 
 fn build_sinks(

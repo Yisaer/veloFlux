@@ -49,10 +49,7 @@ impl ProjectProcessor {
 
     /// Create a ProjectProcessor from a PhysicalPlan
     /// Returns None if the plan is not a PhysicalProject
-    pub fn from_physical_plan(
-        id: impl Into<String>,
-        plan: Arc<PhysicalPlan>,
-    ) -> Option<Self> {
+    pub fn from_physical_plan(id: impl Into<String>, plan: Arc<PhysicalPlan>) -> Option<Self> {
         match plan.as_ref() {
             PhysicalPlan::Project(project) => Some(Self::new(id, Arc::new(project.clone()))),
             _ => None,
