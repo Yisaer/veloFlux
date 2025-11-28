@@ -1,4 +1,4 @@
-.PHONY: build release test fmt clippy clean help
+.PHONY: build release release-thin test fmt clippy clean help
 
 # 默认目标
 .DEFAULT_GOAL := help
@@ -8,10 +8,13 @@ build:
 	@echo "Building debug version..."
 	@cargo build
 
-# 构建发布版本
 release:
-	@echo "Building release version..."
+	@echo "Building release binary (standard profile)..."
 	@cargo build --release
+
+release-thin:
+	@echo "Building minimal binary via release-thin profile..."
+	@cargo build --profile release-thin --no-default-features
 
 # 运行测试
 test:
