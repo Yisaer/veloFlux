@@ -49,10 +49,7 @@ impl FilterProcessor {
 
     /// Create a FilterProcessor from a PhysicalPlan
     /// Returns None if the plan is not a PhysicalFilter
-    pub fn from_physical_plan(
-        id: impl Into<String>,
-        plan: Arc<PhysicalPlan>,
-    ) -> Option<Self> {
+    pub fn from_physical_plan(id: impl Into<String>, plan: Arc<PhysicalPlan>) -> Option<Self> {
         match plan.as_ref() {
             PhysicalPlan::Filter(filter) => Some(Self::new(id, Arc::new(filter.clone()))),
             _ => None,

@@ -16,8 +16,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use flow::{
     BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int8Type, Int16Type,
-    Int32Type, Int64Type, ListType, StringType, StructType, Uint8Type, Uint16Type, Uint32Type,
-    Uint64Type,
+    Int32Type, Int64Type, ListType, StringType, StructField, StructType, Uint8Type, Uint16Type,
+    Uint32Type, Uint64Type,
 };
 
 #[derive(Deserialize)]
@@ -37,6 +37,10 @@ pub struct StreamSchemaRequest {
 pub struct StreamColumnRequest {
     pub name: String,
     pub data_type: String,
+    #[serde(default)]
+    pub fields: Option<Vec<StreamColumnRequest>>,
+    #[serde(default)]
+    pub element: Option<Box<StreamColumnRequest>>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -76,6 +80,10 @@ pub struct StreamSchemaInfo {
 pub struct StreamColumnInfo {
     pub name: String,
     pub data_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<StreamColumnInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub element: Option<Box<StreamColumnInfo>>,
 }
 
 #[derive(Serialize)]
@@ -217,14 +225,38 @@ fn build_stream_info(
             columns: schema
                 .column_schemas()
                 .iter()
-                .map(|col| StreamColumnInfo {
-                    name: col.name.clone(),
-                    data_type: datatype_name(&col.data_type),
-                })
+                .map(|col| stream_column_info(&col.name, &col.data_type))
                 .collect(),
         },
         shared_stream: shared_item,
     }
+}
+
+fn stream_column_info(name: &str, datatype: &ConcreteDatatype) -> StreamColumnInfo {
+    let mut info = StreamColumnInfo {
+        name: name.to_string(),
+        data_type: datatype_name(datatype),
+        fields: None,
+        element: None,
+    };
+
+    match datatype {
+        ConcreteDatatype::Struct(struct_type) => {
+            let field_infos = struct_type
+                .fields()
+                .iter()
+                .map(|field| stream_column_info(field.name(), field.data_type()))
+                .collect();
+            info.fields = Some(field_infos);
+        }
+        ConcreteDatatype::List(list_type) => {
+            let element_info = stream_column_info("element", list_type.item_type());
+            info.element = Some(Box::new(element_info));
+        }
+        _ => {}
+    }
+
+    info
 }
 
 fn build_shared_stream_config(
@@ -266,16 +298,20 @@ fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Schema, String
         .schema
         .columns
         .iter()
-        .map(|col| {
-            parse_datatype(&col.data_type)
-                .map(|datatype| ColumnSchema::new(req.name.clone(), col.name.clone(), datatype))
-        })
+        .map(|col| column_schema_from_request(req.name.clone(), col))
         .collect();
     columns.map(Schema::new)
 }
 
-fn parse_datatype(datatype: &str) -> Result<ConcreteDatatype, String> {
-    match datatype.to_ascii_lowercase().as_str() {
+fn column_schema_from_request(
+    source: String,
+    column: &StreamColumnRequest,
+) -> Result<ColumnSchema, String> {
+    parse_datatype(column).map(|datatype| ColumnSchema::new(source, column.name.clone(), datatype))
+}
+
+fn parse_datatype(column: &StreamColumnRequest) -> Result<ConcreteDatatype, String> {
+    match column.data_type.to_ascii_lowercase().as_str() {
         "null" => Ok(ConcreteDatatype::Null),
         "bool" | "boolean" => Ok(ConcreteDatatype::Bool(BooleanType)),
         "int8" => Ok(ConcreteDatatype::Int8(Int8Type)),
@@ -289,12 +325,30 @@ fn parse_datatype(datatype: &str) -> Result<ConcreteDatatype, String> {
         "float32" => Ok(ConcreteDatatype::Float32(Float32Type)),
         "float64" => Ok(ConcreteDatatype::Float64(Float64Type)),
         "string" => Ok(ConcreteDatatype::String(StringType)),
-        "list" => Ok(ConcreteDatatype::List(ListType::new(Arc::new(
-            ConcreteDatatype::Null,
-        )))),
-        "struct" => Ok(ConcreteDatatype::Struct(
-            StructType::new(Default::default()),
-        )),
+        "list" => {
+            let element = column.element.as_deref().ok_or_else(|| {
+                format!("list column {} requires element definition", column.name)
+            })?;
+            let element_type = parse_datatype(element)?;
+            Ok(ConcreteDatatype::List(ListType::new(Arc::new(
+                element_type,
+            ))))
+        }
+        "struct" => {
+            let fields = column.fields.as_deref().ok_or_else(|| {
+                format!("struct column {} requires fields definition", column.name)
+            })?;
+            let struct_fields: Result<Vec<StructField>, String> = fields
+                .iter()
+                .map(|field| {
+                    let field_type = parse_datatype(field)?;
+                    Ok(StructField::new(field.name.clone(), field_type, false))
+                })
+                .collect();
+            Ok(ConcreteDatatype::Struct(StructType::new(Arc::new(
+                struct_fields?,
+            ))))
+        }
         other => Err(format!("unsupported data type: {}", other)),
     }
 }
@@ -318,6 +372,107 @@ fn datatype_name(datatype: &ConcreteDatatype) -> String {
         ConcreteDatatype::Bool(_) => "bool",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn struct_request() -> StreamColumnRequest {
+        StreamColumnRequest {
+            name: "user".to_string(),
+            data_type: "struct".to_string(),
+            fields: Some(vec![
+                StreamColumnRequest {
+                    name: "id".to_string(),
+                    data_type: "int64".to_string(),
+                    fields: None,
+                    element: None,
+                },
+                StreamColumnRequest {
+                    name: "sessions".to_string(),
+                    data_type: "list".to_string(),
+                    fields: None,
+                    element: Some(Box::new(StreamColumnRequest {
+                        name: "session".to_string(),
+                        data_type: "struct".to_string(),
+                        fields: Some(vec![
+                            StreamColumnRequest {
+                                name: "session_id".to_string(),
+                                data_type: "string".to_string(),
+                                fields: None,
+                                element: None,
+                            },
+                            StreamColumnRequest {
+                                name: "events".to_string(),
+                                data_type: "list".to_string(),
+                                fields: None,
+                                element: Some(Box::new(StreamColumnRequest {
+                                    name: "event".to_string(),
+                                    data_type: "string".to_string(),
+                                    fields: None,
+                                    element: None,
+                                })),
+                            },
+                        ]),
+                        element: None,
+                    })),
+                },
+            ]),
+            element: None,
+        }
+    }
+
+    #[test]
+    fn parse_datatype_nested_struct_list() {
+        let column = struct_request();
+        let datatype = parse_datatype(&column).expect("should parse nested struct");
+
+        let expected = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+            StructField::new("id".to_string(), ConcreteDatatype::Int64(Int64Type), false),
+            StructField::new(
+                "sessions".to_string(),
+                ConcreteDatatype::List(ListType::new(Arc::new(ConcreteDatatype::Struct(
+                    StructType::new(Arc::new(vec![
+                        StructField::new(
+                            "session_id".to_string(),
+                            ConcreteDatatype::String(StringType),
+                            false,
+                        ),
+                        StructField::new(
+                            "events".to_string(),
+                            ConcreteDatatype::List(ListType::new(Arc::new(
+                                ConcreteDatatype::String(StringType),
+                            ))),
+                            false,
+                        ),
+                    ])),
+                )))),
+                false,
+            ),
+        ])));
+
+        assert_eq!(datatype, expected);
+    }
+
+    #[test]
+    fn parse_datatype_errors_without_nested_payload() {
+        let missing_fields = StreamColumnRequest {
+            name: "bad_struct".to_string(),
+            data_type: "struct".to_string(),
+            fields: None,
+            element: None,
+        };
+        assert!(parse_datatype(&missing_fields).is_err());
+
+        let missing_element = StreamColumnRequest {
+            name: "bad_list".to_string(),
+            data_type: "list".to_string(),
+            fields: None,
+            element: None,
+        };
+        assert!(parse_datatype(&missing_element).is_err());
+    }
 }
 
 fn into_shared_stream_item(info: SharedStreamInfo) -> SharedStreamItem {
