@@ -5,9 +5,10 @@
 use crate::model::Collection;
 use crate::planner::physical::{PhysicalFilter, PhysicalPlan};
 use crate::processor::base::{
-    fan_in_streams, forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -27,11 +28,11 @@ pub struct FilterProcessor {
     /// Input channels for receiving data
     inputs: Vec<broadcast::Receiver<StreamData>>,
     /// Control input channels
-    control_inputs: Vec<broadcast::Receiver<StreamData>>,
+    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     /// Broadcast channel for downstream processors
     output: broadcast::Sender<StreamData>,
     /// Dedicated control output channel
-    control_output: broadcast::Sender<StreamData>,
+    control_output: broadcast::Sender<ControlSignal>,
 }
 
 impl FilterProcessor {
@@ -79,7 +80,7 @@ impl Processor for FilterProcessor {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
-        let mut control_streams = fan_in_streams(control_receivers);
+        let mut control_streams = fan_in_control_streams(control_receivers);
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
@@ -92,27 +93,15 @@ impl Processor for FilterProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(result) = control_item {
-                            let control_data = match result {
+                            let control_signal = match result {
                                 Ok(data) => data,
                                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                                    let message = format!(
-                                        "FilterProcessor control input lagged by {} messages",
-                                        skipped
-                                    );
                                     println!("[FilterProcessor:{id}] control input lagged by {skipped} messages");
-                                    forward_error(&output, &id, message.clone()).await?;
-                                    send_with_backpressure(
-                                        &control_output,
-                                        StreamData::error(
-                                            StreamError::new(message).with_source(id.clone()),
-                                        ),
-                                    )
-                                    .await?;
                                     continue;
                                 }
                             };
-                            let is_terminal = control_data.is_terminal();
-                            send_with_backpressure(&control_output, control_data.clone()).await?;
+                            let is_terminal = control_signal.is_terminal();
+                            send_control_with_backpressure(&control_output, control_signal.clone()).await?;
                             if is_terminal {
                                 println!("[FilterProcessor:{id}] received StreamEnd (control)");
                                 println!("[FilterProcessor:{id}] stopped");
@@ -156,14 +145,7 @@ impl Processor for FilterProcessor {
                                     skipped
                                 );
                                 println!("[FilterProcessor:{id}] input lagged by {skipped} messages");
-                                forward_error(&output, &id, message.clone()).await?;
-                                send_with_backpressure(
-                                    &control_output,
-                                    StreamData::error(
-                                        StreamError::new(message).with_source(id.clone()),
-                                    ),
-                                )
-                                .await?;
+                                forward_error(&output, &id, message).await?;
                                 continue;
                             }
                             None => {
@@ -181,7 +163,7 @@ impl Processor for FilterProcessor {
         Some(self.output.subscribe())
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
         Some(self.control_output.subscribe())
     }
 
@@ -189,7 +171,7 @@ impl Processor for FilterProcessor {
         self.inputs.push(receiver);
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
     }
 }

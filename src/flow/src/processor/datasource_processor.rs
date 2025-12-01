@@ -3,12 +3,13 @@
 //! This processor reads data from a PhysicalDatasource and sends it downstream
 //! as StreamData::Collection.
 
-use crate::codec::RecordDecoder;
+use crate::codec::{JsonDecoder, RecordDecoder};
 use crate::connector::{ConnectorError, ConnectorEvent, SourceConnector};
 use crate::processor::base::{
-    fan_in_streams, forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
 use datatypes::Schema;
 use futures::stream::StreamExt;
 use once_cell::sync::Lazy;
@@ -28,16 +29,18 @@ pub struct DataSourceProcessor {
     /// Processor identifier (`datasource_{plan_index}` for plan-based processors)
     id: String,
     plan_index: Option<i64>,
-    source_name: String,
+    stream_name: String,
     schema: Arc<Schema>,
     /// Input channels for receiving control signals
     inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<StreamData>>,
+    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     /// Broadcast channel for downstream consumers
     output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<StreamData>,
+    control_output: broadcast::Sender<ControlSignal>,
     /// External source connectors that feed this processor
     connectors: Vec<ConnectorBinding>,
+    /// Decoder used for raw byte payloads
+    default_decoder: Arc<dyn RecordDecoder>,
 }
 
 static DATASOURCE_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -60,14 +63,12 @@ static DATASOURCE_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
 
 struct ConnectorBinding {
     connector: Box<dyn SourceConnector>,
-    decoder: Arc<dyn RecordDecoder>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl ConnectorBinding {
     fn activate(&mut self, processor_id: &str) -> broadcast::Receiver<StreamData> {
         let (sender, receiver) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let decoder = Arc::clone(&self.decoder);
         let processor_id = processor_id.to_string();
         let connector_id = self.connector.id().to_string();
         let mut stream = match self.connector.subscribe() {
@@ -90,33 +91,14 @@ impl ConnectorBinding {
             let sender = sender_clone;
             while let Some(event) = stream.next().await {
                 match event {
-                    Ok(ConnectorEvent::Payload(bytes)) => match decoder.decode(&bytes) {
-                        Ok(batch) => {
-                            if send_with_backpressure(
-                                &sender,
-                                StreamData::collection(Box::new(batch)),
-                            )
+                    Ok(ConnectorEvent::Payload(bytes)) => {
+                        if send_with_backpressure(&sender, StreamData::bytes(bytes))
                             .await
                             .is_err()
-                            {
-                                break;
-                            }
+                        {
+                            break;
                         }
-                        Err(err) => {
-                            if send_with_backpressure(
-                                &sender,
-                                StreamData::error(
-                                    StreamError::new(format!("decode error: {}", err))
-                                        .with_source(processor_id.clone()),
-                                ),
-                            )
-                            .await
-                            .is_err()
-                            {
-                                break;
-                            }
-                        }
-                    },
+                    }
                     Ok(ConnectorEvent::EndOfStream) => break,
                     Err(err) => {
                         if send_with_backpressure(
@@ -184,16 +166,20 @@ impl DataSourceProcessor {
     ) -> Self {
         let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let stream_name = source_name.into();
+        let default_decoder: Arc<dyn RecordDecoder> =
+            Arc::new(JsonDecoder::new(stream_name.clone(), Arc::clone(&schema)));
         Self {
             id: id.into(),
             plan_index,
-            source_name: source_name.into(),
+            stream_name,
             schema,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
             control_output,
             connectors: Vec::new(),
+            default_decoder,
         }
     }
 
@@ -203,9 +189,9 @@ impl DataSourceProcessor {
         connector: Box<dyn SourceConnector>,
         decoder: Arc<dyn RecordDecoder>,
     ) {
+        self.default_decoder = decoder;
         self.connectors.push(ConnectorBinding {
             connector,
-            decoder,
             handle: None,
         });
     }
@@ -238,21 +224,22 @@ impl Processor for DataSourceProcessor {
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let decoder = Arc::clone(&self.default_decoder);
         let processor_id = self.id.clone();
         let plan_label = self
             .plan_index
             .map(|idx| idx.to_string())
             .unwrap_or_else(|| "global".to_string());
-        let source_name = self.source_name.clone();
+        let stream_name = self.stream_name.clone();
         let log_prefix =
-            format!("[DataSourceProcessor:{processor_id}#{plan_label}::{source_name}]");
+            format!("[DataSourceProcessor:{processor_id}#{plan_label}::{stream_name}]");
         let mut base_inputs = std::mem::take(&mut self.inputs);
         let mut connectors = std::mem::take(&mut self.connectors);
         let connector_inputs = Self::activate_connectors(&mut connectors, &processor_id);
         base_inputs.extend(connector_inputs);
         let mut input_streams = fan_in_streams(base_inputs);
         let control_receivers = std::mem::take(&mut self.control_inputs);
-        let mut control_streams = fan_in_streams(control_receivers);
+        let mut control_streams = fan_in_control_streams(control_receivers);
         let mut control_active = !control_streams.is_empty();
         println!("{log_prefix} starting");
         tokio::spawn(async move {
@@ -262,27 +249,15 @@ impl Processor for DataSourceProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(result) = control_item {
-                            let control_data = match result {
-                                Ok(data) => data,
+                            let control_signal = match result {
+                                Ok(signal) => signal,
                                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                                    let message = format!(
-                                        "DataSource control input lagged by {} messages",
-                                        skipped
-                                    );
                                     println!("{log_prefix} control input lagged by {skipped} messages");
-                                    forward_error(&output, &processor_id, message.clone()).await?;
-                                    send_with_backpressure(
-                                        &control_output,
-                                        StreamData::error(
-                                            StreamError::new(message).with_source(processor_id.clone()),
-                                        ),
-                                    )
-                                    .await?;
                                     continue;
                                 }
                             };
-                            let is_terminal = control_data.is_terminal();
-                            send_with_backpressure(&control_output, control_data.clone()).await?;
+                            let is_terminal = control_signal.is_terminal();
+                            send_control_with_backpressure(&control_output, control_signal.clone()).await?;
                             if is_terminal {
                                 println!("{log_prefix} received StreamEnd (control)");
                                 Self::shutdown_connectors(&mut connectors).await?;
@@ -297,7 +272,19 @@ impl Processor for DataSourceProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(mut data)) => {
-                                if let StreamData::Collection(collection) = data {
+                                if let StreamData::Bytes(payload) = &data {
+                                    match decoder.decode(payload) {
+                                        Ok(batch) => {
+                                            data = StreamData::collection(Box::new(batch));
+                                        }
+                                        Err(err) => {
+                                            let message = format!("decode error: {}", err);
+                                            forward_error(&output, &processor_id, message).await?;
+                                            continue;
+                                        }
+                                    }
+                                }
+                                if let Some(collection) = data.as_collection() {
                                     let rows = collection.num_rows() as u64;
                                     DATASOURCE_RECORDS_IN
                                         .with_label_values(&[processor_id.as_str()])
@@ -305,7 +292,6 @@ impl Processor for DataSourceProcessor {
                                     DATASOURCE_RECORDS_OUT
                                         .with_label_values(&[processor_id.as_str()])
                                         .inc_by(rows);
-                                    data = StreamData::Collection(collection);
                                 }
                                 let is_terminal = data.is_terminal();
                                 send_with_backpressure(&output, data).await?;
@@ -323,14 +309,7 @@ impl Processor for DataSourceProcessor {
                                     skipped
                                 );
                                 println!("{log_prefix} input lagged by {skipped} messages");
-                                forward_error(&output, &processor_id, message.clone()).await?;
-                                send_with_backpressure(
-                                    &control_output,
-                                    StreamData::error(
-                                        StreamError::new(message).with_source(processor_id.clone()),
-                                    ),
-                                )
-                                .await?;
+                                forward_error(&output, &processor_id, message).await?;
                                 continue;
                             }
                             None => {
@@ -349,7 +328,7 @@ impl Processor for DataSourceProcessor {
         Some(self.output.subscribe())
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
         Some(self.control_output.subscribe())
     }
 
@@ -357,7 +336,7 @@ impl Processor for DataSourceProcessor {
         self.inputs.push(receiver);
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
     }
 }
@@ -368,6 +347,6 @@ impl DataSourceProcessor {
     }
 
     pub fn stream_name(&self) -> &str {
-        &self.source_name
+        &self.stream_name
     }
 }

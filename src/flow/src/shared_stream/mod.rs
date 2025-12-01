@@ -211,7 +211,7 @@ pub struct SharedStreamSubscription {
     stream: Arc<SharedStreamInner>,
     consumer_id: String,
     data_receiver: Option<broadcast::Receiver<StreamData>>,
-    control_receiver: Option<broadcast::Receiver<StreamData>>,
+    control_receiver: Option<broadcast::Receiver<ControlSignal>>,
 }
 
 impl SharedStreamSubscription {
@@ -223,7 +223,7 @@ impl SharedStreamSubscription {
         &mut self,
     ) -> (
         broadcast::Receiver<StreamData>,
-        broadcast::Receiver<StreamData>,
+        broadcast::Receiver<ControlSignal>,
     ) {
         let data = self
             .data_receiver
@@ -264,8 +264,8 @@ struct SharedStreamInner {
     created_at: SystemTime,
     connector_id: String,
     data_sender: broadcast::Sender<StreamData>,
-    control_sender: broadcast::Sender<StreamData>,
-    control_input: broadcast::Sender<StreamData>,
+    control_sender: broadcast::Sender<ControlSignal>,
+    control_input: broadcast::Sender<ControlSignal>,
     handles: Mutex<SharedStreamHandles>,
     state: Mutex<SharedStreamState>,
 }
@@ -276,7 +276,7 @@ struct SharedStreamHandles {
     forward: Option<JoinHandle<()>>,
     control_forward: Option<JoinHandle<()>>,
     data_anchor: Option<broadcast::Receiver<StreamData>>,
-    control_anchor: Option<broadcast::Receiver<StreamData>>,
+    control_anchor: Option<broadcast::Receiver<ControlSignal>>,
 }
 
 /// Mutable status tracked for each stream.
@@ -455,9 +455,7 @@ impl SharedStreamInner {
             state.subscribers.clear();
         }
 
-        let _ = self
-            .control_input
-            .send(StreamData::control(ControlSignal::StreamQuickEnd));
+        let _ = self.control_input.send(ControlSignal::StreamQuickEnd);
 
         let mut handles = self.handles.lock().await;
 

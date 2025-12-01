@@ -72,9 +72,7 @@ impl PlanProcessor {
     }
 
     /// Subscribe to the processor's control output stream
-    pub fn subscribe_control_output(
-        &self,
-    ) -> Option<broadcast::Receiver<crate::processor::StreamData>> {
+    pub fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
         match self {
             PlanProcessor::DataSource(p) => p.subscribe_control_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_control_output(),
@@ -94,10 +92,7 @@ impl PlanProcessor {
     }
 
     /// Add a control input channel
-    pub fn add_control_input(
-        &mut self,
-        receiver: broadcast::Receiver<crate::processor::StreamData>,
-    ) {
+    pub fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         match self {
             PlanProcessor::DataSource(p) => p.add_control_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_control_input(receiver),
@@ -126,10 +121,12 @@ pub struct ProcessorPipeline {
     pub sink_processors: Vec<SinkProcessor>,
     /// Result sink processor (data tail) if downstream forwarding is enabled
     pub result_sink: Option<ResultCollectProcessor>,
-    /// Broadcast sender feeding the control source input
-    control_input_sender: broadcast::Sender<StreamData>,
-    /// Buffered receiver that bridges external input into the control input sender
-    control_input_buffer: Option<mpsc::Receiver<StreamData>>,
+    /// Broadcast sender feeding the control source data input
+    data_input_sender: broadcast::Sender<StreamData>,
+    /// Buffered receiver that bridges external input into the data input sender
+    data_input_buffer: Option<mpsc::Receiver<StreamData>>,
+    /// Broadcast sender delivering external control signals
+    control_signal_sender: broadcast::Sender<ControlSignal>,
     /// Join handles for all running processors
     handles: Vec<JoinHandle<Result<(), ProcessorError>>>,
     /// Logical pipeline identifier used for diagnostics/subscriptions
@@ -142,8 +139,8 @@ impl ProcessorPipeline {
         if !self.handles.is_empty() {
             return;
         }
-        if let Some(buffer) = self.control_input_buffer.take() {
-            let sender = self.control_input_sender.clone();
+        if let Some(buffer) = self.data_input_buffer.take() {
+            let sender = self.data_input_sender.clone();
             self.handles.push(tokio::spawn(async move {
                 let mut receiver = buffer;
                 while let Some(data) = receiver.recv().await {
@@ -168,8 +165,8 @@ impl ProcessorPipeline {
 
     /// Broadcast a control signal into the pipeline, respecting its channel target.
     pub fn broadcast_control_signal(&self, signal: ControlSignal) -> Result<(), ProcessorError> {
-        self.control_input_sender
-            .send(StreamData::control(signal))
+        self.control_signal_sender
+            .send(signal)
             .map(|_| ())
             .map_err(|_| ProcessorError::ChannelClosed)
     }
@@ -461,9 +458,12 @@ fn build_processor_pipeline(
 ) -> Result<ProcessorPipeline, ProcessorError> {
     let mut control_source = ControlSourceProcessor::new("control_source");
     let (pipeline_input_sender, pipeline_input_receiver) = mpsc::channel(100);
-    let (control_input_sender, control_input_receiver) =
+    let (data_input_sender, data_input_receiver) =
         broadcast::channel(crate::processor::base::DEFAULT_CHANNEL_CAPACITY);
-    control_source.add_input(control_input_receiver);
+    control_source.add_input(data_input_receiver);
+    let (control_signal_sender, control_signal_receiver) =
+        broadcast::channel(crate::processor::base::DEFAULT_CHANNEL_CAPACITY);
+    control_source.add_control_input(control_signal_receiver);
 
     let mut processor_map = ProcessorMap::new();
     build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map)?;
@@ -539,8 +539,9 @@ fn build_processor_pipeline(
         middle_processors,
         sink_processors,
         result_sink,
-        control_input_sender,
-        control_input_buffer: Some(pipeline_input_receiver),
+        data_input_sender,
+        data_input_buffer: Some(pipeline_input_receiver),
+        control_signal_sender,
         handles: Vec::new(),
         pipeline_id,
     })

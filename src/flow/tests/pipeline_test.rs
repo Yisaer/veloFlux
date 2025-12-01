@@ -129,6 +129,12 @@ async fn run_test_case(test_case: TestCase) {
                 test_case.name, e.message
             );
         }
+        StreamData::Bytes(_) => {
+            panic!(
+                "Expected Collection data, but received undecoded bytes for test: {}",
+                test_case.name
+            );
+        }
     }
 
     pipeline.close().await.expect(&format!(
@@ -320,14 +326,9 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let batch = batch_from_columns_simple(vec![(
-        "stream".to_string(),
-        "a".to_string(),
-        vec![Value::Int64(10)],
-    )])
-    .expect("record batch");
+    let payload = br#"[{"a":10}]"#.to_vec();
     pipeline
-        .send_stream_data("stream", StreamData::collection(Box::new(batch)))
+        .send_stream_data("stream", StreamData::bytes(payload))
         .await
         .expect("send data");
 

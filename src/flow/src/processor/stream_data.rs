@@ -44,6 +44,8 @@ impl ControlSignal {
 pub enum StreamData {
     /// Data payload - Collection (owned)
     Collection(Box<dyn Collection>),
+    /// Raw bytes that still need to be decoded into a collection
+    Bytes(Vec<u8>),
     /// Control signal for flow management
     Control(ControlSignal),
     /// Error that occurred during processing - wrapped for flow continuation
@@ -105,6 +107,11 @@ impl StreamData {
         StreamData::Collection(collection)
     }
 
+    /// Create raw byte payload
+    pub fn bytes(payload: Vec<u8>) -> Self {
+        StreamData::Bytes(payload)
+    }
+
     /// Create control signal
     pub fn control(signal: ControlSignal) -> Self {
         StreamData::Control(signal)
@@ -120,9 +127,9 @@ impl StreamData {
         StreamData::Error(StreamError::new(message))
     }
 
-    /// Check if this is data (Collection)
+    /// Check if this is data (Collection or raw bytes)
     pub fn is_data(&self) -> bool {
-        matches!(self, StreamData::Collection(_))
+        matches!(self, StreamData::Collection(_) | StreamData::Bytes(_))
     }
 
     /// Check if this is a control signal
@@ -189,6 +196,7 @@ impl StreamData {
             StreamData::Collection(collection) => {
                 format!("Collection with {} rows", collection.num_rows())
             }
+            StreamData::Bytes(payload) => format!("Bytes payload ({} bytes)", payload.len()),
             StreamData::Control(signal) => format!("Control signal: {:?}", signal),
             StreamData::Error(error) => format!("Error: {}", error),
         }

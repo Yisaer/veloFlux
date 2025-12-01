@@ -2,8 +2,8 @@
 //!
 //! This processor receives data from upstream processors and forwards it to a single output.
 
-use crate::processor::base::fan_in_streams;
-use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::base::{fan_in_control_streams, fan_in_streams};
+use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -20,7 +20,7 @@ pub struct ResultCollectProcessor {
     /// Input channels for receiving data (multi-input)
     inputs: Vec<broadcast::Receiver<StreamData>>,
     /// Control input channels for high-priority signals
-    control_inputs: Vec<broadcast::Receiver<StreamData>>,
+    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     /// Single output channel for forwarding received data (single-output)
     output: Option<mpsc::Sender<StreamData>>,
 }
@@ -56,7 +56,7 @@ impl Processor for ResultCollectProcessor {
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
-        let mut control_streams = fan_in_streams(control_receivers);
+        let mut control_streams = fan_in_control_streams(control_receivers);
         let mut control_active = !control_streams.is_empty();
         let output = self.output.take().ok_or_else(|| {
             ProcessorError::InvalidConfiguration(
@@ -77,7 +77,7 @@ impl Processor for ResultCollectProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(result) = control_item {
-                            let control_data = match result {
+                            let control_signal = match result {
                                 Ok(data) => data,
                                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
                                     let message = format!(
@@ -97,12 +97,7 @@ impl Processor for ResultCollectProcessor {
                                     continue;
                                 }
                             };
-                            let is_terminal = control_data.is_terminal();
-                            output
-                                .send(control_data)
-                                .await
-                                .map_err(|_| ProcessorError::ChannelClosed)?;
-                            if is_terminal {
+                            if control_signal.is_terminal() {
                                 println!("[ResultCollectProcessor:{}] received StreamEnd (control)", processor_id);
                                 output
                                     .send(StreamData::stream_end())
@@ -175,11 +170,11 @@ impl Processor for ResultCollectProcessor {
         self.inputs.push(receiver);
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
         None
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
     }
 }

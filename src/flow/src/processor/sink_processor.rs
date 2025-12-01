@@ -4,9 +4,10 @@ use crate::codec::encoder::CollectionEncoder;
 use crate::connector::SinkConnector;
 use crate::model::Collection;
 use crate::processor::base::{
-    fan_in_streams, forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter_vec, IntCounterVec};
@@ -61,9 +62,9 @@ impl ConnectorBinding {
 pub struct SinkProcessor {
     id: String,
     inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<StreamData>>,
+    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<StreamData>,
+    control_output: broadcast::Sender<ControlSignal>,
     connectors: Vec<ConnectorBinding>,
     forward_to_result: bool,
 }
@@ -157,7 +158,7 @@ impl Processor for SinkProcessor {
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
-        let mut control_streams = fan_in_streams(control_receivers);
+        let mut control_streams = fan_in_control_streams(control_receivers);
         let mut control_active = !control_streams.is_empty();
         let output = if self.forward_to_result {
             Some(self.output.clone())
@@ -179,8 +180,8 @@ impl Processor for SinkProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(result) = control_item {
-                            let control_data = match result {
-                                Ok(data) => data,
+                            let control_signal = match result {
+                                Ok(signal) => signal,
                                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
                                     let message = format!(
                                         "SinkProcessor control input lagged by {} messages",
@@ -190,18 +191,11 @@ impl Processor for SinkProcessor {
                                     if let Some(output_sender) = &output {
                                         forward_error(output_sender, &processor_id, message.clone()).await?;
                                     }
-                                    send_with_backpressure(
-                                        &control_output,
-                                        StreamData::error(
-                                            StreamError::new(message).with_source(processor_id.clone()),
-                                        ),
-                                    )
-                                    .await?;
                                     continue;
                                 }
                             };
-                            let is_terminal = control_data.is_terminal();
-                            send_with_backpressure(&control_output, control_data.clone()).await?;
+                            let is_terminal = control_signal.is_terminal();
+                            send_control_with_backpressure(&control_output, control_signal.clone()).await?;
                             if is_terminal {
                                 println!("[SinkProcessor:{processor_id}] received StreamEnd (control)");
                                 Self::handle_terminal(&mut connectors).await?;
@@ -256,13 +250,6 @@ impl Processor for SinkProcessor {
                                 if let Some(output_sender) = &output {
                                     forward_error(output_sender, &processor_id, message.clone()).await?;
                                 }
-                                send_with_backpressure(
-                                    &control_output,
-                                    StreamData::error(
-                                        StreamError::new(message).with_source(processor_id.clone()),
-                                    ),
-                                )
-                                .await?;
                                 continue;
                             }
                             None => {
@@ -285,7 +272,7 @@ impl Processor for SinkProcessor {
         }
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
         Some(self.control_output.subscribe())
     }
 
@@ -293,7 +280,7 @@ impl Processor for SinkProcessor {
         self.inputs.push(receiver);
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
     }
 }

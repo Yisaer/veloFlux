@@ -3,8 +3,11 @@
 //! This processor is responsible for receiving and sending control signals
 //! that coordinate the entire stream processing pipeline.
 
-use crate::processor::base::{forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY};
-use crate::processor::{Processor, ProcessorError, StreamData};
+use crate::processor::base::{
+    fan_in_control_streams, forward_error, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
+};
+use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
@@ -23,7 +26,9 @@ pub struct ControlSourceProcessor {
     /// Broadcast channel for all downstream processors
     output: broadcast::Sender<StreamData>,
     /// Dedicated control channel for urgent control propagation
-    control_output: broadcast::Sender<StreamData>,
+    control_output: broadcast::Sender<ControlSignal>,
+    /// Upstream control-signal inputs
+    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
 }
 
 impl ControlSourceProcessor {
@@ -36,6 +41,7 @@ impl ControlSourceProcessor {
             input: None,
             output,
             control_output,
+            control_inputs: Vec::new(),
         }
     }
 
@@ -43,7 +49,7 @@ impl ControlSourceProcessor {
     pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
         if let StreamData::Control(signal) = &data {
             if signal.routes_via_control() {
-                send_with_backpressure(&self.control_output, data.clone()).await?;
+                send_control_with_backpressure(&self.control_output, signal.clone()).await?;
             }
             if !signal.routes_via_data() {
                 return Ok(());
@@ -79,6 +85,9 @@ impl Processor for ControlSourceProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let processor_id = self.id.clone();
+        let control_inputs = std::mem::take(&mut self.control_inputs);
+        let mut control_streams = fan_in_control_streams(control_inputs);
+        let mut control_active = !control_streams.is_empty();
         println!("[ControlSourceProcessor:{processor_id}] starting");
 
         tokio::spawn(async move {
@@ -88,40 +97,62 @@ impl Processor for ControlSourceProcessor {
             };
             let mut stream = BroadcastStream::new(input);
 
-            while let Some(item) = stream.next().await {
-                let data = match item {
-                    Ok(data) => data,
-                    Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                        let message =
-                            format!("Control source input lagged by {} messages", skipped);
-                        println!(
-                            "[ControlSourceProcessor:{processor_id}] input lagged: {}",
-                            message
-                        );
-                        forward_error(&output, &processor_id, message).await?;
-                        continue;
+            loop {
+                tokio::select! {
+                    biased;
+                    control_item = control_streams.next(), if control_active => {
+                        if let Some(result) = control_item {
+                            let control_signal = match result {
+                                Ok(signal) => signal,
+                                Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                                    println!(
+                                        "[ControlSourceProcessor:{processor_id}] control input lagged by {} messages",
+                                        skipped
+                                    );
+                                    continue;
+                                }
+                            };
+                            handle_control_signal(&output, &control_output, control_signal).await?;
+                            continue;
+                        } else {
+                            control_active = false;
+                        }
                     }
-                };
+                    item = stream.next() => {
+                        let data = match item {
+                            Some(Ok(data)) => data,
+                            Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
+                                let message =
+                                    format!("Control source input lagged by {} messages", skipped);
+                                println!(
+                                    "[ControlSourceProcessor:{processor_id}] input lagged: {}",
+                                    message
+                                );
+                                forward_error(&output, &processor_id, message).await?;
+                                continue;
+                            }
+                            None => break,
+                        };
 
-                let is_terminal = data.is_terminal();
-                let mut deliver_to_data = true;
+                        let is_terminal = data.is_terminal();
+                        let mut deliver_to_data = true;
 
-                if let StreamData::Control(signal) = &data {
-                    if signal.routes_via_control() {
-                        send_with_backpressure(&control_output, data.clone()).await?;
+                        if let StreamData::Control(signal) = &data {
+                            handle_control_signal(&output, &control_output, signal.clone()).await?;
+                            if !signal.routes_via_data() {
+                                deliver_to_data = false;
+                            }
+                        }
+
+                        if deliver_to_data {
+                            send_with_backpressure(&output, data).await?;
+                        }
+
+                        if is_terminal {
+                            println!("[ControlSourceProcessor:{processor_id}] received StreamEnd");
+                            return Ok(());
+                        }
                     }
-                    if !signal.routes_via_data() {
-                        deliver_to_data = false;
-                    }
-                }
-
-                if deliver_to_data {
-                    send_with_backpressure(&output, data).await?;
-                }
-
-                if is_terminal {
-                    println!("[ControlSourceProcessor:{processor_id}] received StreamEnd");
-                    return Ok(());
                 }
             }
 
@@ -136,7 +167,7 @@ impl Processor for ControlSourceProcessor {
         Some(self.output.subscribe())
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
         Some(self.control_output.subscribe())
     }
 
@@ -144,5 +175,21 @@ impl Processor for ControlSourceProcessor {
         self.input = Some(receiver);
     }
 
-    fn add_control_input(&mut self, _receiver: broadcast::Receiver<StreamData>) {}
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
+        self.control_inputs.push(receiver);
+    }
+}
+
+async fn handle_control_signal(
+    data_output: &broadcast::Sender<StreamData>,
+    control_output: &broadcast::Sender<ControlSignal>,
+    signal: ControlSignal,
+) -> Result<(), ProcessorError> {
+    if signal.routes_via_control() {
+        send_control_with_backpressure(control_output, signal.clone()).await?;
+    }
+    if signal.routes_via_data() {
+        send_with_backpressure(data_output, StreamData::control(signal)).await?;
+    }
+    Ok(())
 }

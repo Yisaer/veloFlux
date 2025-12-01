@@ -1,7 +1,8 @@
 use crate::processor::base::{
-    fan_in_streams, forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use crate::shared_stream_registry;
 use futures::stream::StreamExt;
 use tokio::sync::broadcast;
@@ -14,9 +15,9 @@ pub struct SharedStreamProcessor {
     stream_name: String,
     pipeline_id: Option<String>,
     inputs: Vec<broadcast::Receiver<StreamData>>,
-    control_inputs: Vec<broadcast::Receiver<StreamData>>,
+    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
-    control_output: broadcast::Sender<StreamData>,
+    control_output: broadcast::Sender<ControlSignal>,
 }
 
 impl SharedStreamProcessor {
@@ -52,7 +53,7 @@ impl Processor for SharedStreamProcessor {
         let mut inputs = fan_in_streams(std::mem::take(&mut self.inputs));
         let mut input_active = has_data_inputs;
         let has_control_inputs = !self.control_inputs.is_empty();
-        let mut control_inputs = fan_in_streams(std::mem::take(&mut self.control_inputs));
+        let mut control_inputs = fan_in_control_streams(std::mem::take(&mut self.control_inputs));
         let mut control_inputs_active = has_control_inputs;
         let output = self.output.clone();
         let control_output = self.control_output.clone();
@@ -80,9 +81,9 @@ impl Processor for SharedStreamProcessor {
                     biased;
                     control_msg = control_inputs.next(), if control_inputs_active => {
                         match control_msg {
-                            Some(Ok(data)) => {
-                                let is_terminal = data.is_terminal();
-                                send_with_backpressure(&control_output, data.clone()).await?;
+                            Some(Ok(signal)) => {
+                                let is_terminal = signal.is_terminal();
+                                send_control_with_backpressure(&control_output, signal.clone()).await?;
                                 if is_terminal {
                                     return Ok(());
                                 }
@@ -93,14 +94,7 @@ impl Processor for SharedStreamProcessor {
                                 println!(
                                     "[SharedStreamProcessor:{processor_id}] control input lagged: {err}"
                                 );
-                                forward_error(&output, &processor_id, message.clone()).await?;
-                                send_with_backpressure(
-                                    &control_output,
-                                    StreamData::error(
-                                        StreamError::new(message).with_source(processor_id.clone()),
-                                    ),
-                                )
-                                .await?;
+                                forward_error(&output, &processor_id, message).await?;
                                 continue;
                             }
                             None => {
@@ -110,9 +104,9 @@ impl Processor for SharedStreamProcessor {
                     }
                     shared_control_msg = shared_control.next() => {
                         match shared_control_msg {
-                            Some(Ok(data)) => {
-                                let is_terminal = data.is_terminal();
-                                send_with_backpressure(&control_output, data.clone()).await?;
+                            Some(Ok(signal)) => {
+                                let is_terminal = signal.is_terminal();
+                                send_control_with_backpressure(&control_output, signal.clone()).await?;
                                 if is_terminal {
                                     return Ok(());
                                 }
@@ -122,14 +116,6 @@ impl Processor for SharedStreamProcessor {
                                 println!(
                                     "[SharedStreamProcessor:{processor_id}] shared control lagged: {err}"
                                 );
-                                send_with_backpressure(
-                                    &control_output,
-                                    StreamData::error(
-                                        StreamError::new(message.clone())
-                                            .with_source(processor_id.clone()),
-                                    ),
-                                )
-                                .await?;
                                 forward_error(&output, &processor_id, message).await?;
                                 continue;
                             }
@@ -178,7 +164,7 @@ impl Processor for SharedStreamProcessor {
         Some(self.output.subscribe())
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
         Some(self.control_output.subscribe())
     }
 
@@ -186,7 +172,7 @@ impl Processor for SharedStreamProcessor {
         self.inputs.push(receiver);
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
     }
 }

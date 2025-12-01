@@ -5,9 +5,10 @@
 use crate::model::Collection;
 use crate::planner::physical::{PhysicalPlan, PhysicalProject, PhysicalProjectField};
 use crate::processor::base::{
-    fan_in_streams, forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, forward_error, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -27,11 +28,11 @@ pub struct ProjectProcessor {
     /// Input channels for receiving data
     inputs: Vec<broadcast::Receiver<StreamData>>,
     /// Control input channels
-    control_inputs: Vec<broadcast::Receiver<StreamData>>,
+    control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     /// Broadcast channel for downstream processors
     output: broadcast::Sender<StreamData>,
     /// Dedicated control output channel
-    control_output: broadcast::Sender<StreamData>,
+    control_output: broadcast::Sender<ControlSignal>,
 }
 
 impl ProjectProcessor {
@@ -79,7 +80,7 @@ impl Processor for ProjectProcessor {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
-        let mut control_streams = fan_in_streams(control_receivers);
+        let mut control_streams = fan_in_control_streams(control_receivers);
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
@@ -95,24 +96,12 @@ impl Processor for ProjectProcessor {
                             let control_data = match result {
                                 Ok(data) => data,
                                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                                    let message = format!(
-                                        "ProjectProcessor control input lagged by {} messages",
-                                        skipped
-                                    );
                                     println!("[ProjectProcessor:{id}] control input lagged by {skipped} messages");
-                                    forward_error(&output, &id, message.clone()).await?;
-                                    send_with_backpressure(
-                                        &control_output,
-                                        StreamData::error(
-                                            StreamError::new(message).with_source(id.clone()),
-                                        ),
-                                    )
-                                    .await?;
                                     continue;
                                 }
                             };
                             let is_terminal = control_data.is_terminal();
-                            send_with_backpressure(&control_output, control_data.clone()).await?;
+                            send_control_with_backpressure(&control_output, control_data.clone()).await?;
                             if is_terminal {
                                 println!("[ProjectProcessor:{id}] received StreamEnd (control)");
                                 println!("[ProjectProcessor:{id}] stopped");
@@ -154,14 +143,7 @@ impl Processor for ProjectProcessor {
                                     skipped
                                 );
                                 println!("[ProjectProcessor:{id}] input lagged by {skipped} messages");
-                                forward_error(&output, &id, message.clone()).await?;
-                                send_with_backpressure(
-                                    &control_output,
-                                    StreamData::error(
-                                        StreamError::new(message).with_source(id.clone()),
-                                    ),
-                                )
-                                .await?;
+                                forward_error(&output, &id, message).await?;
                                 continue;
                             }
                             None => {
@@ -179,7 +161,7 @@ impl Processor for ProjectProcessor {
         Some(self.output.subscribe())
     }
 
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>> {
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
         Some(self.control_output.subscribe())
     }
 
@@ -187,7 +169,7 @@ impl Processor for ProjectProcessor {
         self.inputs.push(receiver);
     }
 
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
     }
 }

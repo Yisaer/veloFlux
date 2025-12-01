@@ -5,7 +5,7 @@
 //! - DataSourceProcessor: Processes data from PhysicalDatasource
 //! - ResultCollectProcessor: Final destination, prints received data
 
-use crate::processor::{StreamData, StreamError};
+use crate::processor::{ControlSignal, StreamData, StreamError};
 use futures::stream::SelectAll;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
@@ -31,13 +31,13 @@ pub trait Processor: Send + Sync {
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>>;
 
     /// Subscribe to the processor's control signal output (high priority path)
-    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<StreamData>>;
+    fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>>;
 
     /// Add an input channel (connect upstream processor)
     fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>);
 
     /// Add a control-signal input channel (connect upstream control path)
-    fn add_control_input(&mut self, receiver: broadcast::Receiver<StreamData>);
+    fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>);
 }
 
 /// Error type for processor operations
@@ -70,9 +70,20 @@ impl std::error::Error for ProcessorError {}
 
 /// Combined input stream built from multiple broadcast receivers
 pub(crate) type ProcessorInputStream = SelectAll<BroadcastStream<StreamData>>;
+pub(crate) type ControlInputStream = SelectAll<BroadcastStream<ControlSignal>>;
 
 /// Convert a list of broadcast receivers into a single SelectAll stream
 pub(crate) fn fan_in_streams(inputs: Vec<broadcast::Receiver<StreamData>>) -> ProcessorInputStream {
+    let mut streams = SelectAll::new();
+    for receiver in inputs {
+        streams.push(BroadcastStream::new(receiver));
+    }
+    streams
+}
+
+pub(crate) fn fan_in_control_streams(
+    inputs: Vec<broadcast::Receiver<ControlSignal>>,
+) -> ControlInputStream {
     let mut streams = SelectAll::new();
     for receiver in inputs {
         streams.push(BroadcastStream::new(receiver));
@@ -96,6 +107,27 @@ pub(crate) async fn send_with_backpressure(
             let value = payload
                 .take()
                 .expect("send_with_backpressure payload already taken");
+            sender
+                .send(value)
+                .map(|_| ())
+                .map_err(|_| ProcessorError::ChannelClosed)?;
+            return Ok(());
+        }
+        sleep(BACKOFF).await;
+    }
+}
+
+pub(crate) async fn send_control_with_backpressure(
+    sender: &broadcast::Sender<ControlSignal>,
+    signal: ControlSignal,
+) -> Result<(), ProcessorError> {
+    const BACKOFF: Duration = Duration::from_millis(1);
+    let mut payload = Some(signal);
+    loop {
+        if sender.receiver_count() == 0 || sender.len() < DEFAULT_CHANNEL_CAPACITY {
+            let value = payload
+                .take()
+                .expect("send_control_with_backpressure payload already taken");
             sender
                 .send(value)
                 .map(|_| ())

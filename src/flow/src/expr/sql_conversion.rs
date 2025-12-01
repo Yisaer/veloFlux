@@ -48,6 +48,13 @@ impl SchemaBinding {
     }
 }
 
+fn find_column_index(schema: &Schema, column_name: &str) -> Option<usize> {
+    schema
+        .column_schemas()
+        .iter()
+        .position(|column| column.name == column_name)
+}
+
 impl SchemaBindingEntry {
     pub fn matches(&self, qualifier: &str) -> bool {
         self.source_name == qualifier
@@ -348,16 +355,14 @@ fn resolve_column_binding(
             .iter()
             .find(|binding| binding.matches(qualifier))
             .ok_or_else(|| ConversionError::ColumnNotFound(qualifier.to_string()))?;
-        let index = binding.schema.column_index(column_name).ok_or_else(|| {
+        let index = find_column_index(binding.schema.as_ref(), column_name).ok_or_else(|| {
             ConversionError::ColumnNotFound(format!("{}.{}", qualifier, column_name))
         })?;
         return Ok((binding.source_name.clone(), index));
     }
 
     let mut matches = bindings.entries().iter().filter_map(|binding| {
-        binding
-            .schema
-            .column_index(column_name)
+        find_column_index(binding.schema.as_ref(), column_name)
             .map(|idx| (binding.source_name.clone(), idx))
     });
 
