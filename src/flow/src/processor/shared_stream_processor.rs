@@ -1,4 +1,6 @@
-use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
+use crate::processor::base::{
+    fan_in_streams, forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use crate::shared_stream_registry;
 use futures::stream::StreamExt;
@@ -80,13 +82,26 @@ impl Processor for SharedStreamProcessor {
                         match control_msg {
                             Some(Ok(data)) => {
                                 let is_terminal = data.is_terminal();
-                                let _ = control_output.send(data);
+                                send_with_backpressure(&control_output, data.clone()).await?;
                                 if is_terminal {
                                     return Ok(());
                                 }
                             }
                             Some(Err(err)) => {
-                                return Err(ProcessorError::ProcessingError(format!("SharedStreamProcessor control lagged: {}", err)));
+                                let message =
+                                    format!("SharedStreamProcessor control input lagged: {err}");
+                                println!(
+                                    "[SharedStreamProcessor:{processor_id}] control input lagged: {err}"
+                                );
+                                forward_error(&output, &processor_id, message.clone()).await?;
+                                send_with_backpressure(
+                                    &control_output,
+                                    StreamData::error(
+                                        StreamError::new(message).with_source(processor_id.clone()),
+                                    ),
+                                )
+                                .await?;
+                                continue;
                             }
                             None => {
                                 control_inputs_active = false;
@@ -97,14 +112,26 @@ impl Processor for SharedStreamProcessor {
                         match shared_control_msg {
                             Some(Ok(data)) => {
                                 let is_terminal = data.is_terminal();
-                                let _ = control_output.send(data);
+                                send_with_backpressure(&control_output, data.clone()).await?;
                                 if is_terminal {
                                     return Ok(());
                                 }
                             }
                             Some(Err(err)) => {
-                                let _ = control_output.send(StreamData::error(StreamError::new(format!("shared control lagged: {}", err))));
-                                return Err(ProcessorError::ProcessingError("shared control stream lagged".into()));
+                                let message = format!("shared control lagged: {err}");
+                                println!(
+                                    "[SharedStreamProcessor:{processor_id}] shared control lagged: {err}"
+                                );
+                                send_with_backpressure(
+                                    &control_output,
+                                    StreamData::error(
+                                        StreamError::new(message.clone())
+                                            .with_source(processor_id.clone()),
+                                    ),
+                                )
+                                .await?;
+                                forward_error(&output, &processor_id, message).await?;
+                                continue;
                             }
                             None => {
                                 return Ok(());
@@ -114,7 +141,7 @@ impl Processor for SharedStreamProcessor {
                     data_msg = inputs.next(), if input_active => {
                         if let Some(Ok(data)) = data_msg {
                             let is_terminal = data.is_terminal();
-                            let _ = output.send(data);
+                            send_with_backpressure(&output, data).await?;
                             if is_terminal {
                                 return Ok(());
                             }
@@ -126,16 +153,18 @@ impl Processor for SharedStreamProcessor {
                         match shared_data_msg {
                             Some(Ok(data)) => {
                                 let is_terminal = data.is_terminal();
-                                if output.send(data).is_err() {
-                                    return Err(ProcessorError::ChannelClosed);
-                                }
+                                send_with_backpressure(&output, data).await?;
                                 if is_terminal {
                                     return Ok(());
                                 }
                             }
                             Some(Err(err)) => {
-                                let _ = output.send(StreamData::error(StreamError::new(format!("shared data lagged: {}", err))));
-                                return Err(ProcessorError::ProcessingError("shared data stream lagged".into()));
+                                let message = format!("shared data lagged: {err}");
+                                println!(
+                                    "[SharedStreamProcessor:{processor_id}] shared data lagged: {err}"
+                                );
+                                forward_error(&output, &processor_id, message).await?;
+                                continue;
                             }
                             None => return Ok(()),
                         }

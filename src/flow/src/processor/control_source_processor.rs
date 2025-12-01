@@ -3,7 +3,7 @@
 //! This processor is responsible for receiving and sending control signals
 //! that coordinate the entire stream processing pipeline.
 
-use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
+use crate::processor::base::{forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY};
 use crate::processor::{Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
 use tokio::sync::broadcast;
@@ -43,18 +43,13 @@ impl ControlSourceProcessor {
     pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
         if let StreamData::Control(signal) = &data {
             if signal.routes_via_control() {
-                self.control_output
-                    .send(data.clone())
-                    .map_err(|_| ProcessorError::ChannelClosed)?;
+                send_with_backpressure(&self.control_output, data.clone()).await?;
             }
             if !signal.routes_via_data() {
                 return Ok(());
             }
         }
-        self.output
-            .send(data)
-            .map(|_| ())
-            .map_err(|_| ProcessorError::ChannelClosed)
+        send_with_backpressure(&self.output, data).await
     }
 
     /// Send StreamData to a specific downstream processor by id.
@@ -97,15 +92,14 @@ impl Processor for ControlSourceProcessor {
                 let data = match item {
                     Ok(data) => data,
                     Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                        let err = ProcessorError::ProcessingError(format!(
-                            "Control source input lagged by {} messages",
-                            skipped
-                        ));
+                        let message =
+                            format!("Control source input lagged by {} messages", skipped);
                         println!(
-                            "[ControlSourceProcessor:{processor_id}] stopped with error: {}",
-                            err
+                            "[ControlSourceProcessor:{processor_id}] input lagged: {}",
+                            message
                         );
-                        return Err(err);
+                        forward_error(&output, &processor_id, message).await?;
+                        continue;
                     }
                 };
 
@@ -114,9 +108,7 @@ impl Processor for ControlSourceProcessor {
 
                 if let StreamData::Control(signal) = &data {
                     if signal.routes_via_control() {
-                        control_output
-                            .send(data.clone())
-                            .map_err(|_| ProcessorError::ChannelClosed)?;
+                        send_with_backpressure(&control_output, data.clone()).await?;
                     }
                     if !signal.routes_via_data() {
                         deliver_to_data = false;
@@ -124,9 +116,7 @@ impl Processor for ControlSourceProcessor {
                 }
 
                 if deliver_to_data {
-                    output
-                        .send(data)
-                        .map_err(|_| ProcessorError::ChannelClosed)?;
+                    send_with_backpressure(&output, data).await?;
                 }
 
                 if is_terminal {
@@ -137,9 +127,7 @@ impl Processor for ControlSourceProcessor {
 
             // Input closed without explicit StreamEnd, propagate shutdown.
             println!("[ControlSourceProcessor:{processor_id}] stopping (input closed)");
-            output
-                .send(StreamData::stream_end())
-                .map_err(|_| ProcessorError::ChannelClosed)?;
+            send_with_backpressure(&output, StreamData::stream_end()).await?;
             Ok(())
         })
     }

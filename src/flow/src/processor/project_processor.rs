@@ -4,7 +4,9 @@
 
 use crate::model::Collection;
 use crate::planner::physical::{PhysicalPlan, PhysicalProject, PhysicalProjectField};
-use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
+use crate::processor::base::{
+    fan_in_streams, forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
 use std::sync::Arc;
@@ -93,14 +95,24 @@ impl Processor for ProjectProcessor {
                             let control_data = match result {
                                 Ok(data) => data,
                                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                                    return Err(ProcessorError::ProcessingError(format!(
+                                    let message = format!(
                                         "ProjectProcessor control input lagged by {} messages",
                                         skipped
-                                    )))
+                                    );
+                                    println!("[ProjectProcessor:{id}] control input lagged by {skipped} messages");
+                                    forward_error(&output, &id, message.clone()).await?;
+                                    send_with_backpressure(
+                                        &control_output,
+                                        StreamData::error(
+                                            StreamError::new(message).with_source(id.clone()),
+                                        ),
+                                    )
+                                    .await?;
+                                    continue;
                                 }
                             };
                             let is_terminal = control_data.is_terminal();
-                            let _ = control_output.send(control_data);
+                            send_with_backpressure(&control_output, control_data.clone()).await?;
                             if is_terminal {
                                 println!("[ProjectProcessor:{id}] received StreamEnd (control)");
                                 println!("[ProjectProcessor:{id}] stopped");
@@ -117,25 +129,19 @@ impl Processor for ProjectProcessor {
                                 match apply_projection(collection.as_ref(), &fields) {
                                     Ok(projected_collection) => {
                                         let projected_data = StreamData::collection(projected_collection);
-                                        output
-                                            .send(projected_data)
-                                            .map_err(|_| ProcessorError::ChannelClosed)?;
+                                        send_with_backpressure(&output, projected_data).await?;
                                     }
                                     Err(e) => {
                                         let error_data = StreamData::error(
                                             StreamError::new(e.to_string()).with_source(id.clone()),
                                         );
-                                        output
-                                            .send(error_data)
-                                            .map_err(|_| ProcessorError::ChannelClosed)?;
+                                        send_with_backpressure(&output, error_data).await?;
                                     }
                                 }
                             }
                             Some(Ok(data)) => {
                                 let is_terminal = data.is_terminal();
-                                output
-                                    .send(data)
-                                    .map_err(|_| ProcessorError::ChannelClosed)?;
+                                send_with_backpressure(&output, data).await?;
                                 if is_terminal {
                                     println!("[ProjectProcessor:{id}] received StreamEnd (data)");
                                     println!("[ProjectProcessor:{id}] stopped");
@@ -143,12 +149,20 @@ impl Processor for ProjectProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let err = ProcessorError::ProcessingError(format!(
+                                let message = format!(
                                     "ProjectProcessor input lagged by {} messages",
                                     skipped
-                                ));
-                                println!("[ProjectProcessor:{id}] stopped with error: {}", err);
-                                return Err(err);
+                                );
+                                println!("[ProjectProcessor:{id}] input lagged by {skipped} messages");
+                                forward_error(&output, &id, message.clone()).await?;
+                                send_with_backpressure(
+                                    &control_output,
+                                    StreamData::error(
+                                        StreamError::new(message).with_source(id.clone()),
+                                    ),
+                                )
+                                .await?;
+                                continue;
                             }
                             None => {
                                 println!("[ProjectProcessor:{id}] stopped");

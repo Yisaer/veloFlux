@@ -5,9 +5,10 @@
 //! - DataSourceProcessor: Processes data from PhysicalDatasource
 //! - ResultCollectProcessor: Final destination, prints received data
 
-use crate::processor::StreamData;
+use crate::processor::{StreamData, StreamError};
 use futures::stream::SelectAll;
 use tokio::sync::broadcast;
+use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::BroadcastStream;
 
 /// Default buffer size for processor broadcast channels
@@ -77,4 +78,40 @@ pub(crate) fn fan_in_streams(inputs: Vec<broadcast::Receiver<StreamData>>) -> Pr
         streams.push(BroadcastStream::new(receiver));
     }
     streams
+}
+
+/// Send data to a broadcast channel while applying cooperative backpressure.
+///
+/// `tokio::broadcast` drops the oldest messages when the channel is full.
+/// To avoid that behaviour we proactively wait until space becomes
+/// available (or until there are no receivers left) before sending.
+pub(crate) async fn send_with_backpressure(
+    sender: &broadcast::Sender<StreamData>,
+    data: StreamData,
+) -> Result<(), ProcessorError> {
+    const BACKOFF: Duration = Duration::from_millis(1);
+    let mut payload = Some(data);
+    loop {
+        if sender.receiver_count() == 0 || sender.len() < DEFAULT_CHANNEL_CAPACITY {
+            let value = payload
+                .take()
+                .expect("send_with_backpressure payload already taken");
+            sender
+                .send(value)
+                .map(|_| ())
+                .map_err(|_| ProcessorError::ChannelClosed)?;
+            return Ok(());
+        }
+        sleep(BACKOFF).await;
+    }
+}
+
+/// Convenience helper to emit a [`StreamData::Error`] for the given processor.
+pub(crate) async fn forward_error(
+    sender: &broadcast::Sender<StreamData>,
+    processor_id: &str,
+    message: impl Into<String>,
+) -> Result<(), ProcessorError> {
+    let error = StreamError::new(message).with_source(processor_id.to_string());
+    send_with_backpressure(sender, StreamData::error(error)).await
 }

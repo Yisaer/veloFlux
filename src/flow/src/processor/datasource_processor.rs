@@ -5,7 +5,9 @@
 
 use crate::codec::RecordDecoder;
 use crate::connector::{ConnectorError, ConnectorEvent, SourceConnector};
-use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
+use crate::processor::base::{
+    fan_in_streams, forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use datatypes::Schema;
 use futures::stream::StreamExt;
@@ -83,31 +85,52 @@ impl ConnectorBinding {
             "[DataSourceProcessor:{processor_id}] connector {} starting",
             connector_id
         );
+        let sender_clone = sender.clone();
         self.handle = Some(tokio::spawn(async move {
+            let sender = sender_clone;
             while let Some(event) = stream.next().await {
                 match event {
                     Ok(ConnectorEvent::Payload(bytes)) => match decoder.decode(&bytes) {
                         Ok(batch) => {
-                            if sender
-                                .send(StreamData::collection(Box::new(batch)))
-                                .is_err()
+                            if send_with_backpressure(
+                                &sender,
+                                StreamData::collection(Box::new(batch)),
+                            )
+                            .await
+                            .is_err()
                             {
                                 break;
                             }
                         }
                         Err(err) => {
-                            let _ = sender.send(StreamData::error(
-                                StreamError::new(format!("decode error: {}", err))
-                                    .with_source(processor_id.clone()),
-                            ));
+                            if send_with_backpressure(
+                                &sender,
+                                StreamData::error(
+                                    StreamError::new(format!("decode error: {}", err))
+                                        .with_source(processor_id.clone()),
+                                ),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
                         }
                     },
                     Ok(ConnectorEvent::EndOfStream) => break,
                     Err(err) => {
-                        let _ = sender.send(StreamData::error(
-                            StreamError::new(format!("connector error: {}", err))
-                                .with_source(processor_id.clone()),
-                        ));
+                        if send_with_backpressure(
+                            &sender,
+                            StreamData::error(
+                                StreamError::new(format!("connector error: {}", err))
+                                    .with_source(processor_id.clone()),
+                            ),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -242,17 +265,24 @@ impl Processor for DataSourceProcessor {
                             let control_data = match result {
                                 Ok(data) => data,
                                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                                    let err = ProcessorError::ProcessingError(format!(
+                                    let message = format!(
                                         "DataSource control input lagged by {} messages",
                                         skipped
-                                    ));
-                                    Self::shutdown_connectors(&mut connectors).await?;
-                                    println!("{log_prefix} stopped with error: {}", err);
-                                    return Err(err);
+                                    );
+                                    println!("{log_prefix} control input lagged by {skipped} messages");
+                                    forward_error(&output, &processor_id, message.clone()).await?;
+                                    send_with_backpressure(
+                                        &control_output,
+                                        StreamData::error(
+                                            StreamError::new(message).with_source(processor_id.clone()),
+                                        ),
+                                    )
+                                    .await?;
+                                    continue;
                                 }
                             };
                             let is_terminal = control_data.is_terminal();
-                            let _ = control_output.send(control_data);
+                            send_with_backpressure(&control_output, control_data.clone()).await?;
                             if is_terminal {
                                 println!("{log_prefix} received StreamEnd (control)");
                                 Self::shutdown_connectors(&mut connectors).await?;
@@ -278,9 +308,7 @@ impl Processor for DataSourceProcessor {
                                     data = StreamData::Collection(collection);
                                 }
                                 let is_terminal = data.is_terminal();
-                                output
-                                    .send(data)
-                                    .map_err(|_| ProcessorError::ChannelClosed)?;
+                                send_with_backpressure(&output, data).await?;
 
                                 if is_terminal {
                                     println!("{log_prefix} received StreamEnd (data)");
@@ -290,13 +318,20 @@ impl Processor for DataSourceProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let err = ProcessorError::ProcessingError(format!(
+                                let message = format!(
                                     "DataSource input lagged by {} messages",
                                     skipped
-                                ));
-                                Self::shutdown_connectors(&mut connectors).await?;
-                                println!("{log_prefix} stopped with error: {}", err);
-                                return Err(err);
+                                );
+                                println!("{log_prefix} input lagged by {skipped} messages");
+                                forward_error(&output, &processor_id, message.clone()).await?;
+                                send_with_backpressure(
+                                    &control_output,
+                                    StreamData::error(
+                                        StreamError::new(message).with_source(processor_id.clone()),
+                                    ),
+                                )
+                                .await?;
+                                continue;
                             }
                             None => {
                                 Self::shutdown_connectors(&mut connectors).await?;

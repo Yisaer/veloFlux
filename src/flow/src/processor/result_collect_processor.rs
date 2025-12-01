@@ -3,7 +3,7 @@
 //! This processor receives data from upstream processors and forwards it to a single output.
 
 use crate::processor::base::fan_in_streams;
-use crate::processor::{Processor, ProcessorError, StreamData};
+use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -80,10 +80,21 @@ impl Processor for ResultCollectProcessor {
                             let control_data = match result {
                                 Ok(data) => data,
                                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                                    return Err(ProcessorError::ProcessingError(format!(
+                                    let message = format!(
                                         "ResultCollectProcessor control input lagged by {} messages",
                                         skipped
-                                    )))
+                                    );
+                                    println!(
+                                        "[ResultCollectProcessor:{processor_id}] control input lagged by {skipped} messages"
+                                    );
+                                    output
+                                        .send(StreamData::error(
+                                            StreamError::new(message)
+                                                .with_source(processor_id.clone()),
+                                        ))
+                                        .await
+                                        .map_err(|_| ProcessorError::ChannelClosed)?;
+                                    continue;
                                 }
                             };
                             let is_terminal = control_data.is_terminal();
@@ -124,15 +135,22 @@ impl Processor for ResultCollectProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let err = ProcessorError::ProcessingError(format!(
+                                let message = format!(
                                     "ResultCollectProcessor input lagged by {} messages",
                                     skipped
-                                ));
-                                println!(
-                                    "[ResultCollectProcessor:{}] stopped with error: {}",
-                                    processor_id, err
                                 );
-                                return Err(err);
+                                println!(
+                                    "[ResultCollectProcessor:{}] input lagged by {} messages",
+                                    processor_id, skipped
+                                );
+                                output
+                                    .send(StreamData::error(
+                                        StreamError::new(message)
+                                            .with_source(processor_id.clone()),
+                                    ))
+                                    .await
+                                    .map_err(|_| ProcessorError::ChannelClosed)?;
+                                continue;
                             }
                             None => {
                                 output

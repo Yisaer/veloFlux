@@ -3,7 +3,9 @@
 use crate::codec::encoder::CollectionEncoder;
 use crate::connector::SinkConnector;
 use crate::model::Collection;
-use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
+use crate::processor::base::{
+    fan_in_streams, forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
 use once_cell::sync::Lazy;
@@ -180,14 +182,26 @@ impl Processor for SinkProcessor {
                             let control_data = match result {
                                 Ok(data) => data,
                                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                                    return Err(ProcessorError::ProcessingError(format!(
+                                    let message = format!(
                                         "SinkProcessor control input lagged by {} messages",
                                         skipped
-                                    )))
+                                    );
+                                    println!("[SinkProcessor:{processor_id}] control input lagged by {skipped} messages");
+                                    if let Some(output_sender) = &output {
+                                        forward_error(output_sender, &processor_id, message.clone()).await?;
+                                    }
+                                    send_with_backpressure(
+                                        &control_output,
+                                        StreamData::error(
+                                            StreamError::new(message).with_source(processor_id.clone()),
+                                        ),
+                                    )
+                                    .await?;
+                                    continue;
                                 }
                             };
                             let is_terminal = control_data.is_terminal();
-                            let _ = control_output.send(control_data);
+                            send_with_backpressure(&control_output, control_data.clone()).await?;
                             if is_terminal {
                                 println!("[SinkProcessor:{processor_id}] received StreamEnd (control)");
                                 Self::handle_terminal(&mut connectors).await?;
@@ -205,29 +219,25 @@ impl Processor for SinkProcessor {
                                 if let Err(err) =
                                     Self::handle_collection(&processor_id, &mut connectors, collection.as_ref()).await
                                 {
+                                    println!("[SinkProcessor:{processor_id}] collection handling error: {err}");
                                     if let Some(output_sender) = &output {
-                                        let error = StreamData::error(
-                                            StreamError::new(err.to_string()).with_source(processor_id.clone()),
-                                        );
-                                        output_sender
-                                            .send(error)
-                                            .map_err(|_| ProcessorError::ChannelClosed)?;
+                                        forward_error(output_sender, &processor_id, err.to_string()).await?;
                                     }
-                                    return Err(err);
+                                    continue;
                                 }
 
                                 if let Some(output_sender) = &output {
-                                    output_sender
-                                        .send(StreamData::collection(collection))
-                                        .map_err(|_| ProcessorError::ChannelClosed)?;
+                                    send_with_backpressure(
+                                        output_sender,
+                                        StreamData::collection(collection),
+                                    )
+                                    .await?;
                                 }
                             }
                             Some(Ok(data)) => {
                                 let is_terminal = data.is_terminal();
                                 if let Some(output_sender) = &output {
-                                    output_sender
-                                        .send(data)
-                                        .map_err(|_| ProcessorError::ChannelClosed)?;
+                                    send_with_backpressure(output_sender, data.clone()).await?;
                                 }
 
                                 if is_terminal {
@@ -238,12 +248,22 @@ impl Processor for SinkProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let err = ProcessorError::ProcessingError(format!(
+                                let message = format!(
                                     "SinkProcessor input lagged by {} messages",
                                     skipped
-                                ));
-                                println!("[SinkProcessor:{processor_id}] stopped with error: {}", err);
-                                return Err(err);
+                                );
+                                println!("[SinkProcessor:{processor_id}] input lagged by {skipped} messages");
+                                if let Some(output_sender) = &output {
+                                    forward_error(output_sender, &processor_id, message.clone()).await?;
+                                }
+                                send_with_backpressure(
+                                    &control_output,
+                                    StreamData::error(
+                                        StreamError::new(message).with_source(processor_id.clone()),
+                                    ),
+                                )
+                                .await?;
+                                continue;
                             }
                             None => {
                                 Self::handle_terminal(&mut connectors).await?;

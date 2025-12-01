@@ -4,7 +4,9 @@
 
 use crate::model::Collection;
 use crate::planner::physical::{PhysicalFilter, PhysicalPlan};
-use crate::processor::base::{fan_in_streams, DEFAULT_CHANNEL_CAPACITY};
+use crate::processor::base::{
+    fan_in_streams, forward_error, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+};
 use crate::processor::{Processor, ProcessorError, StreamData, StreamError};
 use futures::stream::StreamExt;
 use std::sync::Arc;
@@ -93,14 +95,24 @@ impl Processor for FilterProcessor {
                             let control_data = match result {
                                 Ok(data) => data,
                                 Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                                    return Err(ProcessorError::ProcessingError(format!(
+                                    let message = format!(
                                         "FilterProcessor control input lagged by {} messages",
                                         skipped
-                                    )))
+                                    );
+                                    println!("[FilterProcessor:{id}] control input lagged by {skipped} messages");
+                                    forward_error(&output, &id, message.clone()).await?;
+                                    send_with_backpressure(
+                                        &control_output,
+                                        StreamData::error(
+                                            StreamError::new(message).with_source(id.clone()),
+                                        ),
+                                    )
+                                    .await?;
+                                    continue;
                                 }
                             };
                             let is_terminal = control_data.is_terminal();
-                            let _ = control_output.send(control_data);
+                            send_with_backpressure(&control_output, control_data.clone()).await?;
                             if is_terminal {
                                 println!("[FilterProcessor:{id}] received StreamEnd (control)");
                                 println!("[FilterProcessor:{id}] stopped");
@@ -117,25 +129,21 @@ impl Processor for FilterProcessor {
                                 match apply_filter(collection.as_ref(), &filter_expr) {
                                     Ok(filtered_collection) => {
                                         let filtered_data = StreamData::collection(filtered_collection);
-                                        output
-                                            .send(filtered_data)
-                                            .map_err(|_| ProcessorError::ChannelClosed)?;
+                                        send_with_backpressure(&output, filtered_data).await?;
                                     }
                                     Err(e) => {
-                                        let error_data = StreamData::error(
-                                            StreamError::new(e.to_string()).with_source(id.clone()),
-                                        );
-                                        output
-                                            .send(error_data)
-                                            .map_err(|_| ProcessorError::ChannelClosed)?;
+                                        let error = StreamError::new(e.to_string()).with_source(id.clone());
+                                        send_with_backpressure(
+                                            &output,
+                                            StreamData::error(error),
+                                        )
+                                        .await?;
                                     }
                                 }
                             }
                             Some(Ok(data)) => {
                                 let is_terminal = data.is_terminal();
-                                output
-                                    .send(data)
-                                    .map_err(|_| ProcessorError::ChannelClosed)?;
+                                send_with_backpressure(&output, data).await?;
                                 if is_terminal {
                                     println!("[FilterProcessor:{id}] received StreamEnd (data)");
                                     println!("[FilterProcessor:{id}] stopped");
@@ -143,12 +151,20 @@ impl Processor for FilterProcessor {
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let err = ProcessorError::ProcessingError(format!(
+                                let message = format!(
                                     "FilterProcessor input lagged by {} messages",
                                     skipped
-                                ));
-                                println!("[FilterProcessor:{id}] stopped with error: {}", err);
-                                return Err(err);
+                                );
+                                println!("[FilterProcessor:{id}] input lagged by {skipped} messages");
+                                forward_error(&output, &id, message.clone()).await?;
+                                send_with_backpressure(
+                                    &control_output,
+                                    StreamData::error(
+                                        StreamError::new(message).with_source(id.clone()),
+                                    ),
+                                )
+                                .await?;
+                                continue;
                             }
                             None => {
                                 println!("[FilterProcessor:{id}] stopped");
