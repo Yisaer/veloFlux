@@ -1,0 +1,12 @@
+{
+  "id": "stream_id",
+  "type": "mqtt",
+  "schema": {
+
+  },
+  "props" : {
+    "mqtt": {
+      "key":"value"
+    }
+  }
+}

@@ -12,7 +12,8 @@ use flow::shared_stream::{
     registry as shared_stream_registry,
 };
 use flow::{
-    JsonDecoder, Schema,
+    JsonDecoder, Schema, StreamDefinition, StreamProps,
+    catalog::MqttStreamProps,
     connector::{MqttSourceConfig, MqttSourceConnector},
 };
 use serde::{Deserialize, Serialize};
@@ -122,21 +123,30 @@ pub async fn create_stream_handler(Json(req): Json<CreateStreamRequest>) -> impl
         Ok(schema) => schema,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
-    let schema_clone = schema.clone();
+    let schema_arc = Arc::new(schema);
+
+    let stream_props = match build_stream_props(&req.shared) {
+        Ok(props) => props,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+
+    let definition = StreamDefinition::new(req.name.clone(), Arc::clone(&schema_arc), stream_props);
 
     let catalog = global_catalog();
-    if let Err(err) = catalog.insert(req.name.clone(), schema) {
-        return (
-            StatusCode::CONFLICT,
-            format!("failed to create stream: {}", err),
-        )
-            .into_response();
-    }
+    let stored_definition = match catalog.insert(definition) {
+        Ok(def) => def,
+        Err(err) => {
+            return (
+                StatusCode::CONFLICT,
+                format!("failed to create stream: {}", err),
+            )
+                .into_response();
+        }
+    };
 
     let mut shared_stream_runtime = None;
     if req.shared.is_enabled() {
-        let schema_arc = Arc::new(schema_clone.clone());
-        match create_shared_stream(&req.name, schema_arc, &req.shared).await {
+        match create_shared_stream(&req.name, Arc::clone(&schema_arc), &req.shared).await {
             Ok(info) => shared_stream_runtime = Some(info),
             Err(err) => {
                 let _ = catalog.remove(&req.name);
@@ -150,29 +160,25 @@ pub async fn create_stream_handler(Json(req): Json<CreateStreamRequest>) -> impl
     }
 
     println!("[manager] stream {} created", req.name);
-    let response = build_stream_info(
-        req.name.clone(),
-        Arc::new(schema_clone),
-        shared_stream_runtime,
-    );
+    let response = build_stream_info(stored_definition, shared_stream_runtime);
     (StatusCode::CREATED, Json(response)).into_response()
 }
 
 pub async fn list_streams() -> impl IntoResponse {
     let catalog = global_catalog();
-    let schemas = catalog.list();
+    let streams = catalog.list();
     let shared_infos = shared_stream_registry().list_streams().await;
     let shared_map: HashMap<String, SharedStreamInfo> = shared_infos
         .into_iter()
         .map(|info| (info.name.clone(), info))
         .collect();
 
-    let mut payload = Vec::with_capacity(schemas.len());
-    for (name, schema) in schemas {
+    let mut payload = Vec::with_capacity(streams.len());
+    for definition in streams {
         let shared_item = shared_map
-            .get(&name)
+            .get(definition.id())
             .map(|info| into_shared_stream_item(info.clone()));
-        payload.push(build_stream_info(name, schema, shared_item));
+        payload.push(build_stream_info(definition, shared_item));
     }
     Json(payload)
 }
@@ -242,12 +248,12 @@ async fn create_shared_stream(
 }
 
 fn build_stream_info(
-    name: String,
-    schema: Arc<Schema>,
+    definition: Arc<StreamDefinition>,
     shared_item: Option<SharedStreamItem>,
 ) -> StreamInfo {
+    let schema = definition.schema();
     StreamInfo {
-        name: name.clone(),
+        name: definition.id().to_string(),
         shared: shared_item.is_some(),
         schema: StreamSchemaInfo {
             columns: schema
@@ -329,6 +335,32 @@ fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Schema, String
         .map(|col| column_schema_from_request(req.name.clone(), col))
         .collect();
     columns.map(Schema::new)
+}
+
+fn build_stream_props(options: &SharedStreamOptions) -> Result<StreamProps, String> {
+    let connector_kind = options
+        .connector
+        .as_deref()
+        .unwrap_or("mqtt")
+        .to_ascii_lowercase();
+    match connector_kind.as_str() {
+        "mqtt" => {
+            let broker = options
+                .source_broker
+                .as_deref()
+                .unwrap_or(DEFAULT_BROKER_URL);
+            let topic = options.source_topic.as_deref().unwrap_or(SOURCE_TOPIC);
+            let qos = options.qos.unwrap_or(MQTT_QOS);
+            Ok(StreamProps::Mqtt(MqttStreamProps {
+                broker_url: broker.to_string(),
+                topic: topic.to_string(),
+                qos,
+                client_id: None,
+                connector_key: None,
+            }))
+        }
+        other => Err(format!("unsupported shared stream connector: {other}")),
+    }
 }
 
 fn column_schema_from_request(

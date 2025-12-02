@@ -7,7 +7,10 @@ pub mod planner;
 pub mod processor;
 pub mod shared_stream;
 
-pub use catalog::{global_catalog, Catalog, CatalogError};
+pub use catalog::{
+    global_catalog, Catalog, CatalogError, MqttStreamProps, StreamDefinition, StreamProps,
+    StreamType,
+};
 pub use codec::{
     CodecError, CollectionEncoder, EncodeError, JsonDecoder, JsonEncoder, RecordDecoder,
 };
@@ -61,9 +64,10 @@ fn build_schema_binding(
     let registry = shared_stream_registry();
     let mut entries = Vec::new();
     for source in &select_stmt.source_infos {
-        let schema = catalog
+        let definition = catalog
             .get(&source.name)
-            .ok_or_else(|| format!("schema for source '{}' not found", source.name))?;
+            .ok_or_else(|| format!("stream '{}' not found in catalog", source.name))?;
+        let schema = definition.schema();
         let kind = if futures::executor::block_on(registry.is_registered(&source.name)) {
             SourceBindingKind::Shared
         } else {

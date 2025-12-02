@@ -4,7 +4,7 @@
 //! and the customizable `create_pipeline` API that accepts user-defined sinks.
 
 use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
-use flow::catalog::global_catalog;
+use flow::catalog::{global_catalog, MqttStreamProps, StreamDefinition, StreamProps};
 use flow::create_pipeline;
 use flow::create_pipeline_with_log_sink;
 use flow::model::batch_from_columns_simple;
@@ -12,6 +12,7 @@ use flow::planner::sink::{
     NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 };
 use flow::processor::StreamData;
+use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
 /// Test case structure for table-driven tests
@@ -368,5 +369,10 @@ fn install_stream_schema(columns: &[(String, Vec<Value>)]) {
         })
         .collect();
     let schema = Schema::new(schema_columns);
-    global_catalog().upsert("stream".to_string(), schema);
+    let definition = StreamDefinition::new(
+        "stream".to_string(),
+        Arc::new(schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+    );
+    global_catalog().upsert(definition);
 }
