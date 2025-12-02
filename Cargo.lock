@@ -863,6 +863,7 @@ dependencies = [
  "flow",
  "parser",
  "serde",
+ "serde_json",
  "tokio",
 ]
 

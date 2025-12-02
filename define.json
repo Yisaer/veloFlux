@@ -1,12 +1,12 @@
 {
-  "id": "stream_id",
-  "type": "mqtt",
-  "schema": {
+  "id": "pipeline_id",
+  "sql": "select * from stream",
+  "sinks": [
+    {
+      "type": "mqtt",
+      "props": {
 
-  },
-  "props" : {
-    "mqtt": {
-      "key":"value"
+      }
     }
-  }
+  ]
 }
