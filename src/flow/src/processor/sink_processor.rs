@@ -160,11 +160,8 @@ impl Processor for SinkProcessor {
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
         let mut control_active = !control_streams.is_empty();
-        let output = if self.forward_to_result {
-            Some(self.output.clone())
-        } else {
-            None
-        };
+        let output = self.output.clone();
+        let forward_data = self.forward_to_result;
         let control_output = self.control_output.clone();
 
         let mut connectors = std::mem::take(&mut self.connectors);
@@ -188,9 +185,7 @@ impl Processor for SinkProcessor {
                                         skipped
                                     );
                                     println!("[SinkProcessor:{processor_id}] control input lagged by {skipped} messages");
-                                    if let Some(output_sender) = &output {
-                                        forward_error(output_sender, &processor_id, message.clone()).await?;
-                                    }
+                                    forward_error(&output, &processor_id, message.clone()).await?;
                                     continue;
                                 }
                             };
@@ -220,9 +215,9 @@ impl Processor for SinkProcessor {
                                     continue;
                                 }
 
-                                if let Some(output_sender) = &output {
+                                if forward_data {
                                     send_with_backpressure(
-                                        output_sender,
+                                        &output,
                                         StreamData::collection(collection),
                                     )
                                     .await?;
@@ -230,9 +225,7 @@ impl Processor for SinkProcessor {
                             }
                             Some(Ok(data)) => {
                                 let is_terminal = data.is_terminal();
-                                if let Some(output_sender) = &output {
-                                    send_with_backpressure(output_sender, data.clone()).await?;
-                                }
+                                send_with_backpressure(&output, data.clone()).await?;
 
                                 if is_terminal {
                                     println!("[SinkProcessor:{processor_id}] received StreamEnd (data)");
@@ -247,9 +240,7 @@ impl Processor for SinkProcessor {
                                     skipped
                                 );
                                 println!("[SinkProcessor:{processor_id}] input lagged by {skipped} messages");
-                                if let Some(output_sender) = &output {
-                                    forward_error(output_sender, &processor_id, message.clone()).await?;
-                                }
+                                forward_error(&output, &processor_id, message.clone()).await?;
                                 continue;
                             }
                             None => {
@@ -265,11 +256,7 @@ impl Processor for SinkProcessor {
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        if self.forward_to_result {
-            Some(self.output.subscribe())
-        } else {
-            None
-        }
+        Some(self.output.subscribe())
     }
 
     fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {

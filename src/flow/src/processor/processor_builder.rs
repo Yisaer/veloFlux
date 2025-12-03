@@ -521,7 +521,7 @@ fn build_processor_pipeline(
         }
     }
 
-    if !sink_outputs.is_empty() {
+    if !sink_outputs.is_empty() || !sink_control_outputs.is_empty() {
         let mut collector = ResultCollectProcessor::new("result_sink");
         for receiver in sink_outputs {
             collector.add_input(receiver);
