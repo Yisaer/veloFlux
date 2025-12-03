@@ -12,7 +12,7 @@ use crate::planner::sink::{SinkConnectorConfig, SinkEncoderConfig};
 use crate::processor::{
     BatchProcessor, ControlSignal, ControlSourceProcessor, DataSourceProcessor, EncoderProcessor,
     FilterProcessor, Processor, ProcessorError, ProjectProcessor, ResultCollectProcessor,
-    SharedStreamProcessor, SinkProcessor, StreamData,
+    SharedStreamProcessor, SinkProcessor, StreamData, StreamingEncoderProcessor,
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -36,6 +36,8 @@ pub enum PlanProcessor {
     Batch(BatchProcessor),
     /// EncoderProcessor inserted before sinks
     Encoder(EncoderProcessor),
+    /// Streaming encoder processor combining batch + encoder
+    StreamingEncoder(StreamingEncoderProcessor),
 }
 
 impl PlanProcessor {
@@ -48,6 +50,7 @@ impl PlanProcessor {
             PlanProcessor::Filter(p) => p.id(),
             PlanProcessor::Batch(p) => p.id(),
             PlanProcessor::Encoder(p) => p.id(),
+            PlanProcessor::StreamingEncoder(p) => p.id(),
         }
     }
 
@@ -66,6 +69,7 @@ impl PlanProcessor {
             PlanProcessor::Filter(p) => p.start(),
             PlanProcessor::Batch(p) => p.start(),
             PlanProcessor::Encoder(p) => p.start(),
+            PlanProcessor::StreamingEncoder(p) => p.start(),
         }
     }
 
@@ -78,6 +82,7 @@ impl PlanProcessor {
             PlanProcessor::Filter(p) => p.subscribe_output(),
             PlanProcessor::Batch(p) => p.subscribe_output(),
             PlanProcessor::Encoder(p) => p.subscribe_output(),
+            PlanProcessor::StreamingEncoder(p) => p.subscribe_output(),
         }
     }
 
@@ -90,6 +95,7 @@ impl PlanProcessor {
             PlanProcessor::Filter(p) => p.subscribe_control_output(),
             PlanProcessor::Batch(p) => p.subscribe_control_output(),
             PlanProcessor::Encoder(p) => p.subscribe_control_output(),
+            PlanProcessor::StreamingEncoder(p) => p.subscribe_control_output(),
         }
     }
 
@@ -102,6 +108,7 @@ impl PlanProcessor {
             PlanProcessor::Filter(p) => p.add_input(receiver),
             PlanProcessor::Batch(p) => p.add_input(receiver),
             PlanProcessor::Encoder(p) => p.add_input(receiver),
+            PlanProcessor::StreamingEncoder(p) => p.add_input(receiver),
         }
     }
 
@@ -114,6 +121,7 @@ impl PlanProcessor {
             PlanProcessor::Filter(p) => p.add_control_input(receiver),
             PlanProcessor::Batch(p) => p.add_control_input(receiver),
             PlanProcessor::Encoder(p) => p.add_control_input(receiver),
+            PlanProcessor::StreamingEncoder(p) => p.add_control_input(receiver),
         }
     }
 }
@@ -368,9 +376,27 @@ fn create_processor_from_plan_node(
                 PlanProcessor::Encoder(processor),
             ))
         }
+        PhysicalPlan::StreamingEncoder(streaming) => {
+            let processor_id = format!("streaming_encoder_{}", plan_index);
+            let encoder_impl = instantiate_encoder(&streaming.encoder);
+            let processor = StreamingEncoderProcessor::new(
+                processor_id,
+                encoder_impl,
+                streaming.common.batch_count,
+                streaming.common.batch_duration,
+            );
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::StreamingEncoder(processor),
+            ))
+        }
         PhysicalPlan::DataSink(sink_plan) => {
-            let components = build_sink_components(&sink_plan.connectors)?;
+            let components = build_sink_components(std::slice::from_ref(&sink_plan.connector))?;
             Ok(ProcessorBuildOutput::with_sinks(components))
+        }
+        PhysicalPlan::Tail(_tail_plan) => {
+            // TailPlan is a logical collection point - it doesn't create processors directly
+            // Its children (sinks) will be processed individually in the recursive build
+            Ok(ProcessorBuildOutput::with_sinks(Vec::new()))
         }
     }
 }

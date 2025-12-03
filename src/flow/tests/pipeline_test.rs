@@ -326,7 +326,7 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
             encoder_id: "json".to_string(),
         },
     );
-    let sink = PipelineSink::new("custom_sink", vec![connector]).with_forward_to_result(true);
+    let sink = PipelineSink::new("custom_sink", connector).with_forward_to_result(true);
 
     let mut pipeline = create_pipeline("SELECT a FROM stream", vec![sink])
         .expect("pipeline with custom sink should succeed");
@@ -377,7 +377,7 @@ async fn test_batch_processor_flushes_on_count() {
             encoder_id: "json".to_string(),
         },
     );
-    let sink = PipelineSink::new("batch_sink", vec![connector])
+    let sink = PipelineSink::new("batch_sink", connector)
         .with_forward_to_result(true)
         .with_common_props(CommonSinkProps {
             batch_count: Some(2),

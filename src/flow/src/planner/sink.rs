@@ -8,17 +8,17 @@ pub struct PipelineSink {
     pub sink_id: String,
     pub forward_to_result: bool,
     pub common: CommonSinkProps,
-    pub connectors: Vec<PipelineSinkConnector>,
+    pub connector: PipelineSinkConnector,
 }
 
 impl PipelineSink {
-    /// Create a new sink descriptor with the provided connector set.
-    pub fn new(sink_id: impl Into<String>, connectors: Vec<PipelineSinkConnector>) -> Self {
+    /// Create a new sink descriptor with the provided connector configuration.
+    pub fn new(sink_id: impl Into<String>, connector: PipelineSinkConnector) -> Self {
         Self {
             sink_id: sink_id.into(),
             forward_to_result: false,
             common: CommonSinkProps::default(),
-            connectors,
+            connector,
         }
     }
 
@@ -40,7 +40,7 @@ impl fmt::Debug for PipelineSink {
             .field("sink_id", &self.sink_id)
             .field("forward_to_result", &self.forward_to_result)
             .field("common", &self.common)
-            .field("connectors", &self.connectors)
+            .field("connector", &self.connector)
             .finish()
     }
 }
@@ -92,6 +92,15 @@ pub struct NopSinkConfig;
 #[derive(Clone, Debug)]
 pub enum SinkEncoderConfig {
     Json { encoder_id: String },
+}
+
+impl SinkEncoderConfig {
+    /// Whether this encoder supports streaming aggregation.
+    pub fn supports_streaming(&self) -> bool {
+        match self {
+            SinkEncoderConfig::Json { .. } => false,
+        }
+    }
 }
 
 /// Common sink-level properties (batching, etc.).

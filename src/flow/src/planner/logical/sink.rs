@@ -4,18 +4,18 @@ use crate::planner::sink::PipelineSink;
 use std::fmt;
 use std::sync::Arc;
 
-/// Logical plan node that represents the sink stage for a pipeline.
+/// Logical plan node that represents a single sink definition.
 #[derive(Clone)]
 pub struct DataSinkPlan {
     pub base: BaseLogicalPlan,
-    pub sinks: Vec<PipelineSink>,
+    pub sink: PipelineSink,
 }
 
 impl DataSinkPlan {
-    pub fn new(children: Vec<Arc<LogicalPlan>>, index: i64, sinks: Vec<PipelineSink>) -> Self {
+    pub fn new(child: Arc<LogicalPlan>, index: i64, sink: PipelineSink) -> Self {
         Self {
-            base: BaseLogicalPlan::new(children, index),
-            sinks,
+            base: BaseLogicalPlan::new(vec![child], index),
+            sink,
         }
     }
 }
@@ -24,7 +24,7 @@ impl fmt::Debug for DataSinkPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DataSinkPlan")
             .field("index", &self.base.index())
-            .field("sink_count", &self.sinks.len())
+            .field("sink_id", &self.sink.sink_id)
             .finish()
     }
 }

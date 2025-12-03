@@ -110,7 +110,7 @@ fn build_schema_binding(
 ///     SinkConnectorConfig::Nop(NopSinkConfig),
 ///     SinkEncoderConfig::Json { encoder_id: "json".into() },
 /// );
-/// let sink = PipelineSink::new("custom_sink", vec![connector]);
+/// let sink = PipelineSink::new("custom_sink", connector);
 /// let pipeline = create_pipeline("SELECT a FROM stream", vec![sink])?;
 /// # Ok(()) }
 /// ```
@@ -135,7 +135,6 @@ pub fn create_pipeline_with_log_sink(
             encoder_id: "log_sink_encoder".into(),
         },
     );
-    let sink =
-        PipelineSink::new("log_sink", vec![connector]).with_forward_to_result(forward_to_result);
+    let sink = PipelineSink::new("log_sink", connector).with_forward_to_result(forward_to_result);
     create_pipeline(sql, vec![sink])
 }

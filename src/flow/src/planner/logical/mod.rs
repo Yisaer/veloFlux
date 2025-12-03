@@ -2,9 +2,17 @@ use parser::SelectStmt;
 use std::sync::Arc;
 
 pub mod sink;
+pub mod datasource;
+pub mod filter;
+pub mod project;
+pub mod tail;
 
 use crate::planner::sink::PipelineSink;
+pub use datasource::DataSource;
+pub use filter::Filter;
+pub use project::Project;
 pub use sink::DataSinkPlan;
+pub use tail::TailPlan;
 
 #[derive(Debug, Clone)]
 pub struct BaseLogicalPlan {
@@ -32,6 +40,7 @@ pub enum LogicalPlan {
     Filter(Filter),
     Project(Project),
     DataSink(DataSinkPlan),
+    Tail(TailPlan),
 }
 
 impl LogicalPlan {
@@ -41,6 +50,7 @@ impl LogicalPlan {
             LogicalPlan::Filter(plan) => plan.base.children(),
             LogicalPlan::Project(plan) => plan.base.children(),
             LogicalPlan::DataSink(plan) => plan.base.children(),
+            LogicalPlan::Tail(plan) => plan.base.children(),
         }
     }
 
@@ -50,6 +60,7 @@ impl LogicalPlan {
             LogicalPlan::Filter(_) => "Filter",
             LogicalPlan::Project(_) => "Project",
             LogicalPlan::DataSink(_) => "DataSink",
+            LogicalPlan::Tail(_) => "Tail",
         }
     }
 
@@ -59,6 +70,7 @@ impl LogicalPlan {
             LogicalPlan::Filter(plan) => plan.base.index(),
             LogicalPlan::Project(plan) => plan.base.index(),
             LogicalPlan::DataSink(plan) => plan.base.index(),
+            LogicalPlan::Tail(plan) => plan.base.index(),
         }
     }
 }
@@ -129,10 +141,36 @@ pub fn create_logical_plan(
 
     if sinks.is_empty() {
         Ok(base)
-    } else {
+    } else if sinks.len() == 1 {
+        // Single sink: create direct chain as before
         let next_index = max_plan_index(&base) + 1;
-        let sink_plan = DataSinkPlan::new(vec![base], next_index, sinks);
+        let sink_plan = DataSinkPlan::new(base, next_index, sinks.into_iter().next().unwrap());
         Ok(Arc::new(LogicalPlan::DataSink(sink_plan)))
+    } else {
+        // Multiple sinks: create TailPlan to collect multiple DataSinkPlan children
+        let next_index = max_plan_index(&base) + 1;
+        let mut sink_children = Vec::new();
+        let sink_count = sinks.len();
+
+        for (idx, sink) in sinks.into_iter().enumerate() {
+            let sink_index = next_index + idx as i64;
+            let sink_plan = DataSinkPlan::new(Arc::clone(&base), sink_index, sink);
+            sink_children.push(Arc::new(LogicalPlan::DataSink(sink_plan)));
+        }
+
+        // Create TailPlan to hold multiple sink children
+        let tail_plan = TailPlan::new(sink_children, next_index + sink_count as i64);
+        Ok(Arc::new(LogicalPlan::Tail(tail_plan)))
+    }
+}
+
+/// Helper function to print logical plan structure for debugging
+pub fn print_logical_plan(plan: &Arc<LogicalPlan>, indent: usize) {
+    let spacing = "  ".repeat(indent);
+    println!("{}{} (index: {})", spacing, plan.get_plan_type(), plan.get_plan_index());
+    
+    for child in plan.children() {
+        print_logical_plan(child, indent + 1);
     }
 }
 
@@ -146,14 +184,6 @@ fn max_plan_index(plan: &Arc<LogicalPlan>) -> i64 {
     }
     max_index
 }
-
-pub mod datasource;
-pub mod filter;
-pub mod project;
-
-pub use datasource::DataSource;
-pub use filter::Filter;
-pub use project::Project;
 
 #[cfg(test)]
 mod logical_plan_tests {
@@ -247,5 +277,97 @@ mod logical_plan_tests {
         let children = plan.children();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].get_plan_type(), "DataSource");
+    }
+
+    #[test]
+    fn test_create_logical_plan_with_single_sink() {
+        let sql = "SELECT a, b FROM users";
+        let select_stmt = parse_sql(sql).unwrap();
+
+        let sink = PipelineSink::new(
+            "test_sink",
+            crate::planner::sink::PipelineSinkConnector::new(
+                "test_conn",
+                crate::planner::sink::SinkConnectorConfig::Nop(Default::default()),
+                crate::planner::sink::SinkEncoderConfig::Json { encoder_id: "test".to_string() },
+            ),
+        );
+
+        let plan = create_logical_plan(select_stmt, vec![sink]).unwrap();
+
+        // Should be a DataSink node (single sink creates direct chain)
+        assert_eq!(plan.get_plan_type(), "DataSink");
+        
+        // Check that it has one child (Project)
+        let children = plan.children();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].get_plan_type(), "Project");
+    }
+
+    #[test]
+    fn test_create_logical_plan_with_multiple_sinks() {
+        let sql = "SELECT a, b FROM users";
+        let select_stmt = parse_sql(sql).unwrap();
+
+        let sink1 = PipelineSink::new(
+            "sink1",
+            crate::planner::sink::PipelineSinkConnector::new(
+                "conn1",
+                crate::planner::sink::SinkConnectorConfig::Nop(Default::default()),
+                crate::planner::sink::SinkEncoderConfig::Json { encoder_id: "json1".to_string() },
+            ),
+        );
+
+        let sink2 = PipelineSink::new(
+            "sink2",
+            crate::planner::sink::PipelineSinkConnector::new(
+                "conn2",
+                crate::planner::sink::SinkConnectorConfig::Nop(Default::default()),
+                crate::planner::sink::SinkEncoderConfig::Json { encoder_id: "json2".to_string() },
+            ),
+        );
+
+        let plan = create_logical_plan(select_stmt, vec![sink1, sink2]).unwrap();
+
+        // Should be a Tail node (multiple sinks create TailPlan)
+        assert_eq!(plan.get_plan_type(), "Tail");
+        
+        // Check that it has two children (DataSinks)
+        let children = plan.children();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].get_plan_type(), "DataSink");
+        assert_eq!(children[1].get_plan_type(), "DataSink");
+        
+        // Verify each DataSink has Project as child
+        for child in children {
+            let sink_children = child.children();
+            assert_eq!(sink_children.len(), 1);
+            assert_eq!(sink_children[0].get_plan_type(), "Project");
+        }
+        
+        // Verify that all DataSinks share the same Project instance
+        if let LogicalPlan::Tail(tail_plan) = plan.as_ref() {
+            let data_sink_children: Vec<_> = tail_plan.base.children()
+                .iter()
+                .filter(|child| matches!(child.as_ref(), LogicalPlan::DataSink(_)))
+                .collect();
+            
+            assert_eq!(data_sink_children.len(), 2);
+            
+            // Get the Project node from each DataSink
+            let mut project_indices = Vec::new();
+            for data_sink_node in &data_sink_children {
+                if let LogicalPlan::DataSink(data_sink) = data_sink_node.as_ref() {
+                    let project_child = &data_sink.base.children()[0];
+                    project_indices.push(project_child.get_plan_index());
+                }
+            }
+            
+            // All DataSinks should point to the same Project (same index)
+            assert_eq!(project_indices.len(), 2);
+            assert_eq!(project_indices[0], project_indices[1], "DataSinks should share the same Project node");
+            
+            println!("✅ Multiple sinks correctly share the same Project node (index: {})", project_indices[0]);
+        }
     }
 }

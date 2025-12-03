@@ -9,18 +9,14 @@ use super::PhysicalPlan;
 #[derive(Clone)]
 pub struct PhysicalDataSink {
     pub base: BasePhysicalPlan,
-    pub connectors: Vec<PhysicalSinkConnector>,
+    pub connector: PhysicalSinkConnector,
 }
 
 impl PhysicalDataSink {
-    pub fn new(
-        children: Vec<Arc<PhysicalPlan>>,
-        index: i64,
-        connectors: Vec<PhysicalSinkConnector>,
-    ) -> Self {
+    pub fn new(child: Arc<PhysicalPlan>, index: i64, connector: PhysicalSinkConnector) -> Self {
         Self {
-            base: BasePhysicalPlan::new(children, index),
-            connectors,
+            base: BasePhysicalPlan::new(vec![child], index),
+            connector,
         }
     }
 }
@@ -29,7 +25,7 @@ impl fmt::Debug for PhysicalDataSink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PhysicalDataSink")
             .field("index", &self.base.index())
-            .field("connector_count", &self.connectors.len())
+            .field("connector", &self.connector.connector_id)
             .finish()
     }
 }

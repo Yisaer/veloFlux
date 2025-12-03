@@ -313,7 +313,7 @@ fn build_sinks_from_definition(
                         encoder_id: format!("{}_sink_encoder", sink.sink_id),
                     },
                 );
-                let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), vec![connector])
+                let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
                     .with_common_props(sink.common.clone());
                 sinks.push(pipeline_sink);
             }
