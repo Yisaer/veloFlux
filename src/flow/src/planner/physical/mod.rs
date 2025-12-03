@@ -81,4 +81,19 @@ impl PhysicalPlan {
             PhysicalPlan::ResultCollect(plan) => plan.base.index(),
         }
     }
+
+    /// Get the plan name in format: {{plan_type}}_{{plan_index}}
+    pub fn get_plan_name(&self) -> String {
+        format!("{}_{}", self.get_plan_type(), self.get_plan_index())
+    }
+
+    /// Print the topology structure of this physical plan for debugging
+    pub fn print_topology(&self, indent: usize) {
+        let spacing = "  ".repeat(indent);
+        println!("{}{} (index: {})", spacing, self.get_plan_type(), self.get_plan_index());
+        
+        for child in self.children() {
+            child.print_topology(indent + 1);
+        }
+    }
 }

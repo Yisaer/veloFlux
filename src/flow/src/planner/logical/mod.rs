@@ -73,6 +73,11 @@ impl LogicalPlan {
             LogicalPlan::Tail(plan) => plan.base.index(),
         }
     }
+
+    /// Get the plan name in format: {{plan_type}}_{{plan_index}}
+    pub fn get_plan_name(&self) -> String {
+        format!("{}_{}", self.get_plan_type(), self.get_plan_index())
+    }
 }
 
 /// Create a LogicalPlan from a SelectStmt
@@ -141,25 +146,22 @@ pub fn create_logical_plan(
 
     if sinks.is_empty() {
         Ok(base)
-    } else if sinks.len() == 1 {
-        // Single sink: create direct chain as before
-        let next_index = max_plan_index(&base) + 1;
-        let sink_plan = DataSinkPlan::new(base, next_index, sinks.into_iter().next().unwrap());
-        Ok(Arc::new(LogicalPlan::DataSink(sink_plan)))
     } else {
-        // Multiple sinks: create TailPlan to collect multiple DataSinkPlan children
+        // Always create TailPlan for both single and multiple sinks
+        // This ensures consistent PhysicalResultCollect creation in physical plan
         let next_index = max_plan_index(&base) + 1;
         let mut sink_children = Vec::new();
         let sink_count = sinks.len();
-
+        
         for (idx, sink) in sinks.into_iter().enumerate() {
             let sink_index = next_index + idx as i64;
             let sink_plan = DataSinkPlan::new(Arc::clone(&base), sink_index, sink);
             sink_children.push(Arc::new(LogicalPlan::DataSink(sink_plan)));
         }
 
-        // Create TailPlan to hold multiple sink children
-        let tail_plan = TailPlan::new(sink_children, next_index + sink_count as i64);
+        // Create TailPlan to hold sink children (1 or more)
+        let tail_index = next_index + sink_count as i64;
+        let tail_plan = TailPlan::new(sink_children, tail_index);
         Ok(Arc::new(LogicalPlan::Tail(tail_plan)))
     }
 }
@@ -295,13 +297,18 @@ mod logical_plan_tests {
 
         let plan = create_logical_plan(select_stmt, vec![sink]).unwrap();
 
-        // Should be a DataSink node (single sink creates direct chain)
-        assert_eq!(plan.get_plan_type(), "DataSink");
+        // Should be a Tail node (single sink now creates TailPlan for consistency)
+        assert_eq!(plan.get_plan_type(), "Tail");
         
-        // Check that it has one child (Project)
+        // Check that it has one child (DataSink)
         let children = plan.children();
         assert_eq!(children.len(), 1);
-        assert_eq!(children[0].get_plan_type(), "Project");
+        assert_eq!(children[0].get_plan_type(), "DataSink");
+        
+        // Check that DataSink has Project as child
+        let sink_children = children[0].children();
+        assert_eq!(sink_children.len(), 1);
+        assert_eq!(sink_children[0].get_plan_type(), "Project");
     }
 
     #[test]

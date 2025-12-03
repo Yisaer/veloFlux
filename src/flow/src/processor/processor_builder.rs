@@ -328,40 +328,37 @@ impl ProcessorBuildOutput {
 fn create_processor_from_plan_node(
     plan: &Arc<PhysicalPlan>,
 ) -> Result<ProcessorBuildOutput, ProcessorError> {
-    let plan_index = plan.get_plan_index();
+    let plan_name = plan.get_plan_name();
     match plan.as_ref() {
         PhysicalPlan::DataSource(ds) => {
             let processor =
-                DataSourceProcessor::new(plan_index, ds.source_name().to_string(), ds.schema());
+                DataSourceProcessor::new(&plan_name, ds.source_name().to_string(), ds.schema());
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::DataSource(processor),
             ))
         }
         PhysicalPlan::SharedStream(shared) => {
             let processor =
-                SharedStreamProcessor::new(plan_index, shared.stream_name().to_string());
+                SharedStreamProcessor::new(&plan_name, shared.stream_name().to_string());
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::SharedSource(processor),
             ))
         }
         PhysicalPlan::Project(project) => {
-            let processor_id = format!("project_{}", plan_index);
-            let processor = ProjectProcessor::new(processor_id, Arc::new(project.clone()));
+            let processor = ProjectProcessor::new(plan_name.clone(), Arc::new(project.clone()));
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Project(processor),
             ))
         }
         PhysicalPlan::Filter(filter) => {
-            let processor_id = format!("filter_{}", plan_index);
-            let processor = FilterProcessor::new(processor_id, Arc::new(filter.clone()));
+            let processor = FilterProcessor::new(plan_name.clone(), Arc::new(filter.clone()));
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Filter(
                 processor,
             )))
         }
         PhysicalPlan::Batch(batch) => {
-            let processor_id = format!("batch_{}", plan_index);
             let processor = BatchProcessor::new(
-                processor_id,
+                plan_name.clone(),
                 batch.common.batch_count,
                 batch.common.batch_duration,
             );
@@ -370,18 +367,16 @@ fn create_processor_from_plan_node(
             )))
         }
         PhysicalPlan::Encoder(encoder) => {
-            let processor_id = format!("encoder_{}", plan_index);
             let encoder_impl = instantiate_encoder(&encoder.encoder);
-            let processor = EncoderProcessor::new(processor_id, encoder_impl);
+            let processor = EncoderProcessor::new(plan_name.clone(), encoder_impl);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Encoder(processor),
             ))
         }
         PhysicalPlan::StreamingEncoder(streaming) => {
-            let processor_id = format!("streaming_encoder_{}", plan_index);
             let encoder_impl = instantiate_encoder(&streaming.encoder);
             let processor = StreamingEncoderProcessor::new(
-                processor_id,
+                plan_name.clone(),
                 encoder_impl,
                 streaming.common.batch_count,
                 streaming.common.batch_duration,
@@ -411,8 +406,7 @@ fn create_processor_from_plan_node(
             )))
         }
         PhysicalPlan::ResultCollect(_result_collect) => {
-            let processor_id = format!("result_collect_{}", plan_index);
-            let processor = ResultCollectProcessor::new(processor_id);
+            let processor = ResultCollectProcessor::new(plan_name.clone());
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::ResultCollect(processor),
             ))
@@ -422,10 +416,10 @@ fn create_processor_from_plan_node(
 
 /// Internal structure to track processors created from PhysicalPlan nodes
 struct ProcessorMap {
-    /// Map from plan index to processor
-    processors: std::collections::HashMap<i64, PlanProcessor>,
+    /// Map from plan name to processor
+    processors: std::collections::HashMap<String, PlanProcessor>,
     /// Tracks whether a plan node has already been visited
-    visited: std::collections::HashSet<i64>,
+    visited: std::collections::HashSet<String>,
 }
 
 impl ProcessorMap {
@@ -436,30 +430,30 @@ impl ProcessorMap {
         }
     }
 
-    fn get_processor(&self, plan_index: i64) -> Option<&PlanProcessor> {
-        self.processors.get(&plan_index)
+    fn get_processor(&self, plan_name: &str) -> Option<&PlanProcessor> {
+        self.processors.get(plan_name)
     }
 
-    fn get_processor_mut(&mut self, plan_index: i64) -> Option<&mut PlanProcessor> {
-        self.processors.get_mut(&plan_index)
+    fn get_processor_mut(&mut self, plan_name: &str) -> Option<&mut PlanProcessor> {
+        self.processors.get_mut(plan_name)
     }
 
-    fn insert_processor(&mut self, plan_index: i64, processor: PlanProcessor) {
-        self.processors.insert(plan_index, processor);
+    fn insert_processor(&mut self, plan_name: String, processor: PlanProcessor) {
+        self.processors.insert(plan_name, processor);
     }
 
     fn get_all_processors(self) -> Vec<PlanProcessor> {
         self.processors.into_values().collect()
     }
 
-    fn mark_visited(&mut self, index: i64) -> bool {
-        self.visited.insert(index)
+    fn mark_visited(&mut self, plan_name: &str) -> bool {
+        self.visited.insert(plan_name.to_string())
     }
 
-    fn find_result_collect_index(&self) -> Option<i64> {
-        for (index, processor) in &self.processors {
+    fn find_result_collect_plan_name(&self) -> Option<String> {
+        for (plan_name, processor) in &self.processors {
             if matches!(processor, PlanProcessor::ResultCollect(_)) {
-                return Some(*index);
+                return Some(plan_name.clone());
             }
         }
         None
@@ -476,15 +470,15 @@ fn build_processors_recursive(
     plan: Arc<PhysicalPlan>,
     processor_map: &mut ProcessorMap,
 ) -> Result<(), ProcessorError> {
-    let plan_index = plan.get_plan_index();
-    if !processor_map.mark_visited(plan_index) {
+    let plan_name = plan.get_plan_name();
+    if !processor_map.mark_visited(&plan_name) {
         return Ok(());
     }
 
     // Create processor for current node
     let creation = create_processor_from_plan_node(&plan)?;
     if let Some(processor) = creation.processor {
-        processor_map.insert_processor(plan_index, processor);
+        processor_map.insert_processor(plan_name, processor);
     }
 
     // Recursively process children
@@ -525,6 +519,21 @@ fn collect_parent_child_relations(plan: Arc<PhysicalPlan>) -> Vec<(i64, i64)> {
     relations
 }
 
+/// Build a mapping from plan index to plan name for all nodes in the PhysicalPlan tree
+fn build_index_to_name_mapping(
+    plan: &Arc<PhysicalPlan>,
+    mapping: &mut std::collections::HashMap<i64, String>,
+) {
+    let plan_index = plan.get_plan_index();
+    let plan_name = plan.get_plan_name();
+    mapping.insert(plan_index, plan_name);
+    
+    // Recursively process children
+    for child in plan.children() {
+        build_index_to_name_mapping(child, mapping);
+    }
+}
+
 /// Connect processors based on PhysicalPlan tree structure
 ///
 /// This function connects:
@@ -535,16 +544,22 @@ fn connect_processors(
     processor_map: &mut ProcessorMap,
     control_source: &mut ControlSourceProcessor,
 ) -> Result<(), ProcessorError> {
+    // Build index to name mapping for quick lookup
+    let mut index_to_name_map: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+    build_index_to_name_mapping(&physical_plan, &mut index_to_name_map);
+
     // 1. Connect ControlSourceProcessor to all leaf nodes
     let leaf_indices = collect_leaf_indices(Arc::clone(&physical_plan));
     for leaf_index in leaf_indices {
-        if let Some(processor) = processor_map.get_processor_mut(leaf_index) {
-            let receiver = control_source.subscribe_output().ok_or_else(|| {
-                ProcessorError::InvalidConfiguration("control source output unavailable".into())
-            })?;
-            processor.add_input(receiver);
-            if let Some(control_rx) = control_source.subscribe_control_output() {
-                processor.add_control_input(control_rx);
+        if let Some(leaf_plan_name) = index_to_name_map.get(&leaf_index) {
+            if let Some(processor) = processor_map.get_processor_mut(leaf_plan_name) {
+                let receiver = control_source.subscribe_output().ok_or_else(|| {
+                    ProcessorError::InvalidConfiguration("control source output unavailable".into())
+                })?;
+                processor.add_input(receiver);
+                if let Some(control_rx) = control_source.subscribe_control_output() {
+                    processor.add_control_input(control_rx);
+                }
             }
         }
     }
@@ -552,23 +567,28 @@ fn connect_processors(
     // 2. Connect children outputs to parent inputs
     let relations = collect_parent_child_relations(Arc::clone(&physical_plan));
     for (parent_index, child_index) in relations {
-        let receiver = processor_map
-            .get_processor(child_index)
-            .and_then(|proc| proc.subscribe_output())
-            .ok_or_else(|| {
-                ProcessorError::InvalidConfiguration(format!(
-                    "Processor {} has no broadcast output",
-                    child_index
-                ))
-            })?;
+        if let (Some(child_plan_name), Some(parent_plan_name)) = (
+            index_to_name_map.get(&child_index),
+            index_to_name_map.get(&parent_index)
+        ) {
+            let receiver = processor_map
+                .get_processor(child_plan_name)
+                .and_then(|proc| proc.subscribe_output())
+                .ok_or_else(|| {
+                    ProcessorError::InvalidConfiguration(format!(
+                        "Processor {} has no broadcast output",
+                        child_plan_name
+                    ))
+                })?;
 
-        let control_receiver = processor_map
-            .get_processor(child_index)
-            .and_then(|proc| proc.subscribe_control_output());
-        if let Some(parent_processor) = processor_map.get_processor_mut(parent_index) {
-            parent_processor.add_input(receiver);
-            if let Some(control_rx) = control_receiver {
-                parent_processor.add_control_input(control_rx);
+            let control_receiver = processor_map
+                .get_processor(child_plan_name)
+                .and_then(|proc| proc.subscribe_control_output());
+            if let Some(parent_processor) = processor_map.get_processor_mut(parent_plan_name) {
+                parent_processor.add_input(receiver);
+                if let Some(control_rx) = control_receiver {
+                    parent_processor.add_control_input(control_rx);
+                }
             }
         }
     }
@@ -583,6 +603,11 @@ fn connect_processors(
 pub fn create_processor_pipeline(
     physical_plan: Arc<PhysicalPlan>,
 ) -> Result<ProcessorPipeline, ProcessorError> {
+    // Print the PhysicalPlan topology structure for debugging
+    println!("=== PhysicalPlan Topology Structure ===");
+    physical_plan.print_topology(0);
+    println!("======================================");
+
     let mut control_source = ControlSourceProcessor::new("control_source");
     let (pipeline_input_sender, pipeline_input_receiver) = mpsc::channel(100);
     let (data_input_sender, data_input_receiver) =
@@ -723,7 +748,7 @@ mod tests {
         let processor = result
             .processor
             .expect("expected processor for physical project node");
-        assert_eq!(processor.id(), "project_1");
+        assert_eq!(processor.id(), "PhysicalProject_1");
         println!(
             "✅ SUCCESS: PhysicalProject processor created with ID: {}",
             processor.id()

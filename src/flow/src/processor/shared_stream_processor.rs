@@ -11,7 +11,6 @@ use uuid::Uuid;
 
 pub struct SharedStreamProcessor {
     id: String,
-    plan_index: i64,
     stream_name: String,
     pipeline_id: Option<String>,
     inputs: Vec<broadcast::Receiver<StreamData>>,
@@ -21,14 +20,13 @@ pub struct SharedStreamProcessor {
 }
 
 impl SharedStreamProcessor {
-    pub fn new(plan_index: i64, stream_name: impl Into<String>) -> Self {
+    pub fn new(plan_name: &str, stream_name: impl Into<String>) -> Self {
         let stream_name = stream_name.into();
-        let id = format!("shared_source_{plan_index}");
+        let id = plan_name.to_string();
         let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         Self {
             id,
-            plan_index,
             stream_name,
             pipeline_id: None,
             inputs: Vec::new(),
@@ -58,7 +56,6 @@ impl Processor for SharedStreamProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let stream_name = self.stream_name.clone();
-        let plan_index = self.plan_index;
         let processor_id = self.id.clone();
         let pipeline_id = self
             .pipeline_id
@@ -66,7 +63,7 @@ impl Processor for SharedStreamProcessor {
             .unwrap_or_else(|| format!("pipeline-{}", Uuid::new_v4()));
         tokio::spawn(async move {
             println!(
-                "[SharedStreamProcessor:{processor_id}#{plan_index}] subscribing to {stream_name} (pipeline {pipeline_id})"
+                "[SharedStreamProcessor:{processor_id}] subscribing to {stream_name} (pipeline {pipeline_id})"
             );
             let registry = shared_stream_registry();
             let mut subscription = registry

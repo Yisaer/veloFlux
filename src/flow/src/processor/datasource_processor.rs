@@ -149,10 +149,10 @@ impl ConnectorBinding {
 }
 impl DataSourceProcessor {
     /// Create a new DataSourceProcessor from PhysicalDatasource
-    pub fn new(plan_index: i64, source_name: impl Into<String>, schema: Arc<Schema>) -> Self {
+    pub fn new(plan_name: &str, source_name: impl Into<String>, schema: Arc<Schema>) -> Self {
         Self::with_custom_id(
-            Some(plan_index),
-            format!("datasource_{plan_index}"),
+            None, // plan_index is no longer needed as we use plan_name for ID
+            plan_name.to_string(),
             source_name,
             schema,
         )
