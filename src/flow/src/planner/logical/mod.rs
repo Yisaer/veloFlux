@@ -78,6 +78,16 @@ impl LogicalPlan {
     pub fn get_plan_name(&self) -> String {
         format!("{}_{}", self.get_plan_type(), self.get_plan_index())
     }
+
+    /// Print logical topology (similar to PhysicalPlan::print_topology)
+    pub fn print_topology(&self, indent: usize) {
+        let spacing = "  ".repeat(indent);
+        println!("{}{} (index: {})", spacing, self.get_plan_type(), self.get_plan_index());
+
+        for child in self.children() {
+            child.print_topology(indent + 1);
+        }
+    }
 }
 
 /// Create a LogicalPlan from a SelectStmt
@@ -168,12 +178,7 @@ pub fn create_logical_plan(
 
 /// Helper function to print logical plan structure for debugging
 pub fn print_logical_plan(plan: &Arc<LogicalPlan>, indent: usize) {
-    let spacing = "  ".repeat(indent);
-    println!("{}{} (index: {})", spacing, plan.get_plan_type(), plan.get_plan_index());
-    
-    for child in plan.children() {
-        print_logical_plan(child, indent + 1);
-    }
+    plan.print_topology(indent);
 }
 
 fn max_plan_index(plan: &Arc<LogicalPlan>) -> i64 {

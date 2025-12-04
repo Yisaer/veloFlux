@@ -11,12 +11,6 @@ pub enum ControlSignal {
     StreamGracefulEnd,
     /// Immediate stream end propagated via the control channel
     StreamQuickEnd,
-    /// Watermark for time-based processing
-    Watermark(std::time::SystemTime),
-    /// Resume normal processing
-    Resume,
-    /// Flush buffered data
-    Flush,
 }
 
 impl ControlSignal {
@@ -235,20 +229,5 @@ impl StreamData {
     /// Create quick stream end signal
     pub fn quick_end() -> Self {
         StreamData::control(ControlSignal::StreamQuickEnd)
-    }
-
-    /// Create resume signal
-    pub fn resume() -> Self {
-        StreamData::control(ControlSignal::Resume)
-    }
-
-    /// Create flush signal
-    pub fn flush() -> Self {
-        StreamData::control(ControlSignal::Flush)
-    }
-
-    /// Create watermark signal
-    pub fn watermark(time: std::time::SystemTime) -> Self {
-        StreamData::control(ControlSignal::Watermark(time))
     }
 }

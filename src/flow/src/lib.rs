@@ -59,7 +59,9 @@ fn build_physical_plan_from_sql(
     let select_stmt = parser::parse_sql(sql)?;
     let schema_binding = build_schema_binding(&select_stmt)?;
     let logical_plan = create_logical_plan(select_stmt, sinks)?;
-    let physical_plan = create_physical_plan(logical_plan, &schema_binding)?;
+    println!("[LogicalPlan] topology:");
+    logical_plan.print_topology(0);
+    let physical_plan = create_physical_plan(Arc::clone(&logical_plan), &schema_binding)?;
     Ok(physical_plan)
 }
 
