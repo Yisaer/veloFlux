@@ -1,4 +1,5 @@
 use datatypes::Schema;
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -64,10 +65,16 @@ pub struct StreamDefinition {
     stream_type: StreamType,
     schema: Arc<Schema>,
     props: StreamProps,
+    decoder: StreamDecoderConfig,
 }
 
 impl StreamDefinition {
-    pub fn new(id: impl Into<String>, schema: Arc<Schema>, props: StreamProps) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        schema: Arc<Schema>,
+        props: StreamProps,
+        decoder: StreamDecoderConfig,
+    ) -> Self {
         let stream_type = match props {
             StreamProps::Mqtt(_) => StreamType::Mqtt,
         };
@@ -76,6 +83,7 @@ impl StreamDefinition {
             stream_type,
             schema,
             props,
+            decoder,
         }
     }
 
@@ -94,6 +102,54 @@ impl StreamDefinition {
     pub fn props(&self) -> &StreamProps {
         &self.props
     }
+
+    pub fn decoder(&self) -> &StreamDecoderConfig {
+        &self.decoder
+    }
+}
+
+/// Configuration describing which decoder should be used for a stream's payloads.
+#[derive(Debug, Clone)]
+pub enum StreamDecoderConfig {
+    Json { decoder_id: String },
+    Custom(CustomStreamDecoderConfig),
+}
+
+impl StreamDecoderConfig {
+    pub fn kind(&self) -> &str {
+        match self {
+            StreamDecoderConfig::Json { .. } => "json",
+            StreamDecoderConfig::Custom(custom) => custom.kind.as_str(),
+        }
+    }
+
+    pub fn decoder_id(&self) -> &str {
+        match self {
+            StreamDecoderConfig::Json { decoder_id } => decoder_id.as_str(),
+            StreamDecoderConfig::Custom(custom) => custom.decoder_id.as_str(),
+        }
+    }
+
+    pub fn custom_settings(&self) -> Option<&JsonValue> {
+        match self {
+            StreamDecoderConfig::Custom(custom) => Some(&custom.settings),
+            _ => None,
+        }
+    }
+
+    pub fn json_default(stream_id: &str) -> Self {
+        StreamDecoderConfig::Json {
+            decoder_id: format!("{stream_id}_decoder"),
+        }
+    }
+}
+
+/// Custom decoder configuration payload.
+#[derive(Debug, Clone)]
+pub struct CustomStreamDecoderConfig {
+    pub decoder_id: String,
+    pub kind: String,
+    pub settings: JsonValue,
 }
 
 #[derive(Default)]

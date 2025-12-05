@@ -3,7 +3,7 @@
 //! This module provides utilities to build processor pipelines from PhysicalPlan,
 //! connecting ControlSourceProcessor outputs to leaf nodes (nodes without children).
 
-use crate::codec::EncoderRegistry;
+use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::{
@@ -46,6 +46,7 @@ struct ProcessorBuilderContext {
     mqtt_clients: MqttClientManager,
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
+    decoder_registry: Arc<DecoderRegistry>,
 }
 
 impl ProcessorBuilderContext {
@@ -53,11 +54,13 @@ impl ProcessorBuilderContext {
         mqtt_clients: MqttClientManager,
         connector_registry: Arc<ConnectorRegistry>,
         encoder_registry: Arc<EncoderRegistry>,
+        decoder_registry: Arc<DecoderRegistry>,
     ) -> Self {
         Self {
             mqtt_clients,
             connector_registry,
             encoder_registry,
+            decoder_registry,
         }
     }
 
@@ -71,6 +74,10 @@ impl ProcessorBuilderContext {
 
     fn encoder_registry(&self) -> Arc<EncoderRegistry> {
         Arc::clone(&self.encoder_registry)
+    }
+
+    fn decoder_registry(&self) -> Arc<DecoderRegistry> {
+        Arc::clone(&self.decoder_registry)
     }
 }
 
@@ -362,8 +369,13 @@ fn create_processor_from_plan_node(
     let plan_name = plan.get_plan_name();
     match plan.as_ref() {
         PhysicalPlan::DataSource(ds) => {
+            let schema = ds.schema();
+            let decoder = context
+                .decoder_registry()
+                .instantiate(ds.decoder(), ds.source_name(), Arc::clone(&schema))
+                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             let processor =
-                DataSourceProcessor::new(&plan_name, ds.source_name().to_string(), ds.schema());
+                DataSourceProcessor::new(&plan_name, ds.source_name().to_string(), schema, decoder);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::DataSource(processor),
             ))
@@ -675,6 +687,7 @@ pub fn create_processor_pipeline(
     mqtt_clients: MqttClientManager,
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
+    decoder_registry: Arc<DecoderRegistry>,
 ) -> Result<ProcessorPipeline, ProcessorError> {
     // Print the PhysicalPlan topology structure for debugging
     println!("=== PhysicalPlan Topology Structure ===");
@@ -691,7 +704,12 @@ pub fn create_processor_pipeline(
     control_source.add_control_input(control_signal_receiver);
 
     let mut processor_map = ProcessorMap::new();
-    let context = ProcessorBuilderContext::new(mqtt_clients, connector_registry, encoder_registry);
+    let context = ProcessorBuilderContext::new(
+        mqtt_clients,
+        connector_registry,
+        encoder_registry,
+        decoder_registry,
+    );
     build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map, &context)?;
 
     connect_processors(
@@ -742,6 +760,7 @@ pub fn create_processor_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::StreamDecoderConfig;
     use crate::expr::ScalarExpr;
     use crate::planner::physical::{PhysicalDataSource, PhysicalProject, PhysicalProjectField};
     use datatypes::{ConcreteDatatype, Schema, Value};
@@ -756,6 +775,7 @@ mod tests {
             "test_source".to_string(),
             None,
             schema,
+            StreamDecoderConfig::json_default("test_source"),
             0,
         )));
 
@@ -779,10 +799,12 @@ mod tests {
         // Try to create a processor from the PhysicalProject
         let connector_registry = ConnectorRegistry::with_builtin_sinks();
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
+        let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let context = ProcessorBuilderContext::new(
             MqttClientManager::new(),
             connector_registry,
             encoder_registry,
+            decoder_registry,
         );
         let result = create_processor_from_plan_node(&physical_project, &context)
             .expect("processor creation failed");

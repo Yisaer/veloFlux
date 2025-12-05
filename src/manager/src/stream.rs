@@ -6,7 +6,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use flow::catalog::{CatalogError, MqttStreamProps};
+use flow::catalog::{CatalogError, MqttStreamProps, StreamDecoderConfig};
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,8 @@ pub struct CreateStreamRequest {
     pub props: StreamPropsRequest,
     #[serde(default)]
     pub shared: bool,
+    #[serde(default)]
+    pub decoder: Option<StreamDecoderConfigRequest>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -57,6 +59,22 @@ pub struct StreamPropsRequest {
 impl StreamPropsRequest {
     fn to_value(&self) -> JsonValue {
         JsonValue::Object(self.fields.clone())
+    }
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(default)]
+pub struct StreamDecoderConfigRequest {
+    pub kind: String,
+    pub decoder_id: Option<String>,
+}
+
+impl Default for StreamDecoderConfigRequest {
+    fn default() -> Self {
+        Self {
+            kind: "json".to_string(),
+            decoder_id: None,
+        }
     }
 }
 
@@ -132,7 +150,13 @@ pub async fn create_stream_handler(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    let definition = StreamDefinition::new(req.name.clone(), Arc::new(schema), stream_props);
+    let decoder = match build_stream_decoder(&req) {
+        Ok(config) => config,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+
+    let definition =
+        StreamDefinition::new(req.name.clone(), Arc::new(schema), stream_props, decoder);
 
     match state.instance.create_stream(definition, req.shared).await {
         Ok(info) => {
@@ -286,6 +310,18 @@ fn build_stream_props(
             }))
         }
         other => Err(format!("unsupported stream type: {other}")),
+    }
+}
+
+fn build_stream_decoder(req: &CreateStreamRequest) -> Result<StreamDecoderConfig, String> {
+    let config = req.decoder.clone().unwrap_or_default();
+    match config.kind.to_ascii_lowercase().as_str() {
+        "" | "json" => Ok(StreamDecoderConfig::Json {
+            decoder_id: config
+                .decoder_id
+                .unwrap_or_else(|| format!("{}_decoder", req.name)),
+        }),
+        other => Err(format!("unsupported decoder kind: {other}")),
     }
 }
 

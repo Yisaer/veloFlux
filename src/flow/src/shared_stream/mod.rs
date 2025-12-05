@@ -294,20 +294,21 @@ impl SharedStreamInner {
             channel_capacity,
         } = config;
 
+        let SharedSourceConnectorConfig { connector, decoder } = connector.ok_or_else(|| {
+            SharedStreamError::Internal(
+                "shared stream requires exactly one source connector".into(),
+            )
+        })?;
         let ingest_id = format!("shared_ingest_{}", stream_name);
         let mut processor = DataSourceProcessor::with_custom_id(
             None,
             ingest_id,
             stream_name.clone(),
             Arc::clone(&schema),
+            decoder,
         );
-        let SharedSourceConnectorConfig { connector, decoder } = connector.ok_or_else(|| {
-            SharedStreamError::Internal(
-                "shared stream requires exactly one source connector".into(),
-            )
-        })?;
         let connector_id = connector.id().to_string();
-        processor.add_connector(connector, decoder);
+        processor.add_connector(connector);
 
         let mut data_rx = processor
             .subscribe_output()

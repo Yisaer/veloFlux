@@ -1,4 +1,6 @@
+use crate::catalog::StreamDefinition;
 use parser::SelectStmt;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 pub mod datasource;
@@ -112,6 +114,7 @@ impl LogicalPlan {
 pub fn create_logical_plan(
     select_stmt: SelectStmt,
     sinks: Vec<PipelineSink>,
+    stream_defs: &HashMap<String, Arc<StreamDefinition>>,
 ) -> Result<Arc<LogicalPlan>, String> {
     let start_index = 0i64;
     let mut current_index = start_index;
@@ -123,9 +126,16 @@ pub fn create_logical_plan(
 
     let mut current_plans: Vec<Arc<LogicalPlan>> = Vec::new();
     for source_info in &select_stmt.source_infos {
+        let definition = stream_defs.get(&source_info.name).ok_or_else(|| {
+            format!(
+                "stream {} missing catalog definition for logical planning",
+                source_info.name
+            )
+        })?;
         let datasource = DataSource::new(
             source_info.name.clone(),
             source_info.alias.clone(),
+            definition.decoder().clone(),
             current_index,
         );
         current_plans.push(Arc::new(LogicalPlan::DataSource(datasource)));
@@ -200,14 +210,36 @@ fn max_plan_index(plan: &Arc<LogicalPlan>) -> i64 {
 #[cfg(test)]
 mod logical_plan_tests {
     use super::*;
+    use crate::catalog::{MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
+    use datatypes::Schema;
     use parser::parse_sql;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn stream_def(name: &str) -> Arc<StreamDefinition> {
+        Arc::new(StreamDefinition::new(
+            name.to_string(),
+            Arc::new(Schema::new(Vec::new())),
+            StreamProps::Mqtt(MqttStreamProps::new("mqtt://localhost:1883", name, 0)),
+            StreamDecoderConfig::json_default(name),
+        ))
+    }
+
+    fn make_stream_defs(names: &[&str]) -> HashMap<String, Arc<StreamDefinition>> {
+        let mut map = HashMap::new();
+        for name in names {
+            map.insert((*name).to_string(), stream_def(name));
+        }
+        map
+    }
 
     #[test]
     fn test_create_logical_plan_simple() {
         let sql = "SELECT a, b FROM users";
         let select_stmt = parse_sql(sql).unwrap();
+        let stream_defs = make_stream_defs(&["users"]);
 
-        let plan = create_logical_plan(select_stmt, Vec::new()).unwrap();
+        let plan = create_logical_plan(select_stmt, Vec::new(), &stream_defs).unwrap();
 
         // Should be a Project node
         assert_eq!(plan.get_plan_type(), "Project");
@@ -224,8 +256,9 @@ mod logical_plan_tests {
     fn test_create_logical_plan_with_filter() {
         let sql = "SELECT a, b FROM users WHERE a > 10";
         let select_stmt = parse_sql(sql).unwrap();
+        let stream_defs = make_stream_defs(&["users"]);
 
-        let plan = create_logical_plan(select_stmt, Vec::new()).unwrap();
+        let plan = create_logical_plan(select_stmt, Vec::new(), &stream_defs).unwrap();
 
         // Should be a Project node
         assert_eq!(plan.get_plan_type(), "Project");
@@ -248,8 +281,9 @@ mod logical_plan_tests {
     fn test_create_logical_plan_with_alias() {
         let sql = "SELECT a, b FROM users AS u WHERE a > 10";
         let select_stmt = parse_sql(sql).unwrap();
+        let stream_defs = make_stream_defs(&["users"]);
 
-        let plan = create_logical_plan(select_stmt, Vec::new()).unwrap();
+        let plan = create_logical_plan(select_stmt, Vec::new(), &stream_defs).unwrap();
 
         // Verify the structure is correct
         assert_eq!(plan.get_plan_type(), "Project");
@@ -265,8 +299,9 @@ mod logical_plan_tests {
     fn test_create_logical_plan_with_func_field() {
         let sql = "SELECT a, concat(b), c AS custom_name FROM users";
         let select_stmt = parse_sql(sql).unwrap();
+        let stream_defs = make_stream_defs(&["users"]);
 
-        let plan = create_logical_plan(select_stmt, Vec::new()).unwrap();
+        let plan = create_logical_plan(select_stmt, Vec::new(), &stream_defs).unwrap();
 
         // Verify the structure is correct
         assert_eq!(plan.get_plan_type(), "Project");
@@ -307,7 +342,8 @@ mod logical_plan_tests {
             ),
         );
 
-        let plan = create_logical_plan(select_stmt, vec![sink]).unwrap();
+        let stream_defs = make_stream_defs(&["users"]);
+        let plan = create_logical_plan(select_stmt, vec![sink], &stream_defs).unwrap();
 
         // Debug output
         println!("=== Single Sink Logical Plan ===");
@@ -355,7 +391,8 @@ mod logical_plan_tests {
             ),
         );
 
-        let plan = create_logical_plan(select_stmt, vec![sink1, sink2]).unwrap();
+        let stream_defs = make_stream_defs(&["users"]);
+        let plan = create_logical_plan(select_stmt, vec![sink1, sink2], &stream_defs).unwrap();
 
         // Should be a Tail node (multiple sinks create TailPlan)
         assert_eq!(plan.get_plan_type(), "Tail");

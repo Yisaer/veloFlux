@@ -4,7 +4,7 @@
 //! and the customizable `create_pipeline` API that accepts user-defined sinks.
 
 use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
-use flow::catalog::{MqttStreamProps, StreamDefinition, StreamProps};
+use flow::catalog::{MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::model::batch_from_columns_simple;
 use flow::planner::sink::{
     CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
@@ -467,6 +467,7 @@ async fn install_stream_schema(instance: &FlowInstance, columns: &[(String, Vec<
         "stream".to_string(),
         Arc::new(schema),
         StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json_default("stream"),
     );
     instance
         .create_stream(definition, false)

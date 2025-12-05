@@ -186,6 +186,7 @@ fn create_physical_data_source_with_builder(
                 logical_ds.source_name.clone(),
                 logical_ds.alias.clone(),
                 schema,
+                logical_ds.decoder().clone(),
                 index,
             );
             Ok(Arc::new(PhysicalPlan::DataSource(physical_ds)))

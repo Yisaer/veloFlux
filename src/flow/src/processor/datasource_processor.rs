@@ -3,7 +3,7 @@
 //! This processor reads data from a PhysicalDatasource and sends it downstream
 //! as StreamData::Collection.
 
-use crate::codec::{JsonDecoder, RecordDecoder};
+use crate::codec::RecordDecoder;
 use crate::connector::{ConnectorError, ConnectorEvent, SourceConnector};
 use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, forward_error, log_received_data,
@@ -149,12 +149,18 @@ impl ConnectorBinding {
 }
 impl DataSourceProcessor {
     /// Create a new DataSourceProcessor from PhysicalDatasource
-    pub fn new(plan_name: &str, source_name: impl Into<String>, schema: Arc<Schema>) -> Self {
+    pub fn new(
+        plan_name: &str,
+        source_name: impl Into<String>,
+        schema: Arc<Schema>,
+        decoder: Arc<dyn RecordDecoder>,
+    ) -> Self {
         Self::with_custom_id(
             None, // plan_index is no longer needed as we use plan_name for ID
             plan_name.to_string(),
             source_name,
             schema,
+            decoder,
         )
     }
 
@@ -163,12 +169,11 @@ impl DataSourceProcessor {
         id: impl Into<String>,
         source_name: impl Into<String>,
         schema: Arc<Schema>,
+        decoder: Arc<dyn RecordDecoder>,
     ) -> Self {
         let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let stream_name = source_name.into();
-        let default_decoder: Arc<dyn RecordDecoder> =
-            Arc::new(JsonDecoder::new(stream_name.clone(), Arc::clone(&schema)));
         Self {
             id: id.into(),
             plan_index,
@@ -179,17 +184,12 @@ impl DataSourceProcessor {
             output,
             control_output,
             connectors: Vec::new(),
-            default_decoder,
+            default_decoder: decoder,
         }
     }
 
     /// Register an external source connector and its decoder.
-    pub fn add_connector(
-        &mut self,
-        connector: Box<dyn SourceConnector>,
-        decoder: Arc<dyn RecordDecoder>,
-    ) {
-        self.default_decoder = decoder;
+    pub fn add_connector(&mut self, connector: Box<dyn SourceConnector>) {
         self.connectors.push(ConnectorBinding {
             connector,
             handle: None,
