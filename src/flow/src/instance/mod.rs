@@ -1,35 +1,47 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::catalog::{self, Catalog, CatalogError, StreamDefinition, StreamProps};
+use crate::catalog::{Catalog, CatalogError, StreamDefinition, StreamProps};
 use crate::connector::{
-    create_shared_client, drop_shared_client, ConnectorError, MqttSourceConfig,
-    MqttSourceConnector, SharedMqttClientConfig,
+    ConnectorError, MqttClientManager, MqttSourceConfig, MqttSourceConnector,
+    SharedMqttClientConfig,
 };
 use crate::pipeline::{PipelineDefinition, PipelineError, PipelineManager, PipelineSnapshot};
+use crate::processor::ProcessorPipeline;
 use crate::shared_stream::{
     registry as shared_stream_registry, SharedStreamConfig, SharedStreamError, SharedStreamInfo,
     SharedStreamRegistry,
 };
-use crate::JsonDecoder;
+use crate::{create_pipeline, create_pipeline_with_log_sink};
+use crate::{JsonDecoder, PipelineSink};
 
 /// Runtime container that manages all Flow resources (streams, pipelines, shared clients).
 #[derive(Clone)]
 pub struct FlowInstance {
-    catalog: &'static Catalog,
+    catalog: Arc<Catalog>,
     shared_stream_registry: &'static SharedStreamRegistry,
     pipeline_manager: Arc<PipelineManager>,
     shared_mqtt_clients: Arc<Mutex<HashMap<String, SharedMqttClientConfig>>>,
+    mqtt_client_manager: MqttClientManager,
 }
 
 impl FlowInstance {
     /// Create a new Flow instance backed by global registries.
     pub fn new() -> Self {
+        let catalog = Arc::new(Catalog::new());
+        let shared_stream_registry = shared_stream_registry();
+        let mqtt_client_manager = MqttClientManager::new();
+        let pipeline_manager = Arc::new(PipelineManager::new(
+            Arc::clone(&catalog),
+            shared_stream_registry,
+            mqtt_client_manager.clone(),
+        ));
         Self {
-            catalog: catalog::global_catalog(),
-            shared_stream_registry: shared_stream_registry(),
-            pipeline_manager: Arc::new(PipelineManager::new()),
+            catalog,
+            shared_stream_registry,
+            pipeline_manager,
             shared_mqtt_clients: Arc::new(Mutex::new(HashMap::new())),
+            mqtt_client_manager,
         }
     }
 
@@ -107,7 +119,9 @@ impl FlowInstance {
         &self,
         config: SharedMqttClientConfig,
     ) -> Result<(), FlowInstanceError> {
-        create_shared_client(config.clone()).await?;
+        self.mqtt_client_manager
+            .create_client(config.clone())
+            .await?;
         self.shared_mqtt_clients
             .lock()
             .expect("shared mqtt map poisoned")
@@ -117,7 +131,7 @@ impl FlowInstance {
 
     /// Drop a shared MQTT client identified by key.
     pub fn drop_shared_mqtt_client(&self, key: &str) -> Result<(), FlowInstanceError> {
-        drop_shared_client(key)?;
+        self.mqtt_client_manager.drop_client(key)?;
         self.shared_mqtt_clients
             .lock()
             .expect("shared mqtt map poisoned")
@@ -167,6 +181,36 @@ impl FlowInstance {
         self.pipeline_manager.list()
     }
 
+    /// Build a processor pipeline directly without registering it.
+    pub fn build_pipeline(
+        &self,
+        sql: &str,
+        sinks: Vec<PipelineSink>,
+    ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
+        create_pipeline(
+            sql,
+            sinks,
+            &self.catalog,
+            self.shared_stream_registry,
+            self.mqtt_client_manager.clone(),
+        )
+    }
+
+    /// Build a processor pipeline wired to a default logging sink.
+    pub fn build_pipeline_with_log_sink(
+        &self,
+        sql: &str,
+        forward_to_result: bool,
+    ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
+        create_pipeline_with_log_sink(
+            sql,
+            forward_to_result,
+            &self.catalog,
+            self.shared_stream_registry,
+            self.mqtt_client_manager.clone(),
+        )
+    }
+
     async fn ensure_shared_stream(
         &self,
         definition: Arc<StreamDefinition>,
@@ -189,6 +233,7 @@ impl FlowInstance {
                 let connector = MqttSourceConnector::new(
                     format!("{}_shared_source_connector", definition.id()),
                     source_config,
+                    self.mqtt_client_manager.clone(),
                 );
                 let decoder = Arc::new(JsonDecoder::new(definition.id(), definition.schema()));
                 config.set_connector(Box::new(connector), decoder);

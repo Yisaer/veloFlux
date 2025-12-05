@@ -10,8 +10,7 @@ pub mod processor;
 pub mod shared_stream;
 
 pub use catalog::{
-    global_catalog, Catalog, CatalogError, MqttStreamProps, StreamDefinition, StreamProps,
-    StreamType,
+    Catalog, CatalogError, MqttStreamProps, StreamDefinition, StreamProps, StreamType,
 };
 pub use codec::{
     CodecError, CollectionEncoder, CollectionEncoderStream, EncodeError, JsonDecoder, JsonEncoder,
@@ -50,16 +49,20 @@ pub use shared_stream::{
     SharedStreamError, SharedStreamInfo, SharedStreamStatus, SharedStreamSubscription,
 };
 
+use connector::MqttClientManager;
 use planner::logical::create_logical_plan;
 use processor::{create_processor_pipeline, ProcessorPipeline};
+use shared_stream::SharedStreamRegistry;
 use std::sync::Arc;
 
 fn build_physical_plan_from_sql(
     sql: &str,
     sinks: Vec<PipelineSink>,
+    catalog: &Catalog,
+    shared_stream_registry: &SharedStreamRegistry,
 ) -> Result<Arc<planner::physical::PhysicalPlan>, Box<dyn std::error::Error>> {
     let select_stmt = parser::parse_sql(sql)?;
-    let schema_binding = build_schema_binding(&select_stmt)?;
+    let schema_binding = build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks)?;
     println!("[LogicalPlan] topology:");
     logical_plan.print_topology(0);
@@ -69,21 +72,22 @@ fn build_physical_plan_from_sql(
 
 fn build_schema_binding(
     select_stmt: &parser::SelectStmt,
+    catalog: &Catalog,
+    shared_stream_registry: &SharedStreamRegistry,
 ) -> Result<crate::expr::sql_conversion::SchemaBinding, Box<dyn std::error::Error>> {
     use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
-    let catalog = catalog::global_catalog();
-    let registry = shared_stream_registry();
     let mut entries = Vec::new();
     for source in &select_stmt.source_infos {
         let definition = catalog
             .get(&source.name)
             .ok_or_else(|| format!("stream '{}' not found in catalog", source.name))?;
         let schema = definition.schema();
-        let kind = if futures::executor::block_on(registry.is_registered(&source.name)) {
-            SourceBindingKind::Shared
-        } else {
-            SourceBindingKind::Regular
-        };
+        let kind =
+            if futures::executor::block_on(shared_stream_registry.is_registered(&source.name)) {
+                SourceBindingKind::Shared
+            } else {
+                SourceBindingKind::Regular
+            };
         entries.push(SchemaBindingEntry {
             source_name: source.name.clone(),
             alias: source.alias.clone(),
@@ -102,28 +106,43 @@ fn build_schema_binding(
 /// # Example
 /// ```no_run
 /// use flow::{
+///     catalog::Catalog,
+///     connector::MqttClientManager,
 ///     create_pipeline,
 ///     planner::sink::{
 ///         NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 ///     },
+///     shared_stream_registry,
 /// };
 ///
 /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
+/// let catalog = Catalog::new();
+/// let registry = shared_stream_registry();
+/// let mqtt_clients = MqttClientManager::new();
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig),
 ///     SinkEncoderConfig::Json { encoder_id: "json".into() },
 /// );
 /// let sink = PipelineSink::new("custom_sink", connector);
-/// let pipeline = create_pipeline("SELECT a FROM stream", vec![sink])?;
+/// let pipeline = create_pipeline(
+///     "SELECT a FROM stream",
+///     vec![sink],
+///     &catalog,
+///     registry,
+///     mqtt_clients,
+/// )?;
 /// # Ok(()) }
 /// ```
 pub fn create_pipeline(
     sql: &str,
     sinks: Vec<PipelineSink>,
+    catalog: &Catalog,
+    shared_stream_registry: &SharedStreamRegistry,
+    mqtt_client_manager: MqttClientManager,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
-    let physical_plan = build_physical_plan_from_sql(sql, sinks)?;
-    let pipeline = create_processor_pipeline(physical_plan)?;
+    let physical_plan = build_physical_plan_from_sql(sql, sinks, catalog, shared_stream_registry)?;
+    let pipeline = create_processor_pipeline(physical_plan, mqtt_client_manager)?;
     Ok(pipeline)
 }
 
@@ -131,6 +150,9 @@ pub fn create_pipeline(
 pub fn create_pipeline_with_log_sink(
     sql: &str,
     forward_to_result: bool,
+    catalog: &Catalog,
+    shared_stream_registry: &SharedStreamRegistry,
+    mqtt_client_manager: MqttClientManager,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
     let connector = PipelineSinkConnector::new(
         "log_sink_connector",
@@ -140,5 +162,11 @@ pub fn create_pipeline_with_log_sink(
         },
     );
     let sink = PipelineSink::new("log_sink", connector).with_forward_to_result(forward_to_result);
-    create_pipeline(sql, vec![sink])
+    create_pipeline(
+        sql,
+        vec![sink],
+        catalog,
+        shared_stream_registry,
+        mqtt_client_manager,
+    )
 }

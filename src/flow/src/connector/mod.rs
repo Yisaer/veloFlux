@@ -60,7 +60,7 @@ pub enum ConnectorError {
 }
 
 pub use mqtt_client::{
-    acquire_shared_client, create_shared_client, drop_shared_client, SharedMqttClientConfig,
+    MqttClientManager, SharedMqttClient, SharedMqttClientConfig, SharedMqttEvent,
 };
 pub use sink::mock::{MockSinkConnector, MockSinkHandle};
 pub use sink::mqtt::{MqttSinkConfig, MqttSinkConnector};

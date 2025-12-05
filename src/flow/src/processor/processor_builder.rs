@@ -7,6 +7,7 @@ use crate::codec::{CollectionEncoder, JsonEncoder};
 use crate::connector::sink::mqtt::MqttSinkConnector;
 use crate::connector::sink::nop::NopSinkConnector;
 use crate::connector::sink::SinkConnector;
+use crate::connector::MqttClientManager;
 use crate::planner::physical::PhysicalPlan;
 use crate::planner::sink::{SinkConnectorConfig, SinkEncoderConfig};
 use crate::processor::{
@@ -42,6 +43,21 @@ pub enum PlanProcessor {
     Sink(SinkProcessor),
     /// ResultCollectProcessor created from PhysicalResultCollect
     ResultCollect(ResultCollectProcessor),
+}
+
+#[derive(Clone)]
+struct ProcessorBuilderContext {
+    mqtt_clients: MqttClientManager,
+}
+
+impl ProcessorBuilderContext {
+    fn new(mqtt_clients: MqttClientManager) -> Self {
+        Self { mqtt_clients }
+    }
+
+    fn mqtt_clients(&self) -> MqttClientManager {
+        self.mqtt_clients.clone()
+    }
 }
 
 impl PlanProcessor {
@@ -327,6 +343,7 @@ impl ProcessorBuildOutput {
 
 fn create_processor_from_plan_node(
     plan: &Arc<PhysicalPlan>,
+    context: &ProcessorBuilderContext,
 ) -> Result<ProcessorBuildOutput, ProcessorError> {
     let plan_name = plan.get_plan_name();
     match plan.as_ref() {
@@ -396,6 +413,7 @@ fn create_processor_from_plan_node(
             let connector_impl = instantiate_connector(
                 &sink_plan.connector.sink_id,
                 &sink_plan.connector.connector,
+                context,
             )?;
             processor.add_connector(connector_impl);
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Sink(
@@ -457,6 +475,7 @@ impl ProcessorMap {
 fn build_processors_recursive(
     plan: Arc<PhysicalPlan>,
     processor_map: &mut ProcessorMap,
+    context: &ProcessorBuilderContext,
 ) -> Result<(), ProcessorError> {
     let plan_name = plan.get_plan_name();
     if !processor_map.mark_visited(&plan_name) {
@@ -464,14 +483,14 @@ fn build_processors_recursive(
     }
 
     // Create processor for current node
-    let creation = create_processor_from_plan_node(&plan)?;
+    let creation = create_processor_from_plan_node(&plan, context)?;
     if let Some(processor) = creation.processor {
         processor_map.insert_processor(plan_name, processor);
     }
 
     // Recursively process children
     for child in plan.children() {
-        build_processors_recursive(Arc::clone(child), processor_map)?;
+        build_processors_recursive(Arc::clone(child), processor_map, context)?;
     }
 
     Ok(())
@@ -629,6 +648,7 @@ fn connect_processors(
 /// carries the declarative sink configuration.
 pub fn create_processor_pipeline(
     physical_plan: Arc<PhysicalPlan>,
+    mqtt_clients: MqttClientManager,
 ) -> Result<ProcessorPipeline, ProcessorError> {
     // Print the PhysicalPlan topology structure for debugging
     println!("=== PhysicalPlan Topology Structure ===");
@@ -645,7 +665,8 @@ pub fn create_processor_pipeline(
     control_source.add_control_input(control_signal_receiver);
 
     let mut processor_map = ProcessorMap::new();
-    build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map)?;
+    let context = ProcessorBuilderContext::new(mqtt_clients);
+    build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map, &context)?;
 
     connect_processors(
         Arc::clone(&physical_plan),
@@ -701,11 +722,13 @@ fn instantiate_encoder(cfg: &SinkEncoderConfig) -> Arc<dyn CollectionEncoder> {
 fn instantiate_connector(
     sink_id: &str,
     cfg: &SinkConnectorConfig,
+    context: &ProcessorBuilderContext,
 ) -> Result<Box<dyn SinkConnector>, ProcessorError> {
     match cfg {
         SinkConnectorConfig::Mqtt(mqtt_cfg) => Ok(Box::new(MqttSinkConnector::new(
             sink_id.to_string(),
             mqtt_cfg.clone(),
+            context.mqtt_clients(),
         ))),
         SinkConnectorConfig::Nop(_) => Ok(Box::new(NopSinkConnector::new(sink_id.to_string()))),
     }
@@ -749,8 +772,9 @@ mod tests {
         )));
 
         // Try to create a processor from the PhysicalProject
-        let result =
-            create_processor_from_plan_node(&physical_project).expect("processor creation failed");
+        let context = ProcessorBuilderContext::new(MqttClientManager::new());
+        let result = create_processor_from_plan_node(&physical_project, &context)
+            .expect("processor creation failed");
 
         let processor = result
             .processor

@@ -8,7 +8,7 @@ use rumqttc::{AsyncClient, ConnectionError, Event, EventLoop, MqttOptions, QoS, 
 use tokio::task::JoinHandle;
 use url::Url;
 
-use crate::connector::mqtt_client::{acquire_shared_client, SharedMqttClient};
+use crate::connector::mqtt_client::{MqttClientManager, SharedMqttClient};
 
 /// Basic MQTT configuration for sinks.
 #[derive(Debug, Clone)]
@@ -66,6 +66,7 @@ pub struct MqttSinkConnector {
     id: String,
     config: MqttSinkConfig,
     client: Option<SinkClient>,
+    mqtt_clients: MqttClientManager,
 }
 
 static MQTT_SINK_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -172,11 +173,16 @@ async fn run_event_loop(mut event_loop: EventLoop) {
 }
 
 impl MqttSinkConnector {
-    pub fn new(id: impl Into<String>, config: MqttSinkConfig) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        config: MqttSinkConfig,
+        mqtt_clients: MqttClientManager,
+    ) -> Self {
         Self {
             id: id.into(),
             config,
             client: None,
+            mqtt_clients,
         }
     }
 
@@ -186,7 +192,9 @@ impl MqttSinkConnector {
         }
 
         if let Some(connector_key) = self.config.connector_key.clone() {
-            let client = acquire_shared_client(&connector_key)
+            let client = self
+                .mqtt_clients
+                .acquire_client(&connector_key)
                 .await
                 .map_err(|err| SinkConnectorError::Other(err.to_string()))?;
             println!(

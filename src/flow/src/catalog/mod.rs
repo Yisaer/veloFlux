@@ -1,5 +1,4 @@
 use datatypes::Schema;
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -148,10 +147,4 @@ impl Catalog {
             .map(|_| ())
             .ok_or_else(|| CatalogError::NotFound(stream_id.to_string()))
     }
-}
-
-static GLOBAL_CATALOG: Lazy<Catalog> = Lazy::new(Catalog::new);
-
-pub fn global_catalog() -> &'static Catalog {
-    &GLOBAL_CATALOG
 }

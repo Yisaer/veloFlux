@@ -17,9 +17,9 @@ fn log_allocator() {
     println!("[synapse-flow] global allocator: system default");
 }
 
+use flow::FlowInstance;
 #[cfg(feature = "profiling")]
 use pprof::{protos::Message, ProfilerGuard};
-use flow::FlowInstance;
 use std::env;
 #[cfg(feature = "profiling")]
 use std::ffi::CString;

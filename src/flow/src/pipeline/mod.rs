@@ -1,8 +1,9 @@
-use crate::catalog::{global_catalog, StreamDefinition, StreamProps};
-use crate::connector::{MqttSinkConfig, MqttSourceConfig, MqttSourceConnector};
+use crate::catalog::{Catalog, StreamDefinition, StreamProps};
+use crate::connector::{MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector};
 use crate::planner::sink::CommonSinkProps;
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::Processor;
+use crate::shared_stream::SharedStreamRegistry;
 use crate::{
     create_pipeline, JsonDecoder, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
     SinkEncoderConfig,
@@ -167,15 +168,24 @@ pub struct PipelineSnapshot {
 }
 
 /// Stores all registered pipelines and manages their lifecycle.
-#[derive(Default)]
 pub struct PipelineManager {
     pipelines: RwLock<HashMap<String, ManagedPipeline>>,
+    catalog: Arc<Catalog>,
+    shared_stream_registry: &'static SharedStreamRegistry,
+    mqtt_client_manager: MqttClientManager,
 }
 
 impl PipelineManager {
-    pub fn new() -> Self {
+    pub fn new(
+        catalog: Arc<Catalog>,
+        shared_stream_registry: &'static SharedStreamRegistry,
+        mqtt_client_manager: MqttClientManager,
+    ) -> Self {
         Self {
             pipelines: RwLock::new(HashMap::new()),
+            catalog,
+            shared_stream_registry,
+            mqtt_client_manager,
         }
     }
 
@@ -185,8 +195,13 @@ impl PipelineManager {
         definition: PipelineDefinition,
     ) -> Result<PipelineSnapshot, PipelineError> {
         let pipeline_id = definition.id().to_string();
-        let (pipeline, streams) =
-            build_pipeline_runtime(&definition).map_err(PipelineError::BuildFailure)?;
+        let (pipeline, streams) = build_pipeline_runtime(
+            &definition,
+            &self.catalog,
+            self.shared_stream_registry,
+            &self.mqtt_client_manager,
+        )
+        .map_err(PipelineError::BuildFailure)?;
         let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
         if guard.contains_key(&pipeline_id) {
             return Err(PipelineError::AlreadyExists(pipeline_id));
@@ -259,6 +274,9 @@ async fn close_pipeline(mut pipeline: ProcessorPipeline) -> Result<(), PipelineE
 
 fn build_pipeline_runtime(
     definition: &PipelineDefinition,
+    catalog: &Catalog,
+    shared_stream_registry: &SharedStreamRegistry,
+    mqtt_client_manager: &MqttClientManager,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
     let select_stmt = parse_sql(definition.sql()).map_err(|err| err.to_string())?;
     let streams: Vec<String> = select_stmt
@@ -268,15 +286,22 @@ fn build_pipeline_runtime(
         .collect();
     let mut stream_definitions = HashMap::new();
     for stream in &streams {
-        let definition = global_catalog()
+        let definition = catalog
             .get(stream)
             .ok_or_else(|| format!("stream {stream} not found in catalog"))?;
         stream_definitions.insert(stream.clone(), definition);
     }
 
     let sinks = build_sinks_from_definition(definition)?;
-    let mut pipeline = create_pipeline(definition.sql(), sinks).map_err(|err| err.to_string())?;
-    attach_sources_from_catalog(&mut pipeline, &stream_definitions)?;
+    let mut pipeline = create_pipeline(
+        definition.sql(),
+        sinks,
+        catalog,
+        shared_stream_registry,
+        mqtt_client_manager.clone(),
+    )
+    .map_err(|err| err.to_string())?;
+    attach_sources_from_catalog(&mut pipeline, &stream_definitions, mqtt_client_manager)?;
     pipeline.set_pipeline_id(definition.id().to_string());
     Ok((pipeline, streams))
 }
@@ -325,6 +350,7 @@ fn build_sinks_from_definition(
 fn attach_sources_from_catalog(
     pipeline: &mut ProcessorPipeline,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+    mqtt_client_manager: &MqttClientManager,
 ) -> Result<(), String> {
     let mut attached = false;
     for processor in pipeline.middle_processors.iter_mut() {
@@ -349,8 +375,11 @@ fn attach_sources_from_catalog(
             if let Some(connector_key) = &stream_props.connector_key {
                 config = config.with_connector_key(connector_key.clone());
             }
-            let connector =
-                MqttSourceConnector::new(format!("{processor_id}_source_connector"), config);
+            let connector = MqttSourceConnector::new(
+                format!("{processor_id}_source_connector"),
+                config,
+                mqtt_client_manager.clone(),
+            );
             let decoder = Arc::new(JsonDecoder::new(stream_name, schema));
             ds.add_connector(Box::new(connector), decoder);
             attached = true;
@@ -367,11 +396,14 @@ fn attach_sources_from_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::{global_catalog, MqttStreamProps, StreamDefinition, StreamProps};
+    use crate::catalog::{Catalog, MqttStreamProps, StreamDefinition, StreamProps};
+    use crate::connector::MqttClientManager;
+    use crate::shared_stream_registry;
     use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
+    use std::sync::Arc;
     use tokio::runtime::Runtime;
 
-    fn install_stream(name: &str) {
+    fn install_stream(catalog: &Arc<Catalog>, name: &str) {
         let schema = Schema::new(vec![ColumnSchema::new(
             name.to_string(),
             "value".to_string(),
@@ -386,7 +418,7 @@ mod tests {
                 0,
             )),
         );
-        global_catalog().upsert(definition);
+        catalog.upsert(definition);
     }
 
     fn sample_pipeline(id: &str, stream: &str) -> PipelineDefinition {
@@ -408,8 +440,11 @@ mod tests {
 
     #[test]
     fn create_and_list_pipeline() {
-        install_stream("test_stream");
-        let manager = PipelineManager::new();
+        let catalog = Arc::new(Catalog::new());
+        let registry = shared_stream_registry();
+        let mqtt_manager = MqttClientManager::new();
+        install_stream(&catalog, "test_stream");
+        let manager = PipelineManager::new(Arc::clone(&catalog), registry, mqtt_manager.clone());
         let snapshot = manager
             .create_pipeline(sample_pipeline("pipe_a", "test_stream"))
             .expect("create pipeline");
@@ -425,8 +460,11 @@ mod tests {
 
     #[test]
     fn prevent_duplicate_pipeline() {
-        install_stream("dup_stream");
-        let manager = PipelineManager::new();
+        let catalog = Arc::new(Catalog::new());
+        let registry = shared_stream_registry();
+        let mqtt_manager = MqttClientManager::new();
+        install_stream(&catalog, "dup_stream");
+        let manager = PipelineManager::new(Arc::clone(&catalog), registry, mqtt_manager.clone());
         manager
             .create_pipeline(sample_pipeline("dup_pipe", "dup_stream"))
             .expect("first creation");

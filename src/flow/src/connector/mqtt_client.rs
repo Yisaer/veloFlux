@@ -3,7 +3,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use once_cell::sync::Lazy;
 use rumqttc::{
     AsyncClient, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS, Transport,
 };
@@ -12,8 +11,6 @@ use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::connector::ConnectorError;
-
-static MQTT_CLIENT_MANAGER: Lazy<MqttClientManager> = Lazy::new(MqttClientManager::new);
 
 #[derive(Debug, Clone)]
 pub struct SharedMqttClientConfig {
@@ -33,12 +30,17 @@ pub enum SharedMqttEvent {
 pub struct SharedMqttClient {
     key: String,
     entry: Arc<MqttClientEntry>,
+    manager: MqttClientManager,
 }
 
 impl SharedMqttClient {
-    fn new(key: String, entry: Arc<MqttClientEntry>) -> Self {
+    fn new(key: String, entry: Arc<MqttClientEntry>, manager: MqttClientManager) -> Self {
         entry.ref_count.fetch_add(1, Ordering::AcqRel);
-        Self { key, entry }
+        Self {
+            key,
+            entry,
+            manager,
+        }
     }
 
     pub fn client(&self) -> AsyncClient {
@@ -52,7 +54,7 @@ impl SharedMqttClient {
 
 impl Drop for SharedMqttClient {
     fn drop(&mut self) {
-        MQTT_CLIENT_MANAGER.release(&self.key);
+        self.manager.release(&self.key);
     }
 }
 
@@ -139,18 +141,22 @@ impl MqttClientEntry {
     }
 }
 
+#[derive(Clone, Default)]
 pub struct MqttClientManager {
-    entries: Mutex<HashMap<String, Arc<MqttClientEntry>>>,
+    entries: Arc<Mutex<HashMap<String, Arc<MqttClientEntry>>>>,
 }
 
 impl MqttClientManager {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            entries: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    async fn create(&self, config: SharedMqttClientConfig) -> Result<(), ConnectorError> {
+    pub async fn create_client(
+        &self,
+        config: SharedMqttClientConfig,
+    ) -> Result<(), ConnectorError> {
         let key = config.key.clone();
         {
             if self.entries.lock().unwrap().contains_key(&key) {
@@ -166,14 +172,14 @@ impl MqttClientManager {
         Ok(())
     }
 
-    async fn acquire(&self, key: &str) -> Result<SharedMqttClient, ConnectorError> {
+    pub async fn acquire_client(&self, key: &str) -> Result<SharedMqttClient, ConnectorError> {
         if let Some(entry) = self.entries.lock().unwrap().get(key).cloned() {
-            return Ok(SharedMqttClient::new(key.to_string(), entry));
+            return Ok(SharedMqttClient::new(key.to_string(), entry, self.clone()));
         }
         Err(ConnectorError::NotFound(key.to_string()))
     }
 
-    fn drop_client(&self, key: &str) -> Result<(), ConnectorError> {
+    pub fn drop_client(&self, key: &str) -> Result<(), ConnectorError> {
         let mut guard = self.entries.lock().unwrap();
         let entry = guard
             .get(key)
@@ -189,23 +195,11 @@ impl MqttClientManager {
         Ok(())
     }
 
-    fn release(&self, key: &str) {
+    pub fn release(&self, key: &str) {
         if let Some(entry) = self.entries.lock().unwrap().get(key) {
             entry.ref_count.fetch_sub(1, Ordering::AcqRel);
         }
     }
-}
-
-pub async fn create_shared_client(config: SharedMqttClientConfig) -> Result<(), ConnectorError> {
-    MQTT_CLIENT_MANAGER.create(config).await
-}
-
-pub async fn acquire_shared_client(key: &str) -> Result<SharedMqttClient, ConnectorError> {
-    MQTT_CLIENT_MANAGER.acquire(key).await
-}
-
-pub fn drop_shared_client(key: &str) -> Result<(), ConnectorError> {
-    MQTT_CLIENT_MANAGER.drop_client(key)
 }
 
 fn normalize_broker_url(url: &str) -> String {

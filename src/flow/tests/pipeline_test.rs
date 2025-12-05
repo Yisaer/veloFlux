@@ -4,15 +4,14 @@
 //! and the customizable `create_pipeline` API that accepts user-defined sinks.
 
 use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
-use flow::catalog::{global_catalog, MqttStreamProps, StreamDefinition, StreamProps};
-use flow::create_pipeline;
-use flow::create_pipeline_with_log_sink;
+use flow::catalog::{MqttStreamProps, StreamDefinition, StreamProps};
 use flow::model::batch_from_columns_simple;
 use flow::planner::sink::{
     CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
     SinkEncoderConfig,
 };
 use flow::processor::StreamData;
+use flow::FlowInstance;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
@@ -36,13 +35,16 @@ struct ColumnCheck {
 async fn run_test_case(test_case: TestCase) {
     println!("Running test: {}", test_case.name);
 
-    install_stream_schema(&test_case.input_data);
+    let instance = FlowInstance::new();
+    install_stream_schema(&instance, &test_case.input_data).await;
 
     // Create pipeline from SQL
-    let mut pipeline = create_pipeline_with_log_sink(test_case.sql, true).expect(&format!(
-        "Failed to create pipeline for: {}",
-        test_case.name
-    ));
+    let mut pipeline = instance
+        .build_pipeline_with_log_sink(test_case.sql, true)
+        .expect(&format!(
+            "Failed to create pipeline for: {}",
+            test_case.name
+        ));
 
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -317,7 +319,8 @@ async fn test_create_pipeline_various_queries() {
 
 #[tokio::test]
 async fn test_create_pipeline_with_custom_sink_connectors() {
-    install_stream_schema(&[("a".to_string(), vec![Value::Int64(10)])]);
+    let instance = FlowInstance::new();
+    install_stream_schema(&instance, &[("a".to_string(), vec![Value::Int64(10)])]).await;
 
     let connector = PipelineSinkConnector::new(
         "custom_sink_connector",
@@ -328,7 +331,8 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
     );
     let sink = PipelineSink::new("custom_sink", connector).with_forward_to_result(true);
 
-    let mut pipeline = create_pipeline("SELECT a FROM stream", vec![sink])
+    let mut pipeline = instance
+        .build_pipeline("SELECT a FROM stream", vec![sink])
         .expect("pipeline with custom sink should succeed");
 
     pipeline.start();
@@ -365,10 +369,15 @@ async fn test_create_pipeline_with_custom_sink_connectors() {
 
 #[tokio::test]
 async fn test_batch_processor_flushes_on_count() {
-    install_stream_schema(&[(
-        "a".to_string(),
-        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
-    )]);
+    let instance = FlowInstance::new();
+    install_stream_schema(
+        &instance,
+        &[(
+            "a".to_string(),
+            vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+        )],
+    )
+    .await;
 
     let connector = PipelineSinkConnector::new(
         "batch_sink_connector",
@@ -384,7 +393,8 @@ async fn test_batch_processor_flushes_on_count() {
             batch_duration: None,
         });
 
-    let mut pipeline = create_pipeline("SELECT a FROM stream", vec![sink])
+    let mut pipeline = instance
+        .build_pipeline("SELECT a FROM stream", vec![sink])
         .expect("failed to create batched pipeline");
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -440,7 +450,7 @@ async fn test_batch_processor_flushes_on_count() {
     }
 }
 
-fn install_stream_schema(columns: &[(String, Vec<Value>)]) {
+async fn install_stream_schema(instance: &FlowInstance, columns: &[(String, Vec<Value>)]) {
     let schema_columns = columns
         .iter()
         .map(|(name, values)| {
@@ -458,5 +468,8 @@ fn install_stream_schema(columns: &[(String, Vec<Value>)]) {
         Arc::new(schema),
         StreamProps::Mqtt(MqttStreamProps::default()),
     );
-    global_catalog().upsert(definition);
+    instance
+        .create_stream(definition, false)
+        .await
+        .expect("create stream");
 }

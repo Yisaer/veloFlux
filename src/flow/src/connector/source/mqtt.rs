@@ -1,6 +1,6 @@
 //! MQTT source connector supporting shared or standalone clients.
 
-use crate::connector::mqtt_client::{acquire_shared_client, SharedMqttEvent};
+use crate::connector::mqtt_client::{MqttClientManager, SharedMqttEvent};
 use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter_vec, IntCounterVec};
@@ -60,6 +60,7 @@ pub struct MqttSourceConnector {
     config: MqttSourceConfig,
     receiver: Option<mpsc::Receiver<Result<ConnectorEvent, ConnectorError>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    mqtt_clients: MqttClientManager,
 }
 
 static MQTT_SOURCE_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -81,12 +82,17 @@ static MQTT_SOURCE_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
 });
 
 impl MqttSourceConnector {
-    pub fn new(id: impl Into<String>, config: MqttSourceConfig) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        config: MqttSourceConfig,
+        mqtt_clients: MqttClientManager,
+    ) -> Self {
         Self {
             id: id.into(),
             config,
             receiver: None,
             shutdown_tx: None,
+            mqtt_clients,
         }
     }
 }
@@ -109,9 +115,10 @@ impl SourceConnector for MqttSourceConnector {
 
         if let Some(connector_key) = config.connector_key.clone() {
             let metrics_id = connector_id.clone();
+            let manager = self.mqtt_clients.clone();
             tokio::spawn(async move {
                 let mut shutdown_rx = shutdown_rx;
-                match acquire_shared_client(&connector_key).await {
+                match manager.acquire_client(&connector_key).await {
                     Ok(shared_client) => {
                         let mut events = shared_client.subscribe();
                         loop {
