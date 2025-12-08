@@ -6,7 +6,6 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-const CURRENT_VERSION: u8 = 1;
 const STREAMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("streams");
 const PIPELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("pipelines");
 const SHARED_MQTT_CONFIGS_TABLE: TableDefinition<&str, &[u8]> =
@@ -25,8 +24,6 @@ pub enum StorageError {
     Backend(String),
     #[error("serialization error: {0}")]
     Serialization(String),
-    #[error("unsupported record version: {0}")]
-    UnsupportedVersion(u8),
     #[error("corrupted record: {0}")]
     Corrupted(&'static str),
     #[error("not found: {0}")]
@@ -52,52 +49,22 @@ impl StorageError {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredStream {
     pub id: String,
-    pub stream_type: StoredStreamType,
-    pub schema_json: String,
-    pub props: StoredStreamProps,
-    pub decoder_type: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum StoredStreamType {
-    Mqtt,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum StoredStreamProps {
-    Mqtt(StoredMqttStreamProps),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StoredMqttStreamProps {
-    pub broker_url: String,
-    pub topic: String,
-    pub qos: u8,
-    pub client_id: Option<String>,
-    pub connector_key: Option<String>,
+    /// Original create-stream request serialized as JSON.
+    pub raw_json: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredPipeline {
     pub id: String,
-    pub sql: String,
-    pub sinks: Vec<StoredSink>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StoredSink {
-    pub id: String,
-    pub kind: String,
-    pub config_json: String,
+    /// Original create-pipeline request serialized as JSON.
+    pub raw_json: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredMqttClientConfig {
     pub key: String,
-    pub broker_url: String,
-    pub topic: String,
-    pub client_id: String,
-    pub qos: u8,
+    /// Original request serialized as JSON.
+    pub raw_json: String,
 }
 
 pub struct MetadataStorage {
@@ -147,6 +114,10 @@ impl MetadataStorage {
         self.get_entry(STREAMS_TABLE, id)
     }
 
+    pub fn list_streams(&self) -> Result<Vec<StoredStream>, StorageError> {
+        self.list_entries(STREAMS_TABLE)
+    }
+
     pub fn delete_stream(&self, id: &str) -> Result<(), StorageError> {
         self.delete_entry(STREAMS_TABLE, id)
     }
@@ -157,6 +128,10 @@ impl MetadataStorage {
 
     pub fn get_pipeline(&self, id: &str) -> Result<Option<StoredPipeline>, StorageError> {
         self.get_entry(PIPELINES_TABLE, id)
+    }
+
+    pub fn list_pipelines(&self) -> Result<Vec<StoredPipeline>, StorageError> {
+        self.list_entries(PIPELINES_TABLE)
     }
 
     pub fn delete_pipeline(&self, id: &str) -> Result<(), StorageError> {
@@ -172,6 +147,10 @@ impl MetadataStorage {
         key: &str,
     ) -> Result<Option<StoredMqttClientConfig>, StorageError> {
         self.get_entry(SHARED_MQTT_CONFIGS_TABLE, key)
+    }
+
+    pub fn list_mqtt_configs(&self) -> Result<Vec<StoredMqttClientConfig>, StorageError> {
+        self.list_entries(SHARED_MQTT_CONFIGS_TABLE)
     }
 
     pub fn delete_mqtt_config(&self, key: &str) -> Result<(), StorageError> {
@@ -248,6 +227,20 @@ impl MetadataStorage {
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
     }
+
+    fn list_entries<T: DeserializeOwned>(
+        &self,
+        table: TableDefinition<&str, &[u8]>,
+    ) -> Result<Vec<T>, StorageError> {
+        let txn = self.db.begin_read().map_err(StorageError::backend)?;
+        let table = txn.open_table(table).map_err(StorageError::backend)?;
+        let mut items = Vec::new();
+        for entry in table.range::<&str>(..).map_err(StorageError::backend)? {
+            let (_, value) = entry.map_err(StorageError::backend)?;
+            items.push(decode_record(value.value())?);
+        }
+        Ok(items)
+    }
 }
 
 /// Facade that exposes storage capabilities; currently only metadata, future namespaces can be added.
@@ -268,12 +261,20 @@ impl StorageManager {
         &self.metadata
     }
 
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
     pub fn create_stream(&self, stream: StoredStream) -> Result<(), StorageError> {
         self.metadata.create_stream(stream)
     }
 
     pub fn get_stream(&self, id: &str) -> Result<Option<StoredStream>, StorageError> {
         self.metadata.get_stream(id)
+    }
+
+    pub fn list_streams(&self) -> Result<Vec<StoredStream>, StorageError> {
+        self.metadata.list_streams()
     }
 
     pub fn delete_stream(&self, id: &str) -> Result<(), StorageError> {
@@ -286,6 +287,10 @@ impl StorageManager {
 
     pub fn get_pipeline(&self, id: &str) -> Result<Option<StoredPipeline>, StorageError> {
         self.metadata.get_pipeline(id)
+    }
+
+    pub fn list_pipelines(&self) -> Result<Vec<StoredPipeline>, StorageError> {
+        self.metadata.list_pipelines()
     }
 
     pub fn delete_pipeline(&self, id: &str) -> Result<(), StorageError> {
@@ -303,71 +308,47 @@ impl StorageManager {
         self.metadata.get_mqtt_config(key)
     }
 
+    pub fn list_mqtt_configs(&self) -> Result<Vec<StoredMqttClientConfig>, StorageError> {
+        self.metadata.list_mqtt_configs()
+    }
+
     pub fn delete_mqtt_config(&self, key: &str) -> Result<(), StorageError> {
         self.metadata.delete_mqtt_config(key)
     }
 }
 
 fn encode_record<T: Serialize>(value: &T) -> Result<Vec<u8>, StorageError> {
-    let mut buf = Vec::with_capacity(128);
-    buf.push(CURRENT_VERSION);
-    bincode::serialize_into(&mut buf, value).map_err(StorageError::serialization)?;
-    Ok(buf)
+    bincode::serialize(value).map_err(StorageError::serialization)
 }
 
 fn decode_record<T: DeserializeOwned>(raw: &[u8]) -> Result<T, StorageError> {
-    if raw.is_empty() {
-        return Err(StorageError::Corrupted("empty record"));
-    }
-    let version = raw[0];
-    if version != CURRENT_VERSION {
-        return Err(StorageError::UnsupportedVersion(version));
-    }
-    bincode::deserialize(&raw[1..]).map_err(StorageError::serialization)
+    bincode::deserialize(raw).map_err(StorageError::serialization)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use tempfile::tempdir;
 
     fn sample_stream() -> StoredStream {
         StoredStream {
             id: "stream_1".to_string(),
-            stream_type: StoredStreamType::Mqtt,
-            schema_json: r#"{"fields":[{"name":"a","type":"int"}]}"#.to_string(),
-            props: StoredStreamProps::Mqtt(StoredMqttStreamProps {
-                broker_url: "tcp://localhost:1883".to_string(),
-                topic: "foo/bar".to_string(),
-                qos: 0,
-                client_id: Some("cid".to_string()),
-                connector_key: None,
-            }),
-            decoder_type: "json".to_string(),
+            raw_json: r#"{"name":"stream_1","type":"mqtt","schema":{"columns":[]}}"#.to_string(),
         }
     }
 
     fn sample_pipeline() -> StoredPipeline {
         StoredPipeline {
             id: "pipe_1".to_string(),
-            sql: "SELECT * FROM stream_1".to_string(),
-            sinks: vec![StoredSink {
-                id: "sink_1".to_string(),
-                kind: "mqtt".to_string(),
-                config_json: json!({"topic": "out", "qos": 1}).to_string(),
-            }],
+            raw_json: r#"{"id":"pipe_1","sql":"SELECT * FROM stream_1","sinks":[]}"#.to_string(),
         }
     }
 
     fn sample_mqtt_config() -> StoredMqttClientConfig {
         StoredMqttClientConfig {
-            key: "shared_a".to_string(),
-            broker_url: "tcp://localhost:1883".to_string(),
-            topic: "foo/bar".to_string(),
-            client_id: "client_a".to_string(),
-            qos: 1,
-        }
+        key: "shared_a".to_string(),
+        raw_json: r#"{"key":"shared_a","broker_url":"tcp://localhost:1883","topic":"foo/bar","client_id":"client_a","qos":1}"#.to_string(),
+    }
     }
 
     #[test]
@@ -381,6 +362,8 @@ mod tests {
             storage.get_stream(&stream.id).unwrap(),
             Some(stream.clone())
         );
+        let streams = storage.list_streams().unwrap();
+        assert_eq!(streams.len(), 1);
 
         let pipeline = sample_pipeline();
         storage.create_pipeline(pipeline.clone()).unwrap();
@@ -388,6 +371,8 @@ mod tests {
             storage.get_pipeline(&pipeline.id).unwrap(),
             Some(pipeline.clone())
         );
+        let pipelines = storage.list_pipelines().unwrap();
+        assert_eq!(pipelines.len(), 1);
 
         let mqtt = sample_mqtt_config();
         storage.create_mqtt_config(mqtt.clone()).unwrap();
@@ -395,6 +380,8 @@ mod tests {
             storage.get_mqtt_config(&mqtt.key).unwrap(),
             Some(mqtt.clone())
         );
+        let mqtts = storage.list_mqtt_configs().unwrap();
+        assert_eq!(mqtts.len(), 1);
 
         storage.delete_stream(&stream.id).unwrap();
         storage.delete_pipeline(&pipeline.id).unwrap();
