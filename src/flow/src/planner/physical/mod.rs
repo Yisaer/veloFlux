@@ -10,6 +10,7 @@ pub mod physical_project;
 pub mod physical_result_collect;
 pub mod physical_shared_stream;
 pub mod physical_streaming_encoder;
+pub mod physical_window;
 
 pub use base_physical::BasePhysicalPlan;
 pub use physical_batch::PhysicalBatch;
@@ -21,6 +22,7 @@ pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_shared_stream::PhysicalSharedStream;
 pub use physical_streaming_encoder::PhysicalStreamingEncoder;
+pub use physical_window::{PhysicalCountWindow, PhysicalTumblingWindow};
 
 /// Enum describing all supported physical execution nodes
 #[derive(Debug, Clone)]
@@ -34,6 +36,8 @@ pub enum PhysicalPlan {
     Encoder(PhysicalEncoder),
     StreamingEncoder(PhysicalStreamingEncoder),
     ResultCollect(PhysicalResultCollect),
+    TumblingWindow(PhysicalTumblingWindow),
+    CountWindow(PhysicalCountWindow),
 }
 
 impl PhysicalPlan {
@@ -49,6 +53,8 @@ impl PhysicalPlan {
             PhysicalPlan::Encoder(plan) => plan.base.children(),
             PhysicalPlan::StreamingEncoder(plan) => plan.base.children(),
             PhysicalPlan::ResultCollect(plan) => plan.base.children(),
+            PhysicalPlan::TumblingWindow(plan) => plan.base.children(),
+            PhysicalPlan::CountWindow(plan) => plan.base.children(),
         }
     }
 
@@ -64,6 +70,8 @@ impl PhysicalPlan {
             PhysicalPlan::Encoder(_) => "PhysicalEncoder",
             PhysicalPlan::StreamingEncoder(_) => "PhysicalStreamingEncoder",
             PhysicalPlan::ResultCollect(_) => "PhysicalResultCollect",
+            PhysicalPlan::TumblingWindow(_) => "PhysicalTumblingWindow",
+            PhysicalPlan::CountWindow(_) => "PhysicalCountWindow",
         }
     }
 
@@ -79,6 +87,8 @@ impl PhysicalPlan {
             PhysicalPlan::Encoder(plan) => plan.base.index(),
             PhysicalPlan::StreamingEncoder(plan) => plan.base.index(),
             PhysicalPlan::ResultCollect(plan) => plan.base.index(),
+            PhysicalPlan::TumblingWindow(plan) => plan.base.index(),
+            PhysicalPlan::CountWindow(plan) => plan.base.index(),
         }
     }
 

@@ -434,6 +434,17 @@ fn create_processor_from_plan_node(
                 PlanProcessor::StreamingEncoder(processor),
             ))
         }
+        PhysicalPlan::CountWindow(count_window) => {
+            let processor =
+                BatchProcessor::new(plan_name.clone(), Some(count_window.count as usize), None);
+            Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Batch(
+                processor,
+            )))
+        }
+        PhysicalPlan::TumblingWindow(_) => {
+            // TODO: implement time-based window processor
+            Ok(ProcessorBuildOutput { processor: None })
+        }
         PhysicalPlan::DataSink(sink_plan) => {
             let processor_id = format!("{}_{}", plan_name, sink_plan.connector.sink_id);
             let mut processor = SinkProcessor::new(processor_id);

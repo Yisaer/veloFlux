@@ -1,178 +1,74 @@
-use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Value};
+use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Ident, ObjectName, Value};
 use sqlparser::parser::ParserError;
 
-/// Represents different types of time windows
-#[derive(Debug, Clone, PartialEq)]
-pub enum WindowType {
-    /// Tumbling window - fixed-size, non-overlapping windows
-    Tumbling,
-    /// Hopping window - fixed-size windows that hop forward
-    Hopping,
-    /// Sliding window - windows that slide forward continuously
-    Sliding,
-    /// Session window - windows based on session gaps
-    Session,
+/// Window specification supported by StreamDialect
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Window {
+    /// Fixed-size, non-overlapping window defined by time unit + length
+    Tumbling { time_unit: TimeUnit, length: u64 },
+    /// Fixed-size window defined by number of rows
+    Count { count: u64 },
 }
 
-/// Represents a time window specification
-#[derive(Debug, Clone, PartialEq)]
-pub struct TimeWindow {
-    /// Type of window
-    pub window_type: WindowType,
-    /// Time unit (e.g., 'ss', 'mm', 'hh', 'dd')
-    pub time_unit: String,
-    /// Window size in the specified time unit
-    pub size: u64,
-    /// Hop size for hopping windows (optional)
-    pub hop_size: Option<u64>,
-    /// Session gap for session windows (optional)
-    pub session_gap: Option<u64>,
+/// Supported time units for window definitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeUnit {
+    Seconds,
 }
 
-impl TimeWindow {
-    /// Create a new tumbling window
-    pub fn tumbling(time_unit: String, size: u64) -> Self {
-        Self {
-            window_type: WindowType::Tumbling,
-            time_unit,
-            size,
-            hop_size: None,
-            session_gap: None,
-        }
+impl Window {
+    pub fn tumbling(time_unit: TimeUnit, length: u64) -> Self {
+        Window::Tumbling { time_unit, length }
     }
 
-    /// Create a new hopping window
-    pub fn hopping(time_unit: String, size: u64, hop_size: u64) -> Self {
-        Self {
-            window_type: WindowType::Hopping,
-            time_unit,
-            size,
-            hop_size: Some(hop_size),
-            session_gap: None,
-        }
+    pub fn count(count: u64) -> Self {
+        Window::Count { count }
     }
 
-    /// Create a new sliding window
-    pub fn sliding(time_unit: String, size: u64) -> Self {
-        Self {
-            window_type: WindowType::Sliding,
-            time_unit,
-            size,
-            hop_size: None,
-            session_gap: None,
-        }
-    }
-
-    /// Create a new session window
-    pub fn session(time_unit: String, session_gap: u64) -> Self {
-        Self {
-            window_type: WindowType::Session,
-            time_unit,
-            size: 0, // size is not applicable for session windows
-            hop_size: None,
-            session_gap: Some(session_gap),
+    fn function_name(&self) -> &'static str {
+        match self {
+            Window::Tumbling { .. } => "tumblingwindow",
+            Window::Count { .. } => "countwindow",
         }
     }
 }
 
-/// Parse a tumbling window function from SQL expression
-pub fn parse_tumbling_window(function: &Function) -> Result<TimeWindow, ParserError> {
-    let function_name = function.name.to_string().to_lowercase();
-
-    if function_name != "tumblingwindow" {
-        return Err(ParserError::ParserError(format!(
-            "Expected tumblingwindow function, got {}",
-            function_name
-        )));
-    }
-
-    if function.args.len() != 2 {
-        return Err(ParserError::ParserError(
-            "tumblingwindow function requires exactly 2 arguments: time_unit and size".to_string(),
-        ));
-    }
-
-    let time_unit = match &function.args[0] {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::SingleQuotedString(s)))) => {
-            s.clone()
+/// Attempt to parse a window function from an expression
+pub fn parse_window_expr(expr: &Expr) -> Result<Option<Window>, ParserError> {
+    if let Expr::Function(function) = expr
+        && is_supported_window_function(&function.name.to_string()) {
+            return parse_window_function(function).map(Some);
         }
-        _ => {
-            return Err(ParserError::ParserError(
-                "tumblingwindow first argument must be a string literal (time unit)".to_string(),
-            ));
-        }
-    };
 
-    let size_str = match &function.args[1] {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::Number(n, _)))) => n.clone(),
-        _ => {
-            return Err(ParserError::ParserError(
-                "tumblingwindow second argument must be a number (window size)".to_string(),
-            ));
-        }
-    };
-
-    let size = size_str
-        .parse::<u64>()
-        .map_err(|_| ParserError::ParserError(format!("Invalid window size: {}", size_str)))?;
-
-    Ok(TimeWindow::tumbling(time_unit, size))
+    Ok(None)
 }
 
-/// Convert a TimeWindow back to a SQL expression
-pub fn window_to_expr(window: &TimeWindow) -> Expr {
-    let window_type_name = match window.window_type {
-        WindowType::Tumbling => "tumblingwindow",
-        WindowType::Hopping => "hoppingwindow",
-        WindowType::Sliding => "slidingwindow",
-        WindowType::Session => "sessionwindow",
-    };
+/// Parse a window function (tumblingwindow/countwindow) into a Window enum
+pub fn parse_window_function(function: &Function) -> Result<Window, ParserError> {
+    match function.name.to_string().to_lowercase().as_str() {
+        "tumblingwindow" => parse_tumbling_window(function),
+        "countwindow" => parse_count_window(function),
+        name => Err(ParserError::ParserError(format!(
+            "Unsupported window function: {}",
+            name
+        ))),
+    }
+}
 
-    let args = match window.window_type {
-        WindowType::Tumbling => vec![
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                Value::SingleQuotedString(window.time_unit.clone()),
-            ))),
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::Number(
-                window.size.to_string(),
-                false,
-            )))),
-        ],
-        WindowType::Hopping => vec![
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                Value::SingleQuotedString(window.time_unit.clone()),
-            ))),
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::Number(
-                window.size.to_string(),
-                false,
-            )))),
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::Number(
-                window.hop_size.unwrap_or(0).to_string(),
-                false,
-            )))),
-        ],
-        WindowType::Sliding => vec![
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                Value::SingleQuotedString(window.time_unit.clone()),
-            ))),
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::Number(
-                window.size.to_string(),
-                false,
-            )))),
-        ],
-        WindowType::Session => vec![
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
-                Value::SingleQuotedString(window.time_unit.clone()),
-            ))),
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::Number(
-                window.session_gap.unwrap_or(0).to_string(),
-                false,
-            )))),
-        ],
+/// Convert a Window back to a SQL expression
+pub fn window_to_expr(window: &Window) -> Expr {
+    let args = match window {
+        Window::Tumbling { time_unit, length } => {
+            vec![
+                make_string_arg(time_unit.as_str()),
+                make_number_arg(*length),
+            ]
+        }
+        Window::Count { count } => vec![make_number_arg(*count)],
     };
 
     Expr::Function(Function {
-        name: sqlparser::ast::ObjectName(vec![sqlparser::ast::Ident::new(window_type_name)]),
+        name: ObjectName(vec![Ident::new(window.function_name())]),
         args,
         over: None,
         distinct: false,
@@ -183,31 +79,164 @@ pub fn window_to_expr(window: &TimeWindow) -> Expr {
     })
 }
 
+fn parse_tumbling_window(function: &Function) -> Result<Window, ParserError> {
+    if function.args.len() != 2 {
+        return Err(ParserError::ParserError(
+            "tumblingwindow requires 2 arguments: (time_unit, length)".to_string(),
+        ));
+    }
+
+    let time_unit = parse_string_arg(&function.args[0], "tumblingwindow", "time unit")?;
+    let length = parse_number_arg(&function.args[1], "tumblingwindow", "length")?;
+
+    let time_unit = TimeUnit::try_from_str(&time_unit)?;
+
+    Ok(Window::tumbling(time_unit, length))
+}
+
+fn parse_count_window(function: &Function) -> Result<Window, ParserError> {
+    if function.args.len() != 1 {
+        return Err(ParserError::ParserError(
+            "countwindow requires 1 argument: (count)".to_string(),
+        ));
+    }
+
+    let count = parse_number_arg(&function.args[0], "countwindow", "count")?;
+    Ok(Window::count(count))
+}
+
+fn parse_string_arg(
+    arg: &FunctionArg,
+    func_name: &str,
+    field_name: &str,
+) -> Result<String, ParserError> {
+    match arg {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::SingleQuotedString(s)))) => {
+            Ok(s.clone())
+        }
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::DoubleQuotedString(s)))) => {
+            Ok(s.clone())
+        }
+        _ => Err(ParserError::ParserError(format!(
+            "{} {} must be a string literal",
+            func_name, field_name
+        ))),
+    }
+}
+
+fn parse_number_arg(
+    arg: &FunctionArg,
+    func_name: &str,
+    field_name: &str,
+) -> Result<u64, ParserError> {
+    match arg {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::Number(v, _)))) => {
+            v.parse::<u64>().map_err(|_| {
+                ParserError::ParserError(format!(
+                    "{} {} must be an unsigned integer",
+                    func_name, field_name
+                ))
+            })
+        }
+        _ => Err(ParserError::ParserError(format!(
+            "{} {} must be a number",
+            func_name, field_name
+        ))),
+    }
+}
+
+fn is_supported_window_function(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "tumblingwindow" | "countwindow"
+    )
+}
+
+impl TimeUnit {
+    fn try_from_str(raw: &str) -> Result<Self, ParserError> {
+        match raw.to_ascii_lowercase().as_str() {
+            "ss" => Ok(TimeUnit::Seconds),
+            other => Err(ParserError::ParserError(format!(
+                "unsupported time unit `{}` for tumblingwindow (only `ss` allowed)",
+                other
+            ))),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            TimeUnit::Seconds => "ss",
+        }
+    }
+}
+
+fn make_string_arg(value: &str) -> FunctionArg {
+    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
+        Value::SingleQuotedString(value.to_string()),
+    )))
+}
+
+fn make_number_arg(value: u64) -> FunctionArg {
+    FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(Value::Number(
+        value.to_string(),
+        false,
+    ))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_tumbling_window_creation() {
-        let window = TimeWindow::tumbling("ss".to_string(), 10);
-        assert_eq!(window.window_type, WindowType::Tumbling);
-        assert_eq!(window.time_unit, "ss");
-        assert_eq!(window.size, 10);
-        assert_eq!(window.hop_size, None);
-        assert_eq!(window.session_gap, None);
+    fn tumbling_expr() -> Expr {
+        Expr::Function(Function {
+            name: ObjectName(vec![Ident::new("tumblingwindow")]),
+            args: vec![make_string_arg("ss"), make_number_arg(10)],
+            over: None,
+            distinct: false,
+            order_by: vec![],
+            filter: None,
+            null_treatment: None,
+            special: false,
+        })
+    }
+
+    fn count_expr() -> Expr {
+        Expr::Function(Function {
+            name: ObjectName(vec![Ident::new("countwindow")]),
+            args: vec![make_number_arg(5)],
+            over: None,
+            distinct: false,
+            order_by: vec![],
+            filter: None,
+            null_treatment: None,
+            special: false,
+        })
     }
 
     #[test]
-    fn test_window_to_expr() {
-        let window = TimeWindow::tumbling("ss".to_string(), 10);
-        let expr = window_to_expr(&window);
+    fn parse_tumbling_window_expr() {
+        let parsed = parse_window_expr(&tumbling_expr()).unwrap();
+        assert_eq!(parsed, Some(Window::tumbling(TimeUnit::Seconds, 10)));
+    }
 
-        match expr {
-            Expr::Function(func) => {
-                assert_eq!(func.name.to_string(), "tumblingwindow");
-                assert_eq!(func.args.len(), 2);
-            }
-            _ => panic!("Expected Function expression"),
-        }
+    #[test]
+    fn parse_count_window_expr() {
+        let parsed = parse_window_expr(&count_expr()).unwrap();
+        assert_eq!(parsed, Some(Window::count(5)));
+    }
+
+    #[test]
+    fn parse_window_expr_non_window() {
+        let expr = Expr::Identifier(Ident::new("a"));
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn window_round_trip_back_to_expr() {
+        let window = Window::tumbling(TimeUnit::Seconds, 25);
+        let expr = window_to_expr(&window);
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
     }
 }

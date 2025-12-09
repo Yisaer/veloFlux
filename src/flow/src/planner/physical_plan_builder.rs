@@ -6,7 +6,7 @@ use crate::expr::sql_conversion::{
 };
 use crate::planner::logical::{
     DataSinkPlan, DataSource as LogicalDataSource, Filter as LogicalFilter, LogicalPlan,
-    Project as LogicalProject,
+    LogicalWindow, LogicalWindowSpec, Project as LogicalProject,
 };
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
@@ -146,6 +146,13 @@ fn create_physical_plan_with_builder_cached(
                 builder,
             )?
         }
+        LogicalPlan::Window(logical_window) => create_physical_window_with_builder(
+            logical_window,
+            &logical_plan,
+            bindings,
+            encoder_registry,
+            builder,
+        )?,
     };
 
     // Cache the result for future reuse using builder's cache
@@ -181,6 +188,45 @@ fn create_physical_result_collect_from_tail_with_builder_cached(
     let result_collect_index = builder.allocate_index();
     let result_collect = PhysicalResultCollect::new(physical_children, result_collect_index);
     Ok(Arc::new(PhysicalPlan::ResultCollect(result_collect)))
+}
+
+fn create_physical_window_with_builder(
+    logical_window: &LogicalWindow,
+    logical_plan: &Arc<LogicalPlan>,
+    bindings: &SchemaBinding,
+    encoder_registry: &EncoderRegistry,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    let mut physical_children = Vec::new();
+    for child in logical_plan.children() {
+        let physical_child = create_physical_plan_with_builder_cached(
+            child.clone(),
+            bindings,
+            encoder_registry,
+            builder,
+        )?;
+        physical_children.push(physical_child);
+    }
+
+    let index = builder.allocate_index();
+    let physical = match logical_window.spec {
+        LogicalWindowSpec::Tumbling { time_unit, length } => {
+            let tumbling = crate::planner::physical::PhysicalTumblingWindow::new(
+                time_unit,
+                length,
+                physical_children,
+                index,
+            );
+            PhysicalPlan::TumblingWindow(tumbling)
+        }
+        LogicalWindowSpec::Count { count } => {
+            let count_window =
+                crate::planner::physical::PhysicalCountWindow::new(count, physical_children, index);
+            PhysicalPlan::CountWindow(count_window)
+        }
+    };
+
+    Ok(Arc::new(physical))
 }
 
 /// Create a PhysicalDataSource from a LogicalDataSource using centralized index management

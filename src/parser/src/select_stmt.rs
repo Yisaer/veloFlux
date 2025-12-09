@@ -1,6 +1,8 @@
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 
+use crate::window::Window;
+
 /// Represents information about a data source (table)
 #[derive(Debug, Clone)]
 pub struct SourceInfo {
@@ -19,6 +21,10 @@ pub struct SelectStmt {
     pub where_condition: Option<Expr>,
     /// Optional HAVING clause expression
     pub having: Option<Expr>,
+    /// GROUP BY expressions, if any
+    pub group_by_exprs: Vec<Expr>,
+    /// Optional stream window declared in GROUP BY (tumbling/count)
+    pub window: Option<Window>,
     /// Aggregate function mappings: column name -> original aggregate expression
     pub aggregate_mappings: HashMap<String, Expr>,
     /// Information about the data sources (tables) accessed
@@ -41,6 +47,8 @@ impl SelectStmt {
             select_fields: Vec::new(),
             where_condition: None,
             having: None,
+            group_by_exprs: Vec::new(),
+            window: None,
             aggregate_mappings: HashMap::new(),
             source_infos: Vec::new(),
         }
@@ -52,6 +60,8 @@ impl SelectStmt {
             select_fields,
             where_condition: None,
             having: None,
+            group_by_exprs: Vec::new(),
+            window: None,
             aggregate_mappings: HashMap::new(),
             source_infos: Vec::new(),
         }
@@ -67,6 +77,8 @@ impl SelectStmt {
             select_fields,
             where_condition,
             having,
+            group_by_exprs: Vec::new(),
+            window: None,
             aggregate_mappings: HashMap::new(),
             source_infos: Vec::new(),
         }

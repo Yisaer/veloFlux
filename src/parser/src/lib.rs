@@ -18,3 +18,4 @@ pub use visitor::{
     AggregateVisitor, SourceInfo, TableInfoVisitor, contains_aggregates_with_visitor,
     extract_aggregates_with_visitor,
 };
+pub use window::Window;

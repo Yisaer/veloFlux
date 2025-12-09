@@ -1,4 +1,5 @@
 use crate::catalog::StreamDefinition;
+use parser::window as parser_window;
 use parser::SelectStmt;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -8,6 +9,7 @@ pub mod filter;
 pub mod project;
 pub mod sink;
 pub mod tail;
+pub mod window;
 
 use crate::planner::sink::PipelineSink;
 pub use datasource::DataSource;
@@ -15,6 +17,7 @@ pub use filter::Filter;
 pub use project::Project;
 pub use sink::DataSinkPlan;
 pub use tail::TailPlan;
+pub use window::{LogicalWindow, LogicalWindowSpec, TimeUnit};
 
 #[derive(Debug, Clone)]
 pub struct BaseLogicalPlan {
@@ -43,6 +46,7 @@ pub enum LogicalPlan {
     Project(Project),
     DataSink(DataSinkPlan),
     Tail(TailPlan),
+    Window(LogicalWindow),
 }
 
 impl LogicalPlan {
@@ -53,6 +57,7 @@ impl LogicalPlan {
             LogicalPlan::Project(plan) => plan.base.children(),
             LogicalPlan::DataSink(plan) => plan.base.children(),
             LogicalPlan::Tail(plan) => plan.base.children(),
+            LogicalPlan::Window(plan) => plan.base.children(),
         }
     }
 
@@ -63,6 +68,7 @@ impl LogicalPlan {
             LogicalPlan::Project(_) => "Project",
             LogicalPlan::DataSink(_) => "DataSink",
             LogicalPlan::Tail(_) => "Tail",
+            LogicalPlan::Window(_) => "Window",
         }
     }
 
@@ -73,6 +79,7 @@ impl LogicalPlan {
             LogicalPlan::Project(plan) => plan.base.index(),
             LogicalPlan::DataSink(plan) => plan.base.index(),
             LogicalPlan::Tail(plan) => plan.base.index(),
+            LogicalPlan::Window(plan) => plan.base.index(),
         }
     }
 
@@ -167,7 +174,14 @@ pub fn create_logical_plan(
     }
 
     let project = Project::new(project_fields, current_plans, current_index);
-    let base = Arc::new(LogicalPlan::Project(project));
+    let mut base = Arc::new(LogicalPlan::Project(project));
+
+    if let Some(window) = select_stmt.window {
+        let spec = convert_window_spec(window)?;
+        let window_index = max_plan_index(&base) + 1;
+        let logical_window = LogicalWindow::new(spec, vec![Arc::clone(&base)], window_index);
+        base = Arc::new(LogicalPlan::Window(logical_window));
+    }
 
     if sinks.is_empty() {
         Ok(base)
@@ -188,6 +202,21 @@ pub fn create_logical_plan(
         let tail_index = next_index + sink_count as i64;
         let tail_plan = TailPlan::new(sink_children, tail_index);
         Ok(Arc::new(LogicalPlan::Tail(tail_plan)))
+    }
+}
+
+fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpec, String> {
+    match window {
+        parser_window::Window::Tumbling { time_unit, length } => {
+            let unit = match time_unit {
+                parser_window::TimeUnit::Seconds => TimeUnit::Seconds,
+            };
+            Ok(LogicalWindowSpec::Tumbling {
+                time_unit: unit,
+                length,
+            })
+        }
+        parser_window::Window::Count { count } => Ok(LogicalWindowSpec::Count { count }),
     }
 }
 
