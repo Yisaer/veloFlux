@@ -57,7 +57,8 @@ impl Collection for RecordBatch {
         let mut projected_rows = Vec::with_capacity(self.num_rows());
         for tuple in self.rows() {
             let mut projected_tuple = Tuple::new(Vec::new());
-            let mut partial_messages: HashMap<String, (Vec<Arc<str>>, Vec<Arc<Value>>)> =
+            #[allow(clippy::type_complexity)]
+            let mut partial_messages: HashMap<&str, (Vec<Arc<str>>, Vec<Arc<Value>>)> =
                 HashMap::new();
             let mut projected_messages = Vec::new();
 
@@ -105,9 +106,13 @@ impl Collection for RecordBatch {
                         ))
                     })?;
 
-                    let entry = partial_messages
-                        .entry(source_name.clone())
-                        .or_insert_with(|| (Vec::new(), Vec::new()));
+                    let entry = if let Some(existing) = partial_messages.get_mut(source_name.as_str()) {
+                        existing
+                    } else {
+                        partial_messages
+                            .entry(source_name.as_str())
+                            .or_insert_with(|| (Vec::new(), Vec::new()))
+                    };
                     entry.0.push(col_name.clone());
                     entry.1.push(value.clone());
                     continue;
