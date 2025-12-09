@@ -48,11 +48,10 @@ impl sqlparser::dialect::Dialect for StreamDialect {
 pub fn collect_window_and_group_by_exprs(
     statement: &Statement,
 ) -> Result<(Option<Window>, Vec<Expr>), ParserError> {
-    if let Statement::Query(query) = statement {
-        if let SetExpr::Select(select) = &*query.body {
+    if let Statement::Query(query) = statement
+        && let SetExpr::Select(select) = &*query.body {
             return split_group_by_window(&select.group_by);
         }
-    }
 
     Ok((None, Vec::new()))
 }
@@ -65,22 +64,19 @@ pub fn split_group_by_window(
     let mut found: Option<Window> = None;
     let mut remaining_exprs: Vec<Expr> = Vec::new();
 
-    match group_by {
-        GroupByExpr::Expressions(exprs) => {
-            for expr in exprs {
-                if let Some(window) = parse_window_expr(expr)? {
-                    if found.is_some() {
-                        return Err(ParserError::ParserError(
-                            "Only one window function is allowed in GROUP BY".to_string(),
-                        ));
-                    }
-                    found = Some(window);
-                } else {
-                    remaining_exprs.push(expr.clone());
+    if let GroupByExpr::Expressions(exprs) = group_by {
+        for expr in exprs {
+            if let Some(window) = parse_window_expr(expr)? {
+                if found.is_some() {
+                    return Err(ParserError::ParserError(
+                        "Only one window function is allowed in GROUP BY".to_string(),
+                    ));
                 }
+                found = Some(window);
+            } else {
+                remaining_exprs.push(expr.clone());
             }
         }
-        _ => {}
     };
 
     Ok((found, remaining_exprs))
