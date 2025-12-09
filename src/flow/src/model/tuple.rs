@@ -35,6 +35,19 @@ impl Message {
             .map(|(k, v)| (k.as_ref(), v))
     }
 
+    pub fn entry_by_index(&self, index: usize) -> Option<(&Arc<str>, &Value)> {
+        self.keys
+            .get(index)
+            .and_then(|k| self.values.get(index).map(|v| (k, v)))
+    }
+
+    pub fn entry_by_name(&self, column: &str) -> Option<(&Arc<str>, &Value)> {
+        self.keys
+            .iter()
+            .position(|k| k.as_ref() == column)
+            .and_then(|idx| self.entry_by_index(idx))
+    }
+
     pub fn value(&self, column: &str) -> Option<&Value> {
         self.keys
             .iter()
@@ -168,6 +181,9 @@ impl Tuple {
     }
 
     pub fn message_by_source(&self, source: &str) -> Option<&Arc<Message>> {
+        if source.is_empty() && self.messages.len() == 1 {
+            return self.messages.first();
+        }
         self.messages.iter().find(|msg| msg.source() == source)
     }
 }
