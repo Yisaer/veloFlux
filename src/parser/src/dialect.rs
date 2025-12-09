@@ -101,7 +101,7 @@ mod tests {
             window::Window::Tumbling {
                 ref time_unit,
                 length: 10
-            } if time_unit == "ss"
+            } if *time_unit == window::TimeUnit::Seconds
         ));
     }
 }

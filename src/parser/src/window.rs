@@ -5,17 +5,20 @@ use sqlparser::parser::ParserError;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Window {
     /// Fixed-size, non-overlapping window defined by time unit + length
-    Tumbling { time_unit: String, length: u64 },
+    Tumbling { time_unit: TimeUnit, length: u64 },
     /// Fixed-size window defined by number of rows
     Count { count: u64 },
 }
 
+/// Supported time units for window definitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeUnit {
+    Seconds,
+}
+
 impl Window {
-    pub fn tumbling(time_unit: impl Into<String>, length: u64) -> Self {
-        Window::Tumbling {
-            time_unit: time_unit.into(),
-            length,
-        }
+    pub fn tumbling(time_unit: TimeUnit, length: u64) -> Self {
+        Window::Tumbling { time_unit, length }
     }
 
     pub fn count(count: u64) -> Self {
@@ -57,7 +60,10 @@ pub fn parse_window_function(function: &Function) -> Result<Window, ParserError>
 pub fn window_to_expr(window: &Window) -> Expr {
     let args = match window {
         Window::Tumbling { time_unit, length } => {
-            vec![make_string_arg(time_unit), make_number_arg(*length)]
+            vec![
+                make_string_arg(time_unit.as_str()),
+                make_number_arg(*length),
+            ]
         }
         Window::Count { count } => vec![make_number_arg(*count)],
     };
@@ -83,6 +89,8 @@ fn parse_tumbling_window(function: &Function) -> Result<Window, ParserError> {
 
     let time_unit = parse_string_arg(&function.args[0], "tumblingwindow", "time unit")?;
     let length = parse_number_arg(&function.args[1], "tumblingwindow", "length")?;
+
+    let time_unit = TimeUnit::try_from_str(&time_unit)?;
 
     Ok(Window::tumbling(time_unit, length))
 }
@@ -145,6 +153,24 @@ fn is_supported_window_function(name: &str) -> bool {
     )
 }
 
+impl TimeUnit {
+    fn try_from_str(raw: &str) -> Result<Self, ParserError> {
+        match raw.to_ascii_lowercase().as_str() {
+            "ss" => Ok(TimeUnit::Seconds),
+            other => Err(ParserError::ParserError(format!(
+                "unsupported time unit `{}` for tumblingwindow (only `ss` allowed)",
+                other
+            ))),
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            TimeUnit::Seconds => "ss",
+        }
+    }
+}
+
 fn make_string_arg(value: &str) -> FunctionArg {
     FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(
         Value::SingleQuotedString(value.to_string()),
@@ -191,7 +217,7 @@ mod tests {
     #[test]
     fn parse_tumbling_window_expr() {
         let parsed = parse_window_expr(&tumbling_expr()).unwrap();
-        assert_eq!(parsed, Some(Window::tumbling("ss".to_string(), 10)));
+        assert_eq!(parsed, Some(Window::tumbling(TimeUnit::Seconds, 10)));
     }
 
     #[test]
@@ -209,7 +235,7 @@ mod tests {
 
     #[test]
     fn window_round_trip_back_to_expr() {
-        let window = Window::tumbling("ms", 25);
+        let window = Window::tumbling(TimeUnit::Seconds, 25);
         let expr = window_to_expr(&window);
         let parsed = parse_window_expr(&expr).unwrap();
         assert_eq!(parsed, Some(window));

@@ -285,7 +285,7 @@ mod source_info_tests {
 
         match select_stmt.window {
             Some(Window::Tumbling { time_unit, length }) => {
-                assert_eq!(time_unit, "ss");
+                assert_eq!(time_unit, crate::window::TimeUnit::Seconds);
                 assert_eq!(length, 10);
             }
             _ => panic!("Expected tumbling window"),
