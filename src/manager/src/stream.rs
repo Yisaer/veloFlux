@@ -380,7 +380,7 @@ pub(crate) fn build_stream_decoder(
     if !decoder_registry.is_registered(&decode_type) {
         return Err(format!("decoder kind `{decode_type}` not registered"));
     }
-    Ok(StreamDecoderConfig::new(decode_type))
+    Ok(StreamDecoderConfig { decode_type })
 }
 
 fn column_schema_from_request(

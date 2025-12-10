@@ -249,7 +249,7 @@ mod logical_plan_tests {
             name.to_string(),
             Arc::new(Schema::new(Vec::new())),
             StreamProps::Mqtt(MqttStreamProps::new("mqtt://localhost:1883", name, 0)),
-            StreamDecoderConfig::json_default(name),
+            StreamDecoderConfig::json(),
         ))
     }
 
