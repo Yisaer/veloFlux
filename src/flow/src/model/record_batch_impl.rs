@@ -64,29 +64,27 @@ impl Collection for RecordBatch {
 
             for field in fields {
                 match &field.compiled_expr {
-                    ScalarExpr::Wildcard { source_name } => {
-                        match source_name {
-                            Some(prefix) => {
-                                if let Some(message) = tuple.message_by_source(prefix) {
-                                    projected_messages.push(message.clone());
-                                } else {
-                                    let qualifier = format!("{}.*", prefix);
-                                    return Err(CollectionError::Other(format!(
+                    ScalarExpr::Wildcard { source_name } => match source_name {
+                        Some(prefix) => {
+                            if let Some(message) = tuple.message_by_source(prefix) {
+                                projected_messages.push(message.clone());
+                            } else {
+                                let qualifier = format!("{}.*", prefix);
+                                return Err(CollectionError::Other(format!(
                                         "Failed to evaluate expression for field '{}': Column not found: {}",
                                         field.field_name, qualifier
                                     )));
-                                }
-                            }
-                            None => {
-                                if tuple.messages().is_empty() {
-                                    continue;
-                                }
-                                for message in tuple.messages() {
-                                    projected_messages.push(message.clone());
-                                }
                             }
                         }
-                    }
+                        None => {
+                            if tuple.messages().is_empty() {
+                                continue;
+                            }
+                            for message in tuple.messages() {
+                                projected_messages.push(message.clone());
+                            }
+                        }
+                    },
                     ScalarExpr::Column(ColumnRef::ByIndex {
                         source_name,
                         column_index,
@@ -104,7 +102,9 @@ impl Collection for RecordBatch {
                             ))
                         })?;
 
-                        let entry = if let Some(existing) = partial_messages.get_mut(source_name.as_str()) {
+                        let entry = if let Some(existing) =
+                            partial_messages.get_mut(source_name.as_str())
+                        {
                             existing
                         } else {
                             partial_messages
@@ -115,15 +115,16 @@ impl Collection for RecordBatch {
                         entry.1.push(value.clone());
                     }
                     _ => {
-                        let value = field
-                            .compiled_expr
-                            .eval_with_tuple(tuple)
-                            .map_err(|eval_error| {
-                                CollectionError::Other(format!(
-                                    "Failed to evaluate expression for field '{}': {}",
-                                    field.field_name, eval_error
-                                ))
-                            })?;
+                        let value =
+                            field
+                                .compiled_expr
+                                .eval_with_tuple(tuple)
+                                .map_err(|eval_error| {
+                                    CollectionError::Other(format!(
+                                        "Failed to evaluate expression for field '{}': {}",
+                                        field.field_name, eval_error
+                                    ))
+                                })?;
 
                         projected_tuple
                             .add_affiliate_column(Arc::new(field.field_name.clone()), value);

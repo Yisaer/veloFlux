@@ -72,11 +72,7 @@ impl StreamSqlParser {
             match item {
                 SelectItem::UnnamedExpr(expr) => {
                     let field_name = expr.to_string();
-                    select_fields.push(SelectField::new(
-                        expr.clone(),
-                        None,
-                        field_name,
-                    ));
+                    select_fields.push(SelectField::new(expr.clone(), None, field_name));
                 }
                 SelectItem::ExprWithAlias { expr, alias } => {
                     let field_name = alias.value.clone();
