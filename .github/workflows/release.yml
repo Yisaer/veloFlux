@@ -1,45 +1,82 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
+  release:
+    types:
+      - published
 
 jobs:
-  release:
+  lint-and-test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache
-        uses: Swatinem/rust-cache@v2
-
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Lint and test
         run: |
           cargo fmt --all -- --check
           cargo clippy --all --all-targets -- -D warnings
           make test
 
-      - name: Publish crates
+  publish-crates:
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Publish crates (crates.io)
         env:
           CARGO_REGISTRIES_CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
         run: |
           set -euo pipefail
-          # Publish in dependency order
           for crate in src/datatypes src/parser src/flow .; do
             (cd "$crate" && cargo publish --allow-dirty)
           done
 
-      - name: GitHub Release
-        uses: softprops/action-gh-release@v1
+  build-and-upload:
+    needs: publish-crates
+    permissions:
+      contents: write
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            asset_suffix: linux-x86_64
+            build_cmd: make release
+            bin_path: target/release/synapse-flow
+          - runner: ubuntu-latest
+            asset_suffix: linux-x86_64-thin
+            build_cmd: make release-thin
+            bin_path: target/release-thin/synapse-flow
+          - runner: macos-13
+            asset_suffix: macos-x86_64
+            build_cmd: make release
+            bin_path: target/release/synapse-flow
+          - runner: macos-13
+            asset_suffix: macos-x86_64-thin
+            build_cmd: make release-thin
+            bin_path: target/release-thin/synapse-flow
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release binary
+        run: ${{ matrix.build_cmd }}
+      - name: Prepare asset
+        run: |
+          BIN_PATH="${{ matrix.bin_path }}"
+          ASSET_NAME="synapse-flow-${{ matrix.asset_suffix }}"
+          cp "$BIN_PATH" "$ASSET_NAME"
+          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
+          rm "$ASSET_NAME"
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          draft: false
-          prerelease: false
+          tag_name: ${{ github.event.release.tag_name }}
+          files: synapse-flow-${{ matrix.asset_suffix }}.tar.gz
