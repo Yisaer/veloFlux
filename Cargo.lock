@@ -248,7 +248,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "datatypes"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "debugid"
@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "flow"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "datatypes",
@@ -781,7 +781,7 @@ checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
 
 [[package]]
 name = "manager"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "axum",
  "flow",
@@ -921,7 +921,7 @@ dependencies = [
 
 [[package]]
 name = "parser"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "sqlparser",
 ]
@@ -1420,7 +1420,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "storage"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bincode",
  "redb",
@@ -1478,7 +1478,7 @@ dependencies = [
 
 [[package]]
 name = "synapse-flow"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "flow",
  "manager",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "once_cell",
  "prometheus",

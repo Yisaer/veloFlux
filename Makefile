@@ -25,6 +25,10 @@ test:
 	@cd src/flow && cargo test
 	@cd src/parser && cargo test
 
+bump-version:
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make bump-version VERSION=x.y.z"; exit 1; fi
+	@./scripts/bump_version.sh $(VERSION)
+
 # 格式化代码
 fmt:
 	@echo "Formatting code..."
