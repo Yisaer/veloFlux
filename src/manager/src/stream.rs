@@ -33,9 +33,31 @@ pub struct CreateStreamRequest {
     pub props: StreamPropsRequest,
     #[serde(default)]
     pub shared: bool,
-    /// Decoder identifier, e.g. "json".
     #[serde(default)]
-    pub decoder: Option<String>,
+    pub decoder: DecoderConfigRequest,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct DecoderConfigRequest {
+    #[serde(rename = "type")]
+    pub decode_type: String,
+    pub props: JsonMap<String, JsonValue>,
+}
+
+impl DecoderConfigRequest {
+    fn new(decode_type: impl Into<String>, props: JsonMap<String, JsonValue>) -> Self {
+        Self {
+            decode_type: decode_type.into(),
+            props,
+        }
+    }
+}
+
+impl Default for DecoderConfigRequest {
+    fn default() -> Self {
+        Self::new("json", JsonMap::new())
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -376,11 +398,17 @@ pub(crate) fn build_stream_decoder(
     req: &CreateStreamRequest,
     decoder_registry: &DecoderRegistry,
 ) -> Result<StreamDecoderConfig, String> {
-    let decode_type = req.decoder.clone().unwrap_or_else(|| "json".to_string());
-    if !decoder_registry.is_registered(&decode_type) {
-        return Err(format!("decoder kind `{decode_type}` not registered"));
+    let decoder_config = req.decoder.clone();
+    if !decoder_registry.is_registered(&decoder_config.decode_type) {
+        return Err(format!(
+            "decoder kind `{}` not registered",
+            decoder_config.decode_type
+        ));
     }
-    Ok(StreamDecoderConfig { decode_type })
+    Ok(StreamDecoderConfig::new(
+        decoder_config.decode_type,
+        decoder_config.props,
+    ))
 }
 
 fn column_schema_from_request(

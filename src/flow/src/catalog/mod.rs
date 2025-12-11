@@ -1,4 +1,5 @@
 use datatypes::Schema;
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -111,17 +112,27 @@ impl StreamDefinition {
 #[derive(Debug, Clone)]
 pub struct StreamDecoderConfig {
     pub decode_type: String,
+    pub props: JsonMap<String, JsonValue>,
 }
 
 impl StreamDecoderConfig {
+    pub fn new(decode_type: impl Into<String>, props: JsonMap<String, JsonValue>) -> Self {
+        Self {
+            decode_type: decode_type.into(),
+            props,
+        }
+    }
+
     pub fn kind(&self) -> &str {
         &self.decode_type
     }
 
+    pub fn props(&self) -> &JsonMap<String, JsonValue> {
+        &self.props
+    }
+
     pub fn json() -> Self {
-        Self {
-            decode_type: "json".to_string(),
-        }
+        Self::new("json", JsonMap::new())
     }
 }
 

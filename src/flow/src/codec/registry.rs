@@ -73,8 +73,12 @@ impl DecoderRegistry {
     fn register_builtin_decoders(&self) {
         self.register_decoder(
             "json",
-            Arc::new(|_config, schema, stream_name| {
-                Ok(Arc::new(JsonDecoder::new(stream_name.to_string(), schema)) as Arc<_>)
+            Arc::new(|config, schema, stream_name| {
+                Ok(Arc::new(JsonDecoder::new(
+                    stream_name.to_string(),
+                    schema,
+                    config.props().clone(),
+                )) as Arc<_>)
             }),
         );
     }

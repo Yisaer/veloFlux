@@ -488,6 +488,7 @@ mod tests {
     use crate::codec::JsonDecoder;
     use crate::connector::MockSourceConnector;
     use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
+    use serde_json::Map as JsonMap;
     use uuid::Uuid;
 
     fn test_schema() -> Arc<Schema> {
@@ -503,7 +504,11 @@ mod tests {
         let name = format!("shared_stream_test_{}", Uuid::new_v4());
         let schema = test_schema();
         let (connector, _handle) = MockSourceConnector::new(format!("{name}_connector"));
-        let decoder = Arc::new(JsonDecoder::new(name.clone(), Arc::clone(&schema)));
+        let decoder = Arc::new(JsonDecoder::new(
+            name.clone(),
+            Arc::clone(&schema),
+            JsonMap::new(),
+        ));
 
         let mut config = SharedStreamConfig::new(name.clone(), Arc::clone(&schema));
         config.set_connector(Box::new(connector), decoder);
