@@ -25,7 +25,7 @@ impl AggregateFunctionRegistry {
             functions: RwLock::new(HashMap::new()),
         }
     }
-    
+
     pub fn with_builtins() -> Arc<Self> {
         let registry = Arc::new(Self::new());
         registry.register_builtin_functions();

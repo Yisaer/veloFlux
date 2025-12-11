@@ -8,9 +8,10 @@ use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::{
-    AggregationProcessor, BatchProcessor, ControlSignal, ControlSourceProcessor, DataSourceProcessor, EncoderProcessor,
-    FilterProcessor, Processor, ProcessorError, ProjectProcessor, ResultCollectProcessor,
-    SharedStreamProcessor, SinkProcessor, StreamData, StreamingEncoderProcessor,
+    AggregationProcessor, BatchProcessor, ControlSignal, ControlSourceProcessor,
+    DataSourceProcessor, EncoderProcessor, FilterProcessor, Processor, ProcessorError,
+    ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor, StreamData,
+    StreamingEncoderProcessor,
 };
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};

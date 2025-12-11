@@ -5,3 +5,4 @@
 // - datatypes: Data type definitions
 
 pub mod server;
+pub use manager::{register_schema, schema_registry, SchemaParser};

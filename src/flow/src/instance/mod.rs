@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::aggregation::AggregateFunctionRegistry;
 use crate::catalog::{Catalog, CatalogError, StreamDefinition, StreamProps};
 use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry};
 use crate::connector::{
     ConnectorError, ConnectorRegistry, MqttClientManager, MqttSourceConfig, MqttSourceConnector,
     SharedMqttClientConfig,
 };
-use crate::aggregation::AggregateFunctionRegistry;
 use crate::pipeline::{PipelineDefinition, PipelineError, PipelineManager, PipelineSnapshot};
 use crate::processor::ProcessorPipeline;
 use crate::shared_stream::{

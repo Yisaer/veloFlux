@@ -9,6 +9,8 @@ use std::net::SocketAddr;
 use storage::StorageManager;
 use tokio::net::TcpListener;
 
+pub use stream::{SchemaParser, register_schema, schema_registry};
+
 pub(crate) static DEFAULT_BROKER_URL: &str = "tcp://127.0.0.1:1883";
 pub(crate) static SOURCE_TOPIC: &str = "/yisa/data";
 pub(crate) static SINK_TOPIC: &str = "/yisa/data2";

@@ -84,11 +84,18 @@ impl Default for DecoderConfigRequest {
     }
 }
 
-pub type SchemaParser = dyn Fn(&str, &JsonMap<String, JsonValue>) -> Result<Schema, String> + Send + Sync;
+pub type SchemaParser =
+    dyn Fn(&str, &JsonMap<String, JsonValue>) -> Result<Schema, String> + Send + Sync;
 
 /// Registry for schema parsers, enabling pluggable schema declaration formats.
 pub struct SchemaRegistry {
     parsers: RwLock<HashMap<String, Arc<SchemaParser>>>,
+}
+
+impl Default for SchemaRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SchemaRegistry {

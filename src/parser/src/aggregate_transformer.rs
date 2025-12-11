@@ -23,12 +23,11 @@ pub fn transform_aggregate_functions(
 
     // Process select fields: extract aggregates and replace in one step
     for field in &mut select_stmt.select_fields {
-        let (new_expr, field_aggregates) =
-            extract_and_replace_aggregates(
-                &field.expr,
-                &mut replacement_counter,
-                aggregate_registry.clone(),
-            )?;
+        let (new_expr, field_aggregates) = extract_and_replace_aggregates(
+            &field.expr,
+            &mut replacement_counter,
+            aggregate_registry.clone(),
+        )?;
 
         if !field_aggregates.is_empty() && field.alias.is_none() {
             field.alias = Some(field.expr.to_string());
@@ -44,12 +43,11 @@ pub fn transform_aggregate_functions(
 
     // Process HAVING clause: extract aggregates and replace in one step
     if let Some(having_expr) = &mut select_stmt.having {
-        let (new_having, having_aggregates) =
-            extract_and_replace_aggregates(
-                having_expr,
-                &mut replacement_counter,
-                aggregate_registry,
-            )?;
+        let (new_having, having_aggregates) = extract_and_replace_aggregates(
+            having_expr,
+            &mut replacement_counter,
+            aggregate_registry,
+        )?;
 
         // Update the having expression
         *having_expr = new_having;
@@ -201,8 +199,8 @@ fn replace_aggregates_in_expression(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregate_registry::default_aggregate_registry;
     use crate::SelectField;
+    use crate::aggregate_registry::default_aggregate_registry;
     use sqlparser::ast::FunctionArg;
     use sqlparser::ast::FunctionArgExpr;
     use sqlparser::ast::ObjectName;
