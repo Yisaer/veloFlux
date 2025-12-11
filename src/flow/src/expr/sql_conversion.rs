@@ -287,23 +287,20 @@ fn convert_identifier_to_column(
         // and do not belong to any source schema. Treat them as derived columns.
         return Ok(ScalarExpr::column_with_column_name(column_name.to_string()));
     }
-    
+
     if bindings.entries().is_empty() {
         return Ok(ScalarExpr::column_with_column_name(column_name.to_string()));
     }
-    
+
     match resolve_column_binding(None, column_name, bindings) {
-        Ok((source_name, index)) => ScalarExpr::column_with_index(
-            source_name,
-            column_name.to_string(),
-            Some(index),
-        ).map_err(ConversionError::InvalidColumnReference),
-        Err(_err) => {
-            Err(ConversionError::ColumnNotFound(format!(
-                "No schema bindings available for identifier '{}",
-               column_name
-            )))
+        Ok((source_name, index)) => {
+            ScalarExpr::column_with_index(source_name, column_name.to_string(), Some(index))
+                .map_err(ConversionError::InvalidColumnReference)
         }
+        Err(_err) => Err(ConversionError::ColumnNotFound(format!(
+            "No schema bindings available for identifier '{}",
+            column_name
+        ))),
     }
 }
 
@@ -347,11 +344,8 @@ fn convert_compound_identifier_to_column(
             }
             let (resolved_source, index) =
                 resolve_column_binding(Some(source_name), column_name, bindings)?;
-            ScalarExpr::column_with_index(
-                resolved_source,
-                column_name,
-                Some(index),
-            ).map_err(ConversionError::InvalidColumnReference)
+            ScalarExpr::column_with_index(resolved_source, column_name, Some(index))
+                .map_err(ConversionError::InvalidColumnReference)
         }
         _ => Err(ConversionError::InvalidColumnReference(format!(
             "Unsupported compound identifier with {} parts. Only 1 or 2 parts are supported.",

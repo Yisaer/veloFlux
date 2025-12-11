@@ -4,18 +4,18 @@ use parser::SelectStmt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+pub mod aggregation;
 pub mod datasource;
 pub mod filter;
-pub mod aggregation;
 pub mod project;
 pub mod sink;
 pub mod tail;
 pub mod window;
 
 use crate::planner::sink::PipelineSink;
+pub use aggregation::Aggregation;
 pub use datasource::DataSource;
 pub use filter::Filter;
-pub use aggregation::Aggregation;
 pub use project::Project;
 pub use sink::DataSinkPlan;
 pub use tail::TailPlan;

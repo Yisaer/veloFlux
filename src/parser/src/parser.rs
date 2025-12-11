@@ -1,7 +1,7 @@
 use sqlparser::ast::{Expr, Ident, Query, Select, SelectItem, SetExpr, Statement, Visit};
 use sqlparser::parser::Parser;
 
-use crate::aggregate_registry::{default_aggregate_registry, AggregateRegistry};
+use crate::aggregate_registry::{AggregateRegistry, default_aggregate_registry};
 use crate::aggregate_transformer::transform_aggregate_functions;
 use crate::dialect::StreamDialect;
 use crate::select_stmt::{SelectField, SelectStmt};
@@ -52,10 +52,8 @@ impl StreamSqlParser {
         select_stmt.group_by_exprs = group_by_exprs;
 
         // Transform aggregate functions in one step (search + replace)
-        let (transformed_stmt, _aggregate_mappings) = transform_aggregate_functions(
-            select_stmt,
-            Arc::clone(&self.aggregate_registry),
-        )?;
+        let (transformed_stmt, _aggregate_mappings) =
+            transform_aggregate_functions(select_stmt, Arc::clone(&self.aggregate_registry))?;
 
         Ok(transformed_stmt)
     }

@@ -16,7 +16,7 @@ use crate::planner::physical::{
     PhysicalSinkConnector, PhysicalStreamingEncoder,
 };
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
-use crate::{PipelineRegistries};
+use crate::PipelineRegistries;
 use std::sync::Arc;
 
 /// Physical plan builder that manages index allocation and node caching
@@ -131,15 +131,13 @@ fn create_physical_plan_with_builder_cached(
             registries,
             builder,
         )?,
-        LogicalPlan::Aggregation(logical_agg) => {
-            create_physical_aggregation_with_builder(
-                logical_agg,
-                &logical_plan,
-                bindings,
-                registries,
-                builder,
-            )?
-        }
+        LogicalPlan::Aggregation(logical_agg) => create_physical_aggregation_with_builder(
+            logical_agg,
+            &logical_plan,
+            bindings,
+            registries,
+            builder,
+        )?,
         LogicalPlan::DataSink(logical_sink) => create_physical_data_sink_with_builder_cached(
             logical_sink,
             &logical_plan,
@@ -181,12 +179,8 @@ fn create_physical_result_collect_from_tail_with_builder_cached(
     // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached(
-            child.clone(),
-            bindings,
-            registries,
-            builder,
-        )?;
+        let physical_child =
+            create_physical_plan_with_builder_cached(child.clone(), bindings, registries, builder)?;
         physical_children.push(physical_child);
     }
 
@@ -210,12 +204,8 @@ fn create_physical_window_with_builder(
 ) -> Result<Arc<PhysicalPlan>, String> {
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached(
-            child.clone(),
-            bindings,
-            registries,
-            builder,
-        )?;
+        let physical_child =
+            create_physical_plan_with_builder_cached(child.clone(), bindings, registries, builder)?;
         physical_children.push(physical_child);
     }
 
@@ -234,8 +224,8 @@ fn create_physical_window_with_builder(
             let count_window =
                 crate::planner::physical::PhysicalCountWindow::new(count, physical_children, index);
             PhysicalPlan::CountWindow(count_window)
-    }
-};
+        }
+    };
 
     Ok(Arc::new(physical))
 }
@@ -308,12 +298,8 @@ fn create_physical_filter_with_builder_cached(
     // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached(
-            child.clone(),
-            bindings,
-            registries,
-            builder,
-        )?;
+        let physical_child =
+            create_physical_plan_with_builder_cached(child.clone(), bindings, registries, builder)?;
         physical_children.push(physical_child);
     }
 
@@ -347,12 +333,8 @@ fn create_physical_project_with_builder_cached(
     // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached(
-            child.clone(),
-            bindings,
-            registries,
-            builder,
-        )?;
+        let physical_child =
+            create_physical_plan_with_builder_cached(child.clone(), bindings, registries, builder)?;
         physical_children.push(physical_child);
     }
 
@@ -383,12 +365,8 @@ fn create_physical_data_sink_with_builder_cached(
     // Convert children first using the builder with caching
     let mut physical_children = Vec::new();
     for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached(
-            child.clone(),
-            bindings,
-            registries,
-            builder,
-        )?;
+        let physical_child =
+            create_physical_plan_with_builder_cached(child.clone(), bindings, registries, builder)?;
         physical_children.push(physical_child);
     }
     if physical_children.len() != 1 {

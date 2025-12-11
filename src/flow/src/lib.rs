@@ -10,11 +10,11 @@ pub mod planner;
 pub mod processor;
 pub mod shared_stream;
 
+pub use aggregation::AggregateFunctionRegistry;
 pub use catalog::{
     Catalog, CatalogError, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
     StreamType,
 };
-pub use aggregation::AggregateFunctionRegistry;
 pub use codec::{
     CodecError, CollectionEncoder, CollectionEncoderStream, DecoderRegistry, EncodeError,
     EncoderRegistry, JsonDecoder, JsonEncoder, RecordDecoder,
@@ -111,18 +111,14 @@ fn build_physical_plan_from_sql(
     shared_stream_registry: &SharedStreamRegistry,
     registries: &PipelineRegistries,
 ) -> Result<Arc<planner::physical::PhysicalPlan>, Box<dyn std::error::Error>> {
-    let select_stmt =
-        parser::parse_sql_with_registry(sql, registries.aggregate_registry())?;
+    let select_stmt = parser::parse_sql_with_registry(sql, registries.aggregate_registry())?;
     let (schema_binding, stream_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
     println!("[LogicalPlan] topology:");
     logical_plan.print_topology(0);
-    let physical_plan = create_physical_plan(
-        Arc::clone(&logical_plan),
-        &schema_binding,
-        registries,
-    )?;
+    let physical_plan =
+        create_physical_plan(Arc::clone(&logical_plan), &schema_binding, registries)?;
     Ok(physical_plan)
 }
 

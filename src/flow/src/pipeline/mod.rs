@@ -309,11 +309,8 @@ fn build_pipeline_runtime(
     mqtt_client_manager: &MqttClientManager,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
-    let select_stmt = parse_sql_with_registry(
-        definition.sql(),
-        registries.aggregate_registry(),
-    )
-    .map_err(|err| err.to_string())?;
+    let select_stmt = parse_sql_with_registry(definition.sql(), registries.aggregate_registry())
+        .map_err(|err| err.to_string())?;
     let streams: Vec<String> = select_stmt
         .source_infos
         .iter()

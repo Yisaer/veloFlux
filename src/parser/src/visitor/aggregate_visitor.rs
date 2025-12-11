@@ -2,7 +2,7 @@
 //! Uses sqlparser's visitor pattern to efficiently detect and extract aggregate functions
 //! Now with duplicate detection: same aggregate function gets same replacement name
 
-use crate::aggregate_registry::{default_aggregate_registry, AggregateRegistry};
+use crate::aggregate_registry::{AggregateRegistry, default_aggregate_registry};
 use sqlparser::ast::{Expr, Visit, Visitor};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -112,12 +112,12 @@ pub fn contains_aggregates_with_visitor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregate_registry::{default_aggregate_registry, StaticAggregateRegistry};
-    use std::sync::Arc;
+    use crate::aggregate_registry::{StaticAggregateRegistry, default_aggregate_registry};
     use sqlparser::ast::FunctionArg;
     use sqlparser::ast::FunctionArgExpr;
     use sqlparser::ast::ObjectName;
     use sqlparser::ast::{Function, Ident};
+    use std::sync::Arc;
 
     #[test]
     fn test_simple_aggregate_extraction() {

@@ -87,7 +87,9 @@ fn extract_aggregate_args(
     let mut compiled_args = Vec::new();
     for arg in args {
         let expr = function_arg_to_expr(arg)?;
-        compiled_args.push(convert_expr_to_scalar_with_bindings(&expr, bindings).map_err(|err| err.to_string())?);
+        compiled_args.push(
+            convert_expr_to_scalar_with_bindings(&expr, bindings).map_err(|err| err.to_string())?,
+        );
     }
     Ok(compiled_args)
 }

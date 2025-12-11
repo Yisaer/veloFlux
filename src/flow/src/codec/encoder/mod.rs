@@ -62,10 +62,7 @@ impl JsonEncoder {
             id,
             JsonValue::Object(props.clone())
         );
-        Self {
-            id,
-            props,
-        }
+        Self { id, props }
     }
 
     /// Access encoder props (currently unused by JSON encoder).

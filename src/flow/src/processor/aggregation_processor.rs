@@ -10,8 +10,8 @@ use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry};
 use crate::model::Collection;
 use crate::planner::physical::{AggregateCall, PhysicalAggregation, PhysicalPlan};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    fan_in_control_streams, fan_in_streams, log_received_data, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use datatypes::Value;
@@ -96,14 +96,16 @@ impl Processor for AggregationProcessor {
         let control_output = self.control_output.clone();
         let physical_aggregation = self.physical_aggregation.clone();
         let aggregate_registry = self.aggregate_registry.clone();
-        
-        println!("[AggregationProcessor:{id}] starting with {} aggregate calls", 
-                 physical_aggregation.aggregate_calls.len());
+
+        println!(
+            "[AggregationProcessor:{id}] starting with {} aggregate calls",
+            physical_aggregation.aggregate_calls.len()
+        );
 
         tokio::spawn(async move {
             let mut control_streams = fan_in_control_streams(control_receivers);
             let mut stream_ended = false;
-            
+
             loop {
                 tokio::select! {
                     biased;
@@ -122,7 +124,7 @@ impl Processor for AggregationProcessor {
                         match data_item {
                             Some(Ok(StreamData::Collection(collection))) => {
                                 log_received_data(&id, &StreamData::Collection(collection.clone()));
-                                
+
                                 // Create fresh accumulators for this batch of data
                                 let mut batch_accumulators = match Self::create_accumulators_static(&physical_aggregation, &aggregate_registry) {
                                     Ok(acc) => acc,
@@ -130,12 +132,12 @@ impl Processor for AggregationProcessor {
                                         return Err(ProcessorError::ProcessingError(format!("Failed to create accumulators: {}", e)));
                                     }
                                 };
-                                
+
                                 // Process this collection: update accumulators and immediately finalize
                                 if let Err(e) = Self::update_accumulators_static(&physical_aggregation, &mut batch_accumulators, collection.as_ref()) {
                                     return Err(ProcessorError::ProcessingError(format!("Failed to update accumulators: {}", e)));
                                 }
-                                
+
                                 // Immediately finalize and output results for this batch
                                 match Self::finalize_aggregates_static(&physical_aggregation, &batch_accumulators, collection.as_ref()) {
                                     Ok(result_collection) => {
@@ -180,9 +182,10 @@ impl Processor for AggregationProcessor {
             // Stream has ended, just forward the end signal as results were already sent for each batch
             if stream_ended {
                 println!("[AggregationProcessor:{id}] stream ended, forwarding end signal");
-                
+
                 // Send StreamGracefulEnd signal downstream
-                send_control_with_backpressure(&control_output, ControlSignal::StreamGracefulEnd).await?;
+                send_control_with_backpressure(&control_output, ControlSignal::StreamGracefulEnd)
+                    .await?;
                 println!("[AggregationProcessor:{id}] aggregation processing completed");
             }
 
@@ -215,20 +218,23 @@ impl AggregationProcessor {
         aggregate_registry: &Arc<AggregateFunctionRegistry>,
     ) -> Result<Vec<Box<dyn AggregateAccumulator>>, String> {
         let mut accumulators = Vec::new();
-        
+
         for call in &physical_aggregation.aggregate_calls {
             if call.distinct {
                 return Err("DISTINCT aggregates are not supported yet".to_string());
             }
-            
-            let function = aggregate_registry
-                .get(&call.func_name)
-                .ok_or_else(|| format!("Aggregate function '{}' not found in registry", call.func_name))?;
-            
+
+            let function = aggregate_registry.get(&call.func_name).ok_or_else(|| {
+                format!(
+                    "Aggregate function '{}' not found in registry",
+                    call.func_name
+                )
+            })?;
+
             let accumulator = function.create_accumulator();
             accumulators.push(accumulator);
         }
-        
+
         Ok(accumulators)
     }
 
@@ -241,7 +247,7 @@ impl AggregationProcessor {
         for (i, call) in physical_aggregation.aggregate_calls.iter().enumerate() {
             // Evaluate arguments for this aggregate call
             let args = Self::evaluate_arguments_static(call, collection)?;
-            
+
             // Update accumulator for each row
             for row_idx in 0..collection.num_rows() {
                 let mut row_args = Vec::new();
@@ -251,7 +257,7 @@ impl AggregationProcessor {
                 accumulators[i].update(&row_args)?;
             }
         }
-        
+
         Ok(())
     }
 
@@ -261,14 +267,15 @@ impl AggregationProcessor {
         collection: &dyn Collection,
     ) -> Result<Vec<Vec<Value>>, String> {
         let mut all_args = Vec::new();
-        
+
         // Evaluate each argument expression for all rows
         for arg_expr in &call.args {
-            let arg_values = arg_expr.eval_with_collection(collection)
+            let arg_values = arg_expr
+                .eval_with_collection(collection)
                 .map_err(|e| format!("Failed to evaluate argument: {}", e))?;
             all_args.push(arg_values);
         }
-        
+
         Ok(all_args)
     }
 
@@ -282,28 +289,26 @@ impl AggregationProcessor {
 
         // Create result values from finalized accumulators
         let mut affiliate_entries = Vec::new();
-        
-        for (call, accumulator) in physical_aggregation.aggregate_calls
+
+        for (call, accumulator) in physical_aggregation
+            .aggregate_calls
             .iter()
             .zip(accumulators.iter())
         {
             let finalized_value = accumulator.finalize();
-            affiliate_entries.push((
-                Arc::new(call.output_column.clone()),
-                finalized_value,
-            ));
+            affiliate_entries.push((Arc::new(call.output_column.clone()), finalized_value));
         }
 
         let mut tuples: Vec<Tuple> = input_collection.rows().to_vec();
-        
+
         if tuples.is_empty() {
             let mut result_tuple = Tuple::new(vec![]);
             let affiliate_row = crate::model::AffiliateRow::new(affiliate_entries);
             result_tuple.affiliate = Some(affiliate_row);
-            
+
             let collection = RecordBatch::new(vec![result_tuple])
                 .map_err(|e| format!("Failed to create RecordBatch: {}", e))?;
-            
+
             Ok(Box::new(collection))
         } else {
             let last_index = tuples.len() - 1;
@@ -319,7 +324,7 @@ impl AggregationProcessor {
             let last_tuple_cloned = last_tuple.clone();
             let collection = RecordBatch::new(vec![last_tuple_cloned])
                 .map_err(|e| format!("Failed to create RecordBatch: {}", e))?;
-            
+
             Ok(Box::new(collection))
         }
     }

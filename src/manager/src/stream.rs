@@ -13,7 +13,8 @@ use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatu
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flow::{
@@ -28,13 +29,36 @@ pub struct CreateStreamRequest {
     pub name: String,
     #[serde(rename = "type")]
     pub stream_type: String,
-    pub schema: StreamSchemaRequest,
+    pub schema: SchemaConfigRequest,
     #[serde(default)]
     pub props: StreamPropsRequest,
     #[serde(default)]
     pub shared: bool,
     #[serde(default)]
     pub decoder: DecoderConfigRequest,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct SchemaConfigRequest {
+    #[serde(rename = "type")]
+    pub schema_type: String,
+    pub props: JsonMap<String, JsonValue>,
+}
+
+impl SchemaConfigRequest {
+    fn new(schema_type: impl Into<String>, props: JsonMap<String, JsonValue>) -> Self {
+        Self {
+            schema_type: schema_type.into(),
+            props,
+        }
+    }
+}
+
+impl Default for SchemaConfigRequest {
+    fn default() -> Self {
+        Self::new("json", JsonMap::new())
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -58,6 +82,66 @@ impl Default for DecoderConfigRequest {
     fn default() -> Self {
         Self::new("json", JsonMap::new())
     }
+}
+
+pub type SchemaParser =
+    dyn Fn(&str, &JsonMap<String, JsonValue>) -> Result<Schema, String> + Send + Sync;
+
+/// Registry for schema parsers, enabling pluggable schema declaration formats.
+pub struct SchemaRegistry {
+    parsers: RwLock<HashMap<String, Arc<SchemaParser>>>,
+}
+
+impl Default for SchemaRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SchemaRegistry {
+    pub fn new() -> Self {
+        Self {
+            parsers: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn with_builtin() -> Self {
+        let registry = Self::new();
+        registry.register_schema("json", Arc::new(parse_json_schema));
+        registry
+    }
+
+    pub fn register_schema(&self, kind: impl Into<String>, parser: Arc<SchemaParser>) {
+        self.parsers
+            .write()
+            .expect("schema registry poisoned")
+            .insert(kind.into(), parser);
+    }
+
+    pub fn parse(
+        &self,
+        schema_type: &str,
+        stream_name: &str,
+        props: &JsonMap<String, JsonValue>,
+    ) -> Result<Schema, String> {
+        let guard = self.parsers.read().expect("schema registry poisoned");
+        let parser = guard
+            .get(schema_type)
+            .ok_or_else(|| format!("schema type `{schema_type}` not registered"))?;
+        parser(stream_name, props)
+    }
+}
+
+static SCHEMA_REGISTRY: OnceLock<SchemaRegistry> = OnceLock::new();
+
+/// Access the global schema registry (initialized with builtin schemas).
+pub fn schema_registry() -> &'static SchemaRegistry {
+    SCHEMA_REGISTRY.get_or_init(SchemaRegistry::with_builtin)
+}
+
+/// Register a custom schema parser into the global registry.
+pub fn register_schema(kind: impl Into<String>, parser: Arc<SchemaParser>) {
+    schema_registry().register_schema(kind, parser);
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -142,14 +226,6 @@ pub async fn create_stream_handler(
         )
             .into_response();
     }
-    if req.schema.columns.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            "schema must contain at least one column".to_string(),
-        )
-            .into_response();
-    }
-
     let schema = match build_schema_from_request(&req) {
         Ok(schema) => schema,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -359,14 +435,30 @@ fn stream_column_info(name: &str, datatype: &ConcreteDatatype) -> StreamColumnIn
     info
 }
 
-pub(crate) fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Schema, String> {
-    let columns: Result<Vec<ColumnSchema>, String> = req
-        .schema
+fn parse_json_schema(
+    stream_name: &str,
+    props: &JsonMap<String, JsonValue>,
+) -> Result<Schema, String> {
+    let schema_value = JsonValue::Object(props.clone());
+    let schema_req: StreamSchemaRequest = serde_json::from_value(schema_value)
+        .map_err(|err| format!("invalid json schema: {err}"))?;
+    schema_from_columns(stream_name, &schema_req)
+}
+
+fn schema_from_columns(
+    stream_name: &str,
+    schema_req: &StreamSchemaRequest,
+) -> Result<Schema, String> {
+    let columns: Result<Vec<ColumnSchema>, String> = schema_req
         .columns
         .iter()
-        .map(|col| column_schema_from_request(req.name.clone(), col))
+        .map(|col| column_schema_from_request(stream_name.to_string(), col))
         .collect();
     columns.map(Schema::new)
+}
+
+pub(crate) fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Schema, String> {
+    schema_registry().parse(&req.schema.schema_type, &req.name, &req.schema.props)
 }
 
 pub(crate) fn build_stream_props(

@@ -126,7 +126,10 @@ impl EncoderRegistry {
             );
     }
 
-    pub fn instantiate(&self, config: &SinkEncoderConfig) -> Result<Arc<dyn CollectionEncoder>, CodecError> {
+    pub fn instantiate(
+        &self,
+        config: &SinkEncoderConfig,
+    ) -> Result<Arc<dyn CollectionEncoder>, CodecError> {
         let guard = self.factories.read().expect("encoder registry poisoned");
         let kind = config.kind();
         let factory = guard

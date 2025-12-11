@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 pub mod base_physical;
+pub mod physical_aggregation;
 pub mod physical_batch;
 pub mod physical_data_sink;
 pub mod physical_data_source;
 pub mod physical_encoder;
 pub mod physical_filter;
-pub mod physical_aggregation;
 pub mod physical_project;
 pub mod physical_result_collect;
 pub mod physical_shared_stream;
@@ -14,12 +14,12 @@ pub mod physical_streaming_encoder;
 pub mod physical_window;
 
 pub use base_physical::BasePhysicalPlan;
+pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
 pub use physical_batch::PhysicalBatch;
 pub use physical_data_sink::{PhysicalDataSink, PhysicalSinkConnector};
 pub use physical_data_source::PhysicalDataSource;
 pub use physical_encoder::PhysicalEncoder;
 pub use physical_filter::PhysicalFilter;
-pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
 pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_shared_stream::PhysicalSharedStream;

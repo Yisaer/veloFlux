@@ -474,7 +474,7 @@ async fn install_stream_schema(instance: &FlowInstance, columns: &[(String, Vec<
 #[tokio::test]
 async fn test_aggregation_with_countwindow() {
     let instance = FlowInstance::new();
-    
+
     // Install stream schema with column 'a'
     install_stream_schema(
         &instance,
@@ -496,14 +496,16 @@ async fn test_aggregation_with_countwindow() {
         SinkConnectorConfig::Nop(NopSinkConfig),
         SinkEncoderConfig::json(),
     );
-    let sink = PipelineSink::new("aggregation_sink", connector)
-        .with_forward_to_result(true);
+    let sink = PipelineSink::new("aggregation_sink", connector).with_forward_to_result(true);
 
     // Create pipeline with countwindow and sum aggregation
     let mut pipeline = instance
-        .build_pipeline("SELECT sum(a) FROM stream GROUP BY countwindow(2)", vec![sink])
+        .build_pipeline(
+            "SELECT sum(a) FROM stream GROUP BY countwindow(2)",
+            vec![sink],
+        )
         .expect("failed to create aggregation pipeline with countwindow");
-    
+
     pipeline.start();
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -540,7 +542,7 @@ async fn test_aggregation_with_countwindow() {
     // Expect to get 2 complete windows (countwindow(2) with 5 rows = 2 full windows + 1 remainder)
     // Note: The current implementation may not output the final partial window
     let mut results = Vec::new();
-    
+
     // Read first window result (sum of 10, 20 = 30)
     let first = timeout(Duration::from_secs(2), output.recv())
         .await
@@ -567,12 +569,15 @@ async fn test_aggregation_with_countwindow() {
             assert_eq!(collection.num_rows(), 1, "Each window should produce 1 row");
             let rows = collection.rows();
             let sum_value = rows[0]
-                .value_by_name("", "sum(a)")  // aggregate result in affiliate column
+                .value_by_name("", "sum(a)") // aggregate result in affiliate column
                 .expect("missing sum(a) column");
             assert_eq!(sum_value, &Value::Int64(30));
             println!("✓ First window: sum(10, 20) = 30");
         }
-        other => panic!("Expected collection data for first window, got {:?}", other.description()),
+        other => panic!(
+            "Expected collection data for first window, got {:?}",
+            other.description()
+        ),
     }
 
     // Verify second window: sum(30, 40) = 70
@@ -586,7 +591,10 @@ async fn test_aggregation_with_countwindow() {
             assert_eq!(sum_value, &Value::Int64(70));
             println!("✓ Second window: sum(30, 40) = 70");
         }
-        other => panic!("Expected collection data for second window, got {:?}", other.description()),
+        other => panic!(
+            "Expected collection data for second window, got {:?}",
+            other.description()
+        ),
     }
 
     println!("✓ All aggregation with countwindow tests passed!");

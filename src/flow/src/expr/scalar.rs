@@ -195,7 +195,6 @@ impl ScalarExpr {
         }
     }
 
-
     /// Create a column reference expression by column name only (no source qualifier)
     pub fn column_with_column_name(column_name: impl Into<String>) -> Self {
         ScalarExpr::Column(ColumnRef::ByName {
