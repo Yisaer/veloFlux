@@ -36,6 +36,7 @@ pub use pipeline::{
     PipelineStatus, SinkDefinition, SinkProps, SinkType,
 };
 pub use planner::create_physical_plan;
+pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain};
 pub use planner::logical::{
     BaseLogicalPlan, DataSinkPlan, DataSource, Filter, LogicalPlan, Project,
 };
@@ -115,10 +116,10 @@ fn build_physical_plan_from_sql(
     let (schema_binding, stream_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
-    println!("[LogicalPlan] topology:");
-    logical_plan.print_topology(0);
     let physical_plan =
         create_physical_plan(Arc::clone(&logical_plan), &schema_binding, registries)?;
+    let explain = PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&physical_plan));
+    println!("[Pipeline Explain]\n{}", explain.to_pretty_string());
     Ok(physical_plan)
 }
 
@@ -209,6 +210,7 @@ pub fn create_pipeline(
     mqtt_client_manager: MqttClientManager,
     registries: &PipelineRegistries,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
+    println!("create pipeline sql:{}", sql);
     let physical_plan =
         build_physical_plan_from_sql(sql, sinks, catalog, shared_stream_registry, registries)?;
     let pipeline = create_processor_pipeline(
@@ -220,6 +222,23 @@ pub fn create_pipeline(
         registries.aggregate_registry(),
     )?;
     Ok(pipeline)
+}
+
+/// 构建逻辑/物理计划并返回 explain 报告（不创建或启动处理器）。
+pub fn explain_pipeline(
+    sql: &str,
+    sinks: Vec<PipelineSink>,
+    catalog: &Catalog,
+    shared_stream_registry: &SharedStreamRegistry,
+    registries: &PipelineRegistries,
+) -> Result<PipelineExplain, Box<dyn std::error::Error>> {
+    let select_stmt = parser::parse_sql_with_registry(sql, registries.aggregate_registry())?;
+    let (schema_binding, stream_defs) =
+        build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
+    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
+    let physical_plan =
+        create_physical_plan(Arc::clone(&logical_plan), &schema_binding, registries)?;
+    Ok(PipelineExplain::new(logical_plan, physical_plan))
 }
 
 /// Convenience helper for tests and demos that just need a logging mock sink.

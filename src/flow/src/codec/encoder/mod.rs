@@ -57,11 +57,6 @@ impl JsonEncoder {
     /// Create a new JSON encoder with the provided identifier.
     pub fn new(id: impl Into<String>, props: JsonMap<String, JsonValue>) -> Self {
         let id = id.into();
-        println!(
-            "[JsonEncoder] id={} props={}",
-            id,
-            JsonValue::Object(props.clone())
-        );
         Self { id, props }
     }
 

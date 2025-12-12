@@ -9,7 +9,8 @@ use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::Processor;
 use crate::shared_stream::SharedStreamRegistry;
 use crate::{
-    create_pipeline, PipelineRegistries, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
+    create_pipeline, explain_pipeline, PipelineExplain, PipelineRegistries, PipelineSink,
+    PipelineSinkConnector, SinkConnectorConfig,
 };
 use parser::parse_sql_with_registry;
 use std::collections::HashMap;
@@ -257,6 +258,35 @@ impl PipelineManager {
     pub fn list(&self) -> Vec<PipelineSnapshot> {
         let guard = self.pipelines.read().expect("pipeline manager poisoned");
         guard.values().map(|entry| entry.snapshot()).collect()
+    }
+
+    /// Explain an existing pipeline by id (logical + physical plans).
+    pub fn explain_pipeline(&self, pipeline_id: &str) -> Result<PipelineExplain, PipelineError> {
+        let definition = {
+            let guard = self.pipelines.read().expect("pipeline manager poisoned");
+            let entry = guard
+                .get(pipeline_id)
+                .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
+            Arc::clone(&entry.definition)
+        };
+
+        let sinks =
+            build_sinks_from_definition(&definition).map_err(PipelineError::BuildFailure)?;
+        let registries = PipelineRegistries::new(
+            Arc::clone(&self.connector_registry),
+            Arc::clone(&self.encoder_registry),
+            Arc::clone(&self.decoder_registry),
+            Arc::clone(&self.aggregate_registry),
+        );
+
+        explain_pipeline(
+            definition.sql(),
+            sinks,
+            &self.catalog,
+            self.shared_stream_registry,
+            &registries,
+        )
+        .map_err(|err| PipelineError::BuildFailure(err.to_string()))
     }
 
     /// Start the pipeline runtime if not already running.

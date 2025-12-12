@@ -47,11 +47,6 @@ impl JsonDecoder {
         props: JsonMap<String, JsonValue>,
     ) -> Self {
         let stream_name = stream_name.into();
-        println!(
-            "[JsonDecoder] stream={} props={}",
-            stream_name,
-            JsonValue::Object(props.clone())
-        );
         let schema_keys = schema
             .column_schemas()
             .iter()

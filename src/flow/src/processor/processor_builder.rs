@@ -689,7 +689,7 @@ fn connect_processors(
             index_to_name_map.get(&child_index),
             index_to_name_map.get(&parent_index),
         ) {
-            println!("Connecting {} -> {}", child_plan_name, parent_plan_name);
+            // println!("Connecting {} -> {}", child_plan_name, parent_plan_name);
 
             let receiver = processor_map
                 .get_processor(child_plan_name)
@@ -728,11 +728,6 @@ pub fn create_processor_pipeline(
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
 ) -> Result<ProcessorPipeline, ProcessorError> {
-    // Print the PhysicalPlan topology structure for debugging
-    println!("=== PhysicalPlan Topology Structure ===");
-    physical_plan.print_topology(0);
-    println!("======================================");
-
     let mut control_source = ControlSourceProcessor::new("control_source");
     let (pipeline_input_sender, pipeline_input_receiver) = mpsc::channel(100);
     let (data_input_sender, data_input_receiver) =

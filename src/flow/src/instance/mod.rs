@@ -15,7 +15,7 @@ use crate::shared_stream::{
     SharedStreamRegistry,
 };
 use crate::{create_pipeline, create_pipeline_with_log_sink};
-use crate::{PipelineRegistries, PipelineSink};
+use crate::{PipelineExplain, PipelineRegistries, PipelineSink};
 
 /// Runtime container that manages all Flow resources (streams, pipelines, shared clients).
 #[derive(Clone)]
@@ -198,6 +198,11 @@ impl FlowInstance {
     /// Retrieve pipeline snapshots.
     pub fn list_pipelines(&self) -> Vec<PipelineSnapshot> {
         self.pipeline_manager.list()
+    }
+
+    /// Explain an existing pipeline by id (logical + physical plans).
+    pub fn explain_pipeline(&self, id: &str) -> Result<PipelineExplain, PipelineError> {
+        self.pipeline_manager.explain_pipeline(id)
     }
 
     /// Build a processor pipeline directly without registering it.
