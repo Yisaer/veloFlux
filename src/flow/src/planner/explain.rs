@@ -201,11 +201,7 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
         },
     }
 
-    let children = plan
-        .children()
-        .iter()
-        .map(|child| build_logical_node(child))
-        .collect();
+    let children = plan.children().iter().map(build_logical_node).collect();
 
     ExplainNode {
         id: plan.get_plan_name(),
@@ -297,11 +293,7 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
         }
     }
 
-    let children = plan
-        .children()
-        .iter()
-        .map(|child| build_physical_node(child))
-        .collect();
+    let children = plan.children().iter().map(build_physical_node).collect();
 
     ExplainNode {
         id: plan.get_plan_name(),
