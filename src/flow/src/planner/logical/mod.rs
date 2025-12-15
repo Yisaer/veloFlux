@@ -169,6 +169,7 @@ pub fn create_logical_plan(
     if !select_stmt.aggregate_mappings.is_empty() {
         let aggregation = aggregation::Aggregation::new(
             select_stmt.aggregate_mappings.clone(),
+            select_stmt.group_by_exprs.clone(),
             current_plans,
             current_index,
         );

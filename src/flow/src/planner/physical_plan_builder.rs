@@ -244,6 +244,7 @@ fn create_physical_aggregation_with_builder(
     let index = builder.allocate_index();
     let physical = PhysicalAggregation::new(
         logical_agg.aggregate_mappings.clone(),
+        logical_agg.group_by_exprs.clone(),
         physical_children,
         index,
         bindings,

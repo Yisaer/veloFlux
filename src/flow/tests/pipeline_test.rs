@@ -23,6 +23,7 @@ struct TestCase {
     expected_rows: usize,
     expected_columns: usize,
     column_checks: Vec<ColumnCheck>, // checks for specific columns by name
+    sort_by_fields: Option<Vec<&'static str>>,
 }
 
 /// Column-specific checks
@@ -79,7 +80,26 @@ async fn run_test_case(test_case: TestCase) {
 
     match received_data {
         StreamData::Collection(result_collection) => {
-            let rows = result_collection.rows();
+            let mut rows = result_collection.rows().to_vec();
+
+            if let Some(sort_fields) = &test_case.sort_by_fields {
+                use std::cmp::Ordering;
+                rows.sort_by(|a, b| {
+                    for field in sort_fields {
+                        let av = a
+                            .value_by_name("stream", field)
+                            .or_else(|| a.value_by_name("", field));
+                        let bv = b
+                            .value_by_name("stream", field)
+                            .or_else(|| b.value_by_name("", field));
+                        let ord = format!("{:?}", av).cmp(&format!("{:?}", bv));
+                        if ord != Ordering::Equal {
+                            return ord;
+                        }
+                    }
+                    Ordering::Equal
+                });
+            }
 
             // Check basic properties
             assert_eq!(
@@ -95,7 +115,7 @@ async fn run_test_case(test_case: TestCase) {
                     test_case.name
                 );
             } else {
-                for row in rows {
+                for row in &rows {
                     assert_eq!(
                         row.len(),
                         test_case.expected_columns,
@@ -106,7 +126,7 @@ async fn run_test_case(test_case: TestCase) {
 
                 for check in test_case.column_checks {
                     let mut values = Vec::with_capacity(rows.len());
-                    for row in rows {
+                    for row in &rows {
                         let value = row
                             .value_by_name("stream", &check.expected_name)
                             .or_else(|| row.value_by_name("", &check.expected_name))
@@ -186,6 +206,7 @@ async fn test_create_pipeline_various_queries() {
                     expected_values: vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
                 },
             ],
+            sort_by_fields: None,
         },
         TestCase {
             name: "simple_projection",
@@ -216,6 +237,7 @@ async fn test_create_pipeline_various_queries() {
                     expected_values: vec![Value::Int64(102), Value::Int64(202), Value::Int64(302)],
                 },
             ],
+            sort_by_fields: None,
         },
         TestCase {
             name: "simple_filter",
@@ -242,6 +264,7 @@ async fn test_create_pipeline_various_queries() {
                     expected_values: vec![Value::Int64(200), Value::Int64(300)], // Corresponding b values
                 },
             ],
+            sort_by_fields: None,
         },
         TestCase {
             name: "filter_with_projection",
@@ -268,6 +291,7 @@ async fn test_create_pipeline_various_queries() {
                     expected_values: vec![Value::Int64(400), Value::Int64(600)], // (200*2), (300*2)
                 },
             ],
+            sort_by_fields: None,
         },
         TestCase {
             name: "filter_no_matches",
@@ -294,6 +318,7 @@ async fn test_create_pipeline_various_queries() {
                     expected_values: vec![], // Empty
                 },
             ],
+            sort_by_fields: None,
         },
         TestCase {
             name: "filter_all_match",
@@ -308,6 +333,57 @@ async fn test_create_pipeline_various_queries() {
                 expected_name: "a".to_string(),
                 expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
             }],
+            sort_by_fields: None,
+        },
+        TestCase {
+            name: "aggregation_with_group_by_window_and_expr",
+            sql: "SELECT sum(a) + 1, b, c FROM stream GROUP BY countwindow(4), b + 1",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                    ],
+                ),
+                (
+                    "c".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                    ],
+                ),
+            ],
+            expected_rows: 2,
+            expected_columns: 3,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "sum(a) + 1".to_string(),
+                    expected_values: vec![Value::Int64(3), Value::Int64(3)],
+                },
+                ColumnCheck {
+                    expected_name: "b".to_string(),
+                    expected_values: vec![Value::Int64(1), Value::Int64(2)],
+                },
+                ColumnCheck {
+                    expected_name: "c".to_string(),
+                    expected_values: vec![Value::Int64(2), Value::Int64(2)],
+                },
+            ],
+            sort_by_fields: Some(vec!["b"]),
         },
     ];
 

@@ -22,11 +22,14 @@ pub struct PhysicalAggregation {
     pub base: BasePhysicalPlan,
     pub aggregate_mappings: HashMap<String, Expr>,
     pub aggregate_calls: Vec<AggregateCall>,
+    pub group_by_exprs: Vec<Expr>,
+    pub group_by_scalars: Vec<ScalarExpr>,
 }
 
 impl PhysicalAggregation {
     pub fn new(
         aggregate_mappings: HashMap<String, Expr>,
+        group_by_exprs: Vec<Expr>,
         children: Vec<Arc<PhysicalPlan>>,
         index: i64,
         bindings: &SchemaBinding,
@@ -38,10 +41,20 @@ impl PhysicalAggregation {
             aggregate_calls.push(call);
         }
 
+        let mut group_by_scalars = Vec::new();
+        for expr in &group_by_exprs {
+            group_by_scalars.push(
+                convert_expr_to_scalar_with_bindings(expr, bindings)
+                    .map_err(|err| err.to_string())?,
+            );
+        }
+
         Ok(Self {
             base: BasePhysicalPlan::new(children, index),
             aggregate_mappings,
             aggregate_calls,
+            group_by_exprs,
+            group_by_scalars,
         })
     }
 }

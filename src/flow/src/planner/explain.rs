@@ -168,6 +168,14 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 .map(|(out, expr)| format!("{} -> {}", expr, out))
                 .collect::<Vec<_>>();
             info.push(format!("aggregates=[{}]", mappings.join("; ")));
+            if !agg.group_by_exprs.is_empty() {
+                let group_exprs = agg
+                    .group_by_exprs
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>();
+                info.push(format!("group_by=[{}]", group_exprs.join(", ")));
+            }
         }
         LogicalPlan::Project(project) => {
             let fields = project
@@ -254,6 +262,14 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
         }
         PhysicalPlan::Aggregation(aggregation) => {
             info.push(format!("calls=[{}]", format_aggregation_calls(aggregation)));
+            if !aggregation.group_by_exprs.is_empty() {
+                let group_exprs = aggregation
+                    .group_by_exprs
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>();
+                info.push(format!("group_by=[{}]", group_exprs.join(", ")));
+            }
         }
         PhysicalPlan::Batch(batch) => {
             info.push(format!("sink_id={}", batch.sink_id));
