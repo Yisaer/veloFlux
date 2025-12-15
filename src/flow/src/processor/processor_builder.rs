@@ -446,6 +446,9 @@ fn create_processor_from_plan_node(
                 PlanProcessor::Encoder(processor),
             ))
         }
+        PhysicalPlan::StreamingAggregation(_agg) => Err(ProcessorError::InvalidConfiguration(
+            "StreamingAggregation is not yet supported by processor builder".to_string(),
+        )),
         PhysicalPlan::StreamingEncoder(streaming) => {
             let encoder_impl = context
                 .encoder_registry()

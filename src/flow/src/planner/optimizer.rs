@@ -1,6 +1,9 @@
+use crate::aggregation::AggregateFunctionRegistry;
 use crate::codec::EncoderRegistry;
-use crate::planner::physical::PhysicalStreamingEncoder;
-use crate::planner::physical::{PhysicalDataSink, PhysicalPlan, PhysicalSinkConnector};
+use crate::planner::physical::{
+    PhysicalDataSink, PhysicalPlan, PhysicalSinkConnector, PhysicalStreamingAggregation,
+    PhysicalStreamingEncoder, StreamingWindowSpec,
+};
 use std::sync::Arc;
 
 /// A physical optimization rule.
@@ -17,8 +20,14 @@ trait PhysicalOptRule {
 pub fn optimize_physical_plan(
     physical_plan: Arc<PhysicalPlan>,
     encoder_registry: &EncoderRegistry,
+    aggregate_registry: Arc<AggregateFunctionRegistry>,
 ) -> Arc<PhysicalPlan> {
-    let rules: Vec<Box<dyn PhysicalOptRule>> = vec![Box::new(StreamingEncoderRewrite)];
+    let rules: Vec<Box<dyn PhysicalOptRule>> = vec![
+        Box::new(StreamingAggregationRewrite {
+            aggregate_registry: Arc::clone(&aggregate_registry),
+        }),
+        Box::new(StreamingEncoderRewrite),
+    ];
     let mut current = physical_plan;
     for rule in rules {
         let _ = rule.name();
@@ -30,6 +39,104 @@ pub fn optimize_physical_plan(
 /// Rule: if a sink has a Batch -> Encoder chain and the encoder supports streaming,
 /// rewrite it to StreamingEncoder -> Sink (dropping the batch).
 struct StreamingEncoderRewrite;
+
+/// Rule: fuse Window -> Aggregation into StreamingAggregation when all calls are incremental.
+struct StreamingAggregationRewrite {
+    aggregate_registry: Arc<AggregateFunctionRegistry>,
+}
+
+impl PhysicalOptRule for StreamingAggregationRewrite {
+    fn name(&self) -> &str {
+        "streaming_aggregation_rewrite"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        self.optimize_node(plan, encoder_registry)
+    }
+}
+
+impl StreamingAggregationRewrite {
+    fn optimize_node(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        let optimized_children = self.optimize_children(plan.children(), encoder_registry);
+
+        match plan.as_ref() {
+            PhysicalPlan::Aggregation(agg) => {
+                if let Some(child) = optimized_children.first() {
+                    if let Some(streaming) =
+                        self.try_fuse_streaming_agg(agg, child, encoder_registry)
+                    {
+                        return streaming;
+                    }
+                }
+                rebuild_with_children(plan.as_ref(), optimized_children)
+            }
+            _ => rebuild_with_children(plan.as_ref(), optimized_children),
+        }
+    }
+
+    fn optimize_children(
+        &self,
+        children: &[Arc<PhysicalPlan>],
+        encoder_registry: &EncoderRegistry,
+    ) -> Vec<Arc<PhysicalPlan>> {
+        children
+            .iter()
+            .map(|child| self.optimize_node(Arc::clone(child), encoder_registry))
+            .collect()
+    }
+
+    fn try_fuse_streaming_agg(
+        &self,
+        agg: &crate::planner::physical::PhysicalAggregation,
+        child: &Arc<PhysicalPlan>,
+        _encoder_registry: &EncoderRegistry,
+    ) -> Option<Arc<PhysicalPlan>> {
+        if !crate::planner::physical::PhysicalAggregation::all_calls_incremental(
+            &agg.aggregate_calls,
+            &self.aggregate_registry,
+        ) {
+            return None;
+        }
+
+        let (window_spec, upstream_child) = match child.as_ref() {
+            PhysicalPlan::TumblingWindow(window) => {
+                let spec = StreamingWindowSpec::Tumbling {
+                    time_unit: window.time_unit,
+                    length: window.length,
+                };
+                let upstream = window.base.children.first()?.clone();
+                (spec, upstream)
+            }
+            PhysicalPlan::CountWindow(window) => {
+                let spec = StreamingWindowSpec::Count {
+                    count: window.count,
+                };
+                let upstream = window.base.children.first()?.clone();
+                (spec, upstream)
+            }
+            _ => return None,
+        };
+
+        let streaming = PhysicalStreamingAggregation::new(
+            window_spec,
+            agg.aggregate_mappings.clone(),
+            agg.group_by_exprs.clone(),
+            agg.aggregate_calls.clone(),
+            agg.group_by_scalars.clone(),
+            vec![upstream_child],
+            agg.base.index(),
+        );
+        Some(Arc::new(PhysicalPlan::StreamingAggregation(streaming)))
+    }
+}
 
 impl PhysicalOptRule for StreamingEncoderRewrite {
     fn name(&self) -> &str {
@@ -176,6 +283,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::Encoder(new))
         }
+        PhysicalPlan::StreamingAggregation(agg) => {
+            let mut new = agg.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::StreamingAggregation(new))
+        }
         PhysicalPlan::StreamingEncoder(streaming) => {
             let mut new = streaming.clone();
             new.base.children = children;
@@ -285,8 +397,11 @@ mod tests {
           └─PhysicalDataSource_0     | source=stream, decoder=json, schema=[a]";
         assert_eq!(pre_table.trim_end(), expected_pre);
 
-        let optimized_plan =
-            optimize_physical_plan(Arc::clone(&physical_plan), encoder_registry.as_ref());
+        let optimized_plan = optimize_physical_plan(
+            Arc::clone(&physical_plan),
+            encoder_registry.as_ref(),
+            registries.aggregate_registry(),
+        );
         let post_explain = PipelineExplain::new(logical_plan, Arc::clone(&optimized_plan));
         let post_table = post_explain.physical.table_string();
         let expected_post = r"- id                                 | info                                          
