@@ -20,6 +20,13 @@ impl ExplainReport {
         self.root.collect_rows()
     }
 
+    /// Build a report from a logical plan only (no physical needed).
+    pub fn from_logical(plan: Arc<LogicalPlan>) -> Self {
+        ExplainReport {
+            root: build_logical_node(&plan),
+        }
+    }
+
     pub fn topology_string(&self) -> String {
         self.root.topology_string()
     }
