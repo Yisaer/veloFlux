@@ -295,7 +295,7 @@ impl EventWindowState {
                 if let Some(batch) = state
                     .worker
                     .finalize_current_window()
-                    .map_err(|e| ProcessorError::ProcessingError(e))?
+                    .map_err(ProcessorError::ProcessingError)?
                 {
                     send_with_backpressure(output, StreamData::Collection(batch)).await?;
                 }
@@ -314,7 +314,7 @@ impl EventWindowState {
                 if let Some(batch) = state
                     .worker
                     .finalize_current_window()
-                    .map_err(|e| ProcessorError::ProcessingError(e))?
+                    .map_err(ProcessorError::ProcessingError)?
                 {
                     send_with_backpressure(output, StreamData::Collection(batch)).await?;
                 }
@@ -385,7 +385,7 @@ impl ProcessingWindowState {
             if let Some(batch) = state
                 .worker
                 .finalize_current_window()
-                .map_err(|e| ProcessorError::ProcessingError(e))?
+                .map_err(ProcessorError::ProcessingError)?
             {
                 send_with_backpressure(output, StreamData::Collection(batch)).await?;
             }
@@ -401,7 +401,7 @@ impl ProcessingWindowState {
             if let Some(batch) = state
                 .worker
                 .finalize_current_window()
-                .map_err(|e| ProcessorError::ProcessingError(e))?
+                .map_err(ProcessorError::ProcessingError)?
             {
                 send_with_backpressure(output, StreamData::Collection(batch)).await?;
             }
