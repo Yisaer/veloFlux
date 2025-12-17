@@ -1,5 +1,6 @@
 use super::{logical::LogicalPlan, physical::PhysicalPlan};
 use crate::planner::logical::{DataSinkPlan, LogicalWindowSpec};
+use crate::planner::physical::{WatermarkConfig, WatermarkStrategy};
 use serde::Serialize;
 use sqlparser::ast::Expr;
 use std::sync::Arc;
@@ -353,6 +354,26 @@ fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
         PhysicalPlan::ResultCollect(rc) => {
             info.push(format!("sink_count={}", rc.base.children.len()));
         }
+        PhysicalPlan::Watermark(watermark) => match &watermark.config {
+            WatermarkConfig::Tumbling {
+                time_unit,
+                length,
+                strategy,
+            } => {
+                info.push("window=tumbling".to_string());
+                info.push(format!("unit={:?}", time_unit));
+                info.push(format!("length={}", length));
+                match strategy {
+                    WatermarkStrategy::ProcessingTime { interval, .. } => {
+                        info.push("mode=processing_time".to_string());
+                        info.push(format!("interval={}", interval));
+                    }
+                    WatermarkStrategy::External => {
+                        info.push("mode=external".to_string());
+                    }
+                }
+            }
+        },
         PhysicalPlan::TumblingWindow(window) => {
             info.push("kind=tumbling".to_string());
             info.push(format!("unit={:?}", window.time_unit));

@@ -11,7 +11,7 @@ use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
     PhysicalAggregation, PhysicalBatch, PhysicalDataSink, PhysicalDataSource, PhysicalEncoder,
     PhysicalFilter, PhysicalPlan, PhysicalProject, PhysicalResultCollect, PhysicalSharedStream,
-    PhysicalSinkConnector,
+    PhysicalSinkConnector, PhysicalWatermark, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
 use crate::PipelineRegistries;
@@ -207,18 +207,32 @@ fn create_physical_window_with_builder(
         physical_children.push(physical_child);
     }
 
-    let index = builder.allocate_index();
     let physical = match logical_window.spec {
         LogicalWindowSpec::Tumbling { time_unit, length } => {
+            let watermark_index = builder.allocate_index();
+            let watermark = PhysicalWatermark::new(
+                WatermarkConfig::Tumbling {
+                    time_unit,
+                    length,
+                    strategy: WatermarkStrategy::ProcessingTime {
+                        time_unit,
+                        interval: length,
+                    },
+                },
+                physical_children,
+                watermark_index,
+            );
+            let index = builder.allocate_index();
             let tumbling = crate::planner::physical::PhysicalTumblingWindow::new(
                 time_unit,
                 length,
-                physical_children,
+                vec![Arc::new(PhysicalPlan::Watermark(watermark))],
                 index,
             );
             PhysicalPlan::TumblingWindow(tumbling)
         }
         LogicalWindowSpec::Count { count } => {
+            let index = builder.allocate_index();
             let count_window =
                 crate::planner::physical::PhysicalCountWindow::new(count, physical_children, index);
             PhysicalPlan::CountWindow(count_window)

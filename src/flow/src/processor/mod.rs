@@ -22,6 +22,8 @@ pub mod sink_processor;
 pub mod stream_data;
 pub mod streaming_aggregation_processor;
 pub mod streaming_encoder_processor;
+pub mod tumbling_window_processor;
+pub mod watermark_processor;
 
 pub use aggregation_processor::AggregationProcessor;
 pub use base::{Processor, ProcessorError};
@@ -41,3 +43,5 @@ pub use streaming_aggregation_processor::{
     StreamingTumblingAggregationProcessor,
 };
 pub use streaming_encoder_processor::StreamingEncoderProcessor;
+pub use tumbling_window_processor::TumblingWindowProcessor;
+pub use watermark_processor::WatermarkProcessor;

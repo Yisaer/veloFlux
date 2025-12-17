@@ -53,6 +53,12 @@ pub fn log_received_data(processor_id: &str, data: &StreamData) {
                 processor_id, signal
             );
         }
+        StreamData::Watermark(ts) => {
+            println!(
+                "[Processor:{}] received Watermark at {:?}",
+                processor_id, ts
+            );
+        }
         StreamData::Error(error) => {
             println!(
                 "[Processor:{}] received Error: {}",

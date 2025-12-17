@@ -165,6 +165,12 @@ async fn run_test_case(test_case: TestCase) {
                 test_case.name
             );
         }
+        StreamData::Watermark(ts) => {
+            panic!(
+                "Expected Collection data, but received watermark {:?} for test: {}",
+                ts, test_case.name
+            );
+        }
     }
 
     pipeline.close().await.expect(&format!(

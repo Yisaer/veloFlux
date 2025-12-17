@@ -1,6 +1,7 @@
 use datatypes::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// Immutable data from a single source.
 #[derive(Debug)]
@@ -107,13 +108,19 @@ impl AffiliateRow {
 pub struct Tuple {
     pub messages: Vec<Arc<Message>>,
     pub affiliate: Option<AffiliateRow>,
+    pub timestamp: SystemTime,
 }
 
 impl Tuple {
     pub fn new(messages: Vec<Arc<Message>>) -> Self {
+        Self::with_timestamp(messages, SystemTime::now())
+    }
+
+    pub fn with_timestamp(messages: Vec<Arc<Message>>, timestamp: SystemTime) -> Self {
         Self {
             messages,
             affiliate: None,
+            timestamp,
         }
     }
 

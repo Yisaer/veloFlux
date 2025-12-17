@@ -3,6 +3,7 @@
 //! Defines the data types that flow between processors in the stream processing pipeline.
 
 use crate::model::Collection;
+use std::time::SystemTime;
 
 /// Control signals for stream processing
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +48,8 @@ pub enum StreamData {
     Bytes(Vec<u8>),
     /// Control signal for flow management
     Control(ControlSignal),
+    /// Watermark for time progression
+    Watermark(SystemTime),
     /// Error that occurred during processing - wrapped for flow continuation
     Error(StreamError),
 }
@@ -160,6 +163,11 @@ impl StreamData {
         }
     }
 
+    /// Check if this is a watermark signal
+    pub fn is_watermark(&self) -> bool {
+        matches!(self, StreamData::Watermark(_))
+    }
+
     /// Extract Collection if present
     pub fn as_collection(&self) -> Option<&dyn Collection> {
         match self {
@@ -214,6 +222,7 @@ impl StreamData {
             }
             StreamData::Bytes(payload) => format!("Bytes payload ({} bytes)", payload.len()),
             StreamData::Control(signal) => format!("Control signal: {:?}", signal),
+            StreamData::Watermark(ts) => format!("Watermark at {:?}", ts),
             StreamData::Error(error) => format!("Error: {}", error),
         }
     }
@@ -229,5 +238,10 @@ impl StreamData {
     /// Create quick stream end signal
     pub fn quick_end() -> Self {
         StreamData::control(ControlSignal::StreamQuickEnd)
+    }
+
+    /// Create watermark signal
+    pub fn watermark(timestamp: SystemTime) -> Self {
+        StreamData::Watermark(timestamp)
     }
 }

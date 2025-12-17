@@ -12,6 +12,7 @@ pub mod physical_result_collect;
 pub mod physical_shared_stream;
 pub mod physical_streaming_aggregation;
 pub mod physical_streaming_encoder;
+pub mod physical_watermark;
 pub mod physical_window;
 
 pub use base_physical::BasePhysicalPlan;
@@ -26,6 +27,7 @@ pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_shared_stream::PhysicalSharedStream;
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
 pub use physical_streaming_encoder::PhysicalStreamingEncoder;
+pub use physical_watermark::{PhysicalWatermark, WatermarkConfig, WatermarkStrategy};
 pub use physical_window::{PhysicalCountWindow, PhysicalTumblingWindow};
 
 /// Enum describing all supported physical execution nodes
@@ -44,6 +46,7 @@ pub enum PhysicalPlan {
     ResultCollect(PhysicalResultCollect),
     TumblingWindow(PhysicalTumblingWindow),
     CountWindow(PhysicalCountWindow),
+    Watermark(PhysicalWatermark),
 }
 
 impl PhysicalPlan {
@@ -63,6 +66,7 @@ impl PhysicalPlan {
             PhysicalPlan::ResultCollect(plan) => plan.base.children(),
             PhysicalPlan::TumblingWindow(plan) => plan.base.children(),
             PhysicalPlan::CountWindow(plan) => plan.base.children(),
+            PhysicalPlan::Watermark(plan) => plan.base.children(),
         }
     }
 
@@ -82,6 +86,7 @@ impl PhysicalPlan {
             PhysicalPlan::ResultCollect(_) => "PhysicalResultCollect",
             PhysicalPlan::TumblingWindow(_) => "PhysicalTumblingWindow",
             PhysicalPlan::CountWindow(_) => "PhysicalCountWindow",
+            PhysicalPlan::Watermark(_) => "PhysicalWatermark",
         }
     }
 
@@ -101,6 +106,7 @@ impl PhysicalPlan {
             PhysicalPlan::ResultCollect(plan) => plan.base.index(),
             PhysicalPlan::TumblingWindow(plan) => plan.base.index(),
             PhysicalPlan::CountWindow(plan) => plan.base.index(),
+            PhysicalPlan::Watermark(plan) => plan.base.index(),
         }
     }
 
