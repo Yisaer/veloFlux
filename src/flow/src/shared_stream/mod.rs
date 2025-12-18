@@ -310,6 +310,7 @@ struct SharedStreamInner {
     schema: Arc<Schema>,
     created_at: SystemTime,
     connector_id: String,
+    decoding_columns: Arc<std::sync::RwLock<Vec<String>>>,
     data_sender: broadcast::Sender<StreamData>,
     control_sender: broadcast::Sender<ControlSignal>,
     control_input: broadcast::Sender<ControlSignal>,
@@ -331,7 +332,6 @@ struct SharedStreamHandles {
 struct SharedStreamState {
     status: SharedStreamStatus,
     subscribers: HashSet<String>,
-    decoding_columns: Vec<String>,
     consumer_required_columns: HashMap<String, Vec<String>>,
     union_required_columns: Vec<String>,
 }
@@ -371,7 +371,15 @@ impl SharedStreamInner {
         let (control_input_tx, control_input_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         datasource.add_control_input(control_input_rx);
 
-        let mut decoder_processor = DecoderProcessor::with_custom_id(decoder_id, decoder);
+        let initial_decoding_columns: Vec<String> = schema
+            .column_schemas()
+            .iter()
+            .map(|col| col.name.clone())
+            .collect();
+        let decoding_columns = Arc::new(std::sync::RwLock::new(initial_decoding_columns));
+
+        let mut decoder_processor = DecoderProcessor::with_custom_id(decoder_id, decoder)
+            .with_projection(Arc::clone(&decoding_columns));
         decoder_processor.add_input(datasource_data_rx);
         decoder_processor.add_control_input(control_input_tx.subscribe());
         let mut data_rx = decoder_processor
@@ -429,17 +437,12 @@ impl SharedStreamInner {
         let data_anchor = data_sender.subscribe();
         let control_anchor = control_sender.subscribe();
 
-        let initial_decoding_columns: Vec<String> = schema
-            .column_schemas()
-            .iter()
-            .map(|col| col.name.clone())
-            .collect();
-
         Ok(Self {
             name: stream_name,
             schema,
             created_at: SystemTime::now(),
             connector_id,
+            decoding_columns: Arc::clone(&decoding_columns),
             data_sender,
             control_sender,
             control_input: control_input_tx,
@@ -454,7 +457,6 @@ impl SharedStreamInner {
             state: Mutex::new(SharedStreamState {
                 status: SharedStreamStatus::Running,
                 subscribers: HashSet::new(),
-                decoding_columns: initial_decoding_columns,
                 consumer_required_columns: HashMap::new(),
                 union_required_columns: Vec::new(),
             }),
@@ -467,6 +469,11 @@ impl SharedStreamInner {
 
     async fn snapshot(&self) -> SharedStreamInfo {
         let state = self.state.lock().await;
+        let decoding_columns = self
+            .decoding_columns
+            .read()
+            .expect("shared stream decoding columns lock poisoned")
+            .clone();
         SharedStreamInfo {
             name: self.name.clone(),
             schema: Arc::clone(&self.schema),
@@ -474,7 +481,7 @@ impl SharedStreamInner {
             status: state.status.clone(),
             connector_id: self.connector_id.clone(),
             subscriber_count: state.subscribers.len(),
-            decoding_columns: state.decoding_columns.clone(),
+            decoding_columns,
         }
     }
 
@@ -545,16 +552,19 @@ impl SharedStreamInner {
             .collect();
 
         state.union_required_columns = union.clone();
-        if union.is_empty() {
-            state.decoding_columns = self
-                .schema
+        let applied = if union.is_empty() {
+            self.schema
                 .column_schemas()
                 .iter()
                 .map(|col| col.name.clone())
-                .collect();
+                .collect()
         } else {
-            state.decoding_columns = union.clone();
-        }
+            union.clone()
+        };
+        *self
+            .decoding_columns
+            .write()
+            .expect("shared stream decoding columns lock poisoned") = applied;
         Ok(union)
     }
 
@@ -583,16 +593,19 @@ impl SharedStreamInner {
             .collect();
 
         state.union_required_columns = union.clone();
-        if union.is_empty() {
-            state.decoding_columns = self
-                .schema
+        let applied = if union.is_empty() {
+            self.schema
                 .column_schemas()
                 .iter()
                 .map(|col| col.name.clone())
-                .collect();
+                .collect()
         } else {
-            state.decoding_columns = union;
-        }
+            union
+        };
+        *self
+            .decoding_columns
+            .write()
+            .expect("shared stream decoding columns lock poisoned") = applied;
     }
 
     async fn shutdown(self: Arc<Self>) -> Result<(), SharedStreamError> {
@@ -647,6 +660,7 @@ mod tests {
     use crate::connector::MockSourceConnector;
     use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
     use serde_json::Map as JsonMap;
+    use tokio::time::{timeout, Duration};
     use uuid::Uuid;
 
     fn test_schema() -> Arc<Schema> {
@@ -752,6 +766,110 @@ mod tests {
             .expect("union required columns");
         assert!(union.is_empty());
 
+        registry().drop_stream(&name).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_stream_decodes_only_union_required_columns() {
+        let name = format!("shared_stream_projection_test_{}", Uuid::new_v4().simple());
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                name.clone(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                name.clone(),
+                "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                name.clone(),
+                "c".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+        ]));
+
+        let (connector, handle) = MockSourceConnector::new(format!("{name}_connector"));
+        let decoder = Arc::new(JsonDecoder::new(
+            name.clone(),
+            Arc::clone(&schema),
+            JsonMap::new(),
+        ));
+
+        let config = SharedStreamConfig::new(name.clone(), Arc::clone(&schema))
+            .with_connector(Box::new(connector), decoder);
+        registry().create_stream(config).await.unwrap();
+
+        let mut sub_a = registry()
+            .subscribe(&name, "consumer_a")
+            .await
+            .expect("subscribe consumer_a");
+        let mut sub_b = registry()
+            .subscribe(&name, "consumer_b")
+            .await
+            .expect("subscribe consumer_b");
+
+        registry()
+            .set_consumer_required_columns(&name, "consumer_a", vec!["a".to_string()])
+            .await
+            .expect("set required columns for a");
+        registry()
+            .set_consumer_required_columns(&name, "consumer_b", vec!["b".to_string()])
+            .await
+            .expect("set required columns for b");
+
+        let info = registry().get_stream(&name).await.expect("get stream");
+        assert_eq!(
+            info.decoding_columns,
+            vec!["a".to_string(), "b".to_string()]
+        );
+
+        let mut rx_a = sub_a.take_receivers().0;
+        let mut rx_b = sub_b.take_receivers().0;
+
+        handle
+            .send(br#"{"a":1,"b":2,"c":3}"#.as_ref())
+            .await
+            .expect("send payload");
+
+        async fn read_one(
+            rx: &mut broadcast::Receiver<StreamData>,
+        ) -> Box<dyn crate::model::Collection> {
+            loop {
+                let data = timeout(Duration::from_secs(2), rx.recv())
+                    .await
+                    .expect("recv timeout")
+                    .expect("recv");
+                if let StreamData::Collection(collection) = data {
+                    return collection;
+                }
+            }
+        }
+
+        let collection_a = read_one(&mut rx_a).await;
+        let collection_b = read_one(&mut rx_b).await;
+
+        for collection in [collection_a, collection_b] {
+            assert_eq!(collection.num_rows(), 1);
+            let row = &collection.rows()[0];
+            assert_eq!(
+                row.value_by_name(name.as_str(), "a"),
+                Some(&datatypes::Value::Int64(1))
+            );
+            assert_eq!(
+                row.value_by_name(name.as_str(), "b"),
+                Some(&datatypes::Value::Int64(2))
+            );
+            assert_eq!(
+                row.value_by_name(name.as_str(), "c"),
+                Some(&datatypes::Value::Null)
+            );
+        }
+
+        sub_a.release().await;
+        sub_b.release().await;
+        handle.close().await.ok();
         registry().drop_stream(&name).await.unwrap();
     }
 }

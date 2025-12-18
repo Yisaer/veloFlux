@@ -5,7 +5,9 @@ use crate::processor::base::{
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use crate::shared_stream_registry;
 use futures::stream::StreamExt;
+use std::collections::HashSet;
 use tokio::sync::broadcast;
+use tokio::time::{sleep, Duration, Instant};
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
@@ -13,6 +15,7 @@ pub struct SharedStreamProcessor {
     id: String,
     stream_name: String,
     pipeline_id: Option<String>,
+    required_columns: Vec<String>,
     inputs: Vec<broadcast::Receiver<StreamData>>,
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
@@ -29,6 +32,7 @@ impl SharedStreamProcessor {
             id,
             stream_name,
             pipeline_id: None,
+            required_columns: Vec::new(),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -38,6 +42,13 @@ impl SharedStreamProcessor {
 
     pub fn set_pipeline_id(&mut self, pipeline_id: impl Into<String>) {
         self.pipeline_id = Some(pipeline_id.into());
+    }
+
+    /// Set the required columns (by name) for this pipeline's shared stream consumption.
+    ///
+    /// This is used to coordinate dynamic projection decode in the shared stream runtime.
+    pub fn set_required_columns(&mut self, required_columns: Vec<String>) {
+        self.required_columns = required_columns;
     }
 }
 
@@ -57,6 +68,7 @@ impl Processor for SharedStreamProcessor {
         let control_output = self.control_output.clone();
         let stream_name = self.stream_name.clone();
         let processor_id = self.id.clone();
+        let required_columns = std::mem::take(&mut self.required_columns);
         let pipeline_id = self
             .pipeline_id
             .clone()
@@ -66,10 +78,42 @@ impl Processor for SharedStreamProcessor {
                 "[SharedStreamProcessor:{processor_id}] subscribing to {stream_name} (pipeline {pipeline_id})"
             );
             let registry = shared_stream_registry();
+            let consumer_id = format!("{pipeline_id}-{processor_id}");
             let mut subscription = registry
-                .subscribe(&stream_name, format!("{pipeline_id}-{processor_id}"))
+                .subscribe(&stream_name, consumer_id.clone())
                 .await
                 .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+
+            if !required_columns.is_empty() {
+                registry
+                    .set_consumer_required_columns(
+                        &stream_name,
+                        &consumer_id,
+                        required_columns.clone(),
+                    )
+                    .await
+                    .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+
+                let required: HashSet<String> = required_columns.into_iter().collect();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let info = registry
+                        .get_stream(&stream_name)
+                        .await
+                        .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+                    let applied: HashSet<String> = info.decoding_columns.into_iter().collect();
+                    if required.is_subset(&applied) {
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(ProcessorError::ProcessingError(format!(
+                            "shared stream decoder not ready for consumer {consumer_id}: required columns not applied"
+                        )));
+                    }
+                    sleep(Duration::from_millis(20)).await;
+                }
+            }
+
             let (shared_data_rx, shared_control_rx) = subscription.take_receivers();
             let mut shared_data = BroadcastStream::new(shared_data_rx);
             let mut shared_control = BroadcastStream::new(shared_control_rx);

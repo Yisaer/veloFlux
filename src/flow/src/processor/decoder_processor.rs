@@ -18,6 +18,7 @@ pub struct DecoderProcessor {
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
     decoder: Arc<dyn RecordDecoder>,
+    projection: Option<Arc<std::sync::RwLock<Vec<String>>>>,
 }
 
 impl DecoderProcessor {
@@ -36,7 +37,13 @@ impl DecoderProcessor {
             output,
             control_output,
             decoder,
+            projection: None,
         }
+    }
+
+    pub fn with_projection(mut self, projection: Arc<std::sync::RwLock<Vec<String>>>) -> Self {
+        self.projection = Some(projection);
+        self
     }
 }
 
@@ -49,6 +56,7 @@ impl Processor for DecoderProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let decoder = Arc::clone(&self.decoder);
+        let projection = self.projection.clone();
         let processor_id = self.id.clone();
         let log_prefix = format!("[DecoderProcessor:{processor_id}]");
         let base_inputs = std::mem::take(&mut self.inputs);
@@ -80,7 +88,17 @@ impl Processor for DecoderProcessor {
                             Some(Ok(mut data)) => {
                                 log_received_data(&processor_id, &data);
                                 if let StreamData::Bytes(payload) = &data {
-                                    match decoder.decode(payload) {
+                                    let decoded = match &projection {
+                                        Some(lock) => {
+                                            let cols = lock
+                                                .read()
+                                                .expect("decoder projection lock poisoned")
+                                                .clone();
+                                            decoder.decode_with_projection(payload, Some(&cols))
+                                        }
+                                        None => decoder.decode(payload),
+                                    };
+                                    match decoded {
                                         Ok(batch) => {
                                             data = StreamData::collection(Box::new(batch));
                                         }
