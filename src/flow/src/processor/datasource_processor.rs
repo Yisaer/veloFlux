@@ -129,12 +129,17 @@ impl ConnectorBinding {
             return Err(Self::connector_error(self.connector.id(), err));
         }
         if let Some(handle) = self.handle.take() {
-            if let Err(join_err) = handle.await {
-                return Err(ProcessorError::ProcessingError(format!(
-                    "Connector join error: {}",
-                    join_err
-                )));
-            }
+            handle.abort();
+            match handle.await {
+                Ok(_) => {}
+                Err(join_err) if join_err.is_cancelled() => {}
+                Err(join_err) => {
+                    return Err(ProcessorError::ProcessingError(format!(
+                        "Connector join error: {}",
+                        join_err
+                    )));
+                }
+            };
         }
         println!("[SourceConnector:{connector_id}] closed");
         Ok(())

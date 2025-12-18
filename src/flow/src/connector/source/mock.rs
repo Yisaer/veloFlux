@@ -1,9 +1,15 @@
 //! Mock connector that lets tests or scripts push bytes into the pipeline manually.
 
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
+
+static MOCK_HANDLES: Lazy<RwLock<HashMap<String, MockSourceHandle>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 
 /// Connector exposing a handle for manually injecting payloads.
 pub struct MockSourceConnector {
@@ -12,6 +18,7 @@ pub struct MockSourceConnector {
 }
 
 /// Handle used to push payloads into a [`MockSourceConnector`].
+#[derive(Clone)]
 pub struct MockSourceHandle {
     sender: mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
 }
@@ -73,6 +80,31 @@ impl MockSourceHandle {
     pub fn sender(&self) -> mpsc::Sender<Result<ConnectorEvent, ConnectorError>> {
         self.sender.clone()
     }
+}
+
+/// Register a mock source handle under a stable key.
+pub fn register_mock_source_handle(key: impl Into<String>, handle: MockSourceHandle) {
+    MOCK_HANDLES
+        .write()
+        .expect("mock handle registry poisoned")
+        .insert(key.into(), handle);
+}
+
+/// Get a clone of the handle registered under the given key.
+pub fn get_mock_source_handle(key: &str) -> Option<MockSourceHandle> {
+    MOCK_HANDLES
+        .read()
+        .expect("mock handle registry poisoned")
+        .get(key)
+        .cloned()
+}
+
+/// Remove and return the handle registered under the given key.
+pub fn take_mock_source_handle(key: &str) -> Option<MockSourceHandle> {
+    MOCK_HANDLES
+        .write()
+        .expect("mock handle registry poisoned")
+        .remove(key)
 }
 
 /// Errors returned by [`MockSourceHandle`].

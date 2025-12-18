@@ -298,6 +298,9 @@ impl FlowInstance {
                     .await
                     .map_err(FlowInstanceError::from)
             }
+            StreamProps::Mock(_) => Err(FlowInstanceError::Invalid(
+                "mock stream props cannot be used to create shared streams".to_string(),
+            )),
         }
     }
 }

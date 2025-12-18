@@ -1,6 +1,6 @@
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema, Value};
 use flow::aggregation::AggregateFunctionRegistry;
-use flow::catalog::{Catalog, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
+use flow::catalog::{Catalog, MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::codec::{DecoderRegistry, EncoderRegistry, JsonDecoder};
 use flow::connector::{ConnectorRegistry, MockSourceConnector, MqttClientManager};
 use flow::processor::StreamData;
@@ -57,11 +57,7 @@ async fn shared_stream_two_pipelines_project_different_columns() {
     catalog.upsert(StreamDefinition::new(
         stream_name.clone(),
         Arc::clone(&schema),
-        StreamProps::Mqtt(MqttStreamProps::new(
-            "mqtt://localhost:1883",
-            format!("{stream_name}/in"),
-            0,
-        )),
+        StreamProps::Mock(MockStreamProps::default()),
         StreamDecoderConfig::json(),
     ));
 

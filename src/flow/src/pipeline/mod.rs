@@ -2,7 +2,8 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::{
-    ConnectorRegistry, MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
+    register_mock_source_handle, ConnectorRegistry, MockSourceConnector, MqttClientManager,
+    MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
@@ -364,8 +365,8 @@ fn build_pipeline_runtime(
         registries,
     )
     .map_err(|err| err.to_string())?;
-    attach_sources_from_catalog(&mut pipeline, &stream_definitions, mqtt_client_manager)?;
     pipeline.set_pipeline_id(definition.id().to_string());
+    attach_sources_from_catalog(&mut pipeline, &stream_definitions, mqtt_client_manager)?;
     Ok((pipeline, streams))
 }
 
@@ -416,6 +417,7 @@ fn attach_sources_from_catalog(
     mqtt_client_manager: &MqttClientManager,
 ) -> Result<(), String> {
     let mut has_source_processor = false;
+    let pipeline_id = pipeline.pipeline_id().to_string();
     for processor in pipeline.middle_processors.iter_mut() {
         if let PlanProcessor::DataSource(ds) = processor {
             has_source_processor = true;
@@ -423,26 +425,37 @@ fn attach_sources_from_catalog(
             let definition = stream_defs.get(&stream_name).ok_or_else(|| {
                 format!("stream {stream_name} missing definition when attaching sources")
             })?;
-            let StreamProps::Mqtt(stream_props) = definition.props();
             let processor_id = ds.id().to_string();
-            let mut config = MqttSourceConfig::new(
-                processor_id.clone(),
-                stream_props.broker_url.clone(),
-                stream_props.topic.clone(),
-                stream_props.qos,
-            );
-            if let Some(client_id) = &stream_props.client_id {
-                config = config.with_client_id(client_id.clone());
+
+            match definition.props() {
+                StreamProps::Mqtt(stream_props) => {
+                    let mut config = MqttSourceConfig::new(
+                        processor_id.clone(),
+                        stream_props.broker_url.clone(),
+                        stream_props.topic.clone(),
+                        stream_props.qos,
+                    );
+                    if let Some(client_id) = &stream_props.client_id {
+                        config = config.with_client_id(client_id.clone());
+                    }
+                    if let Some(connector_key) = &stream_props.connector_key {
+                        config = config.with_connector_key(connector_key.clone());
+                    }
+                    let connector = MqttSourceConnector::new(
+                        format!("{processor_id}_source_connector"),
+                        config,
+                        mqtt_client_manager.clone(),
+                    );
+                    ds.add_connector(Box::new(connector));
+                }
+                StreamProps::Mock(_) => {
+                    let (connector, handle) =
+                        MockSourceConnector::new(format!("{processor_id}_mock_source_connector"));
+                    let key = format!("{pipeline_id}:{stream_name}:{processor_id}");
+                    register_mock_source_handle(key, handle);
+                    ds.add_connector(Box::new(connector));
+                }
             }
-            if let Some(connector_key) = &stream_props.connector_key {
-                config = config.with_connector_key(connector_key.clone());
-            }
-            let connector = MqttSourceConnector::new(
-                format!("{processor_id}_source_connector"),
-                config,
-                mqtt_client_manager.clone(),
-            );
-            ds.add_connector(Box::new(connector));
             continue;
         }
 
@@ -456,6 +469,28 @@ fn attach_sources_from_catalog(
     } else {
         Err("no datasource processors available to attach connectors".into())
     }
+}
+
+/// Attach source connectors for every `DataSourceProcessor` in the pipeline using the catalog.
+///
+/// For mock streams this will create a `MockSourceConnector` and register a corresponding
+/// `MockSourceHandle` under key `"{pipeline_id}:{stream_name}:{processor_id}"`.
+pub fn attach_sources_for_pipeline(
+    pipeline: &mut ProcessorPipeline,
+    catalog: &Catalog,
+    mqtt_client_manager: &MqttClientManager,
+) -> Result<(), String> {
+    let mut stream_definitions = HashMap::new();
+    for processor in pipeline.middle_processors.iter() {
+        if let PlanProcessor::DataSource(ds) = processor {
+            let stream_name = ds.stream_name().to_string();
+            let definition = catalog
+                .get(&stream_name)
+                .ok_or_else(|| format!("stream {stream_name} not found in catalog"))?;
+            stream_definitions.insert(stream_name, definition);
+        }
+    }
+    attach_sources_from_catalog(pipeline, &stream_definitions, mqtt_client_manager)
 }
 
 #[cfg(test)]

@@ -17,6 +17,8 @@ pub enum CatalogError {
 pub enum StreamProps {
     /// Stream is backed by an MQTT connector.
     Mqtt(MqttStreamProps),
+    /// Stream is backed by an in-memory mock connector (tests only).
+    Mock(MockStreamProps),
 }
 
 /// Supported stream types recognized by the catalog.
@@ -24,6 +26,8 @@ pub enum StreamProps {
 pub enum StreamType {
     /// Stream backed by an MQTT source.
     Mqtt,
+    /// Stream backed by a mock source.
+    Mock,
 }
 
 /// Properties for MQTT-backed streams.
@@ -58,6 +62,10 @@ impl MqttStreamProps {
     }
 }
 
+/// Properties for mock-backed streams.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MockStreamProps {}
+
 /// Complete definition for a stream tracked by the catalog.
 #[derive(Debug, Clone)]
 pub struct StreamDefinition {
@@ -77,6 +85,7 @@ impl StreamDefinition {
     ) -> Self {
         let stream_type = match props {
             StreamProps::Mqtt(_) => StreamType::Mqtt,
+            StreamProps::Mock(_) => StreamType::Mock,
         };
         Self {
             id: id.into(),
