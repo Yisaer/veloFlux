@@ -7,7 +7,7 @@ use crate::processor::base::{
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::broadcast;
@@ -23,7 +23,6 @@ pub struct StreamingTumblingAggregationProcessor {
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
     group_by_meta: Vec<GroupByMeta>,
-    event_time: bool,
 }
 
 impl StreamingTumblingAggregationProcessor {
@@ -45,7 +44,6 @@ impl StreamingTumblingAggregationProcessor {
             output,
             control_output,
             group_by_meta,
-            event_time: false,
         }
     }
 
@@ -77,25 +75,14 @@ impl Processor for StreamingTumblingAggregationProcessor {
             } => length,
             _ => unreachable!("tumbling processor requires tumbling window spec"),
         };
-        let event_time = self.event_time;
 
         tokio::spawn(async move {
-            let window_state = if event_time {
-                WindowState::EventTime(EventWindowState::new(
-                    len_secs,
-                    Arc::clone(&physical),
-                    Arc::clone(&aggregate_registry),
-                    group_by_meta.clone(),
-                ))
-            } else {
-                WindowState::ProcessingTime(ProcessingWindowState::new(
-                    len_secs,
-                    Arc::clone(&physical),
-                    Arc::clone(&aggregate_registry),
-                    group_by_meta.clone(),
-                ))
-            };
-            let mut window_state = window_state;
+            let mut window_state = ProcessingWindowState::new(
+                len_secs,
+                Arc::clone(&physical),
+                Arc::clone(&aggregate_registry),
+                group_by_meta.clone(),
+            );
             let mut stream_ended = false;
 
             loop {
@@ -175,42 +162,6 @@ impl Processor for StreamingTumblingAggregationProcessor {
     }
 }
 
-/// Window manager supporting event-time and processing-time modes.
-enum WindowState {
-    EventTime(EventWindowState),
-    ProcessingTime(ProcessingWindowState),
-}
-
-impl WindowState {
-    fn add_row(&mut self, row: &crate::model::Tuple) -> Result<(), String> {
-        match self {
-            WindowState::EventTime(state) => state.add_row(row),
-            WindowState::ProcessingTime(state) => state.add_row(row),
-        }
-    }
-
-    async fn flush_until(
-        &mut self,
-        watermark: SystemTime,
-        output: &broadcast::Sender<StreamData>,
-    ) -> Result<(), ProcessorError> {
-        match self {
-            WindowState::EventTime(state) => state.flush_until(watermark, output).await,
-            WindowState::ProcessingTime(state) => state.flush_until(watermark, output).await,
-        }
-    }
-
-    async fn flush_all(
-        &mut self,
-        output: &broadcast::Sender<StreamData>,
-    ) -> Result<(), ProcessorError> {
-        match self {
-            WindowState::EventTime(state) => state.flush_all(output).await,
-            WindowState::ProcessingTime(state) => state.flush_all(output).await,
-        }
-    }
-}
-
 /// Per-window aggregation state.
 struct WindowAggState {
     start_secs: u64,
@@ -235,92 +186,6 @@ impl WindowAggState {
                 group_by_meta,
             ),
         }
-    }
-}
-
-/// Event-time windows keyed by start timestamp; watermark drives finalization.
-struct EventWindowState {
-    windows: BTreeMap<u64, WindowAggState>,
-    len_secs: u64,
-    physical: Arc<PhysicalStreamingAggregation>,
-    aggregate_registry: Arc<AggregateFunctionRegistry>,
-    group_by_meta: Vec<GroupByMeta>,
-}
-
-impl EventWindowState {
-    fn new(
-        len_secs: u64,
-        physical: Arc<PhysicalStreamingAggregation>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-        group_by_meta: Vec<GroupByMeta>,
-    ) -> Self {
-        Self {
-            windows: BTreeMap::new(),
-            len_secs,
-            physical,
-            aggregate_registry,
-            group_by_meta,
-        }
-    }
-
-    fn add_row(&mut self, row: &crate::model::Tuple) -> Result<(), String> {
-        let start_secs = window_start_secs_str(row.timestamp, self.len_secs)?;
-        let entry = self.windows.entry(start_secs).or_insert_with(|| {
-            WindowAggState::new(
-                start_secs,
-                self.len_secs,
-                Arc::clone(&self.physical),
-                Arc::clone(&self.aggregate_registry),
-                self.group_by_meta.clone(),
-            )
-        });
-        entry.worker.update_groups(row)
-    }
-
-    async fn flush_until(
-        &mut self,
-        watermark: SystemTime,
-        output: &broadcast::Sender<StreamData>,
-    ) -> Result<(), ProcessorError> {
-        let watermark_secs = to_secs(watermark, "watermark")?;
-        let mut ready = Vec::new();
-        for (&start, state) in self.windows.iter() {
-            if state.end_secs <= watermark_secs {
-                ready.push(start);
-            }
-        }
-
-        for key in ready {
-            if let Some(mut state) = self.windows.remove(&key) {
-                if let Some(batch) = state
-                    .worker
-                    .finalize_current_window()
-                    .map_err(ProcessorError::ProcessingError)?
-                {
-                    send_with_backpressure(output, StreamData::Collection(batch)).await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn flush_all(
-        &mut self,
-        output: &broadcast::Sender<StreamData>,
-    ) -> Result<(), ProcessorError> {
-        let keys: Vec<u64> = self.windows.keys().copied().collect();
-        for key in keys {
-            if let Some(mut state) = self.windows.remove(&key) {
-                if let Some(batch) = state
-                    .worker
-                    .finalize_current_window()
-                    .map_err(ProcessorError::ProcessingError)?
-                {
-                    send_with_backpressure(output, StreamData::Collection(batch)).await?;
-                }
-            }
-        }
-        Ok(())
     }
 }
 
