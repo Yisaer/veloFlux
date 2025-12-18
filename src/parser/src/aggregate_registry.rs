@@ -27,5 +27,5 @@ impl AggregateRegistry for StaticAggregateRegistry {
 }
 
 pub fn default_aggregate_registry() -> Arc<dyn AggregateRegistry> {
-    Arc::new(StaticAggregateRegistry::new(["sum"]))
+    Arc::new(StaticAggregateRegistry::new(["sum", "last_row"]))
 }

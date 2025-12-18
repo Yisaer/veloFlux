@@ -7,7 +7,6 @@
 //! - Finalizes aggregates and outputs results when stream ends
 
 use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry};
-use crate::expr::ScalarExpr;
 use crate::model::Collection;
 use crate::planner::physical::{AggregateCall, PhysicalAggregation, PhysicalPlan};
 use crate::processor::base::{
@@ -400,10 +399,12 @@ impl AggregationProcessor {
         }
 
         let mut tuple = match last_row_idx {
-            Some(idx) => all_rows
-                .get(idx)
-                .cloned()
-                .ok_or_else(|| format!("row index {} out of bounds", idx))?,
+            Some(idx) => {
+                let anchor = all_rows
+                    .get(idx)
+                    .ok_or_else(|| format!("row index {} out of bounds", idx))?;
+                crate::model::Tuple::with_timestamp(anchor.messages.clone(), anchor.timestamp)
+            }
             None => crate::model::Tuple::new(vec![]),
         };
         let mut affiliate = tuple
@@ -422,12 +423,7 @@ fn is_simple_column_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::Identifier(_))
 }
 
-fn build_group_by_meta(exprs: &[Expr], scalars: &[ScalarExpr]) -> Vec<GroupByMeta> {
-    assert_eq!(
-        exprs.len(),
-        scalars.len(),
-        "group-by exprs and scalars length mismatch"
-    );
+fn build_group_by_meta(exprs: &[Expr]) -> Vec<GroupByMeta> {
     exprs
         .iter()
         .map(|expr| GroupByMeta {
@@ -465,10 +461,7 @@ impl AggregationProcessor {
             values_per_expr.push(values);
         }
 
-        let meta = build_group_by_meta(
-            &physical_aggregation.group_by_exprs,
-            &physical_aggregation.group_by_scalars,
-        );
+        let meta = build_group_by_meta(&physical_aggregation.group_by_exprs);
 
         Ok(PreparedGroupBy {
             values_per_expr,

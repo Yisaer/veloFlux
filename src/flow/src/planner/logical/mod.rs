@@ -131,6 +131,8 @@ pub fn create_logical_plan(
     sinks: Vec<PipelineSink>,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
 ) -> Result<Arc<LogicalPlan>, String> {
+    validate_aggregation_projection(&select_stmt)?;
+
     let start_index = 0i64;
     let mut current_index = start_index;
 
@@ -224,6 +226,230 @@ pub fn create_logical_plan(
         let tail_index = next_index + sink_count as i64;
         let tail_plan = TailPlan::new(sink_children, tail_index);
         Ok(Arc::new(LogicalPlan::Tail(tail_plan)))
+    }
+}
+
+fn validate_aggregation_projection(select_stmt: &SelectStmt) -> Result<(), String> {
+    if select_stmt.aggregate_mappings.is_empty() {
+        return Ok(());
+    }
+
+    let group_by_exprs: std::collections::HashSet<String> = select_stmt
+        .group_by_exprs
+        .iter()
+        .map(|expr| expr.to_string())
+        .collect();
+
+    for field in &select_stmt.select_fields {
+        if group_by_exprs.contains(&field.expr.to_string()) {
+            continue;
+        }
+
+        if !expr_contains_aggregate_placeholder(&field.expr) {
+            return Err(format!(
+                "SELECT expression '{}' must be an aggregate or appear in GROUP BY",
+                field.expr
+            ));
+        }
+
+        let referenced_columns = collect_non_placeholder_column_refs(&field.expr);
+        for column in referenced_columns {
+            if !group_by_exprs.contains(&column) {
+                return Err(format!(
+                    "SELECT expression '{}' references column '{}' which must appear in GROUP BY",
+                    field.expr, column
+                ));
+            }
+        }
+    }
+
+    if let Some(having) = &select_stmt.having {
+        if group_by_exprs.contains(&having.to_string()) {
+            return Ok(());
+        }
+
+        if !expr_contains_aggregate_placeholder(having) {
+            return Err(format!(
+                "HAVING expression '{}' must be an aggregate or appear in GROUP BY",
+                having
+            ));
+        }
+
+        let referenced_columns = collect_non_placeholder_column_refs(having);
+        for column in referenced_columns {
+            if !group_by_exprs.contains(&column) {
+                return Err(format!(
+                    "HAVING expression '{}' references column '{}' which must appear in GROUP BY",
+                    having, column
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_non_placeholder_column_refs(expr: &sqlparser::ast::Expr) -> Vec<String> {
+    use sqlparser::ast::Expr;
+
+    fn is_placeholder(ident: &sqlparser::ast::Ident) -> bool {
+        let value = ident.value.as_str();
+        let Some(rest) = value.strip_prefix("col_") else {
+            return false;
+        };
+        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+    }
+
+    fn collect(expr: &Expr, out: &mut std::collections::HashSet<String>) {
+        match expr {
+            Expr::Identifier(ident) => {
+                if !is_placeholder(ident) {
+                    out.insert(ident.value.clone());
+                }
+            }
+            Expr::CompoundIdentifier(idents) => {
+                out.insert(Expr::CompoundIdentifier(idents.clone()).to_string());
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                collect(left, out);
+                collect(right, out);
+            }
+            Expr::UnaryOp { expr, .. } => collect(expr, out),
+            Expr::Nested(expr) => collect(expr, out),
+            Expr::Cast { expr, .. } => collect(expr, out),
+            Expr::Between {
+                expr, low, high, ..
+            } => {
+                collect(expr, out);
+                collect(low, out);
+                collect(high, out);
+            }
+            Expr::InList { expr, list, .. } => {
+                collect(expr, out);
+                for item in list {
+                    collect(item, out);
+                }
+            }
+            Expr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
+                if let Some(expr) = operand.as_ref() {
+                    collect(expr, out);
+                }
+                for expr in conditions {
+                    collect(expr, out);
+                }
+                for expr in results {
+                    collect(expr, out);
+                }
+                if let Some(expr) = else_result.as_ref() {
+                    collect(expr, out);
+                }
+            }
+            Expr::Function(func) => {
+                for arg in &func.args {
+                    match arg {
+                        sqlparser::ast::FunctionArg::Unnamed(
+                            sqlparser::ast::FunctionArgExpr::Expr(expr),
+                        ) => collect(expr, out),
+                        sqlparser::ast::FunctionArg::Named {
+                            arg: sqlparser::ast::FunctionArgExpr::Expr(expr),
+                            ..
+                        } => collect(expr, out),
+                        _ => {}
+                    }
+                }
+            }
+            Expr::JsonAccess { left, right, .. } => {
+                collect(left, out);
+                collect(right, out);
+            }
+            Expr::MapAccess { column, keys } => {
+                collect(column, out);
+                for expr in keys {
+                    collect(expr, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = std::collections::HashSet::new();
+    collect(expr, &mut out);
+    let mut out: Vec<_> = out.into_iter().collect();
+    out.sort();
+    out
+}
+
+fn expr_contains_aggregate_placeholder(expr: &sqlparser::ast::Expr) -> bool {
+    use sqlparser::ast::Expr;
+
+    fn is_placeholder(ident: &sqlparser::ast::Ident) -> bool {
+        let value = ident.value.as_str();
+        let Some(rest) = value.strip_prefix("col_") else {
+            return false;
+        };
+        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+    }
+
+    match expr {
+        Expr::Identifier(ident) => is_placeholder(ident),
+        Expr::CompoundIdentifier(_) => false,
+        Expr::BinaryOp { left, right, .. } => {
+            expr_contains_aggregate_placeholder(left) || expr_contains_aggregate_placeholder(right)
+        }
+        Expr::UnaryOp { expr, .. } => expr_contains_aggregate_placeholder(expr),
+        Expr::Nested(expr) => expr_contains_aggregate_placeholder(expr),
+        Expr::Cast { expr, .. } => expr_contains_aggregate_placeholder(expr),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            expr_contains_aggregate_placeholder(expr)
+                || expr_contains_aggregate_placeholder(low)
+                || expr_contains_aggregate_placeholder(high)
+        }
+        Expr::InList { expr, list, .. } => {
+            expr_contains_aggregate_placeholder(expr)
+                || list.iter().any(expr_contains_aggregate_placeholder)
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            operand
+                .as_ref()
+                .is_some_and(|expr| expr_contains_aggregate_placeholder(expr))
+                || conditions.iter().any(expr_contains_aggregate_placeholder)
+                || results.iter().any(expr_contains_aggregate_placeholder)
+                || else_result
+                    .as_ref()
+                    .is_some_and(|expr| expr_contains_aggregate_placeholder(expr))
+        }
+        Expr::Function(func) => func.args.iter().any(|arg| match arg {
+            sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(expr)) => {
+                expr_contains_aggregate_placeholder(expr)
+            }
+            sqlparser::ast::FunctionArg::Named { arg, .. } => {
+                if let sqlparser::ast::FunctionArgExpr::Expr(expr) = arg {
+                    return expr_contains_aggregate_placeholder(expr);
+                }
+                false
+            }
+            _ => false,
+        }),
+        Expr::JsonAccess { left, right, .. } => {
+            expr_contains_aggregate_placeholder(left) || expr_contains_aggregate_placeholder(right)
+        }
+        Expr::MapAccess { column, keys } => {
+            expr_contains_aggregate_placeholder(column)
+                || keys.iter().any(expr_contains_aggregate_placeholder)
+        }
+        _ => false,
     }
 }
 

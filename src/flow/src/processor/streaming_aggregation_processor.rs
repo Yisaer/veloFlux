@@ -273,7 +273,8 @@ fn finalize_group(
         }
     }
 
-    let mut tuple = last_tuple.clone();
+    let mut tuple =
+        crate::model::Tuple::with_timestamp(last_tuple.messages.clone(), last_tuple.timestamp);
     let mut affiliate = tuple
         .affiliate
         .take()

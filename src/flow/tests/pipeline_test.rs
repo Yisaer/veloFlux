@@ -343,7 +343,7 @@ async fn test_create_pipeline_various_queries() {
         },
         TestCase {
             name: "aggregation_with_group_by_window_and_expr",
-            sql: "SELECT sum(a) + 1, b, c FROM stream GROUP BY countwindow(4), b + 1",
+            sql: "SELECT sum(a) + 1, b + 1 FROM stream GROUP BY countwindow(4), b + 1",
             input_data: vec![
                 (
                     "a".to_string(),
@@ -374,22 +374,18 @@ async fn test_create_pipeline_various_queries() {
                 ),
             ],
             expected_rows: 2,
-            expected_columns: 3,
+            expected_columns: 2,
             column_checks: vec![
                 ColumnCheck {
                     expected_name: "sum(a) + 1".to_string(),
                     expected_values: vec![Value::Int64(3), Value::Int64(3)],
                 },
                 ColumnCheck {
-                    expected_name: "b".to_string(),
-                    expected_values: vec![Value::Int64(1), Value::Int64(2)],
-                },
-                ColumnCheck {
-                    expected_name: "c".to_string(),
-                    expected_values: vec![Value::Int64(2), Value::Int64(2)],
+                    expected_name: "b + 1".to_string(),
+                    expected_values: vec![Value::Int64(2), Value::Int64(3)],
                 },
             ],
-            sort_by_fields: Some(vec!["b"]),
+            sort_by_fields: Some(vec!["b + 1"]),
         },
     ];
 
@@ -680,4 +676,94 @@ async fn test_aggregation_with_countwindow() {
     }
 
     println!("✓ All aggregation with countwindow tests passed!");
+}
+
+#[tokio::test]
+async fn test_last_row_with_countwindow() {
+    let instance = FlowInstance::new();
+
+    install_stream_schema(
+        &instance,
+        &[(
+            "a".to_string(),
+            vec![
+                Value::Int64(10),
+                Value::Int64(20),
+                Value::Int64(30),
+                Value::Int64(40),
+            ],
+        )],
+    )
+    .await;
+
+    let connector = PipelineSinkConnector::new(
+        "last_row_sink_connector",
+        SinkConnectorConfig::Nop(NopSinkConfig),
+        SinkEncoderConfig::json(),
+    );
+    let sink = PipelineSink::new("last_row_sink", connector).with_forward_to_result(true);
+
+    let mut pipeline = instance
+        .build_pipeline(
+            "SELECT last_row(a) FROM stream GROUP BY countwindow(2)",
+            vec![sink],
+        )
+        .expect("failed to create last_row pipeline with countwindow");
+
+    pipeline.start();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let columns = vec![(
+        "stream".to_string(),
+        "a".to_string(),
+        vec![
+            Value::Int64(10),
+            Value::Int64(20),
+            Value::Int64(30),
+            Value::Int64(40),
+        ],
+    )];
+    let batch = batch_from_columns_simple(columns).expect("create batch");
+    pipeline
+        .send_stream_data("stream", StreamData::collection(Box::new(batch)))
+        .await
+        .expect("send data");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    pipeline.close().await.expect("close pipeline");
+
+    let mut output = pipeline
+        .take_output()
+        .expect("pipeline should expose an output receiver");
+
+    let first = timeout(Duration::from_secs(2), output.recv())
+        .await
+        .expect("first window timeout")
+        .expect("first window missing");
+    let second = timeout(Duration::from_secs(2), output.recv())
+        .await
+        .expect("second window timeout")
+        .expect("second window missing");
+
+    match first {
+        StreamData::Collection(collection) => {
+            assert_eq!(collection.num_rows(), 1);
+            let value = collection.rows()[0]
+                .value_by_name("", "last_row(a)")
+                .expect("missing last_row(a)");
+            assert_eq!(value, &Value::Int64(20));
+        }
+        other => panic!("expected collection, got {}", other.description()),
+    }
+
+    match second {
+        StreamData::Collection(collection) => {
+            assert_eq!(collection.num_rows(), 1);
+            let value = collection.rows()[0]
+                .value_by_name("", "last_row(a)")
+                .expect("missing last_row(a)");
+            assert_eq!(value, &Value::Int64(40));
+        }
+        other => panic!("expected collection, got {}", other.description()),
+    }
 }

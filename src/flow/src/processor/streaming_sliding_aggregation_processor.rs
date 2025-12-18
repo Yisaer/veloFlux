@@ -260,7 +260,10 @@ impl Processor for StreamingSlidingAggregationProcessor {
                         }
                     }
 
-                    let mut tuple = state.last_tuple.clone();
+                    let mut tuple = crate::model::Tuple::with_timestamp(
+                        state.last_tuple.messages.clone(),
+                        state.last_tuple.timestamp,
+                    );
                     let mut affiliate = tuple
                         .affiliate
                         .take()

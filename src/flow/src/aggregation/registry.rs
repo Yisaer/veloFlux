@@ -1,4 +1,4 @@
-use crate::aggregation::SumFunction;
+use crate::aggregation::{LastRowFunction, SumFunction};
 use datatypes::{ConcreteDatatype, Value};
 use parser::aggregate_registry::AggregateRegistry;
 use std::collections::HashMap;
@@ -70,6 +70,7 @@ impl AggregateFunctionRegistry {
 
     fn register_builtin_functions(&self) {
         self.register_function(Arc::new(SumFunction::new()));
+        self.register_function(Arc::new(LastRowFunction::new()));
     }
 }
 
