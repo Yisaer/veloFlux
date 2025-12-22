@@ -1,4 +1,6 @@
-use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Ident, ObjectName, Value};
+use sqlparser::ast::{
+    Expr, Function, FunctionArg, FunctionArgExpr, Ident, ObjectName, Value, WindowSpec, WindowType,
+};
 use sqlparser::parser::ParserError;
 
 /// Window specification supported by StreamDialect
@@ -21,7 +23,13 @@ pub enum Window {
     /// State window driven by two boolean conditions:
     /// - `open`: when the window starts collecting state
     /// - `emit`: when the window emits its current state
-    State { open: Box<Expr>, emit: Box<Expr> },
+    State {
+        open: Box<Expr>,
+        emit: Box<Expr>,
+        /// Optional partition keys extracted from `OVER (PARTITION BY ...)`.
+        /// When empty, the window is global (single partition).
+        partition_by: Vec<Expr>,
+    },
 }
 
 /// Supported time units for window definitions.
@@ -48,9 +56,14 @@ impl Window {
     }
 
     pub fn state(open: Expr, emit: Expr) -> Self {
+        Window::state_partitioned(open, emit, Vec::new())
+    }
+
+    pub fn state_partitioned(open: Expr, emit: Expr, partition_by: Vec<Expr>) -> Self {
         Window::State {
             open: Box::new(open),
             emit: Box::new(emit),
+            partition_by,
         }
     }
 
@@ -113,16 +126,27 @@ pub fn window_to_expr(window: &Window) -> Expr {
             }
             args
         }
-        Window::State { open, emit } => vec![
+        Window::State { open, emit, .. } => vec![
             make_expr_arg(open.as_ref().clone()),
             make_expr_arg(emit.as_ref().clone()),
         ],
     };
 
+    let over = match window {
+        Window::State { partition_by, .. } if !partition_by.is_empty() => {
+            Some(WindowType::WindowSpec(WindowSpec {
+                partition_by: partition_by.clone(),
+                order_by: Vec::new(),
+                window_frame: None,
+            }))
+        }
+        _ => None,
+    };
+
     Expr::Function(Function {
         name: ObjectName(vec![Ident::new(window.function_name())]),
         args,
-        over: None,
+        over,
         distinct: false,
         order_by: vec![],
         filter: None,
@@ -132,6 +156,7 @@ pub fn window_to_expr(window: &Window) -> Expr {
 }
 
 fn parse_tumbling_window(function: &Function) -> Result<Window, ParserError> {
+    ensure_no_over(function, "tumblingwindow")?;
     if function.args.len() != 2 {
         return Err(ParserError::ParserError(
             "tumblingwindow requires 2 arguments: (time_unit, length)".to_string(),
@@ -147,6 +172,7 @@ fn parse_tumbling_window(function: &Function) -> Result<Window, ParserError> {
 }
 
 fn parse_count_window(function: &Function) -> Result<Window, ParserError> {
+    ensure_no_over(function, "countwindow")?;
     if function.args.len() != 1 {
         return Err(ParserError::ParserError(
             "countwindow requires 1 argument: (count)".to_string(),
@@ -158,6 +184,7 @@ fn parse_count_window(function: &Function) -> Result<Window, ParserError> {
 }
 
 fn parse_sliding_window(function: &Function) -> Result<Window, ParserError> {
+    ensure_no_over(function, "slidingwindow")?;
     if function.args.len() != 2 && function.args.len() != 3 {
         return Err(ParserError::ParserError(
             "slidingwindow requires 2 or 3 arguments: (time_unit, lookback [, lookahead])"
@@ -192,7 +219,56 @@ fn parse_state_window(function: &Function) -> Result<Window, ParserError> {
     let open = parse_expr_arg(&function.args[0], "statewindow", "open")?;
     let emit = parse_expr_arg(&function.args[1], "statewindow", "emit")?;
 
-    Ok(Window::state(open, emit))
+    let partition_by = parse_over_partition_by(function, "statewindow")?;
+
+    Ok(Window::state_partitioned(open, emit, partition_by))
+}
+
+fn parse_over_partition_by(function: &Function, func_name: &str) -> Result<Vec<Expr>, ParserError> {
+    let Some(over) = function.over.as_ref() else {
+        return Ok(Vec::new());
+    };
+
+    match over {
+        WindowType::WindowSpec(spec) => parse_window_spec_partition_by(spec, func_name),
+        WindowType::NamedWindow(name) => Err(ParserError::ParserError(format!(
+            "{func_name} OVER does not support named windows (got {name})",
+        ))),
+    }
+}
+
+fn ensure_no_over(function: &Function, func_name: &str) -> Result<(), ParserError> {
+    if function.over.is_some() {
+        return Err(ParserError::ParserError(format!(
+            "{func_name} does not support OVER"
+        )));
+    }
+    Ok(())
+}
+
+fn parse_window_spec_partition_by(
+    spec: &WindowSpec,
+    func_name: &str,
+) -> Result<Vec<Expr>, ParserError> {
+    if !spec.order_by.is_empty() {
+        return Err(ParserError::ParserError(format!(
+            "{func_name} OVER does not support ORDER BY"
+        )));
+    }
+
+    if spec.window_frame.is_some() {
+        return Err(ParserError::ParserError(format!(
+            "{func_name} OVER does not support window frames"
+        )));
+    }
+
+    if spec.partition_by.is_empty() {
+        return Err(ParserError::ParserError(format!(
+            "{func_name} OVER requires PARTITION BY expressions"
+        )));
+    }
+
+    Ok(spec.partition_by.clone())
 }
 
 fn parse_string_arg(
@@ -294,6 +370,7 @@ fn parse_expr_arg(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlparser::ast::{WindowSpec, WindowType};
 
     fn tumbling_expr() -> Expr {
         Expr::Function(Function {
@@ -358,6 +435,26 @@ mod tests {
         })
     }
 
+    fn state_expr_partitioned() -> Expr {
+        Expr::Function(Function {
+            name: ObjectName(vec![Ident::new("statewindow")]),
+            args: vec![
+                make_expr_arg(Expr::Identifier(Ident::new("open"))),
+                make_expr_arg(Expr::Identifier(Ident::new("emit"))),
+            ],
+            over: Some(WindowType::WindowSpec(WindowSpec {
+                partition_by: vec![Expr::Identifier(Ident::new("k1"))],
+                order_by: Vec::new(),
+                window_frame: None,
+            })),
+            distinct: false,
+            order_by: vec![],
+            filter: None,
+            null_treatment: None,
+            special: false,
+        })
+    }
+
     #[test]
     fn parse_tumbling_window_expr() {
         let parsed = parse_window_expr(&tumbling_expr()).unwrap();
@@ -389,6 +486,19 @@ mod tests {
     fn parse_state_window_expr() {
         let parsed = parse_window_expr(&state_expr()).unwrap();
         assert!(matches!(parsed, Some(Window::State { .. })));
+    }
+
+    #[test]
+    fn parse_state_window_expr_partitioned_by() {
+        let parsed = parse_window_expr(&state_expr_partitioned()).unwrap();
+        assert_eq!(
+            parsed,
+            Some(Window::state_partitioned(
+                Expr::Identifier(Ident::new("open")),
+                Expr::Identifier(Ident::new("emit")),
+                vec![Expr::Identifier(Ident::new("k1"))],
+            ))
+        );
     }
 
     #[test]
@@ -427,6 +537,21 @@ mod tests {
         let window = Window::state(
             Expr::Identifier(Ident::new("open")),
             Expr::Identifier(Ident::new("emit")),
+        );
+        let expr = window_to_expr(&window);
+        let parsed = parse_window_expr(&expr).unwrap();
+        assert_eq!(parsed, Some(window));
+    }
+
+    #[test]
+    fn state_window_round_trip_back_to_expr_partitioned_by() {
+        let window = Window::state_partitioned(
+            Expr::Identifier(Ident::new("open")),
+            Expr::Identifier(Ident::new("emit")),
+            vec![
+                Expr::Identifier(Ident::new("k1")),
+                Expr::Identifier(Ident::new("k2")),
+            ],
         );
         let expr = window_to_expr(&window);
         let parsed = parse_window_expr(&expr).unwrap();

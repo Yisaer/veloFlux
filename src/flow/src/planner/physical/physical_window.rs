@@ -71,16 +71,20 @@ pub struct PhysicalStateWindow {
     pub base: BasePhysicalPlan,
     pub open_expr: Expr,
     pub emit_expr: Expr,
+    pub partition_by_exprs: Vec<Expr>,
     pub open_scalar: ScalarExpr,
     pub emit_scalar: ScalarExpr,
+    pub partition_by_scalars: Vec<ScalarExpr>,
 }
 
 impl PhysicalStateWindow {
     pub fn new(
         open_expr: Expr,
         emit_expr: Expr,
+        partition_by_exprs: Vec<Expr>,
         open_scalar: ScalarExpr,
         emit_scalar: ScalarExpr,
+        partition_by_scalars: Vec<ScalarExpr>,
         children: Vec<Arc<PhysicalPlan>>,
         index: i64,
     ) -> Self {
@@ -89,8 +93,10 @@ impl PhysicalStateWindow {
             base,
             open_expr,
             emit_expr,
+            partition_by_exprs,
             open_scalar,
             emit_scalar,
+            partition_by_scalars,
         }
     }
 }

@@ -278,18 +278,32 @@ fn create_physical_window_with_builder(
             );
             PhysicalPlan::SlidingWindow(sliding)
         }
-        LogicalWindowSpec::State { open, emit } => {
+        LogicalWindowSpec::State {
+            open,
+            emit,
+            partition_by,
+        } => {
             let open_scalar = convert_expr_to_scalar_with_bindings(open.as_ref(), bindings)
                 .map_err(|err| err.to_string())?;
             let emit_scalar = convert_expr_to_scalar_with_bindings(emit.as_ref(), bindings)
                 .map_err(|err| err.to_string())?;
 
+            let mut partition_by_scalars = Vec::with_capacity(partition_by.len());
+            for expr in partition_by {
+                partition_by_scalars.push(
+                    convert_expr_to_scalar_with_bindings(expr, bindings)
+                        .map_err(|err| err.to_string())?,
+                );
+            }
+
             let index = builder.allocate_index();
             let state = crate::planner::physical::PhysicalStateWindow::new(
                 open.as_ref().clone(),
                 emit.as_ref().clone(),
+                partition_by.clone(),
                 open_scalar,
                 emit_scalar,
+                partition_by_scalars,
                 physical_children,
                 index,
             );

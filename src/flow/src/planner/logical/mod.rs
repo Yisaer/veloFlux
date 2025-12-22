@@ -479,7 +479,15 @@ fn convert_window_spec(window: parser_window::Window) -> Result<LogicalWindowSpe
                 lookahead,
             })
         }
-        parser_window::Window::State { open, emit } => Ok(LogicalWindowSpec::State { open, emit }),
+        parser_window::Window::State {
+            open,
+            emit,
+            partition_by,
+        } => Ok(LogicalWindowSpec::State {
+            open,
+            emit,
+            partition_by,
+        }),
     }
 }
 
@@ -619,9 +627,49 @@ mod logical_plan_tests {
         };
 
         match &window.spec {
-            LogicalWindowSpec::State { open, emit } => {
+            LogicalWindowSpec::State {
+                open,
+                emit,
+                partition_by,
+            } => {
                 assert_eq!(open.as_ref().to_string(), "a > 0");
                 assert_eq!(emit.as_ref().to_string(), "b = 1");
+                assert!(partition_by.is_empty());
+            }
+            other => panic!("Expected State window, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_create_logical_plan_with_state_window_partition_by() {
+        let sql =
+            "SELECT * FROM users GROUP BY statewindow(a > 0, b = 1) OVER (PARTITION BY k1, k2)";
+        let select_stmt = parse_sql(sql).unwrap();
+        let stream_defs = make_stream_defs(&["users"]);
+
+        let plan = create_logical_plan(select_stmt, Vec::new(), &stream_defs).unwrap();
+
+        assert_eq!(plan.get_plan_type(), "Project");
+        let project_children = plan.children();
+        assert_eq!(project_children.len(), 1);
+
+        assert_eq!(project_children[0].get_plan_type(), "Window");
+        let window = match project_children[0].as_ref() {
+            LogicalPlan::Window(window) => window,
+            other => panic!("Expected Window, found {}", other.get_plan_type()),
+        };
+
+        match &window.spec {
+            LogicalWindowSpec::State {
+                open,
+                emit,
+                partition_by,
+            } => {
+                assert_eq!(open.as_ref().to_string(), "a > 0");
+                assert_eq!(emit.as_ref().to_string(), "b = 1");
+                assert_eq!(partition_by.len(), 2);
+                assert_eq!(partition_by[0].to_string(), "k1");
+                assert_eq!(partition_by[1].to_string(), "k2");
             }
             other => panic!("Expected State window, got {:?}", other),
         }

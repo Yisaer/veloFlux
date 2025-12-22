@@ -22,9 +22,7 @@ pub trait SharedStreamConnectorFactory: Send + Sync + 'static {
     fn connector_id(&self) -> String;
 
     /// Build a fresh connector + decoder for starting (or restarting) the stream runtime.
-    fn build(
-        &self,
-    ) -> Result<ConnectorDecoderPair, SharedStreamError>;
+    fn build(&self) -> Result<ConnectorDecoderPair, SharedStreamError>;
 }
 
 struct OneShotConnectorFactory {
@@ -47,9 +45,7 @@ impl SharedStreamConnectorFactory for OneShotConnectorFactory {
         self.connector_id.clone()
     }
 
-    fn build(
-        &self,
-    ) -> Result<ConnectorDecoderPair, SharedStreamError> {
+    fn build(&self) -> Result<ConnectorDecoderPair, SharedStreamError> {
         let mut guard = self
             .inner
             .lock()
@@ -272,10 +268,9 @@ impl SharedStreamConfig {
         connector: Box<dyn SourceConnector>,
         decoder: Arc<dyn RecordDecoder>,
     ) -> Self {
-        self.connector = Some(SharedStreamConnectorSpec::Instance(SharedSourceConnectorConfig {
-            connector,
-            decoder,
-        }));
+        self.connector = Some(SharedStreamConnectorSpec::Instance(
+            SharedSourceConnectorConfig { connector, decoder },
+        ));
         self
     }
 
@@ -284,13 +279,15 @@ impl SharedStreamConfig {
         connector: Box<dyn SourceConnector>,
         decoder: Arc<dyn RecordDecoder>,
     ) {
-        self.connector = Some(SharedStreamConnectorSpec::Instance(SharedSourceConnectorConfig {
-            connector,
-            decoder,
-        }));
+        self.connector = Some(SharedStreamConnectorSpec::Instance(
+            SharedSourceConnectorConfig { connector, decoder },
+        ));
     }
 
-    pub fn with_connector_factory(mut self, factory: Arc<dyn SharedStreamConnectorFactory>) -> Self {
+    pub fn with_connector_factory(
+        mut self,
+        factory: Arc<dyn SharedStreamConnectorFactory>,
+    ) -> Self {
         self.connector = Some(SharedStreamConnectorSpec::Factory(factory));
         self
     }

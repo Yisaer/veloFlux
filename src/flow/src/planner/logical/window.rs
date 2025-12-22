@@ -26,6 +26,9 @@ pub enum LogicalWindowSpec {
     State {
         open: Box<Expr>,
         emit: Box<Expr>,
+        /// Optional partition keys extracted from `OVER (PARTITION BY ...)`.
+        /// When empty, the window is global (single partition).
+        partition_by: Vec<Expr>,
     },
 }
 

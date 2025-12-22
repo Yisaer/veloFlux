@@ -224,8 +224,10 @@ mod tests {
         let physical = PhysicalStateWindow::new(
             Expr::Identifier(Ident::new("open")),
             Expr::Identifier(Ident::new("emit")),
+            Vec::new(),
             lit_bool(true),
             lit_bool(true),
+            Vec::new(),
             Vec::new(),
             0,
         );
@@ -258,8 +260,10 @@ mod tests {
         let physical = PhysicalStateWindow::new(
             Expr::Identifier(Ident::new("open")),
             Expr::Identifier(Ident::new("emit")),
+            Vec::new(),
             lit_bool(false),
             lit_bool(true),
+            Vec::new(),
             Vec::new(),
             0,
         );

@@ -283,9 +283,7 @@ impl FlowInstance {
                     decoder_registry: Arc<crate::codec::DecoderRegistry>,
                 }
 
-                impl crate::shared_stream::SharedStreamConnectorFactory
-                    for MqttSharedStreamConnectorFactory
-                {
+                impl crate::shared_stream::SharedStreamConnectorFactory for MqttSharedStreamConnectorFactory {
                     fn connector_id(&self) -> String {
                         format!("{}_shared_source_connector", self.stream_id)
                     }
@@ -293,7 +291,10 @@ impl FlowInstance {
                     fn build(
                         &self,
                     ) -> Result<
-                        (Box<dyn crate::connector::SourceConnector>, Arc<dyn crate::codec::RecordDecoder>),
+                        (
+                            Box<dyn crate::connector::SourceConnector>,
+                            Arc<dyn crate::codec::RecordDecoder>,
+                        ),
                         crate::shared_stream::SharedStreamError,
                     > {
                         let mut source_config = crate::connector::MqttSourceConfig::new(

@@ -432,9 +432,14 @@ mod source_info_tests {
         assert_eq!(select_stmt.group_by_exprs.len(), 0);
 
         match select_stmt.window {
-            Some(Window::State { open, emit }) => {
+            Some(Window::State {
+                open,
+                emit,
+                partition_by,
+            }) => {
                 assert_eq!(open.as_ref().to_string(), "a > 0");
                 assert_eq!(emit.as_ref().to_string(), "b = 1");
+                assert!(partition_by.is_empty());
             }
             other => panic!("expected state window, got {:?}", other),
         }
@@ -450,9 +455,14 @@ mod source_info_tests {
         let select_stmt = result.unwrap();
 
         match select_stmt.window {
-            Some(Window::State { open, emit }) => {
+            Some(Window::State {
+                open,
+                emit,
+                partition_by,
+            }) => {
                 assert_eq!(open.as_ref().to_string(), "a > 0");
                 assert_eq!(emit.as_ref().to_string(), "b = 1");
+                assert!(partition_by.is_empty());
             }
             other => panic!("expected state window, got {:?}", other),
         }
@@ -462,6 +472,35 @@ mod source_info_tests {
         match expr {
             Expr::Identifier(ident) => assert_eq!(ident.to_string(), "c"),
             other => panic!("expected group by identifier `c`, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_group_by_state_window_over_partition_by() {
+        let parser = StreamSqlParser::new();
+        let sql =
+            "SELECT * FROM stream GROUP BY statewindow(a > 0, b = 1) OVER (PARTITION BY k1, k2)";
+        let result = parser.parse(sql);
+
+        assert!(result.is_ok(), "parse failed: {:?}", result);
+        let select_stmt = result.unwrap();
+
+        assert!(select_stmt.window.is_some());
+        assert_eq!(select_stmt.group_by_exprs.len(), 0);
+
+        match select_stmt.window {
+            Some(Window::State {
+                open,
+                emit,
+                partition_by,
+            }) => {
+                assert_eq!(open.as_ref().to_string(), "a > 0");
+                assert_eq!(emit.as_ref().to_string(), "b = 1");
+                assert_eq!(partition_by.len(), 2);
+                assert_eq!(partition_by[0].to_string(), "k1");
+                assert_eq!(partition_by[1].to_string(), "k2");
+            }
+            other => panic!("expected state window, got {:?}", other),
         }
     }
 }
