@@ -515,6 +515,19 @@ fn collect_shared_source_requirements(
             for scalar in &agg.group_by_scalars {
                 collect_columns_from_scalar_expr(scalar, requirements, all_sources);
             }
+            if let crate::planner::physical::StreamingWindowSpec::State {
+                open_scalar,
+                emit_scalar,
+                partition_by_scalars,
+                ..
+            } = &agg.window
+            {
+                collect_columns_from_scalar_expr(open_scalar, requirements, all_sources);
+                collect_columns_from_scalar_expr(emit_scalar, requirements, all_sources);
+                for scalar in partition_by_scalars {
+                    collect_columns_from_scalar_expr(scalar, requirements, all_sources);
+                }
+            }
         }
         PhysicalPlan::StateWindow(window) => {
             collect_columns_from_scalar_expr(&window.open_scalar, requirements, all_sources);

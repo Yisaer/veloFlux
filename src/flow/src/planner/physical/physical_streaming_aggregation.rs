@@ -21,6 +21,14 @@ pub enum StreamingWindowSpec {
         lookback: u64,
         lookahead: Option<u64>,
     },
+    State {
+        open_expr: Expr,
+        emit_expr: Expr,
+        partition_by_exprs: Vec<Expr>,
+        open_scalar: ScalarExpr,
+        emit_scalar: ScalarExpr,
+        partition_by_scalars: Vec<ScalarExpr>,
+    },
 }
 
 /// Physical node that fuses window + aggregation for incremental processing.

@@ -24,12 +24,16 @@ pub use streaming_count_aggregation_processor::StreamingCountAggregationProcesso
 mod streaming_sliding_aggregation_processor;
 pub use streaming_sliding_aggregation_processor::StreamingSlidingAggregationProcessor;
 pub use streaming_tumbling_aggregation_processor::StreamingTumblingAggregationProcessor;
+#[path = "streaming_state_aggregation_processor.rs"]
+mod streaming_state_aggregation_processor;
+pub use streaming_state_aggregation_processor::StreamingStateAggregationProcessor;
 
 /// StreamingAggregationProcessor - performs incremental aggregation with windowing.
 pub enum StreamingAggregationProcessor {
     Count(StreamingCountAggregationProcessor),
     Tumbling(StreamingTumblingAggregationProcessor),
     Sliding(StreamingSlidingAggregationProcessor),
+    State(StreamingStateAggregationProcessor),
 }
 
 impl StreamingAggregationProcessor {
@@ -62,6 +66,9 @@ impl StreamingAggregationProcessor {
             StreamingWindowSpec::Sliding { .. } => StreamingAggregationProcessor::Sliding(
                 StreamingSlidingAggregationProcessor::new(id, physical, aggregate_registry),
             ),
+            StreamingWindowSpec::State { .. } => StreamingAggregationProcessor::State(
+                StreamingStateAggregationProcessor::new(id, physical, aggregate_registry),
+            ),
         }
     }
 
@@ -87,6 +94,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Count(p) => p.id(),
             StreamingAggregationProcessor::Tumbling(p) => p.id(),
             StreamingAggregationProcessor::Sliding(p) => p.id(),
+            StreamingAggregationProcessor::State(p) => p.id(),
         }
     }
 
@@ -95,6 +103,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Count(p) => p.start(),
             StreamingAggregationProcessor::Tumbling(p) => p.start(),
             StreamingAggregationProcessor::Sliding(p) => p.start(),
+            StreamingAggregationProcessor::State(p) => p.start(),
         }
     }
 
@@ -103,6 +112,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Count(p) => p.subscribe_output(),
             StreamingAggregationProcessor::Tumbling(p) => p.subscribe_output(),
             StreamingAggregationProcessor::Sliding(p) => p.subscribe_output(),
+            StreamingAggregationProcessor::State(p) => p.subscribe_output(),
         }
     }
 
@@ -113,6 +123,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Count(p) => p.subscribe_control_output(),
             StreamingAggregationProcessor::Tumbling(p) => p.subscribe_control_output(),
             StreamingAggregationProcessor::Sliding(p) => p.subscribe_control_output(),
+            StreamingAggregationProcessor::State(p) => p.subscribe_control_output(),
         }
     }
 
@@ -121,6 +132,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Count(p) => p.add_input(receiver),
             StreamingAggregationProcessor::Tumbling(p) => p.add_input(receiver),
             StreamingAggregationProcessor::Sliding(p) => p.add_input(receiver),
+            StreamingAggregationProcessor::State(p) => p.add_input(receiver),
         }
     }
 
@@ -132,6 +144,7 @@ impl Processor for StreamingAggregationProcessor {
             StreamingAggregationProcessor::Count(p) => p.add_control_input(receiver),
             StreamingAggregationProcessor::Tumbling(p) => p.add_control_input(receiver),
             StreamingAggregationProcessor::Sliding(p) => p.add_control_input(receiver),
+            StreamingAggregationProcessor::State(p) => p.add_control_input(receiver),
         }
     }
 }
