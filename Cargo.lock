@@ -1487,6 +1487,7 @@ dependencies = [
 name = "synapse-flow"
 version = "0.0.1"
 dependencies = [
+ "build_info",
  "flow",
  "manager",
  "pprof",

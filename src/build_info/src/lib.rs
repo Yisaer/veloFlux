@@ -1,6 +1,11 @@
-pub fn build_id() -> String {
-    let sha = option_env!("BUILD_GIT_SHA").unwrap_or("unknown");
-    let tag = option_env!("BUILD_GIT_TAG").unwrap_or("unknown");
-    format!("{sha} {tag}")
+pub fn git_sha() -> &'static str {
+    option_env!("BUILD_GIT_SHA").unwrap_or("unknown")
 }
 
+pub fn git_tag() -> &'static str {
+    option_env!("BUILD_GIT_TAG").unwrap_or("unknown")
+}
+
+pub fn build_id() -> String {
+    format!("{} {}", git_sha(), git_tag())
+}
