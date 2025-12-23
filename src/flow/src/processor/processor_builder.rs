@@ -9,7 +9,6 @@ use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::expr::scalar::ColumnRef;
 use crate::expr::ScalarExpr;
 use crate::planner::physical::PhysicalPlan;
-use crate::stateful::StatefulFunctionRegistry;
 use crate::processor::{
     AggregationProcessor, BatchProcessor, ControlSignal, ControlSourceProcessor,
     DataSourceProcessor, DecoderProcessor, EncoderProcessor, FilterProcessor, Processor,
@@ -18,6 +17,7 @@ use crate::processor::{
     StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
     WatermarkProcessor,
 };
+use crate::stateful::StatefulFunctionRegistry;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};

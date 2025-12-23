@@ -1,6 +1,7 @@
 //! Physical plan builder - converts logical plans to physical plans using centralized index management
 use crate::expr::sql_conversion::{
-    convert_expr_to_scalar_with_bindings, SchemaBinding, SchemaBindingEntry, SourceBindingKind,
+    convert_expr_to_scalar_with_bindings_and_custom_registry, SchemaBinding, SchemaBindingEntry,
+    SourceBindingKind,
 };
 use crate::planner::logical::{
     aggregation::Aggregation as LogicalAggregation, DataSinkPlan, DataSource as LogicalDataSource,
@@ -116,13 +117,15 @@ fn create_physical_plan_with_builder_cached(
                 builder,
             )?
         }
-        LogicalPlan::StatefulFunction(logical_stateful) => create_physical_stateful_function_with_builder(
-            logical_stateful,
-            &logical_plan,
-            bindings,
-            registries,
-            builder,
-        )?,
+        LogicalPlan::StatefulFunction(logical_stateful) => {
+            create_physical_stateful_function_with_builder(
+                logical_stateful,
+                &logical_plan,
+                bindings,
+                registries,
+                builder,
+            )?
+        }
         LogicalPlan::Filter(logical_filter) => create_physical_filter_with_builder_cached(
             logical_filter,
             &logical_plan,
@@ -215,10 +218,16 @@ fn create_physical_stateful_function_with_builder(
         let mut arg_scalars = Vec::with_capacity(func.args.len());
         for arg in &func.args {
             match arg {
-                sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(arg_expr)) => {
+                sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
+                    arg_expr,
+                )) => {
                     arg_scalars.push(
-                        convert_expr_to_scalar_with_bindings(arg_expr, bindings)
-                            .map_err(|err| err.to_string())?,
+                        convert_expr_to_scalar_with_bindings_and_custom_registry(
+                            arg_expr,
+                            bindings,
+                            registries.custom_func_registry().as_ref(),
+                        )
+                        .map_err(|err| err.to_string())?,
                     );
                 }
                 _ => {
@@ -358,16 +367,28 @@ fn create_physical_window_with_builder(
             emit,
             partition_by,
         } => {
-            let open_scalar = convert_expr_to_scalar_with_bindings(open.as_ref(), bindings)
-                .map_err(|err| err.to_string())?;
-            let emit_scalar = convert_expr_to_scalar_with_bindings(emit.as_ref(), bindings)
-                .map_err(|err| err.to_string())?;
+            let open_scalar = convert_expr_to_scalar_with_bindings_and_custom_registry(
+                open.as_ref(),
+                bindings,
+                registries.custom_func_registry().as_ref(),
+            )
+            .map_err(|err| err.to_string())?;
+            let emit_scalar = convert_expr_to_scalar_with_bindings_and_custom_registry(
+                emit.as_ref(),
+                bindings,
+                registries.custom_func_registry().as_ref(),
+            )
+            .map_err(|err| err.to_string())?;
 
             let mut partition_by_scalars = Vec::with_capacity(partition_by.len());
             for expr in partition_by {
                 partition_by_scalars.push(
-                    convert_expr_to_scalar_with_bindings(expr, bindings)
-                        .map_err(|err| err.to_string())?,
+                    convert_expr_to_scalar_with_bindings_and_custom_registry(
+                        expr,
+                        bindings,
+                        registries.custom_func_registry().as_ref(),
+                    )
+                    .map_err(|err| err.to_string())?,
                 );
             }
 
@@ -410,6 +431,7 @@ fn create_physical_aggregation_with_builder(
         index,
         bindings,
         registries.aggregate_registry().as_ref(),
+        registries.custom_func_registry().as_ref(),
     )?;
     Ok(Arc::new(PhysicalPlan::Aggregation(physical)))
 }
@@ -491,13 +513,17 @@ fn create_physical_filter_with_builder_cached(
     }
 
     // Convert SQL Expr to ScalarExpr
-    let scalar_predicate =
-        convert_expr_to_scalar_with_bindings(&logical_filter.predicate, bindings).map_err(|e| {
-            format!(
-                "Failed to convert filter predicate to scalar expression: {}",
-                e
-            )
-        })?;
+    let scalar_predicate = convert_expr_to_scalar_with_bindings_and_custom_registry(
+        &logical_filter.predicate,
+        bindings,
+        registries.custom_func_registry().as_ref(),
+    )
+    .map_err(|e| {
+        format!(
+            "Failed to convert filter predicate to scalar expression: {}",
+            e
+        )
+    })?;
 
     let index = builder.allocate_index();
     let physical_filter = PhysicalFilter::new(
@@ -532,6 +558,7 @@ fn create_physical_project_with_builder_cached(
             logical_field.field_name.clone(),
             logical_field.expr.clone(),
             bindings,
+            registries.custom_func_registry().as_ref(),
         )?;
         physical_fields.push(physical_field);
     }

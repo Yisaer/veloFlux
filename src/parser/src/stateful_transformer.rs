@@ -47,37 +47,21 @@ fn rewrite_expr_stateful(
     match expr {
         Expr::BinaryOp { left, op, right } => Ok(Expr::BinaryOp {
             left: Box::new(rewrite_expr_stateful(
-                left,
-                registry,
-                allocator,
-                seen,
-                mappings,
+                left, registry, allocator, seen, mappings,
             )?),
             op: op.clone(),
             right: Box::new(rewrite_expr_stateful(
-                right,
-                registry,
-                allocator,
-                seen,
-                mappings,
+                right, registry, allocator, seen, mappings,
             )?),
         }),
         Expr::UnaryOp { op, expr } => Ok(Expr::UnaryOp {
             op: *op,
             expr: Box::new(rewrite_expr_stateful(
-                expr,
-                registry,
-                allocator,
-                seen,
-                mappings,
+                expr, registry, allocator, seen, mappings,
             )?),
         }),
         Expr::Nested(inner) => Ok(Expr::Nested(Box::new(rewrite_expr_stateful(
-            inner,
-            registry,
-            allocator,
-            seen,
-            mappings,
+            inner, registry, allocator, seen, mappings,
         )?))),
         Expr::Between {
             expr,
@@ -86,26 +70,14 @@ fn rewrite_expr_stateful(
             high,
         } => Ok(Expr::Between {
             expr: Box::new(rewrite_expr_stateful(
-                expr,
-                registry,
-                allocator,
-                seen,
-                mappings,
+                expr, registry, allocator, seen, mappings,
             )?),
             negated: *negated,
             low: Box::new(rewrite_expr_stateful(
-                low,
-                registry,
-                allocator,
-                seen,
-                mappings,
+                low, registry, allocator, seen, mappings,
             )?),
             high: Box::new(rewrite_expr_stateful(
-                high,
-                registry,
-                allocator,
-                seen,
-                mappings,
+                high, registry, allocator, seen, mappings,
             )?),
         }),
         Expr::InList {
@@ -206,12 +178,18 @@ mod tests {
         let mut allocator = ColPlaceholderAllocator::new();
         let lag_a = lag_expr(Expr::Identifier(Ident::new("a")));
 
-        let mut select_stmt =
-            SelectStmt::with_fields(vec![SelectField::new(Expr::Identifier(Ident::new("a")), None, "a".to_string())]);
+        let mut select_stmt = SelectStmt::with_fields(vec![SelectField::new(
+            Expr::Identifier(Ident::new("a")),
+            None,
+            "a".to_string(),
+        )]);
         select_stmt.where_condition = Some(Expr::BinaryOp {
             left: Box::new(lag_a),
             op: sqlparser::ast::BinaryOperator::Gt,
-            right: Box::new(Expr::Value(sqlparser::ast::Value::Number("0".to_string(), false))),
+            right: Box::new(Expr::Value(sqlparser::ast::Value::Number(
+                "0".to_string(),
+                false,
+            ))),
         });
 
         let (out, mappings) =
@@ -223,4 +201,3 @@ mod tests {
         );
     }
 }
-

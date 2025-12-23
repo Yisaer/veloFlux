@@ -22,7 +22,10 @@ struct LagInstance {
 impl StatefulFunctionInstance for LagInstance {
     fn eval(&mut self, args: &[Value]) -> Result<Value, String> {
         if args.len() != 1 {
-            return Err(format!("lag() expects exactly 1 argument, got {}", args.len()));
+            return Err(format!(
+                "lag() expects exactly 1 argument, got {}",
+                args.len()
+            ));
         }
         let out = self.prev.clone().unwrap_or(Value::Null);
         self.prev = Some(args[0].clone());
@@ -74,4 +77,3 @@ mod tests {
         assert!(matches!(ty, ConcreteDatatype::Int64(_)));
     }
 }
-

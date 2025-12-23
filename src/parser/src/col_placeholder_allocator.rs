@@ -13,4 +13,3 @@ impl ColPlaceholderAllocator {
         format!("col_{}", self.next_index)
     }
 }
-

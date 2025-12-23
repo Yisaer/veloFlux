@@ -12,7 +12,6 @@ pub mod shared_stream;
 pub mod stateful;
 
 pub use aggregation::AggregateFunctionRegistry;
-pub use stateful::StatefulFunctionRegistry;
 pub use catalog::{
     Catalog, CatalogError, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
     StreamType,
@@ -26,6 +25,7 @@ pub use datatypes::{
     Int64Type, Int8Type, ListType, Schema, StringType, StructField, StructType, Uint16Type,
     Uint32Type, Uint64Type, Uint8Type,
 };
+pub use expr::custom_func::{CustomFunc, CustomFuncRegistry, CustomFuncRegistryError};
 pub use expr::sql_conversion;
 pub use expr::{
     convert_expr_to_scalar, convert_select_stmt_to_scalar, extract_select_expressions, BinaryFunc,
@@ -56,6 +56,7 @@ pub use shared_stream::{
     registry as shared_stream_registry, SharedSourceConnectorConfig, SharedStreamConfig,
     SharedStreamError, SharedStreamInfo, SharedStreamStatus, SharedStreamSubscription,
 };
+pub use stateful::StatefulFunctionRegistry;
 
 use connector::{ConnectorRegistry, MqttClientManager};
 use planner::logical::create_logical_plan;
@@ -76,6 +77,7 @@ pub struct PipelineRegistries {
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     stateful_registry: Arc<StatefulFunctionRegistry>,
+    custom_func_registry: Arc<CustomFuncRegistry>,
 }
 
 impl PipelineRegistries {
@@ -91,6 +93,7 @@ impl PipelineRegistries {
             decoder_registry,
             aggregate_registry,
             stateful_registry: StatefulFunctionRegistry::with_builtins(),
+            custom_func_registry: CustomFuncRegistry::with_builtins(),
         }
     }
 
@@ -107,6 +110,25 @@ impl PipelineRegistries {
             decoder_registry,
             aggregate_registry,
             stateful_registry,
+            custom_func_registry: CustomFuncRegistry::with_builtins(),
+        }
+    }
+
+    pub fn new_with_stateful_and_custom_registries(
+        connector_registry: Arc<ConnectorRegistry>,
+        encoder_registry: Arc<EncoderRegistry>,
+        decoder_registry: Arc<DecoderRegistry>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        stateful_registry: Arc<StatefulFunctionRegistry>,
+        custom_func_registry: Arc<CustomFuncRegistry>,
+    ) -> Self {
+        Self {
+            connector_registry,
+            encoder_registry,
+            decoder_registry,
+            aggregate_registry,
+            stateful_registry,
+            custom_func_registry,
         }
     }
 
@@ -128,6 +150,10 @@ impl PipelineRegistries {
 
     pub fn stateful_registry(&self) -> Arc<StatefulFunctionRegistry> {
         Arc::clone(&self.stateful_registry)
+    }
+
+    pub fn custom_func_registry(&self) -> Arc<CustomFuncRegistry> {
+        Arc::clone(&self.custom_func_registry)
     }
 }
 

@@ -35,4 +35,3 @@ impl StatefulRegistry for EmptyStatefulRegistry {
 pub fn default_stateful_registry() -> Arc<dyn StatefulRegistry> {
     Arc::new(EmptyStatefulRegistry)
 }
-

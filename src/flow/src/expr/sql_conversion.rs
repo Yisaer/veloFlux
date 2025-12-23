@@ -1,4 +1,4 @@
-use super::custom_func::CUSTOM_FUNCTIONS;
+use super::custom_func::CustomFuncRegistry;
 use super::func::{BinaryFunc, UnaryFunc};
 use super::scalar::ScalarExpr;
 use datatypes::{BooleanType, ConcreteDatatype, Float64Type, Int64Type, Schema, StringType, Value};
@@ -6,7 +6,7 @@ use sqlparser::ast::{
     BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, Ident, UnaryOperator,
     Value as SqlValue,
 };
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Binding between SQL sources (table/alias) and schemas.
 #[derive(Clone, Debug, Default)]
@@ -185,12 +185,31 @@ pub fn convert_expr_to_scalar_with_bindings(
     expr: &Expr,
     bindings: &SchemaBinding,
 ) -> Result<ScalarExpr, ConversionError> {
-    convert_expr_to_scalar_internal(expr, bindings)
+    convert_expr_to_scalar_with_bindings_and_custom_registry(
+        expr,
+        bindings,
+        default_custom_func_registry().as_ref(),
+    )
+}
+
+/// Convert sqlparser Expression to flow ScalarExpr with explicit column bindings and custom function registry.
+pub fn convert_expr_to_scalar_with_bindings_and_custom_registry(
+    expr: &Expr,
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    convert_expr_to_scalar_internal(expr, bindings, custom_func_registry)
+}
+
+fn default_custom_func_registry() -> &'static Arc<CustomFuncRegistry> {
+    static REGISTRY: OnceLock<Arc<CustomFuncRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(CustomFuncRegistry::with_builtins)
 }
 
 fn convert_expr_to_scalar_internal(
     expr: &Expr,
     bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
 ) -> Result<ScalarExpr, ConversionError> {
     match expr {
         // Simple column reference like "a"
@@ -204,8 +223,9 @@ fn convert_expr_to_scalar_internal(
 
         // Binary operations like a + b, a * b
         Expr::BinaryOp { left, op, right } => {
-            let left_expr = convert_expr_to_scalar_internal(left, bindings)?;
-            let right_expr = convert_expr_to_scalar_internal(right, bindings)?;
+            let left_expr = convert_expr_to_scalar_internal(left, bindings, custom_func_registry)?;
+            let right_expr =
+                convert_expr_to_scalar_internal(right, bindings, custom_func_registry)?;
             let binary_func = convert_binary_op(op)?;
 
             Ok(ScalarExpr::CallBinary {
@@ -217,7 +237,8 @@ fn convert_expr_to_scalar_internal(
 
         // Unary operations like -a, NOT b
         Expr::UnaryOp { op, expr: operand } => {
-            let operand_expr = convert_expr_to_scalar_internal(operand, bindings)?;
+            let operand_expr =
+                convert_expr_to_scalar_internal(operand, bindings, custom_func_registry)?;
             let unary_func = convert_unary_op(op)?;
 
             Ok(ScalarExpr::CallUnary {
@@ -227,10 +248,14 @@ fn convert_expr_to_scalar_internal(
         }
 
         // Function calls like CONCAT(a, b), UPPER(name)
-        Expr::Function(Function { name, args, .. }) => convert_function_call(name, args, bindings),
+        Expr::Function(Function { name, args, .. }) => {
+            convert_function_call(name, args, bindings, custom_func_registry)
+        }
 
         // Parenthesized expressions like (a + b)
-        Expr::Nested(inner_expr) => convert_expr_to_scalar_internal(inner_expr, bindings),
+        Expr::Nested(inner_expr) => {
+            convert_expr_to_scalar_internal(inner_expr, bindings, custom_func_registry)
+        }
 
         // BETWEEN expressions like a BETWEEN 1 AND 10
         Expr::Between {
@@ -238,14 +263,14 @@ fn convert_expr_to_scalar_internal(
             low,
             high,
             negated,
-        } => convert_between_expression(expr, low, high, *negated, bindings),
+        } => convert_between_expression(expr, low, high, *negated, bindings, custom_func_registry),
 
         // IN expressions like a IN (1, 2, 3)
         Expr::InList {
             expr,
             list,
             negated,
-        } => convert_in_list_expression(expr, list, *negated, bindings),
+        } => convert_in_list_expression(expr, list, *negated, bindings, custom_func_registry),
 
         // CASE expressions
         Expr::Case {
@@ -253,17 +278,26 @@ fn convert_expr_to_scalar_internal(
             conditions,
             results,
             else_result,
-        } => convert_case_expression(operand, conditions, results, else_result, bindings),
+        } => convert_case_expression(
+            operand,
+            conditions,
+            results,
+            else_result,
+            bindings,
+            custom_func_registry,
+        ),
 
         // Struct field access like a->b
         Expr::JsonAccess {
             left,
             operator,
             right,
-        } => convert_json_access(left, operator, right, bindings),
+        } => convert_json_access(left, operator, right, bindings, custom_func_registry),
 
         // List indexing like a[0]
-        Expr::MapAccess { column, keys } => convert_map_access(column, keys, bindings),
+        Expr::MapAccess { column, keys } => {
+            convert_map_access(column, keys, bindings, custom_func_registry)
+        }
 
         _ => Err(ConversionError::UnsupportedExpression(format!(
             "{:?}",
@@ -399,12 +433,14 @@ fn convert_json_access(
     operator: &sqlparser::ast::JsonOperator,
     right: &Expr,
     bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
 ) -> Result<ScalarExpr, ConversionError> {
     // Only support Arrow operator for now
     match operator {
         sqlparser::ast::JsonOperator::Arrow => {
             // Convert the struct container (left side)
-            let struct_expr = convert_expr_to_scalar_internal(left, bindings)?;
+            let struct_expr =
+                convert_expr_to_scalar_internal(left, bindings, custom_func_registry)?;
 
             // Convert the field name (right side) - should be an identifier
             let field_name = match right {
@@ -431,6 +467,7 @@ fn convert_map_access(
     column: &Expr,
     keys: &[Expr],
     bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
 ) -> Result<ScalarExpr, ConversionError> {
     if keys.is_empty() {
         return Err(ConversionError::UnsupportedExpression(
@@ -445,10 +482,10 @@ fn convert_map_access(
     }
 
     // Convert the container (column)
-    let container_expr = convert_expr_to_scalar_internal(column, bindings)?;
+    let container_expr = convert_expr_to_scalar_internal(column, bindings, custom_func_registry)?;
 
     // Convert the key (index) - should be a literal value
-    let key_expr = convert_expr_to_scalar_internal(&keys[0], bindings)?;
+    let key_expr = convert_expr_to_scalar_internal(&keys[0], bindings, custom_func_registry)?;
 
     // Use the proper ListIndex variant instead of CallDf
     Ok(ScalarExpr::list_index(container_expr, key_expr))
@@ -459,27 +496,27 @@ fn convert_function_call(
     name: &sqlparser::ast::ObjectName,
     args: &[FunctionArg],
     bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
 ) -> Result<ScalarExpr, ConversionError> {
-    use crate::expr::custom_func::ConcatFunc;
-    use std::sync::Arc;
-
-    let function_name = name.to_string();
-
-    let is_custom_function = CUSTOM_FUNCTIONS.contains(&function_name.as_str());
-
-    if !is_custom_function {
-        return Err(ConversionError::UnsupportedExpression(format!(
+    let function_name = name.to_string().to_lowercase();
+    let custom_func = custom_func_registry.get(&function_name).ok_or_else(|| {
+        ConversionError::UnsupportedExpression(format!(
             "Unknown function: '{}'. Available custom functions: {:?}",
-            function_name, CUSTOM_FUNCTIONS
-        )));
-    }
+            function_name,
+            custom_func_registry.list_names()
+        ))
+    })?;
 
     let mut scalar_args = Vec::new();
 
     for arg in args {
         match arg {
             FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
-                scalar_args.push(convert_expr_to_scalar_internal(expr, bindings)?);
+                scalar_args.push(convert_expr_to_scalar_internal(
+                    expr,
+                    bindings,
+                    custom_func_registry,
+                )?);
             }
             FunctionArg::Unnamed(FunctionArgExpr::QualifiedWildcard(object_name)) => {
                 let qualifier = object_name
@@ -497,7 +534,11 @@ fn convert_function_call(
                 arg: FunctionArgExpr::Expr(arg),
                 ..
             } => {
-                scalar_args.push(convert_expr_to_scalar_internal(arg, bindings)?);
+                scalar_args.push(convert_expr_to_scalar_internal(
+                    arg,
+                    bindings,
+                    custom_func_registry,
+                )?);
             }
             FunctionArg::Named {
                 arg: FunctionArgExpr::QualifiedWildcard(object_name),
@@ -520,16 +561,6 @@ fn convert_function_call(
         }
     }
 
-    let custom_func: Arc<dyn crate::expr::custom_func::CustomFunc> = match function_name.as_str() {
-        "concat" => Arc::new(ConcatFunc),
-        _ => {
-            return Err(ConversionError::UnsupportedExpression(format!(
-                "Function '{}' is in CUSTOM_FUNCTIONS but not implemented",
-                function_name
-            )));
-        }
-    };
-
     Ok(ScalarExpr::CallFunc {
         func: custom_func,
         args: scalar_args,
@@ -543,10 +574,11 @@ fn convert_between_expression(
     high: &Expr,
     negated: bool,
     bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
 ) -> Result<ScalarExpr, ConversionError> {
-    let value_expr = convert_expr_to_scalar_internal(expr, bindings)?;
-    let low_expr = convert_expr_to_scalar_internal(low, bindings)?;
-    let high_expr = convert_expr_to_scalar_internal(high, bindings)?;
+    let value_expr = convert_expr_to_scalar_internal(expr, bindings, custom_func_registry)?;
+    let low_expr = convert_expr_to_scalar_internal(low, bindings, custom_func_registry)?;
+    let high_expr = convert_expr_to_scalar_internal(high, bindings, custom_func_registry)?;
 
     let lower_bound = ScalarExpr::CallBinary {
         func: BinaryFunc::Gte,
@@ -582,6 +614,7 @@ fn convert_in_list_expression(
     list: &[Expr],
     negated: bool,
     bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
 ) -> Result<ScalarExpr, ConversionError> {
     if list.is_empty() {
         return Ok(ScalarExpr::Literal(
@@ -590,11 +623,11 @@ fn convert_in_list_expression(
         ));
     }
 
-    let value_expr = convert_expr_to_scalar_internal(expr, bindings)?;
+    let value_expr = convert_expr_to_scalar_internal(expr, bindings, custom_func_registry)?;
     let mut result_expr = None;
 
     for list_item in list {
-        let item_expr = convert_expr_to_scalar_internal(list_item, bindings)?;
+        let item_expr = convert_expr_to_scalar_internal(list_item, bindings, custom_func_registry)?;
         let comparison = ScalarExpr::CallBinary {
             func: BinaryFunc::Eq,
             expr1: Box::new(value_expr.clone()),
@@ -630,11 +663,12 @@ fn convert_case_expression(
     results: &[Expr],
     else_result: &Option<Box<Expr>>,
     bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
 ) -> Result<ScalarExpr, ConversionError> {
     // For simplicity, convert to a chain of IF-THEN-ELSE
     // In a real implementation, you might want to handle this more efficiently
     let mut current_expr = if let Some(else_expr) = else_result {
-        convert_expr_to_scalar_internal(else_expr, bindings)?
+        convert_expr_to_scalar_internal(else_expr, bindings, custom_func_registry)?
     } else {
         ScalarExpr::Literal(Value::Null, ConcreteDatatype::Int64(Int64Type))
     };
@@ -646,8 +680,10 @@ fn convert_case_expression(
 
         let condition_expr = if let Some(operand_expr) = operand {
             // Simple CASE: operand WHEN value THEN result
-            let operand_scalar = convert_expr_to_scalar_internal(operand_expr, bindings)?;
-            let value_scalar = convert_expr_to_scalar_internal(condition, bindings)?;
+            let operand_scalar =
+                convert_expr_to_scalar_internal(operand_expr, bindings, custom_func_registry)?;
+            let value_scalar =
+                convert_expr_to_scalar_internal(condition, bindings, custom_func_registry)?;
             ScalarExpr::CallBinary {
                 func: BinaryFunc::Eq,
                 expr1: Box::new(operand_scalar),
@@ -655,10 +691,10 @@ fn convert_case_expression(
             }
         } else {
             // Searched CASE: WHEN condition THEN result
-            convert_expr_to_scalar_internal(condition, bindings)?
+            convert_expr_to_scalar_internal(condition, bindings, custom_func_registry)?
         };
 
-        let result_expr = convert_expr_to_scalar_internal(result, bindings)?;
+        let result_expr = convert_expr_to_scalar_internal(result, bindings, custom_func_registry)?;
 
         // This is a simplified implementation - in practice you'd need proper conditional evaluation
         current_expr = ScalarExpr::CallBinary {
