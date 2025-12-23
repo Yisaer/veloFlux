@@ -10,3 +10,6 @@ pub mod sink;
 pub use logical_optimizer::optimize_logical_plan;
 pub use optimizer::optimize_physical_plan;
 pub use physical_plan_builder::create_physical_plan;
+
+#[cfg(test)]
+mod tests;

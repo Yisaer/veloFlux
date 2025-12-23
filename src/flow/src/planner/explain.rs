@@ -187,11 +187,12 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             info.push(format!("schema=[{}]", cols.join(", ")));
         }
         LogicalPlan::StatefulFunction(stateful) => {
-            let mappings = stateful
+            let mut mappings = stateful
                 .stateful_mappings
                 .iter()
                 .map(|(out, expr)| format!("{} -> {}", expr, out))
                 .collect::<Vec<_>>();
+            mappings.sort();
             info.push(format!("calls=[{}]", mappings.join("; ")));
         }
         LogicalPlan::Filter(filter) => {
@@ -338,11 +339,19 @@ fn build_physical_node_with_prefix(
             info.push(format!("schema=[{}]", cols.join(", ")));
         }
         PhysicalPlan::StatefulFunction(stateful) => {
-            let calls = stateful
+            let mut calls = stateful
                 .calls
                 .iter()
-                .map(|call| format!("{}({}) -> {}", call.func_name, call.arg_scalars.len(), call.output_column))
+                .map(|call| {
+                    format!(
+                        "{}({}) -> {}",
+                        call.func_name,
+                        call.arg_scalars.len(),
+                        call.output_column
+                    )
+                })
                 .collect::<Vec<_>>();
+            calls.sort();
             info.push(format!("calls=[{}]", calls.join("; ")));
         }
         PhysicalPlan::Filter(filter) => {

@@ -189,8 +189,11 @@ fn create_physical_stateful_function_with_builder(
         physical_children.push(physical_child);
     }
 
-    let mut calls = Vec::with_capacity(logical_stateful.stateful_mappings.len());
-    for (output_column, expr) in &logical_stateful.stateful_mappings {
+    let mut entries: Vec<_> = logical_stateful.stateful_mappings.iter().collect();
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut calls = Vec::with_capacity(entries.len());
+    for (output_column, expr) in entries {
         let sqlparser::ast::Expr::Function(func) = expr else {
             return Err(format!(
                 "stateful mapping '{}' must be a function expression, got {}",

@@ -78,6 +78,12 @@ impl Default for StatefulFunctionRegistry {
     }
 }
 
+impl parser::StatefulRegistry for StatefulFunctionRegistry {
+    fn is_stateful_function(&self, name: &str) -> bool {
+        self.is_registered(name)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
