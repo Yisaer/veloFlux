@@ -5,6 +5,7 @@
 //! And records the mapping: sum(a) -> col_1, sum(c) -> col_2
 
 use crate::aggregate_registry::AggregateRegistry;
+use crate::col_placeholder_allocator::ColPlaceholderAllocator;
 use crate::select_stmt::SelectStmt;
 use crate::visitor::extract_aggregates_with_visitor;
 use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Ident};
@@ -17,20 +18,24 @@ use std::sync::Arc;
 pub fn transform_aggregate_functions(
     mut select_stmt: SelectStmt,
     aggregate_registry: Arc<dyn AggregateRegistry>,
+    allocator: &mut ColPlaceholderAllocator,
 ) -> Result<(SelectStmt, HashMap<String, Expr>), String> {
     let mut all_aggregates = HashMap::new();
-    let mut replacement_counter = 0;
+    let mut seen: HashMap<String, String> = HashMap::new();
 
     // Process select fields: extract aggregates and replace in one step
     for field in &mut select_stmt.select_fields {
         let (new_expr, field_aggregates) = extract_and_replace_aggregates(
             &field.expr,
-            &mut replacement_counter,
+            allocator,
             aggregate_registry.clone(),
+            &mut seen,
         )?;
 
         if !field_aggregates.is_empty() && field.alias.is_none() {
-            field.alias = Some(field.expr.to_string());
+            // Preserve the original (pre-rewrite) expression name so downstream plans/projects
+            // expose user-facing field names even after placeholder replacement.
+            field.alias = Some(field.field_name.clone());
         }
         // Update the field expression
         field.expr = new_expr;
@@ -43,11 +48,8 @@ pub fn transform_aggregate_functions(
 
     // Process HAVING clause: extract aggregates and replace in one step
     if let Some(having_expr) = &mut select_stmt.having {
-        let (new_having, having_aggregates) = extract_and_replace_aggregates(
-            having_expr,
-            &mut replacement_counter,
-            aggregate_registry,
-        )?;
+        let (new_having, having_aggregates) =
+            extract_and_replace_aggregates(having_expr, allocator, aggregate_registry, &mut seen)?;
 
         // Update the having expression
         *having_expr = new_having;
@@ -67,8 +69,9 @@ pub fn transform_aggregate_functions(
 /// Extract aggregates from an expression and replace them in one step
 fn extract_and_replace_aggregates(
     expr: &Expr,
-    replacement_counter: &mut usize,
+    allocator: &mut ColPlaceholderAllocator,
     aggregate_registry: Arc<dyn AggregateRegistry>,
+    seen: &mut HashMap<String, String>,
 ) -> Result<(Expr, HashMap<String, Expr>), String> {
     // First, extract all aggregates from this expression
     let aggregates = extract_aggregates_with_visitor(expr, aggregate_registry);
@@ -82,14 +85,18 @@ fn extract_and_replace_aggregates(
     let mut new_aggregates = HashMap::new();
 
     for (_old_replacement_name, (_func_name, original_expr)) in aggregates {
-        *replacement_counter += 1;
-        let new_replacement_name = format!("col_{}", replacement_counter);
+        let key = format!("{:?}", original_expr);
+        let replacement = if let Some(existing) = seen.get(&key) {
+            existing.clone()
+        } else {
+            let allocated = allocator.allocate();
+            seen.insert(key.clone(), allocated.clone());
+            new_aggregates.insert(allocated.clone(), original_expr.clone());
+            allocated
+        };
 
         // Build mapping: original_expr -> new_replacement_name
-        replacement_mapping.insert(format!("{:?}", original_expr), new_replacement_name.clone());
-
-        // Store the aggregate mapping
-        new_aggregates.insert(new_replacement_name, original_expr.clone());
+        replacement_mapping.insert(key, replacement);
     }
 
     // Now replace aggregates in the expression using the mapping
@@ -201,6 +208,7 @@ mod tests {
     use super::*;
     use crate::SelectField;
     use crate::aggregate_registry::default_aggregate_registry;
+    use crate::col_placeholder_allocator::ColPlaceholderAllocator;
     use sqlparser::ast::FunctionArg;
     use sqlparser::ast::FunctionArgExpr;
     use sqlparser::ast::ObjectName;
@@ -225,9 +233,10 @@ mod tests {
         let select_field = SelectField::new(expr.clone(), None, expr.to_string());
         let select_stmt = SelectStmt::with_fields(vec![select_field]);
 
+        let mut allocator = ColPlaceholderAllocator::new();
         // Transform aggregate functions (now with direct in-place replacement!)
         let (transformed_stmt, aggregate_mappings) =
-            transform_aggregate_functions(select_stmt, default_aggregate_registry())
+            transform_aggregate_functions(select_stmt, default_aggregate_registry(), &mut allocator)
                 .expect("Should transform successfully");
 
         // Verify results

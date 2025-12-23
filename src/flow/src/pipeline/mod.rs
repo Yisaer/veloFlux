@@ -18,7 +18,6 @@ use crate::{
     optimize_physical_plan, PipelineExplain, PipelineRegistries, PipelineSink,
     PipelineSinkConnector, SinkConnectorConfig,
 };
-use parser::parse_sql_with_registry;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -482,8 +481,12 @@ fn build_pipeline_runtime(
     mqtt_client_manager: &MqttClientManager,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
-    let select_stmt = parse_sql_with_registry(definition.sql(), registries.aggregate_registry())
-        .map_err(|err| err.to_string())?;
+    let select_stmt = parser::parse_sql_with_registries(
+        definition.sql(),
+        registries.aggregate_registry(),
+        registries.stateful_registry(),
+    )
+    .map_err(|err| err.to_string())?;
     let streams: Vec<String> = select_stmt
         .source_infos
         .iter()
@@ -519,8 +522,12 @@ fn build_pipeline_runtime_with_logical_ir(
     mqtt_client_manager: &MqttClientManager,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>, Vec<u8>), String> {
-    let select_stmt = parse_sql_with_registry(definition.sql(), registries.aggregate_registry())
-        .map_err(|err| err.to_string())?;
+    let select_stmt = parser::parse_sql_with_registries(
+        definition.sql(),
+        registries.aggregate_registry(),
+        registries.stateful_registry(),
+    )
+    .map_err(|err| err.to_string())?;
     let streams: Vec<String> = select_stmt
         .source_infos
         .iter()
@@ -575,6 +582,7 @@ fn build_pipeline_runtime_with_logical_ir(
         registries.encoder_registry(),
         registries.decoder_registry(),
         registries.aggregate_registry(),
+        registries.stateful_registry(),
     )
     .map_err(|err| err.to_string())?;
     pipeline.set_pipeline_id(definition.id().to_string());
@@ -644,6 +652,7 @@ fn build_pipeline_runtime_from_logical_ir(
         registries.encoder_registry(),
         registries.decoder_registry(),
         registries.aggregate_registry(),
+        registries.stateful_registry(),
     )
     .map_err(|err| err.to_string())?;
 

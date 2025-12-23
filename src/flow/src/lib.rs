@@ -9,8 +9,10 @@ pub mod pipeline;
 pub mod planner;
 pub mod processor;
 pub mod shared_stream;
+pub mod stateful;
 
 pub use aggregation::AggregateFunctionRegistry;
+pub use stateful::StatefulFunctionRegistry;
 pub use catalog::{
     Catalog, CatalogError, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
     StreamType,
@@ -73,6 +75,7 @@ pub struct PipelineRegistries {
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
+    stateful_registry: Arc<StatefulFunctionRegistry>,
 }
 
 impl PipelineRegistries {
@@ -87,6 +90,23 @@ impl PipelineRegistries {
             encoder_registry,
             decoder_registry,
             aggregate_registry,
+            stateful_registry: StatefulFunctionRegistry::with_builtins(),
+        }
+    }
+
+    pub fn new_with_stateful_registry(
+        connector_registry: Arc<ConnectorRegistry>,
+        encoder_registry: Arc<EncoderRegistry>,
+        decoder_registry: Arc<DecoderRegistry>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        stateful_registry: Arc<StatefulFunctionRegistry>,
+    ) -> Self {
+        Self {
+            connector_registry,
+            encoder_registry,
+            decoder_registry,
+            aggregate_registry,
+            stateful_registry,
         }
     }
 
@@ -105,6 +125,10 @@ impl PipelineRegistries {
     pub fn aggregate_registry(&self) -> Arc<AggregateFunctionRegistry> {
         Arc::clone(&self.aggregate_registry)
     }
+
+    pub fn stateful_registry(&self) -> Arc<StatefulFunctionRegistry> {
+        Arc::clone(&self.stateful_registry)
+    }
 }
 
 fn build_physical_plan_from_sql(
@@ -114,7 +138,11 @@ fn build_physical_plan_from_sql(
     shared_stream_registry: &SharedStreamRegistry,
     registries: &PipelineRegistries,
 ) -> Result<Arc<planner::physical::PhysicalPlan>, Box<dyn std::error::Error>> {
-    let select_stmt = parser::parse_sql_with_registry(sql, registries.aggregate_registry())?;
+    let select_stmt = parser::parse_sql_with_registries(
+        sql,
+        registries.aggregate_registry(),
+        registries.stateful_registry(),
+    )?;
     let (schema_binding, stream_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
@@ -229,6 +257,7 @@ pub fn create_pipeline(
         registries.encoder_registry(),
         registries.decoder_registry(),
         registries.aggregate_registry(),
+        registries.stateful_registry(),
     )?;
     Ok(pipeline)
 }
@@ -240,7 +269,11 @@ pub fn explain_pipeline(
     shared_stream_registry: &SharedStreamRegistry,
     registries: &PipelineRegistries,
 ) -> Result<PipelineExplain, Box<dyn std::error::Error>> {
-    let select_stmt = parser::parse_sql_with_registry(sql, registries.aggregate_registry())?;
+    let select_stmt = parser::parse_sql_with_registries(
+        sql,
+        registries.aggregate_registry(),
+        registries.stateful_registry(),
+    )?;
     let (schema_binding, stream_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;

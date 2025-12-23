@@ -279,6 +279,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::Decoder(new))
         }
+        PhysicalPlan::StatefulFunction(stateful) => {
+            let mut new = stateful.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::StatefulFunction(new))
+        }
         PhysicalPlan::SharedStream(stream) => {
             let mut new = stream.clone();
             new.base.children = children;

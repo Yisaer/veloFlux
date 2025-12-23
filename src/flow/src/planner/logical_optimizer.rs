@@ -84,6 +84,11 @@ impl<'a> ColumnUsageCollector<'a> {
                     self.collect_expr(&field.expr);
                 }
             }
+            LogicalPlan::StatefulFunction(stateful) => {
+                for expr in stateful.stateful_mappings.values() {
+                    self.collect_expr(expr);
+                }
+            }
             LogicalPlan::Filter(filter) => {
                 self.collect_expr(&filter.predicate);
             }
@@ -380,6 +385,11 @@ fn apply_pruned_with_cache(
 fn clone_with_children(plan: &LogicalPlan, children: Vec<Arc<LogicalPlan>>) -> Arc<LogicalPlan> {
     match plan {
         LogicalPlan::DataSource(ds) => Arc::new(LogicalPlan::DataSource(ds.clone())),
+        LogicalPlan::StatefulFunction(stateful) => {
+            let mut new = stateful.clone();
+            new.base.children = children;
+            Arc::new(LogicalPlan::StatefulFunction(new))
+        }
         LogicalPlan::Filter(filter) => {
             let mut new = filter.clone();
             new.base.children = children;

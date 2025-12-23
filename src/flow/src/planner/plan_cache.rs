@@ -154,6 +154,9 @@ pub enum LogicalPlanNodeKindIR {
         stream: String,
         alias: Option<String>,
     },
+    StatefulFunction {
+        calls: Vec<StatefulExprIR>,
+    },
     Window {
         window: WindowIR,
     },
@@ -174,6 +177,12 @@ pub enum LogicalPlanNodeKindIR {
     Opaque {
         plan_type: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatefulExprIR {
+    pub output_name: String,
+    pub expr: Expr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -308,6 +317,18 @@ fn build_logical_plan_node(
                 schema,
             );
             Arc::new(LogicalPlan::DataSource(datasource))
+        }
+        LogicalPlanNodeKindIR::StatefulFunction { calls } => {
+            let stateful_mappings = calls
+                .iter()
+                .map(|call| (call.output_name.clone(), call.expr.clone()))
+                .collect();
+            let plan = crate::planner::logical::StatefulFunctionPlan::new(
+                stateful_mappings,
+                children,
+                node.index,
+            );
+            Arc::new(LogicalPlan::StatefulFunction(plan))
         }
         LogicalPlanNodeKindIR::Window { window } => {
             let spec = window_ir_to_spec(window)?;
@@ -554,6 +575,17 @@ fn build_logical_ir(
             stream: plan.source_name.clone(),
             alias: plan.alias.clone(),
         },
+        LogicalPlan::StatefulFunction(plan) => {
+            let calls = plan
+                .stateful_mappings
+                .iter()
+                .map(|(name, expr)| StatefulExprIR {
+                    output_name: name.clone(),
+                    expr: expr.clone(),
+                })
+                .collect();
+            LogicalPlanNodeKindIR::StatefulFunction { calls }
+        }
         LogicalPlan::Window(plan) => LogicalPlanNodeKindIR::Window {
             window: window_spec_to_ir(&plan.spec),
         },

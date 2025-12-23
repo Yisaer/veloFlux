@@ -5,14 +5,14 @@ use crate::expr::sql_conversion::{
 use crate::planner::logical::{
     aggregation::Aggregation as LogicalAggregation, DataSinkPlan, DataSource as LogicalDataSource,
     Filter as LogicalFilter, LogicalPlan, LogicalWindow, LogicalWindowSpec,
-    Project as LogicalProject,
+    Project as LogicalProject, StatefulFunctionPlan as LogicalStatefulFunction,
 };
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
     PhysicalAggregation, PhysicalBatch, PhysicalDataSink, PhysicalDataSource, PhysicalDecoder,
     PhysicalEncoder, PhysicalFilter, PhysicalPlan, PhysicalProject, PhysicalResultCollect,
-    PhysicalSharedStream, PhysicalSinkConnector, PhysicalWatermark, WatermarkConfig,
-    WatermarkStrategy,
+    PhysicalSharedStream, PhysicalSinkConnector, PhysicalStatefulFunction, PhysicalWatermark,
+    StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
 use crate::PipelineRegistries;
@@ -116,6 +116,13 @@ fn create_physical_plan_with_builder_cached(
                 builder,
             )?
         }
+        LogicalPlan::StatefulFunction(logical_stateful) => create_physical_stateful_function_with_builder(
+            logical_stateful,
+            &logical_plan,
+            bindings,
+            registries,
+            builder,
+        )?,
         LogicalPlan::Filter(logical_filter) => create_physical_filter_with_builder_cached(
             logical_filter,
             &logical_plan,
@@ -166,6 +173,74 @@ fn create_physical_plan_with_builder_cached(
     // Cache the result for future reuse using builder's cache
     builder.cache_node(logical_index, Arc::clone(&physical_plan));
     Ok(physical_plan)
+}
+
+fn create_physical_stateful_function_with_builder(
+    logical_stateful: &LogicalStatefulFunction,
+    logical_plan: &Arc<LogicalPlan>,
+    bindings: &SchemaBinding,
+    registries: &PipelineRegistries,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    let mut physical_children = Vec::new();
+    for child in logical_plan.children() {
+        let physical_child =
+            create_physical_plan_with_builder_cached(child.clone(), bindings, registries, builder)?;
+        physical_children.push(physical_child);
+    }
+
+    let mut entries: Vec<_> = logical_stateful.stateful_mappings.iter().collect();
+    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut calls = Vec::with_capacity(entries.len());
+    for (output_column, expr) in entries {
+        let sqlparser::ast::Expr::Function(func) = expr else {
+            return Err(format!(
+                "stateful mapping '{}' must be a function expression, got {}",
+                output_column, expr
+            ));
+        };
+
+        let func_name = func
+            .name
+            .0
+            .last()
+            .map(|ident| ident.value.to_lowercase())
+            .unwrap_or_default();
+        registries
+            .stateful_registry()
+            .get(&func_name)
+            .ok_or_else(|| format!("unknown stateful function '{}'", func_name))?;
+
+        let mut arg_scalars = Vec::with_capacity(func.args.len());
+        for arg in &func.args {
+            match arg {
+                sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(arg_expr)) => {
+                    arg_scalars.push(
+                        convert_expr_to_scalar_with_bindings(arg_expr, bindings)
+                            .map_err(|err| err.to_string())?,
+                    );
+                }
+                _ => {
+                    return Err(format!(
+                        "unsupported stateful function argument for {}: {}",
+                        func_name, arg
+                    ));
+                }
+            }
+        }
+
+        calls.push(StatefulCall {
+            output_column: output_column.clone(),
+            func_name,
+            arg_scalars,
+            original_expr: expr.clone(),
+        });
+    }
+
+    let index = builder.allocate_index();
+    let physical = PhysicalStatefulFunction::new(calls, physical_children, index);
+    Ok(Arc::new(PhysicalPlan::StatefulFunction(physical)))
 }
 
 /// Create a PhysicalResultCollect from a TailPlan using centralized index management with caching

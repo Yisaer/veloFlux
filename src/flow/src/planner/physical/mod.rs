@@ -11,6 +11,7 @@ pub mod physical_filter;
 pub mod physical_project;
 pub mod physical_result_collect;
 pub mod physical_shared_stream;
+pub mod physical_stateful_function;
 pub mod physical_streaming_aggregation;
 pub mod physical_streaming_encoder;
 pub mod physical_watermark;
@@ -27,6 +28,7 @@ pub use physical_filter::PhysicalFilter;
 pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_shared_stream::PhysicalSharedStream;
+pub use physical_stateful_function::{PhysicalStatefulFunction, StatefulCall};
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
 pub use physical_streaming_encoder::PhysicalStreamingEncoder;
 pub use physical_watermark::{PhysicalWatermark, WatermarkConfig, WatermarkStrategy};
@@ -40,6 +42,7 @@ pub use physical_window::{
 pub enum PhysicalPlan {
     DataSource(PhysicalDataSource),
     Decoder(PhysicalDecoder),
+    StatefulFunction(PhysicalStatefulFunction),
     Filter(PhysicalFilter),
     Project(PhysicalProject),
     Aggregation(PhysicalAggregation),
@@ -63,6 +66,7 @@ impl PhysicalPlan {
         match self {
             PhysicalPlan::DataSource(plan) => plan.base.children(),
             PhysicalPlan::Decoder(plan) => plan.base.children(),
+            PhysicalPlan::StatefulFunction(plan) => plan.base.children(),
             PhysicalPlan::Filter(plan) => plan.base.children(),
             PhysicalPlan::Project(plan) => plan.base.children(),
             PhysicalPlan::Aggregation(plan) => plan.base.children(),
@@ -86,6 +90,7 @@ impl PhysicalPlan {
         match self {
             PhysicalPlan::DataSource(_) => "PhysicalDataSource",
             PhysicalPlan::Decoder(_) => "PhysicalDecoder",
+            PhysicalPlan::StatefulFunction(_) => "PhysicalStatefulFunction",
             PhysicalPlan::Filter(_) => "PhysicalFilter",
             PhysicalPlan::Project(_) => "PhysicalProject",
             PhysicalPlan::Aggregation(_) => "PhysicalAggregation",
@@ -109,6 +114,7 @@ impl PhysicalPlan {
         match self {
             PhysicalPlan::DataSource(plan) => plan.base.index(),
             PhysicalPlan::Decoder(plan) => plan.base.index(),
+            PhysicalPlan::StatefulFunction(plan) => plan.base.index(),
             PhysicalPlan::Filter(plan) => plan.base.index(),
             PhysicalPlan::Project(plan) => plan.base.index(),
             PhysicalPlan::Aggregation(plan) => plan.base.index(),

@@ -8,6 +8,7 @@ pub mod aggregation;
 pub mod datasource;
 pub mod filter;
 pub mod project;
+pub mod stateful_function;
 pub mod sink;
 pub mod tail;
 pub mod window;
@@ -17,6 +18,7 @@ pub use aggregation::Aggregation;
 pub use datasource::DataSource;
 pub use filter::Filter;
 pub use project::Project;
+pub use stateful_function::StatefulFunctionPlan;
 pub use sink::DataSinkPlan;
 pub use tail::TailPlan;
 pub use window::{LogicalWindow, LogicalWindowSpec, TimeUnit};
@@ -44,6 +46,7 @@ impl BaseLogicalPlan {
 #[derive(Debug, Clone)]
 pub enum LogicalPlan {
     DataSource(DataSource),
+    StatefulFunction(StatefulFunctionPlan),
     Filter(Filter),
     Aggregation(Aggregation),
     Project(Project),
@@ -56,6 +59,7 @@ impl LogicalPlan {
     pub fn children(&self) -> &[Arc<LogicalPlan>] {
         match self {
             LogicalPlan::DataSource(plan) => plan.base.children(),
+            LogicalPlan::StatefulFunction(plan) => plan.base.children(),
             LogicalPlan::Filter(plan) => plan.base.children(),
             LogicalPlan::Aggregation(plan) => plan.base.children(),
             LogicalPlan::Project(plan) => plan.base.children(),
@@ -68,6 +72,7 @@ impl LogicalPlan {
     pub fn get_plan_type(&self) -> &str {
         match self {
             LogicalPlan::DataSource(_) => "DataSource",
+            LogicalPlan::StatefulFunction(_) => "StatefulFunction",
             LogicalPlan::Filter(_) => "Filter",
             LogicalPlan::Aggregation(_) => "Aggregation",
             LogicalPlan::Project(_) => "Project",
@@ -80,6 +85,7 @@ impl LogicalPlan {
     pub fn get_plan_index(&self) -> i64 {
         match self {
             LogicalPlan::DataSource(plan) => plan.base.index(),
+            LogicalPlan::StatefulFunction(plan) => plan.base.index(),
             LogicalPlan::Filter(plan) => plan.base.index(),
             LogicalPlan::Aggregation(plan) => plan.base.index(),
             LogicalPlan::Project(plan) => plan.base.index(),
@@ -114,6 +120,7 @@ impl LogicalPlan {
 ///
 /// The plan structure will be:
 /// - DataSource(s) (from SelectStmt::source_infos, one per source)
+/// - StatefulFunction (from SelectStmt::stateful_mappings, if present) - takes DataSources as children
 /// - Window (from SelectStmt::window, if present) - takes DataSources as children
 /// - Aggregation (from SelectStmt::aggregate_mappings, if present) - takes Window or DataSources as children
 /// - Filter (from SelectStmt::where_condition, if present) - takes Aggregation, Window, or DataSources as children
@@ -162,7 +169,18 @@ pub fn create_logical_plan(
         current_index += 1;
     }
 
-    // 2. Create Window from window if present
+    // 2. Create StatefulFunctionPlan if stateful mappings exist
+    if !select_stmt.stateful_mappings.is_empty() {
+        let stateful = stateful_function::StatefulFunctionPlan::new(
+            select_stmt.stateful_mappings.clone(),
+            current_plans,
+            current_index,
+        );
+        current_plans = vec![Arc::new(LogicalPlan::StatefulFunction(stateful))];
+        current_index += 1;
+    }
+
+    // 3. Create Window from window if present
     if let Some(window) = select_stmt.window {
         let spec = convert_window_spec(window)?;
         let window_plan = LogicalWindow::new(spec, current_plans, current_index);
@@ -170,7 +188,7 @@ pub fn create_logical_plan(
         current_index += 1;
     }
 
-    // 3. Create Aggregation if aggregate mappings exist
+    // 4. Create Aggregation if aggregate mappings exist
     if !select_stmt.aggregate_mappings.is_empty() {
         let aggregation = aggregation::Aggregation::new(
             select_stmt.aggregate_mappings.clone(),
@@ -182,7 +200,7 @@ pub fn create_logical_plan(
         current_index += 1;
     }
 
-    // 4. Create Filter from where_condition if present
+    // 5. Create Filter from where_condition if present
     if let Some(where_expr) = select_stmt.where_condition {
         // Convert sqlparser Expr to ScalarExpr for the filter predicate
         // For now, we'll keep the original expression in the Filter node
@@ -192,7 +210,7 @@ pub fn create_logical_plan(
         current_index += 1;
     }
 
-    // 5. Create Project from select_fields
+    // 6. Create Project from select_fields
     let mut project_fields = Vec::new();
     for select_field in select_stmt.select_fields.iter() {
         let field_name = select_field

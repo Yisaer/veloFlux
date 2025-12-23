@@ -5,3 +5,6 @@ edition = "2024"
 
 [dependencies]
 sqlparser = { version = "0.40", features = ["serde", "visitor"] }
+
+[dev-dependencies]
+serde_json = "1.0"

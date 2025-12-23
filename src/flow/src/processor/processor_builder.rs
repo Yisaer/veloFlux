@@ -9,12 +9,14 @@ use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::expr::scalar::ColumnRef;
 use crate::expr::ScalarExpr;
 use crate::planner::physical::PhysicalPlan;
+use crate::stateful::StatefulFunctionRegistry;
 use crate::processor::{
     AggregationProcessor, BatchProcessor, ControlSignal, ControlSourceProcessor,
     DataSourceProcessor, DecoderProcessor, EncoderProcessor, FilterProcessor, Processor,
     ProcessorError, ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor,
-    SlidingWindowProcessor, StateWindowProcessor, StreamData, StreamingAggregationProcessor,
-    StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
+    SlidingWindowProcessor, StateWindowProcessor, StatefulFunctionProcessor, StreamData,
+    StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
+    WatermarkProcessor,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -37,6 +39,8 @@ pub enum PlanProcessor {
     SharedSource(SharedStreamProcessor),
     /// ProjectProcessor created from PhysicalProject
     Project(ProjectProcessor),
+    /// StatefulFunctionProcessor created from PhysicalStatefulFunction
+    StatefulFunction(StatefulFunctionProcessor),
     /// FilterProcessor created from PhysicalFilter
     Filter(FilterProcessor),
     /// BatchProcessor inserted before encoders when batching enabled
@@ -68,6 +72,7 @@ struct ProcessorBuilderContext {
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
+    stateful_registry: Arc<StatefulFunctionRegistry>,
     shared_source_required_columns: HashMap<String, Vec<String>>,
 }
 
@@ -78,6 +83,7 @@ impl ProcessorBuilderContext {
         encoder_registry: Arc<EncoderRegistry>,
         decoder_registry: Arc<DecoderRegistry>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
+        stateful_registry: Arc<StatefulFunctionRegistry>,
         shared_source_required_columns: HashMap<String, Vec<String>>,
     ) -> Self {
         Self {
@@ -86,6 +92,7 @@ impl ProcessorBuilderContext {
             encoder_registry,
             decoder_registry,
             aggregate_registry,
+            stateful_registry,
             shared_source_required_columns,
         }
     }
@@ -110,6 +117,10 @@ impl ProcessorBuilderContext {
         Arc::clone(&self.aggregate_registry)
     }
 
+    fn stateful_registry(&self) -> Arc<StatefulFunctionRegistry> {
+        Arc::clone(&self.stateful_registry)
+    }
+
     fn shared_required_columns(&self, source_name: &str) -> Option<Vec<String>> {
         self.shared_source_required_columns
             .get(source_name)
@@ -126,6 +137,7 @@ impl PlanProcessor {
             PlanProcessor::Decoder(p) => p.id(),
             PlanProcessor::SharedSource(p) => p.id(),
             PlanProcessor::Project(p) => p.id(),
+            PlanProcessor::StatefulFunction(p) => p.id(),
             PlanProcessor::Filter(p) => p.id(),
             PlanProcessor::Batch(p) => p.id(),
             PlanProcessor::Encoder(p) => p.id(),
@@ -154,6 +166,7 @@ impl PlanProcessor {
             PlanProcessor::Decoder(p) => p.start(),
             PlanProcessor::SharedSource(p) => p.start(),
             PlanProcessor::Project(p) => p.start(),
+            PlanProcessor::StatefulFunction(p) => p.start(),
             PlanProcessor::Filter(p) => p.start(),
             PlanProcessor::Batch(p) => p.start(),
             PlanProcessor::Encoder(p) => p.start(),
@@ -176,6 +189,7 @@ impl PlanProcessor {
             PlanProcessor::Decoder(p) => p.subscribe_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_output(),
             PlanProcessor::Project(p) => p.subscribe_output(),
+            PlanProcessor::StatefulFunction(p) => p.subscribe_output(),
             PlanProcessor::Filter(p) => p.subscribe_output(),
             PlanProcessor::Batch(p) => p.subscribe_output(),
             PlanProcessor::Encoder(p) => p.subscribe_output(),
@@ -198,6 +212,7 @@ impl PlanProcessor {
             PlanProcessor::Decoder(p) => p.subscribe_control_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_control_output(),
             PlanProcessor::Project(p) => p.subscribe_control_output(),
+            PlanProcessor::StatefulFunction(p) => p.subscribe_control_output(),
             PlanProcessor::Filter(p) => p.subscribe_control_output(),
             PlanProcessor::Batch(p) => p.subscribe_control_output(),
             PlanProcessor::Encoder(p) => p.subscribe_control_output(),
@@ -220,6 +235,7 @@ impl PlanProcessor {
             PlanProcessor::Decoder(p) => p.add_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_input(receiver),
             PlanProcessor::Project(p) => p.add_input(receiver),
+            PlanProcessor::StatefulFunction(p) => p.add_input(receiver),
             PlanProcessor::Filter(p) => p.add_input(receiver),
             PlanProcessor::Batch(p) => p.add_input(receiver),
             PlanProcessor::Encoder(p) => p.add_input(receiver),
@@ -242,6 +258,7 @@ impl PlanProcessor {
             PlanProcessor::Decoder(p) => p.add_control_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_control_input(receiver),
             PlanProcessor::Project(p) => p.add_control_input(receiver),
+            PlanProcessor::StatefulFunction(p) => p.add_control_input(receiver),
             PlanProcessor::Filter(p) => p.add_control_input(receiver),
             PlanProcessor::Batch(p) => p.add_control_input(receiver),
             PlanProcessor::Encoder(p) => p.add_control_input(receiver),
@@ -536,6 +553,13 @@ fn collect_shared_source_requirements(
                 collect_columns_from_scalar_expr(scalar, requirements, all_sources);
             }
         }
+        PhysicalPlan::StatefulFunction(stateful) => {
+            for call in &stateful.calls {
+                for scalar in &call.arg_scalars {
+                    collect_columns_from_scalar_expr(scalar, requirements, all_sources);
+                }
+            }
+        }
         _ => {}
     }
 
@@ -668,6 +692,16 @@ fn create_processor_from_plan_node(
             let processor = ProjectProcessor::new(plan_name.clone(), Arc::new(project.clone()));
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Project(processor),
+            ))
+        }
+        PhysicalPlan::StatefulFunction(stateful) => {
+            let processor = StatefulFunctionProcessor::new(
+                plan_name.clone(),
+                Arc::new(stateful.clone()),
+                context.stateful_registry(),
+            )?;
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::StatefulFunction(processor),
             ))
         }
         PhysicalPlan::Aggregation(aggregation) => {
@@ -1041,6 +1075,7 @@ pub fn create_processor_pipeline(
     encoder_registry: Arc<EncoderRegistry>,
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
+    stateful_registry: Arc<StatefulFunctionRegistry>,
 ) -> Result<ProcessorPipeline, ProcessorError> {
     let mut control_source = ControlSourceProcessor::new("control_source");
     let (pipeline_input_sender, pipeline_input_receiver) = mpsc::channel(100);
@@ -1059,6 +1094,7 @@ pub fn create_processor_pipeline(
         encoder_registry,
         decoder_registry,
         aggregate_registry,
+        stateful_registry,
         shared_required_columns,
     );
     build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map, &context)?;
@@ -1160,12 +1196,14 @@ mod tests {
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let context = ProcessorBuilderContext::new(
             MqttClientManager::new(),
             connector_registry,
             encoder_registry,
             decoder_registry,
             aggregate_registry,
+            stateful_registry,
             HashMap::new(),
         );
         let result = create_processor_from_plan_node(&physical_project, &context)

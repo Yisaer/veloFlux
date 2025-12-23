@@ -3,8 +3,11 @@ use sqlparser::parser::Parser;
 
 use crate::aggregate_registry::{AggregateRegistry, default_aggregate_registry};
 use crate::aggregate_transformer::transform_aggregate_functions;
+use crate::col_placeholder_allocator::ColPlaceholderAllocator;
 use crate::dialect::StreamDialect;
 use crate::select_stmt::{SelectField, SelectStmt};
+use crate::stateful_registry::{StatefulRegistry, default_stateful_registry};
+use crate::stateful_transformer::transform_stateful_functions;
 use crate::visitor::TableInfoVisitor;
 use std::sync::Arc;
 
@@ -12,19 +15,28 @@ use std::sync::Arc;
 pub struct StreamSqlParser {
     dialect: StreamDialect,
     aggregate_registry: Arc<dyn AggregateRegistry>,
+    stateful_registry: Arc<dyn StatefulRegistry>,
 }
 
 impl StreamSqlParser {
     /// Create a new StreamSqlParser
     pub fn new() -> Self {
-        Self::with_registry(default_aggregate_registry())
+        Self::with_registries(default_aggregate_registry(), default_stateful_registry())
     }
 
     /// Create a StreamSqlParser with a specific aggregate registry
     pub fn with_registry(aggregate_registry: Arc<dyn AggregateRegistry>) -> Self {
+        Self::with_registries(aggregate_registry, default_stateful_registry())
+    }
+
+    pub fn with_registries(
+        aggregate_registry: Arc<dyn AggregateRegistry>,
+        stateful_registry: Arc<dyn StatefulRegistry>,
+    ) -> Self {
         Self {
             dialect: StreamDialect::new(),
             aggregate_registry,
+            stateful_registry,
         }
     }
 
@@ -51,9 +63,22 @@ impl StreamSqlParser {
         select_stmt.window = window;
         select_stmt.group_by_exprs = group_by_exprs;
 
-        // Transform aggregate functions in one step (search + replace)
-        let (transformed_stmt, _aggregate_mappings) =
-            transform_aggregate_functions(select_stmt, Arc::clone(&self.aggregate_registry))?;
+        let mut allocator = ColPlaceholderAllocator::new();
+
+        // Transform stateful functions first (search + replace, with dedup).
+        // This enables cases like last_row(lag(a)) where a stateful call appears inside an aggregate.
+        let (select_stmt, _stateful_mappings) = transform_stateful_functions(
+            select_stmt,
+            Arc::clone(&self.stateful_registry),
+            &mut allocator,
+        )?;
+
+        // Transform aggregate functions after stateful rewrite.
+        let (transformed_stmt, _aggregate_mappings) = transform_aggregate_functions(
+            select_stmt,
+            Arc::clone(&self.aggregate_registry),
+            &mut allocator,
+        )?;
 
         Ok(transformed_stmt)
     }
@@ -144,6 +169,15 @@ pub fn parse_sql_with_registry(
     aggregate_registry: Arc<dyn AggregateRegistry>,
 ) -> Result<SelectStmt, String> {
     let parser = StreamSqlParser::with_registry(aggregate_registry);
+    parser.parse(sql)
+}
+
+pub fn parse_sql_with_registries(
+    sql: &str,
+    aggregate_registry: Arc<dyn AggregateRegistry>,
+    stateful_registry: Arc<dyn StatefulRegistry>,
+) -> Result<SelectStmt, String> {
+    let parser = StreamSqlParser::with_registries(aggregate_registry, stateful_registry);
     parser.parse(sql)
 }
 

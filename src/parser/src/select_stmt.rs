@@ -27,6 +27,8 @@ pub struct SelectStmt {
     pub window: Option<Window>,
     /// Aggregate function mappings: column name -> original aggregate expression
     pub aggregate_mappings: HashMap<String, Expr>,
+    /// Stateful function mappings: column name -> original stateful expression
+    pub stateful_mappings: HashMap<String, Expr>,
     /// Information about the data sources (tables) accessed
     pub source_infos: Vec<SourceInfo>,
 }
@@ -52,6 +54,7 @@ impl SelectStmt {
             group_by_exprs: Vec::new(),
             window: None,
             aggregate_mappings: HashMap::new(),
+            stateful_mappings: HashMap::new(),
             source_infos: Vec::new(),
         }
     }
@@ -65,6 +68,7 @@ impl SelectStmt {
             group_by_exprs: Vec::new(),
             window: None,
             aggregate_mappings: HashMap::new(),
+            stateful_mappings: HashMap::new(),
             source_infos: Vec::new(),
         }
     }
@@ -82,6 +86,7 @@ impl SelectStmt {
             group_by_exprs: Vec::new(),
             window: None,
             aggregate_mappings: HashMap::new(),
+            stateful_mappings: HashMap::new(),
             source_infos: Vec::new(),
         }
     }
