@@ -1,14 +1,10 @@
+pub mod registry;
 pub mod string_func;
 
 use crate::expr::func::EvalError;
 use datatypes::Value;
+pub use registry::{CustomFuncRegistry, CustomFuncRegistryError};
 pub use string_func::ConcatFunc;
-
-/// List of functions that can be called through CallFunc (custom functions)
-pub const CUSTOM_FUNCTIONS: &[&str] = &[
-    "concat",
-    // Add more custom functions here as they are implemented
-];
 
 /// Custom function that can be implemented by users
 /// This trait allows users to define their own functions for evaluation

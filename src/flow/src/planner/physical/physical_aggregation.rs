@@ -1,5 +1,8 @@
 use crate::aggregation::AggregateFunctionRegistry;
-use crate::expr::sql_conversion::{convert_expr_to_scalar_with_bindings, SchemaBinding};
+use crate::expr::custom_func::CustomFuncRegistry;
+use crate::expr::sql_conversion::{
+    convert_expr_to_scalar_with_bindings_and_custom_registry, SchemaBinding,
+};
 use crate::expr::ScalarExpr;
 use crate::planner::physical::BasePhysicalPlan;
 use sqlparser::ast::Expr;
@@ -44,18 +47,29 @@ impl PhysicalAggregation {
         index: i64,
         bindings: &SchemaBinding,
         aggregate_registry: &AggregateFunctionRegistry,
+        custom_func_registry: &CustomFuncRegistry,
     ) -> Result<Self, String> {
         let mut aggregate_calls = Vec::new();
         for (output_column, expr) in &aggregate_mappings {
-            let call = build_aggregate_call(output_column, expr, bindings, aggregate_registry)?;
+            let call = build_aggregate_call(
+                output_column,
+                expr,
+                bindings,
+                aggregate_registry,
+                custom_func_registry,
+            )?;
             aggregate_calls.push(call);
         }
 
         let mut group_by_scalars = Vec::new();
         for expr in &group_by_exprs {
             group_by_scalars.push(
-                convert_expr_to_scalar_with_bindings(expr, bindings)
-                    .map_err(|err| err.to_string())?,
+                convert_expr_to_scalar_with_bindings_and_custom_registry(
+                    expr,
+                    bindings,
+                    custom_func_registry,
+                )
+                .map_err(|err| err.to_string())?,
             );
         }
 
@@ -74,6 +88,7 @@ fn build_aggregate_call(
     expr: &Expr,
     bindings: &SchemaBinding,
     aggregate_registry: &AggregateFunctionRegistry,
+    custom_func_registry: &CustomFuncRegistry,
 ) -> Result<AggregateCall, String> {
     match expr {
         Expr::Function(func) => {
@@ -82,12 +97,13 @@ fn build_aggregate_call(
                 return Err(format!("Unsupported aggregate function: {}", func_name));
             }
 
-            let args = extract_aggregate_args(func.args.as_slice(), bindings).map_err(|err| {
-                format!(
-                    "Failed to compile aggregate argument for {}: {}",
-                    output_column, err
-                )
-            })?;
+            let args = extract_aggregate_args(func.args.as_slice(), bindings, custom_func_registry)
+                .map_err(|err| {
+                    format!(
+                        "Failed to compile aggregate argument for {}: {}",
+                        output_column, err
+                    )
+                })?;
 
             Ok(AggregateCall {
                 output_column: output_column.to_string(),
@@ -106,12 +122,18 @@ fn build_aggregate_call(
 fn extract_aggregate_args(
     args: &[FunctionArg],
     bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
 ) -> Result<Vec<ScalarExpr>, String> {
     let mut compiled_args = Vec::new();
     for arg in args {
         let expr = function_arg_to_expr(arg)?;
         compiled_args.push(
-            convert_expr_to_scalar_with_bindings(&expr, bindings).map_err(|err| err.to_string())?,
+            convert_expr_to_scalar_with_bindings_and_custom_registry(
+                &expr,
+                bindings,
+                custom_func_registry,
+            )
+            .map_err(|err| err.to_string())?,
         );
     }
     Ok(compiled_args)

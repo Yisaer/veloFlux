@@ -8,8 +8,8 @@ pub mod aggregation;
 pub mod datasource;
 pub mod filter;
 pub mod project;
-pub mod stateful_function;
 pub mod sink;
+pub mod stateful_function;
 pub mod tail;
 pub mod window;
 
@@ -18,8 +18,8 @@ pub use aggregation::Aggregation;
 pub use datasource::DataSource;
 pub use filter::Filter;
 pub use project::Project;
-pub use stateful_function::StatefulFunctionPlan;
 pub use sink::DataSinkPlan;
+pub use stateful_function::StatefulFunctionPlan;
 pub use tail::TailPlan;
 pub use window::{LogicalWindow, LogicalWindowSpec, TimeUnit};
 

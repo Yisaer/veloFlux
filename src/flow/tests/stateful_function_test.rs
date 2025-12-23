@@ -74,10 +74,7 @@ async fn stateful_lag_basic() {
                 .iter()
                 .map(|row| row.value_by_name("", "prev").expect("prev").clone())
                 .collect();
-            assert_eq!(
-                values,
-                vec![Value::Null, Value::Int64(1), Value::Int64(2)]
-            );
+            assert_eq!(values, vec![Value::Null, Value::Int64(1), Value::Int64(2)]);
         }
         other => panic!("expected collection, got {}", other.description()),
     }
@@ -114,9 +111,9 @@ async fn stateful_custom_function_registration() {
             input_types: &[ConcreteDatatype],
         ) -> Result<ConcreteDatatype, String> {
             match input_types.first() {
-                Some(ConcreteDatatype::Int64(_)) => Ok(ConcreteDatatype::Int64(
-                    datatypes::types::Int64Type,
-                )),
+                Some(ConcreteDatatype::Int64(_)) => {
+                    Ok(ConcreteDatatype::Int64(datatypes::types::Int64Type))
+                }
                 Some(other) => Err(format!("add_one expects Int64, got {other:?}")),
                 None => Err("add_one expects 1 argument".to_string()),
             }
@@ -171,7 +168,10 @@ async fn stateful_custom_function_registration() {
                 .iter()
                 .map(|row| row.value_by_name("", "b").expect("b").clone())
                 .collect();
-            assert_eq!(values, vec![Value::Int64(2), Value::Int64(3), Value::Int64(4)]);
+            assert_eq!(
+                values,
+                vec![Value::Int64(2), Value::Int64(3), Value::Int64(4)]
+            );
         }
         other => panic!("expected collection, got {}", other.description()),
     }
@@ -364,10 +364,7 @@ async fn stateful_nested_inside_aggregate_countwindow() {
             StreamData::Collection(collection) => {
                 assert_eq!(collection.num_rows(), 1);
                 let row = &collection.rows()[0];
-                let sum = row
-                    .value_by_name("", "sum(a)")
-                    .expect("sum(a)")
-                    .clone();
+                let sum = row.value_by_name("", "sum(a)").expect("sum(a)").clone();
                 assert_eq!(sum, Value::Int64(expected_sum));
 
                 let last = row

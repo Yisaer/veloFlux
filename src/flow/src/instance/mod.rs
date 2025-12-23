@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::aggregation::AggregateFunctionRegistry;
 use crate::aggregation::AggregateFunction;
+use crate::aggregation::AggregateFunctionRegistry;
 use crate::catalog::{Catalog, CatalogError, StreamDefinition, StreamProps};
 use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry};
 use crate::connector::{
     ConnectorError, ConnectorRegistry, MqttClientManager, SharedMqttClientConfig,
 };
+use crate::expr::custom_func::{CustomFunc, CustomFuncRegistry, CustomFuncRegistryError};
 use crate::pipeline::{PipelineDefinition, PipelineError, PipelineManager, PipelineSnapshot};
 use crate::processor::ProcessorPipeline;
 use crate::shared_stream::{
@@ -33,6 +34,7 @@ pub struct FlowInstance {
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     stateful_registry: Arc<StatefulFunctionRegistry>,
+    custom_func_registry: Arc<CustomFuncRegistry>,
 }
 
 impl FlowInstance {
@@ -46,6 +48,7 @@ impl FlowInstance {
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
+        let custom_func_registry = CustomFuncRegistry::with_builtins();
         let pipeline_manager = Arc::new(PipelineManager::new(
             Arc::clone(&catalog),
             shared_stream_registry,
@@ -55,6 +58,7 @@ impl FlowInstance {
             Arc::clone(&encoder_registry),
             Arc::clone(&aggregate_registry),
             Arc::clone(&stateful_registry),
+            Arc::clone(&custom_func_registry),
         ));
         Self {
             catalog,
@@ -67,6 +71,7 @@ impl FlowInstance {
             decoder_registry,
             aggregate_registry,
             stateful_registry,
+            custom_func_registry,
         }
     }
 
@@ -83,6 +88,17 @@ impl FlowInstance {
 
     pub fn register_aggregate_function(&self, function: Arc<dyn AggregateFunction>) {
         self.aggregate_registry.register_function(function);
+    }
+
+    pub fn custom_func_registry(&self) -> Arc<CustomFuncRegistry> {
+        Arc::clone(&self.custom_func_registry)
+    }
+
+    pub fn register_custom_func(
+        &self,
+        function: Arc<dyn CustomFunc>,
+    ) -> Result<(), CustomFuncRegistryError> {
+        self.custom_func_registry.register_function(function)
     }
 
     /// Create a stream definition and optionally attach a shared stream runtime.
@@ -303,12 +319,13 @@ impl FlowInstance {
     }
 
     fn pipeline_registries(&self) -> PipelineRegistries {
-        PipelineRegistries::new_with_stateful_registry(
+        PipelineRegistries::new_with_stateful_and_custom_registries(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
             Arc::clone(&self.stateful_registry),
+            Arc::clone(&self.custom_func_registry),
         )
     }
 

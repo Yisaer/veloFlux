@@ -1,3 +1,4 @@
+use crate::expr::custom_func::CustomFuncRegistry;
 use crate::expr::ScalarExpr;
 use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
 use sqlparser::ast::Expr;
@@ -41,13 +42,16 @@ impl PhysicalProjectField {
         field_name: String,
         original_expr: Expr,
         bindings: &crate::expr::sql_conversion::SchemaBinding,
+        custom_func_registry: &CustomFuncRegistry,
     ) -> Result<Self, String> {
         // Compile the sqlparser expression to ScalarExpr
-        let compiled_expr = crate::expr::sql_conversion::convert_expr_to_scalar_with_bindings(
-            &original_expr,
-            bindings,
-        )
-        .map_err(|e| format!("Failed to compile expression: {}", e))?;
+        let compiled_expr =
+            crate::expr::sql_conversion::convert_expr_to_scalar_with_bindings_and_custom_registry(
+                &original_expr,
+                bindings,
+                custom_func_registry,
+            )
+            .map_err(|e| format!("Failed to compile expression: {}", e))?;
 
         Ok(Self {
             field_name,

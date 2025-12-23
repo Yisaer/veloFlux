@@ -235,9 +235,12 @@ mod tests {
 
         let mut allocator = ColPlaceholderAllocator::new();
         // Transform aggregate functions (now with direct in-place replacement!)
-        let (transformed_stmt, aggregate_mappings) =
-            transform_aggregate_functions(select_stmt, default_aggregate_registry(), &mut allocator)
-                .expect("Should transform successfully");
+        let (transformed_stmt, aggregate_mappings) = transform_aggregate_functions(
+            select_stmt,
+            default_aggregate_registry(),
+            &mut allocator,
+        )
+        .expect("Should transform successfully");
 
         // Verify results
         assert_eq!(aggregate_mappings.len(), 1);

@@ -5,6 +5,7 @@ use crate::connector::{
     register_mock_source_handle, ConnectorRegistry, MockSourceConnector, MqttClientManager,
     MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
+use crate::expr::custom_func::CustomFuncRegistry;
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan;
 use crate::planner::plan_cache::{logical_plan_from_ir, sources_from_logical_ir, LogicalPlanIR};
@@ -217,6 +218,7 @@ pub struct PipelineManager {
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     stateful_registry: Arc<StatefulFunctionRegistry>,
+    custom_func_registry: Arc<CustomFuncRegistry>,
 }
 
 impl PipelineManager {
@@ -229,6 +231,7 @@ impl PipelineManager {
         encoder_registry: Arc<EncoderRegistry>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         stateful_registry: Arc<StatefulFunctionRegistry>,
+        custom_func_registry: Arc<CustomFuncRegistry>,
     ) -> Self {
         Self {
             pipelines: RwLock::new(HashMap::new()),
@@ -240,6 +243,7 @@ impl PipelineManager {
             decoder_registry,
             aggregate_registry,
             stateful_registry,
+            custom_func_registry,
         }
     }
 
@@ -249,12 +253,13 @@ impl PipelineManager {
         definition: PipelineDefinition,
     ) -> Result<PipelineSnapshot, PipelineError> {
         let pipeline_id = definition.id().to_string();
-        let registries = PipelineRegistries::new_with_stateful_registry(
+        let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
             Arc::clone(&self.stateful_registry),
+            Arc::clone(&self.custom_func_registry),
         );
         let (pipeline, streams) = build_pipeline_runtime(
             &definition,
@@ -284,12 +289,13 @@ impl PipelineManager {
         definition: PipelineDefinition,
     ) -> Result<(PipelineSnapshot, Vec<u8>), PipelineError> {
         let pipeline_id = definition.id().to_string();
-        let registries = PipelineRegistries::new_with_stateful_registry(
+        let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
             Arc::clone(&self.stateful_registry),
+            Arc::clone(&self.custom_func_registry),
         );
         let (pipeline, streams, logical_ir) = build_pipeline_runtime_with_logical_ir(
             &definition,
@@ -367,12 +373,13 @@ impl PipelineManager {
             }
         }
 
-        let registries = PipelineRegistries::new_with_stateful_registry(
+        let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
             Arc::clone(&self.stateful_registry),
+            Arc::clone(&self.custom_func_registry),
         );
 
         let (pipeline, streams) = build_pipeline_runtime_from_logical_ir(
@@ -421,12 +428,13 @@ impl PipelineManager {
 
         let sinks =
             build_sinks_from_definition(&definition).map_err(PipelineError::BuildFailure)?;
-        let registries = PipelineRegistries::new_with_stateful_registry(
+        let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
             Arc::clone(&self.stateful_registry),
+            Arc::clone(&self.custom_func_registry),
         );
 
         explain_pipeline(
@@ -856,6 +864,7 @@ mod tests {
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
+        let custom_func_registry = CustomFuncRegistry::with_builtins();
         install_stream(&catalog, "test_stream");
         let manager = PipelineManager::new(
             Arc::clone(&catalog),
@@ -866,6 +875,7 @@ mod tests {
             Arc::clone(&encoder_registry),
             Arc::clone(&aggregate_registry),
             Arc::clone(&stateful_registry),
+            Arc::clone(&custom_func_registry),
         );
         let snapshot = manager
             .create_pipeline(sample_pipeline("pipe_a", "test_stream"))
@@ -890,6 +900,7 @@ mod tests {
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
+        let custom_func_registry = CustomFuncRegistry::with_builtins();
         install_stream(&catalog, "dup_stream");
         let manager = PipelineManager::new(
             Arc::clone(&catalog),
@@ -900,6 +911,7 @@ mod tests {
             encoder_registry,
             aggregate_registry,
             stateful_registry,
+            custom_func_registry,
         );
         manager
             .create_pipeline(sample_pipeline("dup_pipe", "dup_stream"))
