@@ -33,7 +33,9 @@ pub fn transform_aggregate_functions(
         )?;
 
         if !field_aggregates.is_empty() && field.alias.is_none() {
-            field.alias = Some(field.expr.to_string());
+            // Preserve the original (pre-rewrite) expression name so downstream plans/projects
+            // expose user-facing field names even after placeholder replacement.
+            field.alias = Some(field.field_name.clone());
         }
         // Update the field expression
         field.expr = new_expr;

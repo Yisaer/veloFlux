@@ -65,17 +65,18 @@ impl StreamSqlParser {
 
         let mut allocator = ColPlaceholderAllocator::new();
 
-        // Transform aggregate functions in one step (search + replace)
-        let (select_stmt, _aggregate_mappings) = transform_aggregate_functions(
+        // Transform stateful functions first (search + replace, with dedup).
+        // This enables cases like last_row(lag(a)) where a stateful call appears inside an aggregate.
+        let (select_stmt, _stateful_mappings) = transform_stateful_functions(
             select_stmt,
-            Arc::clone(&self.aggregate_registry),
+            Arc::clone(&self.stateful_registry),
             &mut allocator,
         )?;
 
-        // Transform stateful functions (search + replace, with dedup)
-        let (transformed_stmt, _stateful_mappings) = transform_stateful_functions(
+        // Transform aggregate functions after stateful rewrite.
+        let (transformed_stmt, _aggregate_mappings) = transform_aggregate_functions(
             select_stmt,
-            Arc::clone(&self.stateful_registry),
+            Arc::clone(&self.aggregate_registry),
             &mut allocator,
         )?;
 

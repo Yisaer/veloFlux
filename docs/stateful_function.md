@@ -153,6 +153,15 @@ Add:
 
 Inserted after `DataSource` and before `Window`.
 
+## Rewrite Order Note
+
+The parser applies rewrites in this order:
+
+1. Stateful rewrite (so nested calls like `last_row(lag(a))` get their `lag(a)` replaced first)
+2. Aggregate rewrite
+
+Both rewrites share the same `ColPlaceholderAllocator` to ensure `col_$index` does not collide.
+
 ### Physical plan
 
 Add:
@@ -201,4 +210,3 @@ Add focused tests that assert:
   - `StatefulFunction` is inserted between `DataSource` and `Window`.
 - End-to-end evaluation:
   - `SELECT lag(a) FROM stream` yields `[NULL, a1, a2, ...]` for an input sequence.
-

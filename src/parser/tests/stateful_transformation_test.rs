@@ -121,12 +121,11 @@ fn case_8_aggregate_and_stateful_share_allocator_and_dedup() {
         "SELECT sum(a) + lag(b) FROM stream WHERE lag(b) > 0 GROUP BY c HAVING sum(a) > 0",
     );
     let expected = json!({
-        "select_exprs": ["col_1 + col_2"],
-        "where": "col_2 > 0",
-        "having": "col_1 > 0",
-        "aggregate_mappings": [{ "col": "col_1", "expr": "sum(a)" }],
-        "stateful_mappings": [{ "col": "col_2", "expr": "lag(b)" }],
+        "select_exprs": ["col_2 + col_1"],
+        "where": "col_1 > 0",
+        "having": "col_2 > 0",
+        "aggregate_mappings": [{ "col": "col_2", "expr": "sum(a)" }],
+        "stateful_mappings": [{ "col": "col_1", "expr": "lag(b)" }],
     });
     assert_eq!(got, expected);
 }
-

@@ -138,7 +138,11 @@ fn build_physical_plan_from_sql(
     shared_stream_registry: &SharedStreamRegistry,
     registries: &PipelineRegistries,
 ) -> Result<Arc<planner::physical::PhysicalPlan>, Box<dyn std::error::Error>> {
-    let select_stmt = parser::parse_sql_with_registry(sql, registries.aggregate_registry())?;
+    let select_stmt = parser::parse_sql_with_registries(
+        sql,
+        registries.aggregate_registry(),
+        registries.stateful_registry(),
+    )?;
     let (schema_binding, stream_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
@@ -265,7 +269,11 @@ pub fn explain_pipeline(
     shared_stream_registry: &SharedStreamRegistry,
     registries: &PipelineRegistries,
 ) -> Result<PipelineExplain, Box<dyn std::error::Error>> {
-    let select_stmt = parser::parse_sql_with_registry(sql, registries.aggregate_registry())?;
+    let select_stmt = parser::parse_sql_with_registries(
+        sql,
+        registries.aggregate_registry(),
+        registries.stateful_registry(),
+    )?;
     let (schema_binding, stream_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
