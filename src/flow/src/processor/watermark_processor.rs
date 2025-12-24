@@ -534,14 +534,14 @@ impl Ord for HeapItem {
 /// This processor buffers out-of-order tuples and emits:
 /// - ordered `StreamData::Collection(RecordBatch)` (non-decreasing tuple.timestamp)
 /// - monotonic `StreamData::Watermark`
-/// Late events (`ts <= current_watermark`) are dropped.
+///   Late events (`ts <= current_watermark`) are dropped.
 pub struct EventtimeWatermarkProcessor {
     id: String,
     inputs: Vec<broadcast::Receiver<StreamData>>,
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
-    late_tolerance_nanos: u128,
+    state: EventtimeWatermarkState,
 }
 
 impl EventtimeWatermarkProcessor {
@@ -560,7 +560,7 @@ impl EventtimeWatermarkProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
-            late_tolerance_nanos: late_tolerance.as_nanos(),
+            state: EventtimeWatermarkState::new(late_tolerance),
         }
     }
 
@@ -596,82 +596,10 @@ impl Processor for EventtimeWatermarkProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
-        let late_tolerance_nanos = self.late_tolerance_nanos;
-        let mut current_watermark_nanos: u128 = 0;
-        let mut max_timestamp_seen_nanos: u128 = 0;
-        let mut buffer: BinaryHeap<Reverse<HeapItem>> = BinaryHeap::new();
-        let mut seq: u64 = 0;
+        let mut state = std::mem::take(&mut self.state);
 
         tracing::info!(processor_id = %id, "eventtime watermark processor starting");
         tokio::spawn(async move {
-            async fn flush_up_to(
-                id: &str,
-                output: &broadcast::Sender<StreamData>,
-                target: u128,
-                current_watermark_nanos: &mut u128,
-                buffer: &mut BinaryHeap<Reverse<HeapItem>>,
-            ) -> Result<(), ProcessorError> {
-                if target <= *current_watermark_nanos {
-                    return Ok(());
-                }
-
-                let mut out_rows = Vec::new();
-                while let Some(Reverse(head)) = buffer.peek() {
-                    if head.ts_nanos > target {
-                        break;
-                    }
-                    let Reverse(item) = buffer
-                        .pop()
-                        .expect("peek returned Some, pop must succeed");
-                    out_rows.push(item.tuple);
-                }
-
-                if !out_rows.is_empty() {
-                    match crate::model::RecordBatch::new(out_rows) {
-                        Ok(batch) => {
-                            send_with_backpressure(output, StreamData::collection(Box::new(batch)))
-                                .await?;
-                        }
-                        Err(err) => {
-                            forward_error(output, id, format!("eventtime batch build error: {err}"))
-                                .await?;
-                        }
-                    }
-                }
-
-                let watermark_ts = EventtimeWatermarkProcessor::from_nanos(target)?;
-                send_with_backpressure(output, StreamData::watermark(watermark_ts)).await?;
-                *current_watermark_nanos = target;
-                Ok(())
-            }
-
-            async fn flush_all(
-                id: &str,
-                output: &broadcast::Sender<StreamData>,
-                buffer: &mut BinaryHeap<Reverse<HeapItem>>,
-            ) -> Result<(), ProcessorError> {
-                if buffer.is_empty() {
-                    return Ok(());
-                }
-                let mut out_rows = Vec::with_capacity(buffer.len());
-                while let Some(Reverse(item)) = buffer.pop() {
-                    out_rows.push(item.tuple);
-                }
-                if out_rows.is_empty() {
-                    return Ok(());
-                }
-                match crate::model::RecordBatch::new(out_rows) {
-                    Ok(batch) => {
-                        send_with_backpressure(output, StreamData::collection(Box::new(batch))).await
-                    }
-                    Err(err) => {
-                        forward_error(output, id, format!("eventtime batch build error: {err}"))
-                            .await?;
-                        Ok(())
-                    }
-                }
-            }
-
             loop {
                 tokio::select! {
                     biased;
@@ -679,7 +607,19 @@ impl Processor for EventtimeWatermarkProcessor {
                         if let Some(Ok(control_signal)) = control_item {
                             let is_terminal = control_signal.is_terminal();
                             if matches!(control_signal, ControlSignal::StreamGracefulEnd) {
-                                flush_all(&id, &output, &mut buffer).await?;
+                                match state.on_graceful_end() {
+                                    Ok(step) => {
+                                        for err in step.errors {
+                                            forward_error(&output, &id, err).await?;
+                                        }
+                                        for item in step.outputs {
+                                            send_with_backpressure(&output, item).await?;
+                                        }
+                                    }
+                                    Err(err) => {
+                                        forward_error(&output, &id, format!("eventtime flush error: {err}")).await?;
+                                    }
+                                }
                             }
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -702,40 +642,44 @@ impl Processor for EventtimeWatermarkProcessor {
                                         continue;
                                     }
                                 };
-                                for tuple in rows {
-                                    let ts_nanos = match EventtimeWatermarkProcessor::to_nanos(tuple.timestamp) {
-                                        Ok(ts) => ts,
-                                        Err(err) => {
-                                            forward_error(&output, &id, format!("eventtime ingest error: {err}")).await?;
-                                            continue;
+                                match state.on_rows(rows) {
+                                    Ok(step) => {
+                                        for err in step.errors {
+                                            forward_error(&output, &id, err).await?;
                                         }
-                                    };
-                                    if ts_nanos <= current_watermark_nanos {
-                                        continue;
+                                        for item in step.outputs {
+                                            send_with_backpressure(&output, item).await?;
+                                        }
                                     }
-                                    max_timestamp_seen_nanos = std::cmp::max(max_timestamp_seen_nanos, ts_nanos);
-                                    buffer.push(Reverse(HeapItem {
-                                        ts_nanos,
-                                        seq,
-                                        tuple,
-                                    }));
-                                    seq = seq.wrapping_add(1);
+                                    Err(err) => {
+                                        forward_error(&output, &id, format!("eventtime ingest error: {err}")).await?;
+                                    }
                                 }
-                                let candidate = max_timestamp_seen_nanos.saturating_sub(late_tolerance_nanos);
-                                let target = std::cmp::max(current_watermark_nanos, candidate);
-                                flush_up_to(
-                                    &id,
+                            }
+                            Some(Ok(StreamData::Watermark(_))) => {
+                                forward_error(
                                     &output,
-                                    target,
-                                    &mut current_watermark_nanos,
-                                    &mut buffer,
+                                    &id,
+                                    "unexpected StreamData::Watermark input in eventtime watermark processor".to_string(),
                                 )
                                 .await?;
                             }
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
                                 if matches!(signal, ControlSignal::StreamGracefulEnd) {
-                                    flush_all(&id, &output, &mut buffer).await?;
+                                    match state.on_graceful_end() {
+                                        Ok(step) => {
+                                            for err in step.errors {
+                                                forward_error(&output, &id, err).await?;
+                                            }
+                                            for item in step.outputs {
+                                                send_with_backpressure(&output, item).await?;
+                                            }
+                                        }
+                                        Err(err) => {
+                                            forward_error(&output, &id, format!("eventtime flush error: {err}")).await?;
+                                        }
+                                    }
                                 }
                                 send_with_backpressure(&output, StreamData::control(signal)).await?;
                                 if is_terminal {
@@ -786,6 +730,127 @@ impl Processor for EventtimeWatermarkProcessor {
 
     fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
+    }
+}
+
+struct EventtimeStep {
+    outputs: Vec<StreamData>,
+    errors: Vec<String>,
+}
+
+#[derive(Debug)]
+struct EventtimeWatermarkState {
+    current_watermark_nanos: u128,
+    max_timestamp_seen_nanos: u128,
+    late_tolerance_nanos: u128,
+    buffer: BinaryHeap<Reverse<HeapItem>>,
+    seq: u64,
+}
+
+impl Default for EventtimeWatermarkState {
+    fn default() -> Self {
+        Self::new(Duration::ZERO)
+    }
+}
+
+impl EventtimeWatermarkState {
+    fn new(late_tolerance: Duration) -> Self {
+        Self {
+            current_watermark_nanos: 0,
+            max_timestamp_seen_nanos: 0,
+            late_tolerance_nanos: late_tolerance.as_nanos(),
+            buffer: BinaryHeap::new(),
+            seq: 0,
+        }
+    }
+
+    fn compute_target(&self) -> u128 {
+        let candidate = self
+            .max_timestamp_seen_nanos
+            .saturating_sub(self.late_tolerance_nanos);
+        std::cmp::max(self.current_watermark_nanos, candidate)
+    }
+
+    fn on_rows(&mut self, rows: Vec<crate::model::Tuple>) -> Result<EventtimeStep, ProcessorError> {
+        let mut errors = Vec::new();
+
+        for tuple in rows {
+            let ts_nanos = match EventtimeWatermarkProcessor::to_nanos(tuple.timestamp) {
+                Ok(ts) => ts,
+                Err(err) => {
+                    errors.push(err.to_string());
+                    continue;
+                }
+            };
+            if ts_nanos <= self.current_watermark_nanos {
+                continue;
+            }
+            self.max_timestamp_seen_nanos = std::cmp::max(self.max_timestamp_seen_nanos, ts_nanos);
+            self.buffer.push(Reverse(HeapItem {
+                ts_nanos,
+                seq: self.seq,
+                tuple,
+            }));
+            self.seq = self.seq.wrapping_add(1);
+        }
+
+        let target = self.compute_target();
+        let outputs = self.flush_up_to(target)?;
+        Ok(EventtimeStep { outputs, errors })
+    }
+
+    fn on_graceful_end(&mut self) -> Result<EventtimeStep, ProcessorError> {
+        let outputs = self.flush_all()?;
+        Ok(EventtimeStep {
+            outputs,
+            errors: Vec::new(),
+        })
+    }
+
+    fn flush_up_to(&mut self, target: u128) -> Result<Vec<StreamData>, ProcessorError> {
+        if target <= self.current_watermark_nanos {
+            return Ok(Vec::new());
+        }
+
+        let mut out_rows = Vec::new();
+        while let Some(Reverse(head)) = self.buffer.peek() {
+            if head.ts_nanos > target {
+                break;
+            }
+            let Reverse(item) = self
+                .buffer
+                .pop()
+                .expect("peek returned Some, pop must succeed");
+            out_rows.push(item.tuple);
+        }
+
+        let mut out = Vec::new();
+        if !out_rows.is_empty() {
+            let batch = crate::model::RecordBatch::new(out_rows)
+                .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+            out.push(StreamData::collection(Box::new(batch)));
+        }
+
+        let watermark_ts = EventtimeWatermarkProcessor::from_nanos(target)?;
+        out.push(StreamData::watermark(watermark_ts));
+        self.current_watermark_nanos = target;
+        Ok(out)
+    }
+
+    fn flush_all(&mut self) -> Result<Vec<StreamData>, ProcessorError> {
+        if self.buffer.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut out_rows = Vec::with_capacity(self.buffer.len());
+        while let Some(Reverse(item)) = self.buffer.pop() {
+            out_rows.push(item.tuple);
+        }
+        if out_rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let batch = crate::model::RecordBatch::new(out_rows)
+            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+        Ok(vec![StreamData::collection(Box::new(batch))])
     }
 }
 
@@ -938,5 +1003,83 @@ mod tests {
         }
         assert_eq!(saw_rows, vec![3]);
         assert_eq!(saw_watermark, Some(3));
+    }
+
+    #[test]
+    fn eventtime_state_computes_target_and_emits_watermarks() {
+        /*
+        Summary:
+        - Validates state transitions for event-time watermark computation:
+          - `max_seen` tracks the max tuple timestamp observed so far.
+          - `target = max(current_watermark, max_seen - late_tolerance)` advances monotonically.
+        - Validates output transitions when `target` advances:
+          - First emits a `Collection` containing all buffered tuples with `ts <= target`,
+            in non-decreasing `(ts, seq)` order.
+          - Then emits `Watermark(target)`.
+        */
+        let mut state = EventtimeWatermarkState::new(Duration::from_secs(1));
+
+        let step = state
+            .on_rows(vec![tuple_at(3), tuple_at(1), tuple_at(2)])
+            .expect("on_rows");
+        assert_eq!(state.current_watermark_nanos, Duration::from_secs(2).as_nanos());
+        assert!(step.errors.is_empty());
+        assert_eq!(step.outputs.len(), 2);
+        match &step.outputs[0] {
+            StreamData::Collection(collection) => {
+                let rows = collection.clone().into_rows().expect("rows");
+                let secs: Vec<u64> = rows
+                    .into_iter()
+                    .map(|t| t.timestamp.duration_since(UNIX_EPOCH).unwrap().as_secs())
+                    .collect();
+                assert_eq!(secs, vec![1, 2]);
+            }
+            _ => panic!("expected collection"),
+        }
+        match &step.outputs[1] {
+            StreamData::Watermark(ts) => {
+                assert_eq!(ts.duration_since(UNIX_EPOCH).unwrap().as_secs(), 2);
+            }
+            _ => panic!("expected watermark"),
+        }
+
+        let step = state.on_rows(vec![tuple_at(4)]).expect("on_rows");
+        assert_eq!(state.current_watermark_nanos, Duration::from_secs(3).as_nanos());
+        assert!(step.errors.is_empty());
+        assert_eq!(step.outputs.len(), 2);
+        match &step.outputs[0] {
+            StreamData::Collection(collection) => {
+                let rows = collection.clone().into_rows().expect("rows");
+                let secs: Vec<u64> = rows
+                    .into_iter()
+                    .map(|t| t.timestamp.duration_since(UNIX_EPOCH).unwrap().as_secs())
+                    .collect();
+                assert_eq!(secs, vec![3]);
+            }
+            _ => panic!("expected collection"),
+        }
+        match &step.outputs[1] {
+            StreamData::Watermark(ts) => {
+                assert_eq!(ts.duration_since(UNIX_EPOCH).unwrap().as_secs(), 3);
+            }
+            _ => panic!("expected watermark"),
+        }
+    }
+
+    #[test]
+    fn eventtime_state_drops_late_events() {
+        /*
+        Summary:
+        - Establishes a watermark (late_tolerance = 0) and then verifies late-drop semantics:
+          - Any tuple with `ts <= current_watermark` is considered late and dropped.
+          - Late drops do not advance watermark and do not emit outputs.
+        */
+        let mut state = EventtimeWatermarkState::new(Duration::from_secs(0));
+        let step = state.on_rows(vec![tuple_at(2)]).expect("on_rows");
+        assert_eq!(step.outputs.len(), 2);
+        assert_eq!(state.current_watermark_nanos, Duration::from_secs(2).as_nanos());
+
+        let step = state.on_rows(vec![tuple_at(2), tuple_at(1)]).expect("on_rows");
+        assert!(step.outputs.is_empty());
     }
 }
