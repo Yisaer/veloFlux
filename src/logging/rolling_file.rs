@@ -31,7 +31,7 @@ impl RollingFileWriter {
     }
 
     fn max_size_bytes(&self) -> u64 {
-        (self.cfg.rotation.max_size_mb as u64) * 1024 * 1024
+        self.cfg.rotation.max_size_mb * 1024 * 1024
     }
 
     fn maybe_rotate(&mut self, incoming_bytes: usize) -> io::Result<()> {
@@ -60,7 +60,7 @@ impl RollingFileWriter {
 
         let now = OffsetDateTime::now_utc()
             .replace_nanosecond(0)
-            .unwrap_or_else(|_| OffsetDateTime::UNIX_EPOCH);
+            .unwrap_or(OffsetDateTime::UNIX_EPOCH);
         let seq = next_seq_for_timestamp(dir, stem, now);
         let rotated_name = format_rotated_filename(stem, now, seq);
         let rotated_path = dir.join(rotated_name);
@@ -85,7 +85,7 @@ impl Write for RollingFileWriter {
         let written = self
             .file
             .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "log file not open"))?
+            .ok_or_else(|| io::Error::other("log file not open"))?
             .write(buf)?;
         self.bytes_written = self.bytes_written.saturating_add(written as u64);
         Ok(written)
@@ -94,7 +94,7 @@ impl Write for RollingFileWriter {
     fn flush(&mut self) -> io::Result<()> {
         self.file
             .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "log file not open"))?
+            .ok_or_else(|| io::Error::other("log file not open"))?
             .flush()
     }
 }
