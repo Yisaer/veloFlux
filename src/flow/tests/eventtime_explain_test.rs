@@ -89,6 +89,7 @@ fn explain_pipeline_with_eventtime_enabled_prints_plans() {
     println!("{rendered}");
     assert!(rendered.contains("Logical Plan Explain:"));
     assert!(rendered.contains("Physical Plan Explain:"));
+    assert!(rendered.contains("PhysicalEventtimeWatermark"));
     assert!(rendered.contains("mode=event_time"));
     assert!(rendered.contains("lateToleranceMs=5000"));
 }
