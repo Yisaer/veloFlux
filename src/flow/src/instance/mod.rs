@@ -8,6 +8,7 @@ use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry};
 use crate::connector::{
     ConnectorError, ConnectorRegistry, MqttClientManager, SharedMqttClientConfig,
 };
+use crate::eventtime::EventtimeTypeRegistry;
 use crate::expr::custom_func::{CustomFunc, CustomFuncRegistry, CustomFuncRegistryError};
 use crate::pipeline::{PipelineDefinition, PipelineError, PipelineManager, PipelineSnapshot};
 use crate::processor::ProcessorPipeline;
@@ -35,6 +36,7 @@ pub struct FlowInstance {
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     stateful_registry: Arc<StatefulFunctionRegistry>,
     custom_func_registry: Arc<CustomFuncRegistry>,
+    eventtime_type_registry: Arc<EventtimeTypeRegistry>,
 }
 
 impl FlowInstance {
@@ -49,6 +51,7 @@ impl FlowInstance {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let custom_func_registry = CustomFuncRegistry::with_builtins();
+        let eventtime_type_registry = EventtimeTypeRegistry::with_builtin_types();
         let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
             Arc::clone(&connector_registry),
             Arc::clone(&encoder_registry),
@@ -56,6 +59,7 @@ impl FlowInstance {
             Arc::clone(&aggregate_registry),
             Arc::clone(&stateful_registry),
             Arc::clone(&custom_func_registry),
+            Arc::clone(&eventtime_type_registry),
         );
         let pipeline_manager = Arc::new(PipelineManager::new(
             Arc::clone(&catalog),
@@ -75,11 +79,16 @@ impl FlowInstance {
             aggregate_registry,
             stateful_registry,
             custom_func_registry,
+            eventtime_type_registry,
         }
     }
 
     pub fn stateful_registry(&self) -> Arc<StatefulFunctionRegistry> {
         Arc::clone(&self.stateful_registry)
+    }
+
+    pub fn eventtime_type_registry(&self) -> Arc<EventtimeTypeRegistry> {
+        Arc::clone(&self.eventtime_type_registry)
     }
 
     pub fn register_stateful_function(
@@ -329,6 +338,7 @@ impl FlowInstance {
             Arc::clone(&self.aggregate_registry),
             Arc::clone(&self.stateful_registry),
             Arc::clone(&self.custom_func_registry),
+            Arc::clone(&self.eventtime_type_registry),
         )
     }
 

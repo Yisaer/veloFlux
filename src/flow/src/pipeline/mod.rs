@@ -781,6 +781,7 @@ mod tests {
     use crate::shared_stream::SharedStreamConfig;
     use crate::shared_stream_registry;
     use crate::stateful::StatefulFunctionRegistry;
+    use crate::EventtimeTypeRegistry;
     use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
     use serde_json::Map as JsonMap;
     use std::sync::Arc;
@@ -834,6 +835,7 @@ mod tests {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let custom_func_registry = CustomFuncRegistry::with_builtins();
+        let eventtime_type_registry = EventtimeTypeRegistry::with_builtin_types();
         install_stream(&catalog, "test_stream");
         let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
             Arc::clone(&connector_registry),
@@ -842,6 +844,7 @@ mod tests {
             Arc::clone(&aggregate_registry),
             Arc::clone(&stateful_registry),
             Arc::clone(&custom_func_registry),
+            Arc::clone(&eventtime_type_registry),
         );
         let manager = PipelineManager::new(
             Arc::clone(&catalog),
@@ -873,6 +876,7 @@ mod tests {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let custom_func_registry = CustomFuncRegistry::with_builtins();
+        let eventtime_type_registry = EventtimeTypeRegistry::with_builtin_types();
         install_stream(&catalog, "dup_stream");
         let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
             connector_registry,
@@ -881,6 +885,7 @@ mod tests {
             aggregate_registry,
             stateful_registry,
             custom_func_registry,
+            eventtime_type_registry,
         );
         let manager = PipelineManager::new(
             Arc::clone(&catalog),

@@ -2,6 +2,7 @@ pub mod aggregation;
 pub mod catalog;
 pub mod codec;
 pub mod connector;
+pub mod eventtime;
 pub mod expr;
 pub mod instance;
 pub mod model;
@@ -24,6 +25,9 @@ pub use datatypes::{
     BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type, Int32Type,
     Int64Type, Int8Type, ListType, Schema, StringType, StructField, StructType, Uint16Type,
     Uint32Type, Uint64Type, Uint8Type,
+};
+pub use eventtime::{
+    BuiltinEventtimeType, EventtimeParseError, EventtimeTypeParser, EventtimeTypeRegistry,
 };
 pub use expr::custom_func::{CustomFunc, CustomFuncRegistry, CustomFuncRegistryError};
 pub use expr::sql_conversion;
@@ -78,6 +82,7 @@ pub struct PipelineRegistries {
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     stateful_registry: Arc<StatefulFunctionRegistry>,
     custom_func_registry: Arc<CustomFuncRegistry>,
+    eventtime_type_registry: Arc<EventtimeTypeRegistry>,
 }
 
 impl PipelineRegistries {
@@ -94,6 +99,7 @@ impl PipelineRegistries {
             aggregate_registry,
             stateful_registry: StatefulFunctionRegistry::with_builtins(),
             custom_func_registry: CustomFuncRegistry::with_builtins(),
+            eventtime_type_registry: EventtimeTypeRegistry::with_builtin_types(),
         }
     }
 
@@ -111,6 +117,7 @@ impl PipelineRegistries {
             aggregate_registry,
             stateful_registry,
             custom_func_registry: CustomFuncRegistry::with_builtins(),
+            eventtime_type_registry: EventtimeTypeRegistry::with_builtin_types(),
         }
     }
 
@@ -121,6 +128,7 @@ impl PipelineRegistries {
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         stateful_registry: Arc<StatefulFunctionRegistry>,
         custom_func_registry: Arc<CustomFuncRegistry>,
+        eventtime_type_registry: Arc<EventtimeTypeRegistry>,
     ) -> Self {
         Self {
             connector_registry,
@@ -129,6 +137,7 @@ impl PipelineRegistries {
             aggregate_registry,
             stateful_registry,
             custom_func_registry,
+            eventtime_type_registry,
         }
     }
 
@@ -154,6 +163,10 @@ impl PipelineRegistries {
 
     pub fn custom_func_registry(&self) -> Arc<CustomFuncRegistry> {
         Arc::clone(&self.custom_func_registry)
+    }
+
+    pub fn eventtime_type_registry(&self) -> Arc<EventtimeTypeRegistry> {
+        Arc::clone(&self.eventtime_type_registry)
     }
 }
 

@@ -237,6 +237,7 @@ mod tests {
             props: crate::stream::StreamPropsRequest::default(),
             shared: false,
             decoder: crate::stream::DecoderConfigRequest::default(),
+            eventtime: None,
         }
     }
 
