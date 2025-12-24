@@ -8,8 +8,8 @@ use std::time::Duration;
 pub enum WatermarkStrategy {
     /// Emit watermarks based on wall clock/ticker.
     ProcessingTime { time_unit: TimeUnit, interval: u64 },
-    /// Forward upstream watermarks (event time).
-    External,
+    /// Event-time progression driven by upstream watermarks.
+    EventTime { late_tolerance: Duration },
 }
 
 impl WatermarkStrategy {
@@ -21,7 +21,7 @@ impl WatermarkStrategy {
             } => match time_unit {
                 TimeUnit::Seconds => Some(Duration::from_secs(*interval)),
             },
-            WatermarkStrategy::External => None,
+            WatermarkStrategy::EventTime { .. } => None,
         }
     }
 }

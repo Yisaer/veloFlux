@@ -377,6 +377,15 @@ pub fn explain_pipeline_with_options(
 
     let physical_plan =
         create_physical_plan(Arc::clone(&logical_plan), &pruned_binding, registries)?;
+    let mut physical_plan = physical_plan;
+    if options.eventtime.enabled {
+        crate::planner::physical::rewrite_watermark_strategy(
+            &mut physical_plan,
+            crate::planner::physical::WatermarkStrategy::EventTime {
+                late_tolerance: options.eventtime.late_tolerance,
+            },
+        );
+    }
     let optimized_plan = optimize_physical_plan(
         Arc::clone(&physical_plan),
         registries.encoder_registry().as_ref(),

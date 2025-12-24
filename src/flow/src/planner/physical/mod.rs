@@ -152,4 +152,41 @@ impl PhysicalPlan {
             child.print_topology(indent + 1);
         }
     }
+
+    fn children_mut(&mut self) -> &mut Vec<Arc<PhysicalPlan>> {
+        match self {
+            PhysicalPlan::DataSource(plan) => &mut plan.base.children,
+            PhysicalPlan::Decoder(plan) => &mut plan.base.children,
+            PhysicalPlan::StatefulFunction(plan) => &mut plan.base.children,
+            PhysicalPlan::Filter(plan) => &mut plan.base.children,
+            PhysicalPlan::Project(plan) => &mut plan.base.children,
+            PhysicalPlan::Aggregation(plan) => &mut plan.base.children,
+            PhysicalPlan::SharedStream(plan) => &mut plan.base.children,
+            PhysicalPlan::Batch(plan) => &mut plan.base.children,
+            PhysicalPlan::DataSink(plan) => &mut plan.base.children,
+            PhysicalPlan::Encoder(plan) => &mut plan.base.children,
+            PhysicalPlan::StreamingAggregation(plan) => &mut plan.base.children,
+            PhysicalPlan::StreamingEncoder(plan) => &mut plan.base.children,
+            PhysicalPlan::ResultCollect(plan) => &mut plan.base.children,
+            PhysicalPlan::TumblingWindow(plan) => &mut plan.base.children,
+            PhysicalPlan::CountWindow(plan) => &mut plan.base.children,
+            PhysicalPlan::SlidingWindow(plan) => &mut plan.base.children,
+            PhysicalPlan::StateWindow(plan) => &mut plan.base.children,
+            PhysicalPlan::Watermark(plan) => &mut plan.base.children,
+        }
+    }
+}
+
+pub fn rewrite_watermark_strategy(plan: &mut Arc<PhysicalPlan>, strategy: WatermarkStrategy) {
+    let plan_mut = Arc::make_mut(plan);
+    for child in plan_mut.children_mut() {
+        rewrite_watermark_strategy(child, strategy.clone());
+    }
+
+    if let PhysicalPlan::Watermark(watermark) = plan_mut {
+        match &mut watermark.config {
+            WatermarkConfig::Tumbling { strategy: s, .. } => *s = strategy,
+            WatermarkConfig::Sliding { strategy: s, .. } => *s = strategy,
+        }
+    }
 }
