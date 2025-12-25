@@ -1,14 +1,11 @@
 use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
-use flow::connector::ConnectorRegistry;
-use flow::eventtime::EventtimeTypeRegistry;
 use flow::pipeline::{EventtimeOptions, PipelineOptions, PlanCacheOptions};
 use flow::planner::sink::{
     NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
 };
 use flow::{
-    AggregateFunctionRegistry, Catalog, ColumnSchema, ConcreteDatatype, CustomFuncRegistry,
-    DecoderRegistry, EncoderRegistry, EventtimeDefinition, PipelineRegistries, SinkEncoderConfig,
-    StatefulFunctionRegistry,
+    Catalog, ColumnSchema, ConcreteDatatype, EventtimeDefinition, PipelineRegistries,
+    SinkEncoderConfig,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,22 +40,7 @@ fn explain_pipeline_with_eventtime_enabled_prints_plans() {
         )),
     );
 
-    let connector_registry = ConnectorRegistry::with_builtin_sinks();
-    let encoder_registry = EncoderRegistry::with_builtin_encoders();
-    let decoder_registry = DecoderRegistry::with_builtin_decoders();
-    let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-    let stateful_registry = StatefulFunctionRegistry::with_builtins();
-    let custom_func_registry = CustomFuncRegistry::with_builtins();
-    let eventtime_registry = EventtimeTypeRegistry::with_builtin_types();
-    let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
-        connector_registry,
-        encoder_registry,
-        decoder_registry,
-        aggregate_registry,
-        stateful_registry,
-        custom_func_registry,
-        eventtime_registry,
-    );
+    let registries = PipelineRegistries::new_with_builtin();
 
     let options = PipelineOptions {
         plan_cache: PlanCacheOptions { enabled: false },

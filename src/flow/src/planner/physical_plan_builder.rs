@@ -868,12 +868,10 @@ fn find_binding_entry<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::ConnectorRegistry;
     use crate::planner::logical::create_logical_plan;
     use crate::{
-        optimize_logical_plan, AggregateFunctionRegistry, DecoderRegistry, EncoderRegistry,
-        ExplainReport, MqttStreamProps, StatefulFunctionRegistry, StreamDecoderConfig,
-        StreamDefinition, StreamProps,
+        optimize_logical_plan, ExplainReport, MqttStreamProps, PipelineRegistries,
+        StreamDecoderConfig, StreamDefinition, StreamProps,
     };
     use datatypes::{
         ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
@@ -894,11 +892,6 @@ mod tests {
 
     #[test]
     fn physical_explain_reflects_pruned_struct_schema() {
-        use crate::codec::{DecoderRegistry, EncoderRegistry};
-        use crate::connector::ConnectorRegistry;
-        use crate::stateful::StatefulFunctionRegistry;
-        use crate::{AggregateFunctionRegistry, PipelineRegistries};
-
         let user_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
             StructField::new("c".to_string(), ConcreteDatatype::Int64(Int64Type), false),
             StructField::new("d".to_string(), ConcreteDatatype::String(StringType), false),
@@ -937,14 +930,7 @@ mod tests {
         let (optimized_logical, pruned_binding) =
             optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
 
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let registries = PipelineRegistries::new_with_stateful_registry(
-            ConnectorRegistry::with_builtin_sinks(),
-            Arc::clone(&encoder_registry),
-            DecoderRegistry::with_builtin_decoders(),
-            AggregateFunctionRegistry::with_builtins(),
-            StatefulFunctionRegistry::with_builtins(),
-        );
+        let registries = PipelineRegistries::new_with_builtin();
 
         let physical = crate::planner::create_physical_plan(
             Arc::clone(&optimized_logical),
@@ -960,11 +946,6 @@ mod tests {
 
     #[test]
     fn physical_explain_reflects_pruned_list_struct_schema() {
-        use crate::codec::{DecoderRegistry, EncoderRegistry};
-        use crate::connector::ConnectorRegistry;
-        use crate::stateful::StatefulFunctionRegistry;
-        use crate::{AggregateFunctionRegistry, PipelineRegistries};
-
         let element_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
             StructField::new("c".to_string(), ConcreteDatatype::Int64(Int64Type), false),
             StructField::new("d".to_string(), ConcreteDatatype::String(StringType), false),
@@ -1007,14 +988,7 @@ mod tests {
         let (optimized_logical, pruned_binding) =
             optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
 
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let registries = PipelineRegistries::new_with_stateful_registry(
-            ConnectorRegistry::with_builtin_sinks(),
-            Arc::clone(&encoder_registry),
-            DecoderRegistry::with_builtin_decoders(),
-            AggregateFunctionRegistry::with_builtins(),
-            StatefulFunctionRegistry::with_builtins(),
-        );
+        let registries = PipelineRegistries::new_with_builtin();
 
         let physical = crate::planner::create_physical_plan(
             Arc::clone(&optimized_logical),
@@ -1030,11 +1004,6 @@ mod tests {
 
     #[test]
     fn physical_plan_supports_parenthesized_struct_field_list_index() {
-        use crate::codec::{DecoderRegistry, EncoderRegistry};
-        use crate::connector::ConnectorRegistry;
-        use crate::stateful::StatefulFunctionRegistry;
-        use crate::{AggregateFunctionRegistry, PipelineRegistries};
-
         let element_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
             StructField::new("x".to_string(), ConcreteDatatype::Int64(Int64Type), false),
             StructField::new("y".to_string(), ConcreteDatatype::String(StringType), false),
@@ -1081,14 +1050,7 @@ mod tests {
         let (optimized_logical, pruned_binding) =
             optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
 
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let registries = PipelineRegistries::new_with_stateful_registry(
-            ConnectorRegistry::with_builtin_sinks(),
-            Arc::clone(&encoder_registry),
-            DecoderRegistry::with_builtin_decoders(),
-            AggregateFunctionRegistry::with_builtins(),
-            StatefulFunctionRegistry::with_builtins(),
-        );
+        let registries = PipelineRegistries::new_with_builtin();
 
         let physical = crate::planner::create_physical_plan(
             Arc::clone(&optimized_logical),
@@ -1102,14 +1064,7 @@ mod tests {
     }
 
     fn build_registries() -> PipelineRegistries {
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        PipelineRegistries::new_with_stateful_registry(
-            ConnectorRegistry::with_builtin_sinks(),
-            Arc::clone(&encoder_registry),
-            DecoderRegistry::with_builtin_decoders(),
-            AggregateFunctionRegistry::with_builtins(),
-            StatefulFunctionRegistry::with_builtins(),
-        )
+        PipelineRegistries::new_with_builtin()
     }
     #[test]
     fn explain_reflects_pruned_list_struct_schema() {

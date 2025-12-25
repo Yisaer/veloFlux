@@ -1,10 +1,7 @@
 use crate::catalog::{MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
-use crate::codec::{DecoderRegistry, EncoderRegistry};
-use crate::connector::ConnectorRegistry;
 use crate::planner::explain::PipelineExplain;
 use crate::planner::logical::create_logical_plan;
-use crate::stateful::StatefulFunctionRegistry;
-use crate::{AggregateFunctionRegistry, PipelineRegistries};
+use crate::PipelineRegistries;
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use parser::parse_sql_with_registries;
 use std::collections::HashMap;
@@ -49,14 +46,7 @@ fn setup_single_stream(
 }
 
 fn build_registries() -> PipelineRegistries {
-    let encoder_registry = EncoderRegistry::with_builtin_encoders();
-    PipelineRegistries::new_with_stateful_registry(
-        ConnectorRegistry::with_builtin_sinks(),
-        Arc::clone(&encoder_registry),
-        DecoderRegistry::with_builtin_decoders(),
-        AggregateFunctionRegistry::with_builtins(),
-        StatefulFunctionRegistry::with_builtins(),
-    )
+    PipelineRegistries::new_with_builtin()
 }
 
 fn explain_from_sql(sql: &str, cols: Vec<&str>) -> serde_json::Value {

@@ -91,41 +91,6 @@ impl PipelineRegistries {
         encoder_registry: Arc<EncoderRegistry>,
         decoder_registry: Arc<DecoderRegistry>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Self {
-        Self {
-            connector_registry,
-            encoder_registry,
-            decoder_registry,
-            aggregate_registry,
-            stateful_registry: StatefulFunctionRegistry::with_builtins(),
-            custom_func_registry: CustomFuncRegistry::with_builtins(),
-            eventtime_type_registry: EventtimeTypeRegistry::with_builtin_types(),
-        }
-    }
-
-    pub fn new_with_stateful_registry(
-        connector_registry: Arc<ConnectorRegistry>,
-        encoder_registry: Arc<EncoderRegistry>,
-        decoder_registry: Arc<DecoderRegistry>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-        stateful_registry: Arc<StatefulFunctionRegistry>,
-    ) -> Self {
-        Self {
-            connector_registry,
-            encoder_registry,
-            decoder_registry,
-            aggregate_registry,
-            stateful_registry,
-            custom_func_registry: CustomFuncRegistry::with_builtins(),
-            eventtime_type_registry: EventtimeTypeRegistry::with_builtin_types(),
-        }
-    }
-
-    pub fn new_with_stateful_and_custom_registries(
-        connector_registry: Arc<ConnectorRegistry>,
-        encoder_registry: Arc<EncoderRegistry>,
-        decoder_registry: Arc<DecoderRegistry>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
         stateful_registry: Arc<StatefulFunctionRegistry>,
         custom_func_registry: Arc<CustomFuncRegistry>,
         eventtime_type_registry: Arc<EventtimeTypeRegistry>,
@@ -139,6 +104,18 @@ impl PipelineRegistries {
             custom_func_registry,
             eventtime_type_registry,
         }
+    }
+
+    pub fn new_with_builtin() -> Self {
+        Self::new(
+            ConnectorRegistry::with_builtin_sinks(),
+            EncoderRegistry::with_builtin_encoders(),
+            DecoderRegistry::with_builtin_decoders(),
+            AggregateFunctionRegistry::with_builtins(),
+            StatefulFunctionRegistry::with_builtins(),
+            CustomFuncRegistry::with_builtins(),
+            EventtimeTypeRegistry::with_builtin_types(),
+        )
     }
 
     pub fn connector_registry(&self) -> Arc<ConnectorRegistry> {
@@ -237,12 +214,8 @@ fn build_schema_binding(
 /// # Example
 /// ```no_run
 /// use flow::{
-///     aggregation::AggregateFunctionRegistry,
 ///     catalog::Catalog,
 ///     connector::MqttClientManager,
-///     connector::ConnectorRegistry,
-///     codec::EncoderRegistry,
-///     codec::DecoderRegistry,
 ///     create_pipeline,
 ///     planner::sink::{
 ///         NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
@@ -255,13 +228,7 @@ fn build_schema_binding(
 /// let catalog = Catalog::new();
 /// let registry = shared_stream_registry();
 /// let mqtt_clients = MqttClientManager::new();
-/// let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-/// let registries = PipelineRegistries::new(
-///     ConnectorRegistry::with_builtin_sinks(),
-///     EncoderRegistry::with_builtin_encoders(),
-///     DecoderRegistry::with_builtin_decoders(),
-///     aggregate_registry,
-/// );
+/// let registries = PipelineRegistries::new_with_builtin();
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig),

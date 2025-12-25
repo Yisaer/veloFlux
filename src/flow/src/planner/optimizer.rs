@@ -376,15 +376,13 @@ fn rebuild_with_children(
 mod tests {
     use super::*;
     use crate::catalog::{MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
-    use crate::codec::{DecoderRegistry, EncoderRegistry};
-    use crate::connector::ConnectorRegistry;
     use crate::planner::explain::PipelineExplain;
     use crate::planner::logical::create_logical_plan;
     use crate::planner::sink::{
         CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
         SinkEncoderConfig,
     };
-    use crate::{AggregateFunctionRegistry, PipelineRegistries};
+    use crate::PipelineRegistries;
     use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
     use parser::parse_sql_with_registry;
     use std::collections::HashMap;
@@ -392,13 +390,8 @@ mod tests {
 
     #[test]
     fn optimize_rewrites_batch_encoder_chain_to_streaming_encoder() {
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let registries = PipelineRegistries::new(
-            ConnectorRegistry::with_builtin_sinks(),
-            Arc::clone(&encoder_registry),
-            DecoderRegistry::with_builtin_decoders(),
-            AggregateFunctionRegistry::with_builtins(),
-        );
+        let registries = PipelineRegistries::new_with_builtin();
+        let encoder_registry = registries.encoder_registry();
 
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "stream".to_string(),
@@ -463,14 +456,9 @@ mod tests {
 
     #[test]
     fn optimize_rewrites_streaming_agg() {
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-        let registries = PipelineRegistries::new(
-            ConnectorRegistry::with_builtin_sinks(),
-            Arc::clone(&encoder_registry),
-            DecoderRegistry::with_builtin_decoders(),
-            Arc::clone(&aggregate_registry),
-        );
+        let registries = PipelineRegistries::new_with_builtin();
+        let encoder_registry = registries.encoder_registry();
+        let aggregate_registry = registries.aggregate_registry();
 
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
@@ -543,14 +531,9 @@ mod tests {
 
     #[test]
     fn optimize_rewrites_streaming_agg_for_sliding_window() {
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-        let registries = PipelineRegistries::new(
-            ConnectorRegistry::with_builtin_sinks(),
-            Arc::clone(&encoder_registry),
-            DecoderRegistry::with_builtin_decoders(),
-            Arc::clone(&aggregate_registry),
-        );
+        let registries = PipelineRegistries::new_with_builtin();
+        let encoder_registry = registries.encoder_registry();
+        let aggregate_registry = registries.aggregate_registry();
 
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
@@ -624,14 +607,9 @@ mod tests {
 
     #[test]
     fn optimize_rewrites_streaming_agg_for_state_window() {
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-        let registries = PipelineRegistries::new(
-            ConnectorRegistry::with_builtin_sinks(),
-            Arc::clone(&encoder_registry),
-            DecoderRegistry::with_builtin_decoders(),
-            Arc::clone(&aggregate_registry),
-        );
+        let registries = PipelineRegistries::new_with_builtin();
+        let encoder_registry = registries.encoder_registry();
+        let aggregate_registry = registries.aggregate_registry();
 
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
@@ -709,14 +687,7 @@ mod tests {
 
     #[test]
     fn physical_plan_sliding_without_lookahead_includes_watermark_for_gc() {
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-        let registries = PipelineRegistries::new(
-            ConnectorRegistry::with_builtin_sinks(),
-            Arc::clone(&encoder_registry),
-            DecoderRegistry::with_builtin_decoders(),
-            Arc::clone(&aggregate_registry),
-        );
+        let registries = PipelineRegistries::new_with_builtin();
 
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(

@@ -1,15 +1,11 @@
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema, Value};
-use flow::aggregation::AggregateFunctionRegistry;
 use flow::catalog::{Catalog, MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
-use flow::connector::{
-    get_mock_source_handle, take_mock_source_handle, ConnectorRegistry, MqttClientManager,
-};
+use flow::connector::{get_mock_source_handle, take_mock_source_handle, MqttClientManager};
 use flow::planner::sink::{
     NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 };
 use flow::processor::StreamData;
-use flow::{create_pipeline_with_attached_sources, shared_stream_registry, DecoderRegistry};
-use flow::{EncoderRegistry, PipelineRegistries};
+use flow::{create_pipeline_with_attached_sources, shared_stream_registry, PipelineRegistries};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
@@ -18,16 +14,7 @@ async fn mock_source_attaches_and_can_send_payloads() {
     let catalog = Arc::new(Catalog::new());
     let registry = shared_stream_registry();
     let mqtt_manager = MqttClientManager::new();
-    let connector_registry = ConnectorRegistry::with_builtin_sinks();
-    let encoder_registry = EncoderRegistry::with_builtin_encoders();
-    let decoder_registry = DecoderRegistry::with_builtin_decoders();
-    let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-    let registries = PipelineRegistries::new(
-        connector_registry,
-        encoder_registry,
-        decoder_registry,
-        aggregate_registry,
-    );
+    let registries = PipelineRegistries::new_with_builtin();
 
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
         "stream".to_string(),

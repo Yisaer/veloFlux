@@ -860,18 +860,13 @@ pub fn attach_sources_for_pipeline(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::aggregation::AggregateFunctionRegistry;
     use crate::catalog::{
         Catalog, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
     };
-    use crate::codec::{DecoderRegistry, EncoderRegistry, JsonDecoder};
-    use crate::connector::MockSourceConnector;
-    use crate::connector::{ConnectorRegistry, MqttClientManager};
-    use crate::expr::custom_func::CustomFuncRegistry;
+    use crate::codec::JsonDecoder;
+    use crate::connector::{MockSourceConnector, MqttClientManager};
     use crate::shared_stream::SharedStreamConfig;
     use crate::shared_stream_registry;
-    use crate::stateful::StatefulFunctionRegistry;
-    use crate::EventtimeTypeRegistry;
     use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
     use serde_json::Map as JsonMap;
     use std::sync::Arc;
@@ -919,23 +914,8 @@ mod tests {
         let catalog = Arc::new(Catalog::new());
         let registry = shared_stream_registry();
         let mqtt_manager = MqttClientManager::new();
-        let connector_registry = ConnectorRegistry::with_builtin_sinks();
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let decoder_registry = DecoderRegistry::with_builtin_decoders();
-        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-        let stateful_registry = StatefulFunctionRegistry::with_builtins();
-        let custom_func_registry = CustomFuncRegistry::with_builtins();
-        let eventtime_type_registry = EventtimeTypeRegistry::with_builtin_types();
         install_stream(&catalog, "test_stream");
-        let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
-            Arc::clone(&connector_registry),
-            Arc::clone(&encoder_registry),
-            Arc::clone(&decoder_registry),
-            Arc::clone(&aggregate_registry),
-            Arc::clone(&stateful_registry),
-            Arc::clone(&custom_func_registry),
-            Arc::clone(&eventtime_type_registry),
-        );
+        let registries = PipelineRegistries::new_with_builtin();
         let manager = PipelineManager::new(
             Arc::clone(&catalog),
             registry,
@@ -960,23 +940,8 @@ mod tests {
         let catalog = Arc::new(Catalog::new());
         let registry = shared_stream_registry();
         let mqtt_manager = MqttClientManager::new();
-        let connector_registry = ConnectorRegistry::with_builtin_sinks();
-        let encoder_registry = EncoderRegistry::with_builtin_encoders();
-        let decoder_registry = DecoderRegistry::with_builtin_decoders();
-        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-        let stateful_registry = StatefulFunctionRegistry::with_builtins();
-        let custom_func_registry = CustomFuncRegistry::with_builtins();
-        let eventtime_type_registry = EventtimeTypeRegistry::with_builtin_types();
         install_stream(&catalog, "dup_stream");
-        let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
-            connector_registry,
-            encoder_registry,
-            decoder_registry,
-            aggregate_registry,
-            stateful_registry,
-            custom_func_registry,
-            eventtime_type_registry,
-        );
+        let registries = PipelineRegistries::new_with_builtin();
         let manager = PipelineManager::new(
             Arc::clone(&catalog),
             registry,
@@ -1002,10 +967,7 @@ mod tests {
             let catalog = Arc::new(Catalog::new());
             let registry = shared_stream_registry();
             let mqtt_manager = MqttClientManager::new();
-            let connector_registry = ConnectorRegistry::with_builtin_sinks();
-            let encoder_registry = EncoderRegistry::with_builtin_encoders();
-            let decoder_registry = DecoderRegistry::with_builtin_decoders();
-            let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+            let registries = PipelineRegistries::new_with_builtin();
 
             let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
                 stream_name.clone(),
@@ -1037,14 +999,6 @@ mod tests {
                 .await
                 .expect("create shared stream");
 
-            let registries = PipelineRegistries::new_with_stateful_registry(
-                connector_registry,
-                encoder_registry,
-                decoder_registry,
-                aggregate_registry,
-                StatefulFunctionRegistry::with_builtins(),
-            );
-
             let mut pipeline = crate::create_pipeline_with_log_sink(
                 &format!("SELECT sum(value) FROM {stream_name} GROUP BY slidingwindow('ss',10)"),
                 false,
@@ -1069,10 +1023,7 @@ mod tests {
             let catalog = Arc::new(Catalog::new());
             let registry = shared_stream_registry();
             let mqtt_manager = MqttClientManager::new();
-            let connector_registry = ConnectorRegistry::with_builtin_sinks();
-            let encoder_registry = EncoderRegistry::with_builtin_encoders();
-            let decoder_registry = DecoderRegistry::with_builtin_decoders();
-            let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+            let registries = PipelineRegistries::new_with_builtin();
 
             let schema = Arc::new(Schema::new(vec![
                 ColumnSchema::new(
@@ -1111,14 +1062,6 @@ mod tests {
                 .create_stream(config)
                 .await
                 .expect("create shared stream");
-
-            let registries = PipelineRegistries::new_with_stateful_registry(
-                connector_registry,
-                encoder_registry,
-                decoder_registry,
-                aggregate_registry,
-                StatefulFunctionRegistry::with_builtins(),
-            );
 
             let mut pipeline = crate::create_pipeline_with_log_sink(
                 &format!("SELECT sum(b) FROM {stream_name} GROUP BY slidingwindow('ss',10)"),

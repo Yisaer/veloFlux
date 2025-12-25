@@ -1,11 +1,7 @@
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema, Value};
-use flow::aggregation::AggregateFunctionRegistry;
 use flow::catalog::{Catalog, MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
-use flow::codec::{DecoderRegistry, EncoderRegistry, JsonDecoder};
-use flow::connector::{ConnectorRegistry, MockSourceConnector, MqttClientManager};
-use flow::planner::sink::{
-    NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
-};
+use flow::codec::JsonDecoder;
+use flow::connector::{MockSourceConnector, MqttClientManager};
 use flow::processor::StreamData;
 use flow::{shared_stream_registry, PipelineRegistries, SharedStreamConfig};
 use serde_json::Map as JsonMap;
@@ -86,16 +82,7 @@ async fn shared_stream_two_pipelines_project_different_columns() {
         .expect("create shared stream");
 
     let mqtt_manager = MqttClientManager::new();
-    let connector_registry = ConnectorRegistry::with_builtin_sinks();
-    let encoder_registry = EncoderRegistry::with_builtin_encoders();
-    let decoder_registry = DecoderRegistry::with_builtin_decoders();
-    let aggregate_registry = AggregateFunctionRegistry::with_builtins();
-    let registries = PipelineRegistries::new(
-        connector_registry,
-        encoder_registry,
-        decoder_registry,
-        aggregate_registry,
-    );
+    let registries = PipelineRegistries::new_with_builtin();
 
     let mut pipeline_ab = flow::create_pipeline_with_log_sink(
         &format!("SELECT a, b FROM {stream_name}"),

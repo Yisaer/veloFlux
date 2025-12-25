@@ -52,7 +52,7 @@ impl FlowInstance {
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let custom_func_registry = CustomFuncRegistry::with_builtins();
         let eventtime_type_registry = EventtimeTypeRegistry::with_builtin_types();
-        let registries = PipelineRegistries::new_with_stateful_and_custom_registries(
+        let registries = PipelineRegistries::new(
             Arc::clone(&connector_registry),
             Arc::clone(&encoder_registry),
             Arc::clone(&decoder_registry),
@@ -331,7 +331,7 @@ impl FlowInstance {
     }
 
     fn pipeline_registries(&self) -> PipelineRegistries {
-        PipelineRegistries::new_with_stateful_and_custom_registries(
+        PipelineRegistries::new(
             Arc::clone(&self.connector_registry),
             Arc::clone(&self.encoder_registry),
             Arc::clone(&self.decoder_registry),
