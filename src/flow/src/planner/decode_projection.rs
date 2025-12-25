@@ -91,8 +91,7 @@ impl DecodeProjection {
     }
 
     pub fn mark_column_all(&mut self, name: &str) {
-        self.columns
-            .insert(name.to_string(), ProjectionNode::All);
+        self.columns.insert(name.to_string(), ProjectionNode::All);
     }
 
     pub fn mark_field_path_used(&mut self, path: &FieldPath) {
@@ -160,4 +159,3 @@ impl DecodeProjection {
         }
     }
 }
-

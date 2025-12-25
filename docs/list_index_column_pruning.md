@@ -66,6 +66,23 @@ A query like `items[0]->b` should fail during logical planning/optimization if:
 
 This validation case is important because explain/pruning should never silently accept invalid nested accesses.
 
+## Shared Stream Caveat (Why Nested Pruning May Not Apply)
+
+The logical pruning rules (`StructFieldPruning`, `ListElementPruning`, and list index `DecodeProjection`) are designed for **regular sources** where each pipeline owns its own `DataSource → Decoder` chain.
+
+For **shared streams** (`SourceBindingKind::Shared`), synapseFlow intentionally keeps a different contract:
+
+- A shared stream runtime decodes once and broadcasts tuples to multiple consumers (pipelines).
+- Different consumers may require different nested fields and different list indices.
+- If we applied per-pipeline nested pruning/index projection to the shared stream’s single decoder, one consumer’s projection could accidentally break another consumer.
+
+Because of this, shared streams currently:
+
+- keep the **full schema** for nested types in logical pruning (no struct-field / list-element schema shrink), and
+- only use a **top-level column** union (`Vec<String>`) across consumers to reduce decoding work safely.
+
+Supporting nested pruning for shared streams would require a different mechanism (e.g. maintaining per-consumer projections and decoding the union of nested requirements), which is out of scope for this iteration.
+
 ## Desired Explain Representation
 
 For a schema like:
@@ -92,6 +109,23 @@ schema=[a, b{items[indexes={0}][struct{x}]}]
 ```
 
 ## Proposed Implementation (High Level)
+
+### How `StructFieldPruning` works (Logical Optimizer)
+
+`StructFieldPruning` is a logical-optimizer rule that shrinks **struct-typed columns** to only the fields that are actually referenced by expressions.
+
+Conceptually it does:
+
+1. Traverse SQL expressions and recognize `JsonAccess` chains such as `stream_4.b->items->x`.
+2. For each access, record a field-path usage rooted at a top-level column (keyed by `source_name + column_name`).
+   - Multiple expressions merge into a single usage tree per column.
+3. When building the pruned schema, rewrite each struct column datatype by keeping only referenced fields, and recursively applying the same pruning to nested structs.
+
+Important notes:
+
+- This rule only controls **datatype shrink** (which fields exist in the pruned schema). It does not express list index selection.
+- List index selection is carried separately in `DecodeProjection` and is used at decode time.
+- For shared streams, this rule is currently disabled (see “Shared Stream Caveat”) to avoid cross-consumer inconsistency.
 
 ### Step 1 — Projection model
 
@@ -136,4 +170,3 @@ Update JSON decoding (and other decoders that can support it) to:
 Add a regression test that prints the physical plan explain output and verifies:
 - physical decoder schema/projection reflects the pruned indices
 - downstream decoder processor applies the same projection consistently
-

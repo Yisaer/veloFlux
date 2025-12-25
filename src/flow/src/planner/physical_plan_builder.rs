@@ -857,15 +857,19 @@ fn find_binding_entry<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connector::ConnectorRegistry;
     use crate::planner::logical::create_logical_plan;
-    use crate::{optimize_logical_plan, AggregateFunctionRegistry, DecoderRegistry, EncoderRegistry, ExplainReport, MqttStreamProps, StatefulFunctionRegistry, StreamDecoderConfig, StreamDefinition, StreamProps};
+    use crate::{
+        optimize_logical_plan, AggregateFunctionRegistry, DecoderRegistry, EncoderRegistry,
+        ExplainReport, MqttStreamProps, StatefulFunctionRegistry, StreamDecoderConfig,
+        StreamDefinition, StreamProps,
+    };
     use datatypes::{
         ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
         StructType,
     };
     use parser::parse_sql;
     use std::collections::HashMap;
-    use crate::connector::ConnectorRegistry;
 
     #[test]
     fn test_physical_plan_builder_creation() {
@@ -1126,8 +1130,7 @@ mod tests {
         stream_defs.insert("stream_3".to_string(), Arc::new(definition));
 
         let sql = "SELECT stream_3.a, stream_3.items[0]->c FROM stream_3";
-        let select_stmt =
-            parse_sql(sql).expect("parse sql");
+        let select_stmt = parse_sql(sql).expect("parse sql");
         let logical_plan =
             create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical plan");
 
@@ -1138,15 +1141,16 @@ mod tests {
             kind: crate::expr::sql_conversion::SourceBindingKind::Regular,
         }]);
 
-        let (optimized, pruned_binding) = optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
+        let (optimized, pruned_binding) =
+            optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
         let report = ExplainReport::from_logical(Arc::clone(&optimized));
         let logical_topology = report.topology_string();
         println!("{logical_topology}");
         assert!(logical_topology.contains("schema=[a, items[0][struct{c}]]"));
 
         let registries = build_registries();
-        let physical = create_physical_plan(optimized, &pruned_binding, &registries)
-            .expect("physical plan");
+        let physical =
+            create_physical_plan(optimized, &pruned_binding, &registries).expect("physical plan");
         let physical_report = ExplainReport::from_physical(physical);
         let physical_topology = physical_report.topology_string();
         println!("{sql}");
@@ -1176,11 +1180,7 @@ mod tests {
                 "a".to_string(),
                 ConcreteDatatype::Int64(Int64Type),
             ),
-            ColumnSchema::new(
-                "stream_4".to_string(),
-                "b".to_string(),
-                b_struct,
-            ),
+            ColumnSchema::new("stream_4".to_string(), "b".to_string(), b_struct),
         ]));
 
         let definition = StreamDefinition::new(
@@ -1192,9 +1192,9 @@ mod tests {
         let mut stream_defs = HashMap::new();
         stream_defs.insert("stream_4".to_string(), Arc::new(definition));
 
-        let sql = "SELECT stream_4.a, stream_4.b->items[0]->x, stream_4.b->items[3]->x FROM stream_4";
-        let select_stmt = parse_sql(sql)
-            .expect("parse sql");
+        let sql =
+            "SELECT stream_4.a, stream_4.b->items[0]->x, stream_4.b->items[3]->x FROM stream_4";
+        let select_stmt = parse_sql(sql).expect("parse sql");
         let logical_plan =
             create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical plan");
 
@@ -1205,7 +1205,8 @@ mod tests {
             kind: crate::expr::sql_conversion::SourceBindingKind::Regular,
         }]);
 
-        let (optimized, pruned_binding) = optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
+        let (optimized, pruned_binding) =
+            optimize_logical_plan(Arc::clone(&logical_plan), &bindings);
 
         let report = ExplainReport::from_logical(Arc::clone(&optimized));
         let logical_topology = report.topology_string();

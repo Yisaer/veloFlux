@@ -385,7 +385,9 @@ fn format_column_projection_with_decode_projection(
         }
         ConcreteDatatype::List(list_type) => {
             let list_proj = match projection {
-                Some(ProjectionNode::List { indexes, element }) => Some((indexes, element.as_ref())),
+                Some(ProjectionNode::List { indexes, element }) => {
+                    Some((indexes, element.as_ref()))
+                }
                 _ => None,
             };
             format!(
@@ -432,7 +434,9 @@ fn format_list_item_projection_with_decode_projection(
         }
         ConcreteDatatype::List(inner) => {
             let list_proj = match projection {
-                Some(ProjectionNode::List { indexes, element }) => Some((indexes, element.as_ref())),
+                Some(ProjectionNode::List { indexes, element }) => {
+                    Some((indexes, element.as_ref()))
+                }
                 _ => None,
             };
             format!(
@@ -529,7 +533,9 @@ fn format_struct_field_projection_with_decode_projection(
         }
         ConcreteDatatype::List(list_type) => {
             let list_proj = match projection {
-                Some(ProjectionNode::List { indexes, element }) => Some((indexes, element.as_ref())),
+                Some(ProjectionNode::List { indexes, element }) => {
+                    Some((indexes, element.as_ref()))
+                }
                 _ => None,
             };
             format!(

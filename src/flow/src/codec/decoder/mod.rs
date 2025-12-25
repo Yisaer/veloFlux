@@ -401,7 +401,8 @@ impl JsonDecoder {
             let mut keys = Vec::with_capacity(self.schema_keys.len() + row.len());
             let mut values = Vec::with_capacity(keys.capacity());
             for (idx, column) in self.schema.column_schemas().iter().enumerate() {
-                let projection_node = decode_projection.and_then(|p| p.column(column.name.as_str()));
+                let projection_node =
+                    decode_projection.and_then(|p| p.column(column.name.as_str()));
                 let value = row
                     .remove(&column.name)
                     .map(|json| {
@@ -666,11 +667,7 @@ fn json_to_struct_value_with_datatype_and_projection(
             let child_proj = projection_fields.and_then(|fields| fields.get(field.name()));
             map.get(field.name())
                 .map(|v| {
-                    json_to_value_with_datatype_and_projection(
-                        v,
-                        field.data_type(),
-                        child_proj,
-                    )
+                    json_to_value_with_datatype_and_projection(v, field.data_type(), child_proj)
                 })
                 .unwrap_or(Value::Null)
         })
@@ -852,8 +849,8 @@ mod tests {
         // Ensure the test uses the same semantics as mark_field_path_used.
         assert_eq!(projection.column("items"), Some(&list_node));
 
-        let payload = br#"{"items":[{"x":10,"y":"ignore"},{"x":20},{"x":30},{"x":40},{"x":50}]}"#
-            .as_ref();
+        let payload =
+            br#"{"items":[{"x":10,"y":"ignore"},{"x":20},{"x":30},{"x":40},{"x":50}]}"#.as_ref();
         let tuple = decoder
             .decode_with_decode_projection(payload, Some(&projection))
             .expect("decode batch")

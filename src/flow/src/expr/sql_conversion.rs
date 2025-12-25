@@ -442,12 +442,7 @@ fn convert_json_access(
             let struct_expr =
                 convert_expr_to_scalar_internal(left, bindings, custom_func_registry)?;
 
-            convert_relative_access_expr(
-                struct_expr,
-                right,
-                bindings,
-                custom_func_registry,
-            )
+            convert_relative_access_expr(struct_expr, right, bindings, custom_func_registry)
         }
         _ => Err(ConversionError::UnsupportedOperator(format!(
             "{:?}",
@@ -472,7 +467,8 @@ fn convert_relative_access_expr(
             operator: sqlparser::ast::JsonOperator::Arrow,
             right,
         } => {
-            let mid = convert_relative_access_expr(base, left.as_ref(), bindings, custom_func_registry)?;
+            let mid =
+                convert_relative_access_expr(base, left.as_ref(), bindings, custom_func_registry)?;
             convert_relative_access_expr(mid, right.as_ref(), bindings, custom_func_registry)
         }
         Expr::MapAccess { column, keys } => {

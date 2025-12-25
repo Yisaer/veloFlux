@@ -685,12 +685,7 @@ impl<'a> StructFieldUsageCollector<'a> {
     }
 
     fn mark_field_path_used(&mut self, source_name: &str, column_name: &str, path: &[String]) {
-        mark_field_path_used_in_tree(
-            &mut self.used_columns,
-            source_name,
-            column_name,
-            path,
-        );
+        mark_field_path_used_in_tree(&mut self.used_columns, source_name, column_name, path);
     }
 
     fn resolve_source(&self, qualifier: &str) -> Option<String> {
@@ -1089,7 +1084,9 @@ fn extract_decode_access_chain(expr: &SqlExpr) -> Option<(Vec<Ident>, Vec<FieldP
             let (base, mut segments) = extract_decode_access_chain(column.as_ref())?;
             for key in keys {
                 match extract_const_non_negative_index(key) {
-                    Some(index) => segments.push(FieldPathSegment::ListIndex(ListIndex::Const(index))),
+                    Some(index) => {
+                        segments.push(FieldPathSegment::ListIndex(ListIndex::Const(index)))
+                    }
                     None => segments.push(FieldPathSegment::ListIndex(ListIndex::Dynamic)),
                 }
             }
@@ -1214,7 +1211,9 @@ fn prune_list_elements_datatype(
                 let mut out_fields = Vec::new();
                 for field in struct_type.fields().iter() {
                     let new_type = match fields.get(field.name()) {
-                        Some(field_usage) => prune_list_elements_datatype(field.data_type(), field_usage),
+                        Some(field_usage) => {
+                            prune_list_elements_datatype(field.data_type(), field_usage)
+                        }
                         None => field.data_type().clone(),
                     };
                     out_fields.push(datatypes::StructField::new(
@@ -1223,13 +1222,16 @@ fn prune_list_elements_datatype(
                         field.is_nullable(),
                     ));
                 }
-                datatypes::ConcreteDatatype::Struct(datatypes::StructType::new(Arc::new(out_fields)))
+                datatypes::ConcreteDatatype::Struct(datatypes::StructType::new(Arc::new(
+                    out_fields,
+                )))
             }
             datatypes::ConcreteDatatype::List(list_type) => {
                 let Some(element_usage) = fields.get("element") else {
                     return datatype.clone();
                 };
-                let item_type = prune_nested_datatype_for_usage(list_type.item_type(), element_usage);
+                let item_type =
+                    prune_nested_datatype_for_usage(list_type.item_type(), element_usage);
                 datatypes::ConcreteDatatype::List(datatypes::ListType::new(Arc::new(item_type)))
             }
             _ => datatype.clone(),
@@ -1269,7 +1271,8 @@ fn prune_nested_datatype_for_usage(
                 let Some(element_usage) = fields.get("element") else {
                     return datatype.clone();
                 };
-                let item_type = prune_nested_datatype_for_usage(list_type.item_type(), element_usage);
+                let item_type =
+                    prune_nested_datatype_for_usage(list_type.item_type(), element_usage);
                 datatypes::ConcreteDatatype::List(datatypes::ListType::new(Arc::new(item_type)))
             }
             _ => datatype.clone(),
@@ -1394,8 +1397,7 @@ mod tests {
     use crate::planner::explain::ExplainReport;
     use crate::planner::logical::create_logical_plan;
     use datatypes::{
-        ColumnSchema, ConcreteDatatype, Int64Type, Schema, StringType, StructField,
-        StructType,
+        ColumnSchema, ConcreteDatatype, Int64Type, Schema, StringType, StructField, StructType,
     };
     use parser::parse_sql;
     use std::collections::HashMap;

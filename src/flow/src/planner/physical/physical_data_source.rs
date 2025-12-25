@@ -1,5 +1,5 @@
-use crate::planner::physical::BasePhysicalPlan;
 use crate::planner::decode_projection::DecodeProjection;
+use crate::planner::physical::BasePhysicalPlan;
 use datatypes::Schema;
 use std::sync::Arc;
 
