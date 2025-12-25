@@ -694,6 +694,9 @@ fn create_processor_from_plan_node(
                 )
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             let mut processor = DecoderProcessor::new(plan_name.clone(), decoder);
+            if let Some(projection) = decoder_plan.decode_projection().cloned() {
+                processor = processor.with_decode_projection(projection);
+            }
             if let (Some(eventtime_ctx), Some(eventtime_spec)) =
                 (context.eventtime(), decoder_plan.eventtime())
             {

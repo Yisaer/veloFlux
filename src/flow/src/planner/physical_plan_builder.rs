@@ -1010,7 +1010,7 @@ mod tests {
         let report = crate::planner::explain::ExplainReport::from_physical(physical);
         let topology = report.topology_string();
         println!("{topology}");
-        assert!(topology.contains("schema=[a, items[struct{c}]]"));
+        assert!(topology.contains("schema=[a, items[0][struct{c}]]"));
     }
 
     #[test]
