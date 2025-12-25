@@ -596,6 +596,16 @@ fn create_physical_data_source_with_builder(
             Ok(Arc::new(PhysicalPlan::Decoder(decoder)))
         }
         SourceBindingKind::Shared => {
+            let required_columns = logical_ds
+                .shared_required_schema()
+                .map(|cols| cols.to_vec())
+                .unwrap_or_else(|| {
+                    schema
+                        .column_schemas()
+                        .iter()
+                        .map(|col| col.name.clone())
+                        .collect()
+                });
             let explain_ingest_plan = {
                 let ds = PhysicalDataSource::new(
                     logical_ds.source_name.clone(),
@@ -620,6 +630,7 @@ fn create_physical_data_source_with_builder(
                 logical_ds.source_name.clone(),
                 logical_ds.alias.clone(),
                 schema,
+                required_columns,
                 logical_ds.decoder().clone(),
                 Some(explain_ingest_plan),
                 index,

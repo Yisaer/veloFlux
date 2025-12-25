@@ -73,7 +73,13 @@ impl LogicalOptRule for TopLevelColumnPruning {
         let mut collector = TopLevelColumnUsageCollector::new(bindings, self.eventtime_enabled);
         collector.collect_from_plan(plan.as_ref());
         let pruned = collector.build_pruned_binding();
-        let updated_plan = apply_pruned_schemas_to_logical(plan, &pruned, &HashMap::new());
+        let shared_required_schemas = collector.build_shared_required_schemas();
+        let updated_plan = apply_pruned_schemas_to_logical(
+            plan,
+            &pruned,
+            &HashMap::new(),
+            &shared_required_schemas,
+        );
         (updated_plan, pruned)
     }
 }
@@ -94,7 +100,8 @@ impl LogicalOptRule for StructFieldPruning {
         let mut collector = StructFieldUsageCollector::new(bindings);
         collector.collect_from_plan(plan.as_ref());
         let pruned = collector.build_pruned_binding();
-        let updated_plan = apply_pruned_schemas_to_logical(plan, &pruned, &HashMap::new());
+        let updated_plan =
+            apply_pruned_schemas_to_logical(plan, &pruned, &HashMap::new(), &HashMap::new());
         (updated_plan, pruned)
     }
 }
@@ -116,7 +123,8 @@ impl LogicalOptRule for ListElementPruning {
         collector.collect_from_plan(plan.as_ref());
         let pruned = collector.build_pruned_binding();
         let decode_projections = collector.build_decode_projections();
-        let updated_plan = apply_pruned_schemas_to_logical(plan, &pruned, &decode_projections);
+        let updated_plan =
+            apply_pruned_schemas_to_logical(plan, &pruned, &decode_projections, &HashMap::new());
         (updated_plan, pruned)
     }
 }
@@ -432,6 +440,44 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
         }
 
         SchemaBinding::new(entries)
+    }
+
+    fn build_shared_required_schemas(&self) -> HashMap<String, Vec<String>> {
+        let mut out = HashMap::new();
+        for entry in self.bindings.entries() {
+            if !matches!(
+                entry.kind,
+                crate::expr::sql_conversion::SourceBindingKind::Shared
+            ) {
+                continue;
+            }
+
+            let full: Vec<String> = entry
+                .schema
+                .column_schemas()
+                .iter()
+                .map(|col| col.name.clone())
+                .collect();
+
+            let required = if self.prune_disabled.contains(&entry.source_name)
+                || !self.used_columns.contains_key(&entry.source_name)
+            {
+                full.clone()
+            } else {
+                let used = &self.used_columns[&entry.source_name];
+                let cols: Vec<String> = entry
+                    .schema
+                    .column_schemas()
+                    .iter()
+                    .filter(|col| used.contains(col.name.as_str()))
+                    .map(|col| col.name.clone())
+                    .collect();
+                if cols.is_empty() { full.clone() } else { cols }
+            };
+
+            out.insert(entry.source_name.clone(), required);
+        }
+        out
     }
 }
 
@@ -1285,15 +1331,23 @@ fn apply_pruned_schemas_to_logical(
     plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
     decode_projections: &HashMap<String, DecodeProjection>,
+    shared_required_schemas: &HashMap<String, Vec<String>>,
 ) -> Arc<LogicalPlan> {
     let mut cache = HashMap::new();
-    apply_pruned_with_cache(plan, bindings, decode_projections, &mut cache)
+    apply_pruned_with_cache(
+        plan,
+        bindings,
+        decode_projections,
+        shared_required_schemas,
+        &mut cache,
+    )
 }
 
 fn apply_pruned_with_cache(
     plan: Arc<LogicalPlan>,
     bindings: &SchemaBinding,
     decode_projections: &HashMap<String, DecodeProjection>,
+    shared_required_schemas: &HashMap<String, Vec<String>>,
     cache: &mut HashMap<i64, Arc<LogicalPlan>>,
 ) -> Arc<LogicalPlan> {
     let idx = plan.get_plan_index();
@@ -1310,12 +1364,20 @@ fn apply_pruned_with_cache(
                 .map(|entry| Arc::clone(&entry.schema))
                 .unwrap_or_else(|| ds.schema());
             let decode_projection = decode_projections.get(&ds.source_name).cloned();
-            if Arc::ptr_eq(&schema, &ds.schema) && ds.decode_projection == decode_projection {
+            let shared_required_schema = shared_required_schemas
+                .get(&ds.source_name)
+                .cloned()
+                .or_else(|| ds.shared_required_schema.clone());
+            if Arc::ptr_eq(&schema, &ds.schema)
+                && ds.decode_projection == decode_projection
+                && ds.shared_required_schema == shared_required_schema
+            {
                 plan
             } else {
                 let mut new_ds = ds.clone();
                 new_ds.schema = schema;
                 new_ds.decode_projection = decode_projection;
+                new_ds.shared_required_schema = shared_required_schema;
                 Arc::new(LogicalPlan::DataSource(new_ds))
             }
         }
@@ -1324,7 +1386,13 @@ fn apply_pruned_with_cache(
                 .children()
                 .iter()
                 .map(|child| {
-                    apply_pruned_with_cache(child.clone(), bindings, decode_projections, cache)
+                    apply_pruned_with_cache(
+                        child.clone(),
+                        bindings,
+                        decode_projections,
+                        shared_required_schemas,
+                        cache,
+                    )
                 })
                 .collect();
 

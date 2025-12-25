@@ -27,6 +27,28 @@ We implement “decode fewer columns” while preserving the full schema index s
 
 This ensures any pipeline compiled with `ByIndex` continues to read the correct column by index.
 
+## Source-Of-Truth: SQL-Semantic Required Columns
+
+For shared streams, the authoritative “which columns does this pipeline need?” answer must come from the SQL-semantic plan (logical plan), not from a later runtime/processor scan.
+
+However, because shared streams must keep the full schema to preserve `ByIndex`, this information must be represented as a **projection view** (a list of column names), not as a schema shrink/rewrite.
+
+Concretely:
+
+- `DataSource.schema` remains the full stream schema for shared sources.
+- `DataSource.shared_required_schema` (name TBD) stores the per-pipeline required top-level columns for shared sources as `Vec<String>`.
+- `EXPLAIN` for shared sources prints `shared_required_schema` (the view/projection) rather than the full schema (which is always the stream full schema).
+- Physical planning propagates the list into `PhysicalSharedStream`, and processor building uses it to call `SharedStreamProcessor.set_required_columns(...)`.
+
+This removes the need to recompute shared required columns during `build_processor_pipeline`.
+
+## Scope: Top-Level Columns Only (Initial)
+
+For the initial iteration, only `TopLevelColumnPruning` contributes to `shared_required_schema`.
+
+- `StructFieldPruning` and `ListElementPruning` remain disabled for shared sources.
+- Nested pruning for shared streams requires a separate “union nested projection” mechanism and is out of scope here.
+
 ## Required Behavior
 
 1. Dynamic union
@@ -83,7 +105,7 @@ Decoder-specific notes:
 
 We avoid explicit ack/versioning by using a simple polling loop against the **applied** state:
 
-1. Pipeline computes `required_columns` for the shared stream.
+1. Pipeline obtains `required_columns` for the shared stream from its logical plan metadata (`shared_required_schema`).
 2. Pipeline registers `required_columns` in the shared stream registry.
 3. Before starting to process incoming tuples, pipeline loops:
    - read shared stream info (`decoding_columns`)
@@ -94,19 +116,21 @@ This guarantees the decoder applied the projection needed by the pipeline.
 
 ## Implementation Steps (Suggested Order)
 
-1. Column requirement extraction
-   - Derive per-source required columns for a pipeline from its SQL plan (including projection/filter/aggregation/window/encoder needs).
-   - Treat wildcard as ALL.
-2. Registry extensions
-   - Store `consumer_id -> required_columns` for each shared stream.
-   - Compute union on changes.
-   - Expose shared stream info field `decoding_columns` (applied).
-3. Ingest loop projection
-   - Apply union projection to decoder.
-   - Update `decoding_columns` after applying.
-4. Pipeline startup guard
-   - Poll `decoding_columns` until it covers the pipeline’s required set.
-5. Tests
+1. Extend logical `DataSource` metadata
+   - Add `shared_required_schema: Option<Vec<String>>` (or similar) to `LogicalPlan::DataSource`.
+   - Populate it only when the source is `SourceBindingKind::Shared`.
+2. Update `TopLevelColumnPruning` to fill `shared_required_schema`
+   - Keep current expression traversal and wildcard/ambiguity handling.
+   - For shared sources: do not shrink `schema`; instead, record the computed required column list in `shared_required_schema` (use full column list when “ALL” is required).
+3. Update explain rendering
+   - For shared sources (`LogicalPlan::DataSource` and `PhysicalSharedStream`), print the `shared_required_schema` view (not the full schema).
+   - Ensure the output makes it clear this is a projection/view, not a schema rewrite (indices remain full-schema).
+4. Propagate to physical planning
+   - Carry `shared_required_schema` into `PhysicalSharedStream` (and the `explain_ingest_plan` if needed for consistency).
+5. Processor building: remove recomputation
+   - Delete `compute_shared_required_columns(...)` (or stop using it).
+   - When building `SharedStreamProcessor`, read `required_columns` directly from the `PhysicalSharedStream` metadata and call `set_required_columns`.
+6. Regression tests
    - Two pipelines requiring disjoint columns must both work without wrong-index reads.
-   - `SELECT *` must force full decode.
-
+   - `SELECT *` / `source.*` must force full decode.
+   - `EXPLAIN` for shared sources must show the per-pipeline projected column list.
