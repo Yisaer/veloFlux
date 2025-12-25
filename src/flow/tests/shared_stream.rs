@@ -3,6 +3,9 @@ use flow::aggregation::AggregateFunctionRegistry;
 use flow::catalog::{Catalog, MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::codec::{DecoderRegistry, EncoderRegistry, JsonDecoder};
 use flow::connector::{ConnectorRegistry, MockSourceConnector, MqttClientManager};
+use flow::planner::sink::{
+    NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
+};
 use flow::processor::StreamData;
 use flow::{shared_stream_registry, PipelineRegistries, SharedStreamConfig};
 use serde_json::Map as JsonMap;

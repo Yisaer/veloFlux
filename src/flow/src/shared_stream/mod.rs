@@ -326,8 +326,7 @@ pub struct SharedStreamInfo {
 pub struct SharedStreamSubscription {
     stream: Arc<SharedStreamInner>,
     consumer_id: String,
-    data_receiver: Option<broadcast::Receiver<StreamData>>,
-    control_receiver: Option<broadcast::Receiver<ControlSignal>>,
+    receivers_taken: bool,
 }
 
 impl SharedStreamSubscription {
@@ -341,20 +340,17 @@ impl SharedStreamSubscription {
         broadcast::Receiver<StreamData>,
         broadcast::Receiver<ControlSignal>,
     ) {
-        let data = self
-            .data_receiver
-            .take()
-            .expect("shared stream data receiver already taken");
-        let control = self
-            .control_receiver
-            .take()
-            .expect("shared stream control receiver already taken");
-        (data, control)
+        if self.receivers_taken {
+            panic!("shared stream receivers already taken");
+        }
+        self.receivers_taken = true;
+        (
+            self.stream.data_sender.subscribe(),
+            self.stream.control_sender.subscribe(),
+        )
     }
 
-    pub async fn release(mut self) {
-        let _ = self.data_receiver.take();
-        let _ = self.control_receiver.take();
+    pub async fn release(self) {
         let consumer_id = self.consumer_id.clone();
         self.stream.unregister_consumer(&consumer_id).await;
     }
@@ -649,14 +645,10 @@ impl SharedStreamInner {
             }
         }
 
-        let data_receiver = self.data_sender.subscribe();
-        let control_receiver = self.control_sender.subscribe();
-
         Ok(SharedStreamSubscription {
             stream: Arc::clone(self),
             consumer_id,
-            data_receiver: Some(data_receiver),
-            control_receiver: Some(control_receiver),
+            receivers_taken: false,
         })
     }
 

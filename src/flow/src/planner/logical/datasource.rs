@@ -13,6 +13,10 @@ pub struct DataSource {
     pub decoder: StreamDecoderConfig,
     pub schema: Arc<Schema>,
     pub decode_projection: Option<DecodeProjection>,
+    /// For shared sources, this stores the per-pipeline required top-level columns as a
+    /// projection view (column name list). The full `schema` is preserved to keep
+    /// `ColumnRef::ByIndex` semantics stable.
+    pub shared_required_schema: Option<Vec<String>>,
     pub eventtime: Option<EventtimeDefinition>,
 }
 
@@ -33,6 +37,7 @@ impl DataSource {
             decoder,
             schema,
             decode_projection: None,
+            shared_required_schema: None,
             eventtime,
         }
     }
@@ -47,6 +52,10 @@ impl DataSource {
 
     pub fn decode_projection(&self) -> Option<&DecodeProjection> {
         self.decode_projection.as_ref()
+    }
+
+    pub fn shared_required_schema(&self) -> Option<&[String]> {
+        self.shared_required_schema.as_deref()
     }
 
     pub fn eventtime(&self) -> Option<&EventtimeDefinition> {

@@ -72,7 +72,7 @@ The logical pruning rules (`StructFieldPruning`, `ListElementPruning`, and list 
 
 For **shared streams** (`SourceBindingKind::Shared`), synapseFlow intentionally keeps a different contract:
 
-- A shared stream runtime decodes once and broadcasts tuples to multiple consumers (pipelines).
+≈- A shared stream runtime decodes once and broadcasts tuples to multiple consumers (pipelines).
 - Different consumers may require different nested fields and different list indices.
 - If we applied per-pipeline nested pruning/index projection to the shared stream’s single decoder, one consumer’s projection could accidentally break another consumer.
 

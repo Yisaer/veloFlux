@@ -213,10 +213,14 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 info.push(format!("alias={}", alias));
             }
             info.push(format!("decoder={}", ds.decoder().kind()));
-            info.push(format_schema_with_decode_projection(
-                ds.schema.as_ref(),
-                ds.decode_projection(),
-            ));
+            if let Some(required) = ds.shared_required_schema() {
+                info.push(format!("schema=[{}]", required.join(", ")));
+            } else {
+                info.push(format_schema_with_decode_projection(
+                    ds.schema.as_ref(),
+                    ds.decode_projection(),
+                ));
+            }
         }
         LogicalPlan::StatefulFunction(stateful) => {
             let mut mappings = stateful
@@ -593,7 +597,7 @@ fn build_physical_node_with_prefix(
             if let Some(alias) = ds.alias() {
                 info.push(format!("alias={}", alias));
             }
-            info.push(format_schema(ds.schema().as_ref()));
+            info.push(format!("schema=[{}]", ds.required_columns().join(", ")));
         }
         PhysicalPlan::StatefulFunction(stateful) => {
             let mut calls = stateful

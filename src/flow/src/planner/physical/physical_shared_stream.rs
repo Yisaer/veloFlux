@@ -10,6 +10,7 @@ pub struct PhysicalSharedStream {
     stream_name: String,
     alias: Option<String>,
     schema: Arc<Schema>,
+    required_columns: Vec<String>,
     decoder: StreamDecoderConfig,
     explain_ingest_plan: Option<Arc<PhysicalPlan>>,
 }
@@ -19,6 +20,7 @@ impl PhysicalSharedStream {
         stream_name: String,
         alias: Option<String>,
         schema: Arc<Schema>,
+        required_columns: Vec<String>,
         decoder: StreamDecoderConfig,
         explain_ingest_plan: Option<Arc<PhysicalPlan>>,
         index: i64,
@@ -29,6 +31,7 @@ impl PhysicalSharedStream {
             stream_name,
             alias,
             schema,
+            required_columns,
             decoder,
             explain_ingest_plan,
         }
@@ -44,6 +47,10 @@ impl PhysicalSharedStream {
 
     pub fn schema(&self) -> Arc<Schema> {
         Arc::clone(&self.schema)
+    }
+
+    pub fn required_columns(&self) -> &[String] {
+        &self.required_columns
     }
 
     pub fn decoder(&self) -> &StreamDecoderConfig {
