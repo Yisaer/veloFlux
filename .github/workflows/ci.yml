@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [ main, master ]
+  push:
+    branches: [ main, master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  COVERAGE_THRESHOLD: 50
+
+jobs:
+  pr-title-lint:
+    name: PR Title Lint
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR title follows conventional commits
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  lint:
+    name: Lint
+    if: github.event.action != 'edited'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: make clippy
+
+  test:
+    name: Test
+    if: github.event.action != 'edited'
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      nanomq:
+        image: emqx/nanomq
+        ports:
+          - 1883:1883
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build project
+        run: make build
+
+      - name: Run tests
+        run: make test
+
+  coverage:
+    name: Coverage
+    if: github.event.action != 'edited'
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      nanomq:
+        image: emqx/nanomq
+        ports:
+          - 1883:1883
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-cov-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cov-
+
+      - name: Generate coverage report
+        run: |
+          cargo llvm-cov --workspace --all-features --fail-under-lines ${{ env.COVERAGE_THRESHOLD }} --lcov --output-path lcov.info
+
+      - name: Generate coverage summary
+        if: always()
+        run: |
+          cargo llvm-cov report --summary-only
+
+      - name: Upload coverage to Codecov
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          flags: rust
+          name: rust-llvm-cov
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

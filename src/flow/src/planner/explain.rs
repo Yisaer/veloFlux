@@ -62,14 +62,10 @@ impl ExplainReport {
             .enumerate()
             .map(|(idx, row)| {
                 let sep = if idx == 0 { "-" } else { " " };
-                format!(
-                    "{} {:<id_w$} | {:<info_w$}",
-                    sep,
-                    row.id,
-                    row.info,
-                    id_w = id_width,
-                    info_w = info_width
-                )
+                // Manual padding to avoid format! panic when width >= 65536
+                let id_pad = " ".repeat(id_width.saturating_sub(row.id.len()));
+                let info_pad = " ".repeat(info_width.saturating_sub(row.info.len()));
+                format!("{} {}{} | {}{}", sep, row.id, id_pad, row.info, info_pad)
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -737,4 +733,86 @@ fn format_aggregation_calls(mappings: &std::collections::HashMap<String, Expr>) 
         .map(|(out, expr)| format!("{} -> {}", expr, out))
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_string_simple() {
+        let node = ExplainNode {
+            id: "root".to_string(),
+            operator: "DataSource".to_string(),
+            info: vec!["source=test".to_string()],
+            children: vec![],
+        };
+        let report = ExplainReport { root: node };
+        let output = report.table_string();
+        assert!(output.contains("root"));
+        assert!(output.contains("source=test"));
+    }
+
+    #[test]
+    fn test_table_string_with_children() {
+        let node = ExplainNode {
+            id: "root".to_string(),
+            operator: "Project".to_string(),
+            info: vec!["cols=[a, b]".to_string()],
+            children: vec![ExplainNode {
+                id: "child".to_string(),
+                operator: "Filter".to_string(),
+                info: vec!["predicate=x > 0".to_string()],
+                children: vec![],
+            }],
+        };
+        let report = ExplainReport { root: node };
+        let output = report.table_string();
+        assert!(output.contains("root"));
+        assert!(output.contains("child"));
+    }
+
+    /// Regression test: format! panics when width >= 65536 (u16 limit).
+    /// This test ensures manual padding works for very long info strings.
+    #[test]
+    fn test_table_string_info_exceeds_u16_width() {
+        // Create info string longer than 65536 characters
+        let long_info = "x".repeat(70000);
+        let node = ExplainNode {
+            id: "test".to_string(),
+            operator: "DataSource".to_string(),
+            info: vec![long_info.clone()],
+            children: vec![],
+        };
+        let report = ExplainReport { root: node };
+
+        // This would panic with the old format! implementation
+        let output = report.table_string();
+
+        assert!(output.contains("test"));
+        assert!(output.len() > 70000);
+    }
+
+    /// Test with many columns (simulates DBC schema with thousands of signals)
+    #[test]
+    fn test_table_string_many_columns() {
+        let schema_info = format!(
+            "schema=[{}]",
+            (0..5000)
+                .map(|i| format!("Signal{}", i))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let node = ExplainNode {
+            id: "DataSource".to_string(),
+            operator: "DataSource".to_string(),
+            info: vec!["source=spiStream".to_string(), schema_info],
+            children: vec![],
+        };
+        let report = ExplainReport { root: node };
+        let output = report.table_string();
+        assert!(output.contains("DataSource"));
+        assert!(output.contains("Signal0"));
+        assert!(output.contains("Signal4999"));
+    }
 }
