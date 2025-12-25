@@ -4,6 +4,8 @@ use parser::SelectStmt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use datatypes::{ConcreteDatatype, Schema};
+
 pub mod aggregation;
 pub mod datasource;
 pub mod filter;
@@ -140,6 +142,7 @@ pub fn create_logical_plan(
 ) -> Result<Arc<LogicalPlan>, String> {
     validate_group_by_requires_aggregates(&select_stmt)?;
     validate_aggregation_projection(&select_stmt)?;
+    validate_expression_types(&select_stmt, stream_defs)?;
 
     let start_index = 0i64;
     let mut current_index = start_index;
@@ -246,6 +249,245 @@ pub fn create_logical_plan(
         let tail_index = next_index + sink_count as i64;
         let tail_plan = TailPlan::new(sink_children, tail_index);
         Ok(Arc::new(LogicalPlan::Tail(tail_plan)))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SourceSchemaEntry {
+    source_name: String,
+    alias: Option<String>,
+    schema: Arc<Schema>,
+}
+
+fn validate_expression_types(
+    select_stmt: &SelectStmt,
+    stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+) -> Result<(), String> {
+    let mut sources = Vec::new();
+    for source_info in &select_stmt.source_infos {
+        let Some(definition) = stream_defs.get(&source_info.name) else {
+            continue;
+        };
+        sources.push(SourceSchemaEntry {
+            source_name: source_info.name.clone(),
+            alias: source_info.alias.clone(),
+            schema: definition.schema(),
+        });
+    }
+
+    for field in &select_stmt.select_fields {
+        validate_expr_against_sources(&field.expr, &sources)?;
+    }
+    if let Some(expr) = &select_stmt.where_condition {
+        validate_expr_against_sources(expr, &sources)?;
+    }
+    if let Some(expr) = &select_stmt.having {
+        validate_expr_against_sources(expr, &sources)?;
+    }
+    for expr in &select_stmt.group_by_exprs {
+        validate_expr_against_sources(expr, &sources)?;
+    }
+
+    Ok(())
+}
+
+fn validate_expr_against_sources(
+    expr: &sqlparser::ast::Expr,
+    sources: &[SourceSchemaEntry],
+) -> Result<(), String> {
+    use sqlparser::ast::{Expr, JsonOperator};
+
+    match expr {
+        Expr::JsonAccess {
+            left,
+            operator: JsonOperator::Arrow,
+            right,
+        } => {
+            let left_type = infer_expr_datatype(left.as_ref(), sources)?;
+            let Some(ConcreteDatatype::Struct(struct_type)) = left_type else {
+                return Ok(());
+            };
+            let field_name = match right.as_ref() {
+                Expr::Identifier(ident) => ident.value.as_str(),
+                _ => return Ok(()),
+            };
+            if !struct_type
+                .fields()
+                .iter()
+                .any(|field| field.name() == field_name)
+            {
+                let available = struct_type
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(format!(
+                    "field `{}` not found in struct (available: {})",
+                    field_name, available
+                ));
+            }
+
+            validate_expr_against_sources(left.as_ref(), sources)?;
+            Ok(())
+        }
+        Expr::MapAccess { column, keys } => {
+            let column_type = infer_expr_datatype(column.as_ref(), sources)?;
+            if let Some(dtype) = column_type {
+                if !matches!(dtype, ConcreteDatatype::List(_)) {
+                    return Err(format!(
+                        "list index requires List type, got {:?}",
+                        dtype
+                    ));
+                }
+            }
+            validate_expr_against_sources(column.as_ref(), sources)?;
+            for key in keys {
+                validate_expr_against_sources(key, sources)?;
+            }
+            Ok(())
+        }
+        Expr::BinaryOp { left, right, .. } => {
+            validate_expr_against_sources(left.as_ref(), sources)?;
+            validate_expr_against_sources(right.as_ref(), sources)?;
+            Ok(())
+        }
+        Expr::UnaryOp { expr, .. } => validate_expr_against_sources(expr.as_ref(), sources),
+        Expr::Nested(expr) => validate_expr_against_sources(expr.as_ref(), sources),
+        Expr::Cast { expr, .. } => validate_expr_against_sources(expr.as_ref(), sources),
+        Expr::Function(func) => {
+            for arg in &func.args {
+                match arg {
+                    sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
+                        expr,
+                    )) => validate_expr_against_sources(expr, sources)?,
+                    sqlparser::ast::FunctionArg::Named {
+                        arg: sqlparser::ast::FunctionArgExpr::Expr(expr),
+                        ..
+                    } => validate_expr_against_sources(expr, sources)?,
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(expr) = operand.as_ref() {
+                validate_expr_against_sources(expr, sources)?;
+            }
+            for expr in conditions {
+                validate_expr_against_sources(expr, sources)?;
+            }
+            for expr in results {
+                validate_expr_against_sources(expr, sources)?;
+            }
+            if let Some(expr) = else_result.as_ref() {
+                validate_expr_against_sources(expr, sources)?;
+            }
+            Ok(())
+        }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            ..
+        } => {
+            validate_expr_against_sources(expr.as_ref(), sources)?;
+            validate_expr_against_sources(low.as_ref(), sources)?;
+            validate_expr_against_sources(high.as_ref(), sources)?;
+            Ok(())
+        }
+        Expr::InList { expr, list, .. } => {
+            validate_expr_against_sources(expr.as_ref(), sources)?;
+            for item in list {
+                validate_expr_against_sources(item, sources)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn infer_expr_datatype(
+    expr: &sqlparser::ast::Expr,
+    sources: &[SourceSchemaEntry],
+) -> Result<Option<ConcreteDatatype>, String> {
+    use sqlparser::ast::Expr;
+
+    match expr {
+        Expr::Identifier(ident) => Ok(resolve_column_datatype(None, &ident.value, sources)),
+        Expr::CompoundIdentifier(idents) => {
+            if idents.len() != 2 {
+                return Ok(None);
+            }
+            Ok(resolve_column_datatype(
+                Some(&idents[0].value),
+                &idents[1].value,
+                sources,
+            ))
+        }
+        Expr::Nested(expr) => infer_expr_datatype(expr.as_ref(), sources),
+        Expr::Cast { expr, .. } => infer_expr_datatype(expr.as_ref(), sources),
+        Expr::MapAccess { column, .. } => {
+            let Some(dtype) = infer_expr_datatype(column.as_ref(), sources)? else {
+                return Ok(None);
+            };
+            let ConcreteDatatype::List(list_type) = dtype else {
+                return Ok(None);
+            };
+            Ok(Some(list_type.item_type().clone()))
+        }
+        Expr::JsonAccess { left, right, .. } => {
+            let Some(dtype) = infer_expr_datatype(left.as_ref(), sources)? else {
+                return Ok(None);
+            };
+            let ConcreteDatatype::Struct(struct_type) = dtype else {
+                return Ok(None);
+            };
+            let Expr::Identifier(ident) = right.as_ref() else {
+                return Ok(None);
+            };
+            Ok(struct_type
+                .fields()
+                .iter()
+                .find(|f| f.name() == ident.value)
+                .map(|f| f.data_type().clone()))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn resolve_column_datatype(
+    qualifier: Option<&str>,
+    column_name: &str,
+    sources: &[SourceSchemaEntry],
+) -> Option<ConcreteDatatype> {
+    if sources.is_empty() {
+        return None;
+    }
+
+    let matches: Vec<_> = sources
+        .iter()
+        .filter(|src| match qualifier {
+            Some(q) => src.source_name == q || src.alias.as_deref() == Some(q),
+            None => true,
+        })
+        .filter_map(|src| {
+            src.schema
+                .column_schemas()
+                .iter()
+                .find(|c| c.name == column_name)
+                .map(|c| c.data_type.clone())
+        })
+        .collect();
+
+    match matches.len() {
+        1 => Some(matches[0].clone()),
+        _ => None,
     }
 }
 
@@ -541,7 +783,10 @@ fn max_plan_index(plan: &Arc<LogicalPlan>) -> i64 {
 mod logical_plan_tests {
     use super::*;
     use crate::catalog::{MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
-    use datatypes::Schema;
+    use datatypes::{
+        ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
+        StructType,
+    };
     use parser::parse_sql;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -878,5 +1123,48 @@ mod logical_plan_tests {
                 project_indices[0]
             );
         }
+    }
+
+    #[test]
+    fn test_rejects_unknown_list_struct_field_during_logical_planning() {
+        let items_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+            StructField::new(
+                "c".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+                false,
+            ),
+            StructField::new(
+                "d".to_string(),
+                ConcreteDatatype::String(StringType),
+                false,
+            ),
+        ])));
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "stream_3".to_string(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                "stream_3".to_string(),
+                "items".to_string(),
+                ConcreteDatatype::List(ListType::new(Arc::new(items_struct))),
+            ),
+        ]));
+
+        let definition = Arc::new(StreamDefinition::new(
+            "stream_3".to_string(),
+            schema,
+            StreamProps::Mqtt(MqttStreamProps::new("mqtt://localhost:1883", "stream_3", 0)),
+            StreamDecoderConfig::json(),
+        ));
+
+        let mut stream_defs = HashMap::new();
+        stream_defs.insert("stream_3".to_string(), definition);
+
+        let select_stmt = parse_sql("SELECT a, items[0]->b FROM stream_3").unwrap();
+        let err = create_logical_plan(select_stmt, Vec::new(), &stream_defs).unwrap_err();
+        assert!(err.contains("field `b` not found"), "unexpected error: {err}");
     }
 }
