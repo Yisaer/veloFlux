@@ -71,18 +71,6 @@ pub trait RecordDecoder: Send + Sync + 'static {
         let _ = decode_projection;
         self.decode(payload)
     }
-
-    /// Convert raw bytes into a single tuple, decoding only the requested nested fields / list indices.
-    ///
-    /// Default implementation falls back to full decode.
-    fn decode_tuple_with_decode_projection(
-        &self,
-        payload: &[u8],
-        decode_projection: Option<&DecodeProjection>,
-    ) -> Result<Tuple, CodecError> {
-        let _ = decode_projection;
-        self.decode_tuple(payload)
-    }
 }
 
 /// Decoder that converts JSON documents (object or array) into a RecordBatch.

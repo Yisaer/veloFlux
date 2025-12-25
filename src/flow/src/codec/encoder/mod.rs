@@ -112,19 +112,37 @@ impl CollectionEncoder for JsonEncoder {
     }
 }
 
-#[derive(Default)]
 struct JsonStreamingEncoder {
-    rows: Vec<JsonValue>,
+    payload: Vec<u8>,
+    is_first_row: bool,
+}
+
+impl Default for JsonStreamingEncoder {
+    fn default() -> Self {
+        Self {
+            payload: vec![b'['],
+            is_first_row: true,
+        }
+    }
 }
 
 impl CollectionEncoderStream for JsonStreamingEncoder {
     fn append(&mut self, tuple: &Tuple) -> Result<(), EncodeError> {
-        self.rows.push(tuple_to_json(tuple));
+        if self.is_first_row {
+            self.is_first_row = false;
+        } else {
+            self.payload.push(b',');
+        }
+
+        serde_json::to_writer(&mut self.payload, &tuple_to_json(tuple))
+            .map_err(EncodeError::Serialization)?;
         Ok(())
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<u8>, EncodeError> {
-        serde_json::to_vec(&JsonValue::Array(self.rows)).map_err(EncodeError::Serialization)
+        let mut encoder = *self;
+        encoder.payload.push(b']');
+        Ok(encoder.payload)
     }
 }
 
@@ -279,5 +297,15 @@ mod tests {
                 {"amount":2, "status":"fail"}
             ])
         );
+    }
+
+    #[test]
+    fn json_encoder_streaming_empty_payload_is_array() {
+        let encoder = JsonEncoder::new("json", JsonMap::new());
+        let stream = encoder.start_stream().expect("stream");
+        let payload = stream.finish().expect("stream finish");
+
+        let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(json, serde_json::json!([]));
     }
 }

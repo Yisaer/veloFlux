@@ -100,7 +100,7 @@ impl StreamingEncoderProcessor {
     #[allow(clippy::too_many_arguments)]
     async fn handle_collection(
         processor_id: &str,
-        collection: &dyn Collection,
+        collection: Box<dyn Collection>,
         encoder: &Arc<dyn CollectionEncoder>,
         buffer: &mut Vec<Tuple>,
         stream_state: &mut Option<Box<dyn CollectionEncoderStream>>,
@@ -108,12 +108,15 @@ impl StreamingEncoderProcessor {
         output: &broadcast::Sender<StreamData>,
         timer: &mut Option<Pin<Box<Sleep>>>,
     ) -> Result<(), ProcessorError> {
-        for tuple in collection.rows() {
+        let rows = collection
+            .into_rows()
+            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
+        for tuple in rows {
             let stream = Self::ensure_stream(encoder, stream_state)?;
-            stream.append(tuple).map_err(|err| {
+            stream.append(&tuple).map_err(|err| {
                 ProcessorError::ProcessingError(format!("stream append error: {err}"))
             })?;
-            buffer.push(tuple.clone());
+            buffer.push(tuple);
             if let Some(count) = mode.count_threshold() {
                 if buffer.len() >= count {
                     Self::flush_buffer(processor_id, buffer, stream_state, output).await?;
@@ -223,7 +226,7 @@ impl Processor for StreamingEncoderProcessor {
                                 log_received_data(&processor_id, &StreamData::Collection(collection.clone()));
                                 if let Err(err) = StreamingEncoderProcessor::handle_collection(
                                     &processor_id,
-                                    collection.as_ref(),
+                                    collection,
                                     &encoder,
                                     &mut buffer,
                                     &mut stream_state,
