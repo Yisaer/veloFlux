@@ -3,6 +3,9 @@ name = "flow"
 version = "0.0.1"
 edition = "2021"
 
+[features]
+optimizer-unit-tests = []
+
 [dependencies]
 datatypes = { path = "../datatypes" }
 parser = { path = "../parser" }

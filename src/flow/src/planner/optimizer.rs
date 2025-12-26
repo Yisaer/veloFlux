@@ -372,7 +372,7 @@ fn rebuild_with_children(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "optimizer-unit-tests"))]
 mod tests {
     use super::*;
     use crate::catalog::{MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
