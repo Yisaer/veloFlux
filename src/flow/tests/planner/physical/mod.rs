@@ -1,0 +1,1 @@
+mod physical_explain_reflects_pruned_struct_schema;

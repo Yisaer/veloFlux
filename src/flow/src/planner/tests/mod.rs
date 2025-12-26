@@ -63,7 +63,10 @@ fn explain_from_sql(sql: &str, cols: Vec<&str>) -> serde_json::Value {
         crate::planner::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
             .expect("physical");
 
-    PipelineExplain::new(logical_plan, physical_plan).to_json()
+    let explain = PipelineExplain::new(logical_plan, physical_plan);
+    println!("{}", sql);
+    println!("{}", explain.to_pretty_string());
+    explain.to_json()
 }
 
 #[test]
