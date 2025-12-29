@@ -18,7 +18,6 @@ pub enum FunctionKind {
 pub enum FunctionContext {
     Select,
     Where,
-    Having,
     GroupBy,
 }
 
