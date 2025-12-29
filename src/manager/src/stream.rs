@@ -224,6 +224,25 @@ pub struct SharedStreamItem {
     pub created_at_secs: u64,
 }
 
+#[derive(Serialize)]
+pub struct DescribeStreamResponse {
+    pub stream: String,
+    pub spec_version: u32,
+    pub spec: StreamDefinitionSpec,
+}
+
+#[derive(Serialize)]
+pub struct StreamDefinitionSpec {
+    #[serde(rename = "type")]
+    pub stream_type: String,
+    pub schema: StreamSchemaInfo,
+    pub props: JsonValue,
+    pub shared: bool,
+    pub decoder: DecoderConfigRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eventtime: Option<EventtimeConfigRequest>,
+}
+
 pub async fn create_stream_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateStreamRequest>,
@@ -341,6 +360,82 @@ pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+pub async fn describe_stream_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let stored = match state.storage.get_stream(&name) {
+        Ok(Some(stream)) => stream,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("stream {name} not found")).into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load stream {name}: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let shared = match serde_json::from_str::<CreateStreamRequest>(&stored.raw_json) {
+        Ok(req) => req.shared,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("decode stored stream {name}: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let decoder_registry = state.instance.decoder_registry();
+    let definition =
+        match storage_bridge::stream_definition_from_stored(&stored, decoder_registry.as_ref()) {
+            Ok(definition) => definition,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("rebuild stream definition {name}: {err}"),
+                )
+                    .into_response();
+            }
+        };
+
+    let schema = definition.schema();
+    let columns = schema
+        .column_schemas()
+        .iter()
+        .map(|col| stream_column_info(&col.name, &col.data_type))
+        .collect();
+    let spec = StreamDefinitionSpec {
+        stream_type: stream_type_label(definition.stream_type()).to_string(),
+        schema: StreamSchemaInfo { columns },
+        props: stream_props_value(definition.props()),
+        shared,
+        decoder: DecoderConfigRequest {
+            decode_type: definition.decoder().kind().to_string(),
+            props: definition.decoder().props().clone(),
+        },
+        eventtime: definition
+            .eventtime()
+            .map(|eventtime| EventtimeConfigRequest {
+                column: eventtime.column().to_string(),
+                eventtime_type: eventtime.eventtime_type().to_string(),
+            }),
+    };
+
+    (
+        StatusCode::OK,
+        Json(DescribeStreamResponse {
+            stream: name,
+            spec_version: 1,
+            spec,
+        }),
+    )
+        .into_response()
+}
+
 pub async fn delete_stream_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -421,6 +516,41 @@ fn map_flow_instance_error(err: FlowInstanceError) -> axum::response::Response {
     };
 
     (status, message).into_response()
+}
+
+fn stream_type_label(stream_type: flow::catalog::StreamType) -> &'static str {
+    match stream_type {
+        flow::catalog::StreamType::Mqtt => "mqtt",
+        flow::catalog::StreamType::Mock => "mock",
+    }
+}
+
+fn stream_props_value(props: &StreamProps) -> JsonValue {
+    match props {
+        StreamProps::Mqtt(mqtt) => {
+            let mut map = JsonMap::new();
+            map.insert(
+                "broker_url".to_string(),
+                JsonValue::String(mqtt.broker_url.clone()),
+            );
+            map.insert("topic".to_string(), JsonValue::String(mqtt.topic.clone()));
+            map.insert("qos".to_string(), JsonValue::from(mqtt.qos));
+            if let Some(client_id) = &mqtt.client_id {
+                map.insert(
+                    "client_id".to_string(),
+                    JsonValue::String(client_id.clone()),
+                );
+            }
+            if let Some(connector_key) = &mqtt.connector_key {
+                map.insert(
+                    "connector_key".to_string(),
+                    JsonValue::String(connector_key.clone()),
+                );
+            }
+            JsonValue::Object(map)
+        }
+        StreamProps::Mock(_) => JsonValue::Object(JsonMap::new()),
+    }
 }
 
 fn stream_column_info(name: &str, datatype: &ConcreteDatatype) -> StreamColumnInfo {

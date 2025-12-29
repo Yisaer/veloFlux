@@ -37,6 +37,10 @@ pub async fn start_server(
             "/streams",
             post(stream::create_stream_handler).get(stream::list_streams),
         )
+        .route(
+            "/streams/describe/:name",
+            axum::routing::get(stream::describe_stream_handler),
+        )
         .route("/streams/:name", delete(stream::delete_stream_handler))
         .with_state(state);
 
