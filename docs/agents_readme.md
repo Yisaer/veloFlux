@@ -15,6 +15,20 @@ Agents must not invent:
 
 All of the above must be grounded via runtime catalog introspection and capability catalogs.
 
+## Function Workflow
+
+Before generating SQL (and when fixing validation errors):
+
+1) Fetch `GET /functions`.
+2) For a specific function, fetch `GET /functions/describe/:name` (or resolve by alias).
+3) Use `FunctionDef` to constrain generation:
+   - `kind`: scalar vs aggregate vs stateful
+   - `signature`: argument count and type expectations
+   - `allowed_contexts`: which query contexts are allowed (e.g. `SELECT`, `WHERE`)
+   - `requirements`: additional semantic requirements (e.g. aggregation context, deterministic order)
+
+Agents must not guess function existence, arity, or meaning.
+
 ## Stream & Schema Workflow
 
 When a user request references a stream (e.g. “user stream”) or columns (e.g. “column `a`”):
@@ -54,6 +68,7 @@ Stop and clarify when:
 Do:
 
 - Treat `GET /streams/describe/:name` as the source of truth for schema.
+- Treat `GET /functions` as the source of truth for function availability and constraints.
 - Prefer stable SQL patterns and the supported syntax subset.
 - Use `validate_sql` errors as structured feedback to self-correct.
 
