@@ -33,10 +33,11 @@ If any of these checks fail:
 ## SQL Generation Workflow (Recommended)
 
 1) Build an intent sketch (project/filter/aggregate/sort/limit…).
-2) Render SQL using only supported syntax/features/functions.
-3) Run `validate_sql(sql)` and iterate until it passes.
-4) Run `explain_sql(sql)` and verify the plan matches intent (node kinds and ordering).
-5) Output:
+2) Fetch function metadata via `GET /functions` (and `GET /functions/describe/:name` when needed).
+3) Render SQL using only supported syntax/features/functions.
+4) Run `validate_sql(sql)` and iterate until it passes.
+5) Run `explain_sql(sql)` and verify the plan matches intent (node kinds and ordering).
+6) Output:
    - SQL
    - short explanation of key clauses/functions
    - an explain summary (pretty string or key highlights)

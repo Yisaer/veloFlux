@@ -1,14 +1,14 @@
-use crate::aggregation::sum_function_def;
+use crate::aggregation::builtin_aggregation_defs;
 use crate::catalog::FunctionDef;
-use crate::expr::custom_func::string_func::concat_function_def;
-use crate::stateful::lag_function_def;
+use crate::expr::custom_func::builtin_custom_function_defs;
+use crate::stateful::builtin_stateful_function_defs;
 
 fn builtin_function_defs_unsorted() -> Vec<FunctionDef> {
-    vec![
-        concat_function_def(),
-        sum_function_def(),
-        lag_function_def(),
-    ]
+    let mut defs = Vec::new();
+    defs.extend(builtin_custom_function_defs());
+    defs.extend(builtin_aggregation_defs());
+    defs.extend(builtin_stateful_function_defs());
+    defs
 }
 
 /// List all known SQL-visible functions with their metadata.

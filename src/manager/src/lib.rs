@@ -1,3 +1,4 @@
+mod function;
 mod pipeline;
 pub mod storage_bridge;
 mod stream;
@@ -40,6 +41,14 @@ pub async fn start_server(
         .route(
             "/streams/describe/:name",
             axum::routing::get(stream::describe_stream_handler),
+        )
+        .route(
+            "/functions",
+            axum::routing::get(function::list_functions_handler),
+        )
+        .route(
+            "/functions/describe/:name",
+            axum::routing::get(function::describe_function_handler),
         )
         .route("/streams/:name", delete(stream::delete_stream_handler))
         .with_state(state);

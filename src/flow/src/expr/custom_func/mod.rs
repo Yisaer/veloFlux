@@ -1,6 +1,7 @@
 pub mod registry;
 pub mod string_func;
 
+use crate::catalog::FunctionDef;
 use crate::expr::func::EvalError;
 use datatypes::Value;
 pub use registry::{CustomFuncRegistry, CustomFuncRegistryError};
@@ -33,4 +34,8 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
 
     /// Get the function name for debugging purposes
     fn name(&self) -> &str;
+}
+
+pub fn builtin_custom_function_defs() -> Vec<FunctionDef> {
+    vec![string_func::concat_function_def()]
 }
