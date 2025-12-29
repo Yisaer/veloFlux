@@ -535,6 +535,7 @@ fn stream_type_label(stream_type: flow::catalog::StreamType) -> &'static str {
     match stream_type {
         flow::catalog::StreamType::Mqtt => "mqtt",
         flow::catalog::StreamType::Mock => "mock",
+        flow::catalog::StreamType::History => "history",
     }
 }
 
@@ -563,6 +564,7 @@ fn stream_props_value(props: &StreamProps) -> JsonValue {
             JsonValue::Object(map)
         }
         StreamProps::Mock(_) => JsonValue::Object(JsonMap::new()),
+        StreamProps::History(_) => JsonValue::Object(JsonMap::new()),
     }
 }
 
