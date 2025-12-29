@@ -1,12 +1,12 @@
 //! Table-driven tests for pipeline creation helpers.
 
-use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
-use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
+use datatypes::Value;
 use flow::model::batch_from_columns_simple;
 use flow::processor::StreamData;
 use flow::FlowInstance;
-use std::sync::Arc;
-use tokio::time::{timeout, Duration};
+use tokio::time::Duration;
+
+use super::common::{install_stream_schema, recv_next_collection};
 
 struct TestCase {
     name: &'static str,
@@ -53,83 +53,45 @@ async fn run_test_case(test_case: TestCase) {
         .take_output()
         .expect("pipeline should expose an output receiver");
     let timeout_duration = Duration::from_secs(5);
-    let received_data = timeout(timeout_duration, output.recv())
-        .await
-        .unwrap_or_else(|_| panic!("Timeout waiting for output for: {}", test_case.name))
-        .unwrap_or_else(|| panic!("Failed to receive output for: {}", test_case.name));
+    let collection = recv_next_collection(&mut output, timeout_duration).await;
+    let rows = collection.rows();
 
-    match received_data {
-        StreamData::Collection(result_collection) => {
-            let rows = result_collection.rows();
+    assert_eq!(
+        rows.len(),
+        test_case.expected_rows,
+        "Wrong number of rows for test: {}",
+        test_case.name
+    );
 
+    if test_case.expected_rows == 0 {
+        assert!(
+            rows.is_empty(),
+            "Row-less batches should have no rows for test: {}",
+            test_case.name
+        );
+    } else {
+        for row in rows {
             assert_eq!(
-                rows.len(),
-                test_case.expected_rows,
-                "Wrong number of rows for test: {}",
+                row.len(),
+                test_case.expected_columns,
+                "Wrong number of columns for test: {}",
                 test_case.name
             );
+        }
 
-            if test_case.expected_rows == 0 {
-                assert!(
-                    rows.is_empty(),
-                    "Row-less batches should have no rows for test: {}",
-                    test_case.name
-                );
-            } else {
-                for row in rows {
-                    assert_eq!(
-                        row.len(),
-                        test_case.expected_columns,
-                        "Wrong number of columns for test: {}",
-                        test_case.name
-                    );
-                }
-
-                for check in test_case.column_checks {
-                    let mut values = Vec::with_capacity(rows.len());
-                    for row in rows {
-                        let value = row
-                            .value_by_name("stream", &check.expected_name)
-                            .or_else(|| row.value_by_name("", &check.expected_name))
-                            .unwrap_or_else(|| panic!("column {} missing", check.expected_name));
-                        values.push(value.clone());
-                    }
-                    assert_eq!(
-                        values, check.expected_values,
-                        "Wrong values in column {} for test: {}",
-                        check.expected_name, test_case.name
-                    );
-                }
+        for check in test_case.column_checks {
+            let mut values = Vec::with_capacity(rows.len());
+            for row in rows {
+                let value = row
+                    .value_by_name("stream", &check.expected_name)
+                    .or_else(|| row.value_by_name("", &check.expected_name))
+                    .unwrap_or_else(|| panic!("column {} missing", check.expected_name));
+                values.push(value.clone());
             }
-        }
-        StreamData::Encoded { .. } => {
-            panic!(
-                "Expected Collection data, but received encoded payload for test: {}",
-                test_case.name
-            );
-        }
-        StreamData::Control(_) => {
-            panic!(
-                "Expected Collection data, but received control signal for test: {}",
-                test_case.name
-            );
-        }
-        StreamData::Error(e) => {
-            panic!(
-                "Expected Collection data, but received error for test: {}: {}",
-                test_case.name, e.message
-            );
-        }
-        StreamData::Bytes(_) => {
-            panic!(
-                "Expected Collection data, but received undecoded bytes for test: {}",
-                test_case.name
-            );
-        }
-        StreamData::Watermark(ts) => {
-            panic!(
-                "Expected Collection data, but received watermark {:?} for test: {}",
-                ts, test_case.name
+            assert_eq!(
+                values, check.expected_values,
+                "Wrong values in column {} for test: {}",
+                check.expected_name, test_case.name
             );
         }
     }
@@ -301,29 +263,3 @@ async fn pipeline_table_driven_queries() {
         run_test_case(test_case).await;
     }
 }
-
-async fn install_stream_schema(instance: &FlowInstance, columns: &[(String, Vec<Value>)]) {
-    let schema_columns = columns
-        .iter()
-        .map(|(name, values)| {
-            let datatype = values
-                .iter()
-                .find(|v| !matches!(v, Value::Null))
-                .map(Value::datatype)
-                .unwrap_or(ConcreteDatatype::Null);
-            ColumnSchema::new("stream".to_string(), name.clone(), datatype)
-        })
-        .collect();
-    let schema = Schema::new(schema_columns);
-    let definition = StreamDefinition::new(
-        "stream".to_string(),
-        Arc::new(schema),
-        StreamProps::Mock(MockStreamProps::default()),
-        StreamDecoderConfig::json(),
-    );
-    instance
-        .create_stream(definition, false)
-        .await
-        .expect("create stream");
-}
-
