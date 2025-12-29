@@ -46,7 +46,7 @@ pub async fn recv_next_collection(
             StreamData::Control(_) => continue,
             StreamData::Watermark(_) => continue,
             StreamData::Error(err) => panic!("pipeline returned error: {}", err.message),
-            StreamData::Encoded { .. } => panic!("unexpected stream data: Encoded"),
+            StreamData::EncodedBytes { .. } => panic!("unexpected stream data: EncodedBytes"),
             StreamData::Bytes(_) => panic!("unexpected stream data: Bytes"),
         }
     }

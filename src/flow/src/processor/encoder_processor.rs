@@ -2,9 +2,7 @@
 //!
 //! This processor sits between the physical plan root and sink processors.
 //! It transforms [`StreamData::Collection`] items using the configured
-//! [`CollectionEncoder`] and produces [`StreamData::Encoded`] records that
-//! carry both the encoded payload and the original collection for downstream
-//! consumers such as tests/result collectors.
+//! [`CollectionEncoder`] and produces [`StreamData::EncodedBytes`] records.
 
 use crate::codec::encoder::CollectionEncoder;
 use crate::processor::base::{
@@ -81,11 +79,12 @@ impl Processor for EncoderProcessor {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
                                 log_received_data(&processor_id, &StreamData::Collection(collection.clone()));
+                                let rows = collection.num_rows() as u64;
                                 match encoder.encode(collection.as_ref()) {
                                     Ok(payload) => {
                                         send_with_backpressure(
                                             &output,
-                                            StreamData::encoded(collection, payload),
+                                            StreamData::encoded_bytes(payload, rows),
                                         )
                                         .await?;
                                     }

@@ -176,9 +176,9 @@ impl Processor for SinkProcessor {
                     }
                     item = input_streams.next() => {
                         match item {
-                            Some(Ok(StreamData::Encoded { collection, payload })) => {
-                                log_received_data(&processor_id, &StreamData::Encoded { collection: collection.clone(), payload: payload.clone() });
-                                let rows = collection.num_rows() as u64;
+                            Some(Ok(StreamData::EncodedBytes { payload, num_rows })) => {
+                                log_received_data(&processor_id, &StreamData::EncodedBytes { payload: payload.clone(), num_rows });
+                                let rows = num_rows;
                                 if let Err(err) =
                                     Self::handle_payload(&processor_id, &mut connector, &payload, rows).await
                                 {
@@ -190,7 +190,7 @@ impl Processor for SinkProcessor {
                                 if forward_data {
                                     send_with_backpressure(
                                         &output,
-                                        StreamData::collection(collection),
+                                        StreamData::EncodedBytes { payload, num_rows },
                                     )
                                     .await?;
                                 }
