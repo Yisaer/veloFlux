@@ -1,9 +1,51 @@
 use crate::aggregation::{AggregateAccumulator, AggregateFunction};
+use crate::catalog::{
+    AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
+    FunctionRequirement, FunctionSignatureSpec, TypeSpec,
+};
 use crate::expr::func::BinaryFunc;
 use datatypes::{ConcreteDatatype, Value};
 
 #[derive(Debug)]
 pub struct SumFunction;
+
+pub fn sum_function_def() -> FunctionDef {
+    FunctionDef {
+        kind: FunctionKind::Aggregate,
+        name: "sum".to_string(),
+        aliases: vec![],
+        signature: FunctionSignatureSpec {
+            args: vec![FunctionArgSpec {
+                name: "x".to_string(),
+                r#type: TypeSpec::Category {
+                    name: "numeric".to_string(),
+                },
+                optional: false,
+                variadic: false,
+            }],
+            return_type: TypeSpec::Category {
+                name: "numeric".to_string(),
+            },
+        },
+        description: "Sum of numeric values.".to_string(),
+        allowed_contexts: vec![FunctionContext::Select],
+        requirements: vec![FunctionRequirement::AggregateContext],
+        constraints: vec![
+            "Requires exactly 1 argument.".to_string(),
+            "Argument type must be numeric (int/uint/float).".to_string(),
+            "Ignores NULL inputs; returns NULL if all inputs are NULL.".to_string(),
+            "Return type matches the input numeric type.".to_string(),
+        ],
+        examples: vec![
+            "SELECT sum(x) AS total".to_string(),
+            "SELECT sum(amount) FROM orders GROUP BY user_id".to_string(),
+        ],
+        aggregate: Some(AggregateFunctionSpec {
+            supports_incremental: true,
+        }),
+        stateful: None,
+    }
+}
 
 impl Default for SumFunction {
     fn default() -> Self {

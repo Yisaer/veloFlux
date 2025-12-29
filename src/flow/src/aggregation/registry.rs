@@ -1,4 +1,5 @@
-use crate::aggregation::{LastRowFunction, NdvFunction, SumFunction};
+use crate::aggregation::{sum_function_def, LastRowFunction, NdvFunction, SumFunction};
+use crate::catalog::FunctionDef;
 use datatypes::{ConcreteDatatype, Value};
 use parser::aggregate_registry::AggregateRegistry;
 use std::collections::HashMap;
@@ -87,6 +88,10 @@ impl AggregateRegistry for AggregateFunctionRegistry {
     fn is_aggregate_function(&self, name: &str) -> bool {
         self.is_registered(name)
     }
+}
+
+pub fn builtin_aggregation_defs() -> Vec<FunctionDef> {
+    vec![sum_function_def()]
 }
 
 #[cfg(test)]
