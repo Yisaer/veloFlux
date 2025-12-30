@@ -27,57 +27,29 @@ pub enum CodecError {
 
 /// Trait implemented by all record decoders.
 pub trait RecordDecoder: Send + Sync + 'static {
-    /// Convert raw bytes into a RecordBatch.
-    fn decode(&self, payload: &[u8]) -> Result<RecordBatch, CodecError>;
-
-    /// Convert raw bytes into a single tuple.
-    fn decode_tuple(&self, payload: &[u8]) -> Result<Tuple, CodecError>;
-
-    /// Convert raw bytes into a RecordBatch, decoding only the requested schema columns.
+    /// Convert raw bytes into a RecordBatch, optionally applying a decode projection.
     ///
-    /// `projection` is a list of schema column names to decode. Columns not in `projection` are
-    /// treated as `NULL` (position-preserving semantics for `ByIndex` consumers).
-    ///
-    /// Default implementation falls back to full decode.
+    /// Projection semantics:
+    /// - `None`: decode all schema columns.
+    /// - `Some(p)`: only decode columns present in `p`; missing columns are treated as `NULL`.
+    ///   Nested projection nodes (struct fields / list indexes) are applied when present.
     fn decode_with_projection(
         &self,
         payload: &[u8],
-        projection: Option<&[String]>,
-    ) -> Result<RecordBatch, CodecError> {
-        let _ = projection;
-        self.decode(payload)
-    }
+        projection: Option<&DecodeProjection>,
+    ) -> Result<RecordBatch, CodecError>;
 
-    /// Convert raw bytes into a single tuple, decoding only the requested schema columns.
-    ///
-    /// Default implementation falls back to full decode.
-    fn decode_tuple_with_projection(
-        &self,
-        payload: &[u8],
-        projection: Option<&[String]>,
-    ) -> Result<Tuple, CodecError> {
-        let _ = projection;
-        self.decode_tuple(payload)
-    }
-
-    /// Convert raw bytes into a RecordBatch, decoding only the requested nested fields / list indices.
-    ///
-    /// Default implementation falls back to full decode.
-    fn decode_with_decode_projection(
-        &self,
-        payload: &[u8],
-        decode_projection: Option<&DecodeProjection>,
-    ) -> Result<RecordBatch, CodecError> {
-        let _ = decode_projection;
-        self.decode(payload)
+    /// Convert raw bytes into a RecordBatch (no projection).
+    fn decode(&self, payload: &[u8]) -> Result<RecordBatch, CodecError> {
+        self.decode_with_projection(payload, None)
     }
 }
 
 /// Decoder that converts JSON documents (object or array) into a RecordBatch.
 pub struct JsonDecoder {
-    stream_name: String,
+    stream_name: Arc<str>,
     schema: Arc<Schema>,
-    schema_keys: Vec<Arc<str>>,
+    schema_keys: Arc<[Arc<str>]>,
     #[allow(dead_code)]
     props: JsonMap<String, JsonValue>,
 }
@@ -88,43 +60,19 @@ impl JsonDecoder {
         schema: Arc<Schema>,
         props: JsonMap<String, JsonValue>,
     ) -> Self {
-        let stream_name = stream_name.into();
-        let schema_keys = schema
-            .column_schemas()
-            .iter()
-            .map(|col| Arc::<str>::from(col.name.as_str()))
-            .collect();
+        let stream_name: Arc<str> = Arc::<str>::from(stream_name.into());
+        let schema_keys: Arc<[Arc<str>]> = Arc::from(
+            schema
+                .column_schemas()
+                .iter()
+                .map(|col| Arc::<str>::from(col.name.as_str()))
+                .collect::<Vec<_>>(),
+        );
         Self {
             stream_name,
             schema,
             schema_keys,
             props,
-        }
-    }
-
-    fn decode_value(&self, json: JsonValue) -> Result<RecordBatch, CodecError> {
-        match json {
-            JsonValue::Object(map) => self.build_from_object_rows(vec![map]),
-            JsonValue::Array(items) => self.decode_array(items),
-            other => Err(CodecError::Other(format!(
-                "JSON root must be object or array, got {other:?}"
-            ))),
-        }
-    }
-
-    fn decode_value_with_projection(
-        &self,
-        json: JsonValue,
-        projection: Option<&[String]>,
-    ) -> Result<RecordBatch, CodecError> {
-        match json {
-            JsonValue::Object(map) => {
-                self.build_from_object_rows_with_projection(vec![map], projection)
-            }
-            JsonValue::Array(items) => self.decode_array_with_projection(items, projection),
-            other => Err(CodecError::Other(format!(
-                "JSON root must be object or array, got {other:?}"
-            ))),
         }
     }
 
@@ -144,52 +92,6 @@ impl JsonDecoder {
                 "JSON root must be object or array, got {other:?}"
             ))),
         }
-    }
-
-    fn decode_array(&self, items: Vec<JsonValue>) -> Result<RecordBatch, CodecError> {
-        if items.is_empty() {
-            return Ok(RecordBatch::empty());
-        }
-
-        if !items.iter().all(|v| v.is_object()) {
-            return Err(CodecError::Other(
-                "JSON array must contain only objects".to_string(),
-            ));
-        }
-
-        let rows: Vec<JsonMap<String, JsonValue>> = items
-            .into_iter()
-            .map(|v| match v {
-                JsonValue::Object(map) => map,
-                _ => unreachable!("validated object rows"),
-            })
-            .collect();
-        self.build_from_object_rows(rows)
-    }
-
-    fn decode_array_with_projection(
-        &self,
-        items: Vec<JsonValue>,
-        projection: Option<&[String]>,
-    ) -> Result<RecordBatch, CodecError> {
-        if items.is_empty() {
-            return Ok(RecordBatch::empty());
-        }
-
-        if !items.iter().all(|v| v.is_object()) {
-            return Err(CodecError::Other(
-                "JSON array must contain only objects".to_string(),
-            ));
-        }
-
-        let rows: Vec<JsonMap<String, JsonValue>> = items
-            .into_iter()
-            .map(|v| match v {
-                JsonValue::Object(map) => map,
-                _ => unreachable!("validated object rows"),
-            })
-            .collect();
-        self.build_from_object_rows_with_projection(rows, projection)
     }
 
     fn decode_array_with_decode_projection(
@@ -217,76 +119,6 @@ impl JsonDecoder {
         self.build_from_object_rows_with_decode_projection(rows, decode_projection)
     }
 
-    pub fn decode_tuple(&self, payload: &[u8]) -> Result<Tuple, CodecError> {
-        let json = serde_json::from_slice(payload)?;
-        let tuples = self.decode_value_to_tuples(json)?;
-        match tuples.as_slice() {
-            [] => Err(CodecError::Other(
-                "JSON payload did not contain any object rows".to_string(),
-            )),
-            [tuple] => Ok(tuple.clone()),
-            _ => Err(CodecError::Other(
-                "JSON payload contained multiple rows; expected a single object".to_string(),
-            )),
-        }
-    }
-
-    fn decode_value_to_tuples(&self, json: JsonValue) -> Result<Vec<Tuple>, CodecError> {
-        match json {
-            JsonValue::Object(map) => self.build_tuples_from_object_rows(vec![map]),
-            JsonValue::Array(items) => self.decode_array_to_tuples(items),
-            other => Err(CodecError::Other(format!(
-                "JSON root must be object or array, got {other:?}"
-            ))),
-        }
-    }
-
-    fn decode_array_to_tuples(&self, items: Vec<JsonValue>) -> Result<Vec<Tuple>, CodecError> {
-        if items.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        if !items.iter().all(|v| v.is_object()) {
-            return Err(CodecError::Other(
-                "JSON array must contain only objects".to_string(),
-            ));
-        }
-
-        let rows: Vec<JsonMap<String, JsonValue>> = items
-            .into_iter()
-            .map(|v| match v {
-                JsonValue::Object(map) => map,
-                _ => unreachable!("validated object rows"),
-            })
-            .collect();
-        self.build_tuples_from_object_rows(rows)
-    }
-
-    fn build_from_object_rows(
-        &self,
-        rows: Vec<JsonMap<String, JsonValue>>,
-    ) -> Result<RecordBatch, CodecError> {
-        if rows.is_empty() {
-            return Ok(RecordBatch::empty());
-        }
-
-        let tuples = self.build_tuples_from_object_rows(rows)?;
-        Ok(RecordBatch::new(tuples)?)
-    }
-
-    fn build_from_object_rows_with_projection(
-        &self,
-        rows: Vec<JsonMap<String, JsonValue>>,
-        projection: Option<&[String]>,
-    ) -> Result<RecordBatch, CodecError> {
-        if rows.is_empty() {
-            return Ok(RecordBatch::empty());
-        }
-
-        let tuples = self.build_tuples_from_object_rows_with_projection(rows, projection)?;
-        Ok(RecordBatch::new(tuples)?)
-    }
-
     fn build_from_object_rows_with_decode_projection(
         &self,
         rows: Vec<JsonMap<String, JsonValue>>,
@@ -301,84 +133,6 @@ impl JsonDecoder {
         Ok(RecordBatch::new(tuples)?)
     }
 
-    fn build_tuples_from_object_rows(
-        &self,
-        rows: Vec<JsonMap<String, JsonValue>>,
-    ) -> Result<Vec<Tuple>, CodecError> {
-        let mut tuples = Vec::with_capacity(rows.len());
-        for mut row in rows {
-            let mut keys = Vec::with_capacity(self.schema_keys.len() + row.len());
-            let mut values = Vec::with_capacity(keys.capacity());
-            for (idx, column) in self.schema.column_schemas().iter().enumerate() {
-                let value = row
-                    .remove(&column.name)
-                    .map(|json| json_to_value_with_datatype(&json, &column.data_type))
-                    .unwrap_or(Value::Null);
-                keys.push(self.schema_keys[idx].clone());
-                values.push(Arc::new(value));
-            }
-            for (key, value) in row {
-                keys.push(Arc::<str>::from(key.as_str()));
-                values.push(Arc::new(json_to_value(&value)));
-            }
-            let message = Arc::new(Message::new(
-                Arc::<str>::from(self.stream_name.as_str()),
-                keys,
-                values,
-            ));
-            tuples.push(Tuple::new(vec![message]));
-        }
-        Ok(tuples)
-    }
-
-    fn build_tuples_from_object_rows_with_projection(
-        &self,
-        rows: Vec<JsonMap<String, JsonValue>>,
-        projection: Option<&[String]>,
-    ) -> Result<Vec<Tuple>, CodecError> {
-        let projection_set = projection.map(|columns| {
-            columns
-                .iter()
-                .map(|name| name.as_str())
-                .collect::<std::collections::HashSet<_>>()
-        });
-
-        let mut tuples = Vec::with_capacity(rows.len());
-        for mut row in rows {
-            let mut keys = Vec::with_capacity(self.schema_keys.len() + row.len());
-            let mut values = Vec::with_capacity(keys.capacity());
-            for (idx, column) in self.schema.column_schemas().iter().enumerate() {
-                let should_decode = projection_set
-                    .as_ref()
-                    .map(|set| set.contains(column.name.as_str()))
-                    .unwrap_or(true);
-
-                let value = if should_decode {
-                    row.remove(&column.name)
-                        .map(|json| json_to_value_with_datatype(&json, &column.data_type))
-                        .unwrap_or(Value::Null)
-                } else {
-                    let _ = row.remove(&column.name);
-                    Value::Null
-                };
-
-                keys.push(self.schema_keys[idx].clone());
-                values.push(Arc::new(value));
-            }
-            for (key, value) in row {
-                keys.push(Arc::<str>::from(key.as_str()));
-                values.push(Arc::new(json_to_value(&value)));
-            }
-            let message = Arc::new(Message::new(
-                Arc::<str>::from(self.stream_name.as_str()),
-                keys,
-                values,
-            ));
-            tuples.push(Tuple::new(vec![message]));
-        }
-        Ok(tuples)
-    }
-
     fn build_tuples_from_object_rows_with_decode_projection(
         &self,
         rows: Vec<JsonMap<String, JsonValue>>,
@@ -386,31 +140,44 @@ impl JsonDecoder {
     ) -> Result<Vec<Tuple>, CodecError> {
         let mut tuples = Vec::with_capacity(rows.len());
         for mut row in rows {
-            let mut keys = Vec::with_capacity(self.schema_keys.len() + row.len());
-            let mut values = Vec::with_capacity(keys.capacity());
-            for (idx, column) in self.schema.column_schemas().iter().enumerate() {
+            let mut values = Vec::with_capacity(self.schema_keys.len());
+            for column in self.schema.column_schemas().iter() {
                 let projection_node =
                     decode_projection.and_then(|p| p.column(column.name.as_str()));
-                let value = row
-                    .remove(&column.name)
-                    .map(|json| {
-                        json_to_value_with_datatype_and_projection(
-                            &json,
-                            &column.data_type,
-                            projection_node,
-                        )
-                    })
-                    .unwrap_or(Value::Null);
-                keys.push(self.schema_keys[idx].clone());
+                let value = match decode_projection {
+                    Some(_) => {
+                        if let Some(node) = projection_node {
+                            row.remove(&column.name)
+                                .map(|json| {
+                                    json_to_value_with_datatype_and_projection(
+                                        &json,
+                                        &column.data_type,
+                                        Some(node),
+                                    )
+                                })
+                                .unwrap_or(Value::Null)
+                        } else {
+                            let _ = row.remove(&column.name);
+                            Value::Null
+                        }
+                    }
+                    None => row
+                        .remove(&column.name)
+                        .map(|json| {
+                            json_to_value_with_datatype_and_projection(
+                                &json,
+                                &column.data_type,
+                                None,
+                            )
+                        })
+                        .unwrap_or(Value::Null),
+                };
                 values.push(Arc::new(value));
             }
-            for (key, value) in row {
-                keys.push(Arc::<str>::from(key.as_str()));
-                values.push(Arc::new(json_to_value(&value)));
-            }
-            let message = Arc::new(Message::new(
-                Arc::<str>::from(self.stream_name.as_str()),
-                keys,
+            drop(row);
+            let message = Arc::new(Message::new_shared_keys(
+                Arc::clone(&self.stream_name),
+                Arc::clone(&self.schema_keys),
                 values,
             ));
             tuples.push(Tuple::new(vec![message]));
@@ -420,32 +187,13 @@ impl JsonDecoder {
 }
 
 impl RecordDecoder for JsonDecoder {
-    fn decode(&self, payload: &[u8]) -> Result<RecordBatch, CodecError> {
-        let json = serde_json::from_slice(payload)?;
-        let batch = self.decode_value(json)?;
-        Ok(batch)
-    }
-
-    fn decode_tuple(&self, payload: &[u8]) -> Result<Tuple, CodecError> {
-        JsonDecoder::decode_tuple(self, payload)
-    }
-
     fn decode_with_projection(
         &self,
         payload: &[u8],
-        projection: Option<&[String]>,
+        projection: Option<&DecodeProjection>,
     ) -> Result<RecordBatch, CodecError> {
         let json = serde_json::from_slice(payload)?;
-        self.decode_value_with_projection(json, projection)
-    }
-
-    fn decode_with_decode_projection(
-        &self,
-        payload: &[u8],
-        decode_projection: Option<&DecodeProjection>,
-    ) -> Result<RecordBatch, CodecError> {
-        let json = serde_json::from_slice(payload)?;
-        self.decode_value_with_decode_projection(json, decode_projection)
+        self.decode_value_with_decode_projection(json, projection)
     }
 }
 
@@ -673,6 +421,12 @@ mod tests {
     };
     use serde_json::Map as JsonMap;
 
+    fn decode_one(decoder: &JsonDecoder, payload: &[u8]) -> Tuple {
+        let mut rows = decoder.decode(payload).expect("decode batch").into_rows();
+        assert_eq!(rows.len(), 1, "expected exactly one decoded tuple");
+        rows.pop().expect("one row")
+    }
+
     #[test]
     fn json_decoder_decodes_single_tuple() {
         let schema = Arc::new(Schema::new(vec![
@@ -689,7 +443,7 @@ mod tests {
         ]));
         let decoder = JsonDecoder::new("orders", schema, JsonMap::new());
         let payload = br#"{"amount":10,"status":"ok"}"#.as_ref();
-        let tuple = decoder.decode_tuple(payload).expect("decode tuple");
+        let tuple = decode_one(&decoder, payload);
 
         let mut columns: Vec<_> = tuple
             .entries()
@@ -715,7 +469,47 @@ mod tests {
     }
 
     #[test]
-    fn json_decoder_rejects_multiple_rows_for_tuple() {
+    fn json_decoder_ignores_unknown_fields() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "orders".to_string(),
+                "amount".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                "orders".to_string(),
+                "status".to_string(),
+                ConcreteDatatype::String(StringType),
+            ),
+        ]));
+        let decoder = JsonDecoder::new("orders", schema, JsonMap::new());
+        let payload = br#"{"amount":10,"status":"ok","extra":42,"extra2":"ignored"}"#.as_ref();
+
+        let batch = decoder.decode(payload).expect("decode batch");
+        let tuples = batch.into_rows();
+        assert_eq!(tuples.len(), 1);
+        let tuple = &tuples[0];
+
+        let mut columns: Vec<_> = tuple
+            .entries()
+            .into_iter()
+            .map(|((src, col), _)| (src.to_string(), col.to_string()))
+            .collect();
+        columns.sort();
+        assert_eq!(
+            columns,
+            vec![
+                ("orders".to_string(), "amount".to_string()),
+                ("orders".to_string(), "status".to_string())
+            ]
+        );
+
+        assert_eq!(tuple.value_by_name("orders", "extra"), None);
+        assert_eq!(tuple.value_by_name("orders", "extra2"), None);
+    }
+
+    #[test]
+    fn json_decoder_decodes_multiple_rows() {
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
             "orders".to_string(),
             "amount".to_string(),
@@ -723,10 +517,8 @@ mod tests {
         )]));
         let decoder = JsonDecoder::new("orders", schema, JsonMap::new());
         let payload = br#"[{"amount":10},{"amount":20}]"#.as_ref();
-        let err = decoder
-            .decode_tuple(payload)
-            .expect_err("multiple rows fail");
-        assert!(format!("{err}").contains("multiple rows"));
+        let rows = decoder.decode(payload).expect("decode batch").into_rows();
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]
@@ -746,7 +538,7 @@ mod tests {
 
         let decoder = JsonDecoder::new("orders", schema, JsonMap::new());
         let payload = br#"{"b":{"c":10,"d":"ignore"}}"#.as_ref();
-        let tuple = decoder.decode_tuple(payload).expect("decode tuple");
+        let tuple = decode_one(&decoder, payload);
 
         let Some(Value::Struct(struct_val)) = tuple.value_by_name("orders", "b") else {
             panic!("expected struct value");
@@ -772,7 +564,7 @@ mod tests {
 
         let decoder = JsonDecoder::new("orders", schema, JsonMap::new());
         let payload = br#"{"items":[{"c":10,"d":"ignore"},{"c":20,"d":"ignore2"}]}"#.as_ref();
-        let tuple = decoder.decode_tuple(payload).expect("decode tuple");
+        let tuple = decode_one(&decoder, payload);
 
         let Some(Value::List(list_val)) = tuple.value_by_name("orders", "items") else {
             panic!("expected list value");
@@ -840,7 +632,7 @@ mod tests {
         let payload =
             br#"{"items":[{"x":10,"y":"ignore"},{"x":20},{"x":30},{"x":40},{"x":50}]}"#.as_ref();
         let tuple = decoder
-            .decode_with_decode_projection(payload, Some(&projection))
+            .decode_with_projection(payload, Some(&projection))
             .expect("decode batch")
             .into_rows()
             .into_iter()

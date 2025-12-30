@@ -56,7 +56,8 @@ impl Collection for RecordBatch {
     ) -> Result<Box<dyn Collection>, CollectionError> {
         let mut projected_rows = Vec::with_capacity(self.num_rows());
         for tuple in self.rows() {
-            let mut projected_tuple = Tuple::with_timestamp(Vec::new(), tuple.timestamp);
+            let mut projected_tuple =
+                Tuple::with_timestamp(Tuple::empty_messages(), tuple.timestamp);
             #[allow(clippy::type_complexity)]
             let mut partial_messages: HashMap<&str, (Vec<Arc<str>>, Vec<Arc<Value>>)> =
                 HashMap::new();
@@ -137,7 +138,7 @@ impl Collection for RecordBatch {
                 projected_messages.push(msg);
             }
 
-            projected_tuple.messages = projected_messages;
+            projected_tuple.messages = Arc::from(projected_messages);
 
             projected_rows.push(projected_tuple);
         }

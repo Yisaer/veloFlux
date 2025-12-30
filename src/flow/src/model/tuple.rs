@@ -7,12 +7,20 @@ use std::time::SystemTime;
 #[derive(Debug)]
 pub struct Message {
     source: Arc<str>,
-    keys: Vec<Arc<str>>,
+    keys: Arc<[Arc<str>]>,
     values: Vec<Arc<Value>>,
 }
 
 impl Message {
     pub fn new(source: impl Into<Arc<str>>, keys: Vec<Arc<str>>, values: Vec<Arc<Value>>) -> Self {
+        Self::new_shared_keys(source, Arc::from(keys), values)
+    }
+
+    pub fn new_shared_keys(
+        source: impl Into<Arc<str>>,
+        keys: Arc<[Arc<str>]>,
+        values: Vec<Arc<Value>>,
+    ) -> Self {
         debug_assert_eq!(
             keys.len(),
             values.len(),
@@ -106,17 +114,21 @@ impl AffiliateRow {
 /// Tuple combining source messages and optional derived columns.
 #[derive(Debug, Clone)]
 pub struct Tuple {
-    pub messages: Vec<Arc<Message>>,
+    pub messages: Arc<[Arc<Message>]>,
     pub affiliate: Option<AffiliateRow>,
     pub timestamp: SystemTime,
 }
 
 impl Tuple {
-    pub fn new(messages: Vec<Arc<Message>>) -> Self {
-        Self::with_timestamp(messages, SystemTime::now())
+    pub fn empty_messages() -> Arc<[Arc<Message>]> {
+        Arc::from(Vec::<Arc<Message>>::new())
     }
 
-    pub fn with_timestamp(messages: Vec<Arc<Message>>, timestamp: SystemTime) -> Self {
+    pub fn new(messages: Vec<Arc<Message>>) -> Self {
+        Self::with_timestamp(Arc::from(messages), SystemTime::now())
+    }
+
+    pub fn with_timestamp(messages: Arc<[Arc<Message>]>, timestamp: SystemTime) -> Self {
         Self {
             messages,
             affiliate: None,
@@ -138,7 +150,7 @@ impl Tuple {
                 out.push((("", key.as_str()), value));
             }
         }
-        for msg in &self.messages {
+        for msg in self.messages.iter() {
             for (name, value) in msg.entries() {
                 out.push(((msg.source(), name), value));
             }
@@ -184,7 +196,7 @@ impl Tuple {
     }
 
     pub fn messages(&self) -> &[Arc<Message>] {
-        &self.messages
+        self.messages.as_ref()
     }
 
     pub fn message_by_source(&self, source: &str) -> Option<&Arc<Message>> {
