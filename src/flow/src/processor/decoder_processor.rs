@@ -116,13 +116,15 @@ impl Processor for DecoderProcessor {
                                 log_received_data(&processor_id, &data);
                                 if let StreamData::Bytes(payload) = &data {
                                     let decoded = if let Some(proj) = decode_projection.as_ref() {
-                                        decoder.decode_with_decode_projection(payload, Some(proj))
+                                        decoder.decode_with_projection(payload, Some(proj))
                                     } else if let Some(lock) = &projection {
                                         let cols = lock
                                             .read()
                                             .expect("decoder projection lock poisoned")
                                             .clone();
-                                        decoder.decode_with_projection(payload, Some(&cols))
+                                        let projection =
+                                            DecodeProjection::from_top_level_columns(&cols);
+                                        decoder.decode_with_projection(payload, Some(&projection))
                                     } else {
                                         decoder.decode(payload)
                                     };

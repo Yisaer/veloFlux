@@ -94,6 +94,18 @@ impl DecodeProjection {
         self.columns.insert(name.to_string(), ProjectionNode::All);
     }
 
+    /// Build a decode projection that includes the given top-level columns.
+    ///
+    /// This is useful for "column projection" use-cases where decoding should only materialize a
+    /// subset of schema columns; unspecified columns can then be treated as NULL by decoders.
+    pub fn from_top_level_columns(columns: &[String]) -> Self {
+        let mut projection = Self::default();
+        for column in columns {
+            projection.mark_column_all(column);
+        }
+        projection
+    }
+
     pub fn mark_field_path_used(&mut self, path: &FieldPath) {
         self.mark_segments_used(path.column.as_str(), path.segments.as_slice());
     }
