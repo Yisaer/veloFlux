@@ -73,6 +73,8 @@ pub enum PipelineError {
 pub enum SinkType {
     /// MQTT sink.
     Mqtt,
+    /// No-op sink that discards payloads.
+    Nop,
 }
 
 /// Sink configuration payload.
@@ -80,6 +82,8 @@ pub enum SinkType {
 pub enum SinkProps {
     /// MQTT sink configuration.
     Mqtt(MqttSinkProps),
+    /// No-op sink config (empty).
+    Nop,
 }
 
 /// Runtime state for pipeline execution.
@@ -741,7 +745,15 @@ fn build_sinks_from_definition(
     for sink in definition.sinks() {
         match sink.sink_type {
             SinkType::Mqtt => {
-                let SinkProps::Mqtt(props) = &sink.props;
+                let props = match &sink.props {
+                    SinkProps::Mqtt(props) => props,
+                    other => {
+                        return Err(format!(
+                            "sink {} expected mqtt props but received {other:?}",
+                            sink.sink_id
+                        ));
+                    }
+                };
                 let mut config = MqttSinkConfig::new(
                     sink.sink_id.clone(),
                     props.broker_url.clone(),
@@ -764,6 +776,22 @@ fn build_sinks_from_definition(
                 let connector = PipelineSinkConnector::new(
                     sink.sink_id.clone(),
                     SinkConnectorConfig::Mqtt(config),
+                    sink.encoder.clone(),
+                );
+                let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
+                    .with_common_props(sink.common.clone());
+                sinks.push(pipeline_sink);
+            }
+            SinkType::Nop => {
+                if !matches!(&sink.props, SinkProps::Nop) {
+                    return Err(format!(
+                        "sink {} expected nop props but received different variant",
+                        sink.sink_id
+                    ));
+                }
+                let connector = PipelineSinkConnector::new(
+                    sink.sink_id.clone(),
+                    SinkConnectorConfig::Nop(crate::planner::sink::NopSinkConfig),
                     sink.encoder.clone(),
                 );
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
