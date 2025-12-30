@@ -394,6 +394,7 @@ pub(crate) fn build_pipeline_definition(
                 }
                 SinkDefinition::new(sink_id.clone(), SinkType::Mqtt, SinkProps::Mqtt(props))
             }
+            "nop" => SinkDefinition::new(sink_id.clone(), SinkType::Nop, SinkProps::Nop),
             other => return Err(format!("unsupported sink type: {other}")),
         };
         let encoder_kind = sink_req.encoder.encode_type.clone();
