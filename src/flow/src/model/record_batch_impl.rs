@@ -7,6 +7,141 @@ use datatypes::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[allow(clippy::type_complexity)]
+enum PartialMessages<'a> {
+    Single {
+        keys: Vec<Arc<str>>,
+        values: Vec<Arc<Value>>,
+    },
+    Multi {
+        map: HashMap<&'a str, (Vec<Arc<str>>, Vec<Arc<Value>>)>,
+    },
+}
+
+impl<'a> PartialMessages<'a> {
+    fn push(
+        &mut self,
+        source: &'a str,
+        key: Arc<str>,
+        value: Arc<Value>,
+    ) -> Result<(), CollectionError> {
+        match self {
+            PartialMessages::Single { keys, values } => {
+                let _ = source;
+                keys.push(key);
+                values.push(value);
+                Ok(())
+            }
+            PartialMessages::Multi { map } => {
+                let entry = if let Some(existing) = map.get_mut(source) {
+                    existing
+                } else {
+                    map.entry(source)
+                        .or_insert_with(|| (Vec::new(), Vec::new()))
+                };
+                entry.0.push(key);
+                entry.1.push(value);
+                Ok(())
+            }
+        }
+    }
+
+    fn append_to_messages(
+        self,
+        single_source: Option<&str>,
+        projected_messages: &mut Vec<Arc<crate::model::Message>>,
+    ) {
+        match self {
+            PartialMessages::Single { keys, values } => {
+                if !keys.is_empty() {
+                    let source = single_source.unwrap_or_default();
+                    let msg = Arc::new(crate::model::Message::new(source, keys, values));
+                    projected_messages.push(msg);
+                }
+            }
+            PartialMessages::Multi { map } => {
+                for (source, (keys, values)) in map {
+                    let msg = Arc::new(crate::model::Message::new(source, keys, values));
+                    projected_messages.push(msg);
+                }
+            }
+        }
+    }
+}
+
+fn apply_projection_for_tuple<'a>(
+    tuple: &Tuple,
+    fields: &'a [PhysicalProjectField],
+    mut partial_messages: PartialMessages<'a>,
+) -> Result<Tuple, CollectionError> {
+    let mut projected_tuple = Tuple::with_timestamp(Tuple::empty_messages(), tuple.timestamp);
+    let mut projected_messages = Vec::with_capacity(tuple.messages().len().saturating_add(1));
+    let single_source = (tuple.messages().len() == 1).then(|| tuple.messages()[0].source());
+
+    for field in fields {
+        match &field.compiled_expr {
+            ScalarExpr::Wildcard { source_name } => match source_name {
+                Some(prefix) => {
+                    if let Some(message) = tuple.message_by_source(prefix) {
+                        projected_messages.push(message.clone());
+                    } else {
+                        let qualifier = format!("{}.*", prefix);
+                        return Err(CollectionError::Other(format!(
+                            "Failed to evaluate expression for field '{}': Column not found: {}",
+                            field.field_name, qualifier
+                        )));
+                    }
+                }
+                None => {
+                    if tuple.messages().is_empty() {
+                        continue;
+                    }
+                    for message in tuple.messages() {
+                        projected_messages.push(message.clone());
+                    }
+                }
+            },
+            ScalarExpr::Column(ColumnRef::ByIndex {
+                source_name,
+                column_index,
+            }) => {
+                let message = tuple.message_by_source(source_name).ok_or_else(|| {
+                    CollectionError::Other(format!(
+                        "Failed to evaluate expression for field '{}': Column not found: {}",
+                        field.field_name, source_name
+                    ))
+                })?;
+                let (col_name, value) = message.entry_by_index(*column_index).ok_or_else(|| {
+                    CollectionError::Other(format!(
+                        "Failed to evaluate expression for field '{}': Column not found: {}#{}",
+                        field.field_name, source_name, column_index
+                    ))
+                })?;
+
+                partial_messages.push(source_name.as_str(), col_name.clone(), value.clone())?;
+            }
+            _ => {
+                let value = field
+                    .compiled_expr
+                    .eval_with_tuple(tuple)
+                    .map_err(|eval_error| {
+                        CollectionError::Other(format!(
+                            "Failed to evaluate expression for field '{}': {}",
+                            field.field_name, eval_error
+                        ))
+                    })?;
+
+                projected_tuple.add_affiliate_column(Arc::new(field.field_name.clone()), value);
+            }
+        }
+    }
+
+    partial_messages.append_to_messages(single_source, &mut projected_messages);
+    projected_tuple.messages = Arc::from(projected_messages);
+
+    Ok(projected_tuple)
+}
+
 impl Collection for RecordBatch {
     fn num_rows(&self) -> usize {
         self.num_rows()
@@ -54,93 +189,30 @@ impl Collection for RecordBatch {
         &self,
         fields: &[PhysicalProjectField],
     ) -> Result<Box<dyn Collection>, CollectionError> {
+        let by_index_count = fields
+            .iter()
+            .filter(|field| {
+                matches!(
+                    &field.compiled_expr,
+                    ScalarExpr::Column(ColumnRef::ByIndex { .. })
+                )
+            })
+            .count();
+
         let mut projected_rows = Vec::with_capacity(self.num_rows());
         for tuple in self.rows() {
-            let mut projected_tuple =
-                Tuple::with_timestamp(Tuple::empty_messages(), tuple.timestamp);
-            #[allow(clippy::type_complexity)]
-            let mut partial_messages: HashMap<&str, (Vec<Arc<str>>, Vec<Arc<Value>>)> =
-                HashMap::new();
-            let mut projected_messages = Vec::new();
-
-            for field in fields {
-                match &field.compiled_expr {
-                    ScalarExpr::Wildcard { source_name } => match source_name {
-                        Some(prefix) => {
-                            if let Some(message) = tuple.message_by_source(prefix) {
-                                projected_messages.push(message.clone());
-                            } else {
-                                let qualifier = format!("{}.*", prefix);
-                                return Err(CollectionError::Other(format!(
-                                        "Failed to evaluate expression for field '{}': Column not found: {}",
-                                        field.field_name, qualifier
-                                    )));
-                            }
-                        }
-                        None => {
-                            if tuple.messages().is_empty() {
-                                continue;
-                            }
-                            for message in tuple.messages() {
-                                projected_messages.push(message.clone());
-                            }
-                        }
-                    },
-                    ScalarExpr::Column(ColumnRef::ByIndex {
-                        source_name,
-                        column_index,
-                    }) => {
-                        let message = tuple.message_by_source(source_name).ok_or_else(|| {
-                            CollectionError::Other(format!(
-                                "Failed to evaluate expression for field '{}': Column not found: {}",
-                                field.field_name, source_name
-                            ))
-                        })?;
-                        let (col_name, value) = message.entry_by_index(*column_index).ok_or_else(|| {
-                            CollectionError::Other(format!(
-                                "Failed to evaluate expression for field '{}': Column not found: {}#{}",
-                                field.field_name, source_name, column_index
-                            ))
-                        })?;
-
-                        let entry = if let Some(existing) =
-                            partial_messages.get_mut(source_name.as_str())
-                        {
-                            existing
-                        } else {
-                            partial_messages
-                                .entry(source_name.as_str())
-                                .or_insert_with(|| (Vec::new(), Vec::new()))
-                        };
-                        entry.0.push(col_name.clone());
-                        entry.1.push(value.clone());
-                    }
-                    _ => {
-                        let value =
-                            field
-                                .compiled_expr
-                                .eval_with_tuple(tuple)
-                                .map_err(|eval_error| {
-                                    CollectionError::Other(format!(
-                                        "Failed to evaluate expression for field '{}': {}",
-                                        field.field_name, eval_error
-                                    ))
-                                })?;
-
-                        projected_tuple
-                            .add_affiliate_column(Arc::new(field.field_name.clone()), value);
-                    }
+            let partial_messages = if tuple.messages().len() == 1 {
+                PartialMessages::Single {
+                    keys: Vec::with_capacity(by_index_count),
+                    values: Vec::with_capacity(by_index_count),
                 }
-            }
+            } else {
+                PartialMessages::Multi {
+                    map: HashMap::new(),
+                }
+            };
 
-            for (source, (keys, values)) in partial_messages {
-                let msg = Arc::new(crate::model::Message::new(source, keys, values));
-                projected_messages.push(msg);
-            }
-
-            projected_tuple.messages = Arc::from(projected_messages);
-
-            projected_rows.push(projected_tuple);
+            projected_rows.push(apply_projection_for_tuple(tuple, fields, partial_messages)?);
         }
 
         Ok(Box::new(RecordBatch::new(projected_rows)?))

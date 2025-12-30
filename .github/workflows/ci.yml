@@ -81,7 +81,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Build project
-        run: make build
+        run: make release
 
       - name: Run tests
         run: make test
