@@ -58,10 +58,13 @@ if $SUDO apt-get install -y flamegraph >/dev/null 2>&1; then
 fi
 
 install_dir="/opt/FlameGraph"
-if [[ -d "${install_dir}/.git" ]]; then
-  echo "[setup] updating ${install_dir}"
-  $SUDO git -C "${install_dir}" fetch --all --tags
-  $SUDO git -C "${install_dir}" reset --hard origin/master
+if [[ -d "${install_dir}" ]]; then
+  echo "[setup] using existing ${install_dir} (skip update)"
+  if [[ ! -f "${install_dir}/flamegraph.pl" ]]; then
+    echo "error: ${install_dir} exists but flamegraph.pl not found" >&2
+    echo "error: remove ${install_dir} and rerun, or point install_dir to a valid FlameGraph checkout" >&2
+    exit 1
+  fi
 else
   echo "[setup] cloning FlameGraph to ${install_dir}"
   $SUDO mkdir -p "$(dirname "${install_dir}")"
@@ -70,6 +73,19 @@ else
 fi
 
 $SUDO mkdir -p /usr/local/bin
-$SUDO ln -sf "${install_dir}/flamegraph.pl" /usr/local/bin/flamegraph.pl
 
-echo "[setup] flamegraph.pl: $(command -v flamegraph.pl)"
+bin_dir="/usr/local/bin"
+case ":${PATH:-}:" in
+  *":/usr/local/bin:"*) bin_dir="/usr/local/bin" ;;
+  *":/usr/bin:"*) bin_dir="/usr/bin" ;;
+  *)
+    echo "warning: /usr/local/bin is not in PATH; installing to /usr/bin for easier access" >&2
+    bin_dir="/usr/bin"
+    ;;
+esac
+
+$SUDO mkdir -p "${bin_dir}"
+$SUDO ln -sf "${install_dir}/flamegraph.pl" "${bin_dir}/flamegraph.pl"
+$SUDO chmod +x "${install_dir}/flamegraph.pl" || true
+
+echo "[setup] flamegraph.pl installed at: ${bin_dir}/flamegraph.pl"
