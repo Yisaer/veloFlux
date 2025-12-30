@@ -318,7 +318,10 @@ mod tests {
     }
 
     fn tuple_with(cols: &[(&str, Value)]) -> crate::model::Tuple {
-        let mut tuple = crate::model::Tuple::with_timestamp(Vec::new(), std::time::UNIX_EPOCH);
+        let mut tuple = crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            std::time::UNIX_EPOCH,
+        );
         for (k, v) in cols {
             tuple.add_affiliate_column(Arc::new((*k).to_string()), v.clone());
         }

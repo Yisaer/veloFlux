@@ -264,7 +264,10 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     fn tuple_at(sec: u64) -> crate::model::Tuple {
-        crate::model::Tuple::with_timestamp(Vec::new(), UNIX_EPOCH + Duration::from_secs(sec))
+        crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_secs(sec),
+        )
     }
 
     fn tuple_with_key_at(sec: u64, key: i64) -> crate::model::Tuple {
