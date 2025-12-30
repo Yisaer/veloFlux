@@ -7,12 +7,20 @@ use std::time::SystemTime;
 #[derive(Debug)]
 pub struct Message {
     source: Arc<str>,
-    keys: Vec<Arc<str>>,
+    keys: Arc<[Arc<str>]>,
     values: Vec<Arc<Value>>,
 }
 
 impl Message {
     pub fn new(source: impl Into<Arc<str>>, keys: Vec<Arc<str>>, values: Vec<Arc<Value>>) -> Self {
+        Self::new_shared_keys(source, Arc::from(keys), values)
+    }
+
+    pub fn new_shared_keys(
+        source: impl Into<Arc<str>>,
+        keys: Arc<[Arc<str>]>,
+        values: Vec<Arc<Value>>,
+    ) -> Self {
         debug_assert_eq!(
             keys.len(),
             values.len(),

@@ -75,9 +75,9 @@ pub trait RecordDecoder: Send + Sync + 'static {
 
 /// Decoder that converts JSON documents (object or array) into a RecordBatch.
 pub struct JsonDecoder {
-    stream_name: String,
+    stream_name: Arc<str>,
     schema: Arc<Schema>,
-    schema_keys: Vec<Arc<str>>,
+    schema_keys: Arc<[Arc<str>]>,
     #[allow(dead_code)]
     props: JsonMap<String, JsonValue>,
 }
@@ -88,12 +88,14 @@ impl JsonDecoder {
         schema: Arc<Schema>,
         props: JsonMap<String, JsonValue>,
     ) -> Self {
-        let stream_name = stream_name.into();
-        let schema_keys = schema
-            .column_schemas()
-            .iter()
-            .map(|col| Arc::<str>::from(col.name.as_str()))
-            .collect();
+        let stream_name: Arc<str> = Arc::<str>::from(stream_name.into());
+        let schema_keys: Arc<[Arc<str>]> = Arc::from(
+            schema
+                .column_schemas()
+                .iter()
+                .map(|col| Arc::<str>::from(col.name.as_str()))
+                .collect::<Vec<_>>(),
+        );
         Self {
             stream_name,
             schema,
@@ -307,23 +309,18 @@ impl JsonDecoder {
     ) -> Result<Vec<Tuple>, CodecError> {
         let mut tuples = Vec::with_capacity(rows.len());
         for mut row in rows {
-            let mut keys = Vec::with_capacity(self.schema_keys.len() + row.len());
-            let mut values = Vec::with_capacity(keys.capacity());
-            for (idx, column) in self.schema.column_schemas().iter().enumerate() {
+            let mut values = Vec::with_capacity(self.schema_keys.len());
+            for column in self.schema.column_schemas().iter() {
                 let value = row
                     .remove(&column.name)
                     .map(|json| json_to_value_with_datatype(&json, &column.data_type))
                     .unwrap_or(Value::Null);
-                keys.push(self.schema_keys[idx].clone());
                 values.push(Arc::new(value));
             }
-            for (key, value) in row {
-                keys.push(Arc::<str>::from(key.as_str()));
-                values.push(Arc::new(json_to_value(&value)));
-            }
-            let message = Arc::new(Message::new(
-                Arc::<str>::from(self.stream_name.as_str()),
-                keys,
+            drop(row);
+            let message = Arc::new(Message::new_shared_keys(
+                Arc::clone(&self.stream_name),
+                Arc::clone(&self.schema_keys),
                 values,
             ));
             tuples.push(Tuple::new(vec![message]));
@@ -345,9 +342,8 @@ impl JsonDecoder {
 
         let mut tuples = Vec::with_capacity(rows.len());
         for mut row in rows {
-            let mut keys = Vec::with_capacity(self.schema_keys.len() + row.len());
-            let mut values = Vec::with_capacity(keys.capacity());
-            for (idx, column) in self.schema.column_schemas().iter().enumerate() {
+            let mut values = Vec::with_capacity(self.schema_keys.len());
+            for column in self.schema.column_schemas().iter() {
                 let should_decode = projection_set
                     .as_ref()
                     .map(|set| set.contains(column.name.as_str()))
@@ -362,16 +358,12 @@ impl JsonDecoder {
                     Value::Null
                 };
 
-                keys.push(self.schema_keys[idx].clone());
                 values.push(Arc::new(value));
             }
-            for (key, value) in row {
-                keys.push(Arc::<str>::from(key.as_str()));
-                values.push(Arc::new(json_to_value(&value)));
-            }
-            let message = Arc::new(Message::new(
-                Arc::<str>::from(self.stream_name.as_str()),
-                keys,
+            drop(row);
+            let message = Arc::new(Message::new_shared_keys(
+                Arc::clone(&self.stream_name),
+                Arc::clone(&self.schema_keys),
                 values,
             ));
             tuples.push(Tuple::new(vec![message]));
@@ -386,9 +378,8 @@ impl JsonDecoder {
     ) -> Result<Vec<Tuple>, CodecError> {
         let mut tuples = Vec::with_capacity(rows.len());
         for mut row in rows {
-            let mut keys = Vec::with_capacity(self.schema_keys.len() + row.len());
-            let mut values = Vec::with_capacity(keys.capacity());
-            for (idx, column) in self.schema.column_schemas().iter().enumerate() {
+            let mut values = Vec::with_capacity(self.schema_keys.len());
+            for column in self.schema.column_schemas().iter() {
                 let projection_node =
                     decode_projection.and_then(|p| p.column(column.name.as_str()));
                 let value = row
@@ -401,16 +392,12 @@ impl JsonDecoder {
                         )
                     })
                     .unwrap_or(Value::Null);
-                keys.push(self.schema_keys[idx].clone());
                 values.push(Arc::new(value));
             }
-            for (key, value) in row {
-                keys.push(Arc::<str>::from(key.as_str()));
-                values.push(Arc::new(json_to_value(&value)));
-            }
-            let message = Arc::new(Message::new(
-                Arc::<str>::from(self.stream_name.as_str()),
-                keys,
+            drop(row);
+            let message = Arc::new(Message::new_shared_keys(
+                Arc::clone(&self.stream_name),
+                Arc::clone(&self.schema_keys),
                 values,
             ));
             tuples.push(Tuple::new(vec![message]));
