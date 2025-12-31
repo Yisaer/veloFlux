@@ -275,6 +275,7 @@ impl Processor for DataSourceProcessor {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
                                 if let Some(collection) = data.as_collection() {
+                                    // TODO: fix metrics
                                     let rows = collection.num_rows() as u64;
                                     DATASOURCE_RECORDS_IN
                                         .with_label_values(&[processor_id.as_str()])
