@@ -201,12 +201,13 @@ fn run_profile_server(addr: SocketAddr) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     tracing::info!(
         profile_addr = %addr,
-        "CPU/heap endpoints at http://{addr}/debug/pprof/{{profile,flamegraph,heap}}"
+        "CPU/heap endpoints at http://{addr}/debug/pprof/{{profile,heap}}"
     );
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                thread::spawn(|| {
+                thread::spawn(move || {
+                    disable_heap_profiling_for_current_thread();
                     if let Err(err) = handle_profile_connection(stream) {
                         tracing::error!(error = %err, "profile connection failed");
                     }
@@ -244,13 +245,6 @@ fn handle_profile_connection(mut stream: TcpStream) -> Result<(), Box<dyn std::e
                 Err(err) => write_response(&mut stream, 500, "text/plain", err.as_bytes())?,
             }
         }
-        "/debug/pprof/flamegraph" => {
-            let duration = parse_seconds(query).unwrap_or(30);
-            match generate_flamegraph(duration) {
-                Ok(body) => write_response(&mut stream, 200, "image/svg+xml", &body)?,
-                Err(err) => write_response(&mut stream, 500, "text/plain", err.as_bytes())?,
-            }
-        }
         "/debug/pprof/heap" => match capture_heap_profile() {
             Ok(body) => write_response(&mut stream, 200, "application/octet-stream", &body)?,
             Err(err) => write_response(&mut stream, 500, "text/plain", err.as_bytes())?,
@@ -269,16 +263,6 @@ fn generate_profile(duration: u64) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     profile
         .write_to_vec(&mut body)
-        .map_err(|err| err.to_string())?;
-    Ok(body)
-}
-
-#[cfg(feature = "profiling")]
-fn generate_flamegraph(duration: u64) -> Result<Vec<u8>, String> {
-    let report = run_profiler(duration)?;
-    let mut body = Vec::new();
-    report
-        .flamegraph(&mut body)
         .map_err(|err| err.to_string())?;
     Ok(body)
 }
@@ -380,6 +364,14 @@ fn ensure_jemalloc_profiling() {
 
 #[cfg(not(feature = "profiling"))]
 fn ensure_jemalloc_profiling() {}
+
+#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+fn disable_heap_profiling_for_current_thread() {
+    let _ = unsafe { raw::write(b"prof.thread_active\0", false) };
+}
+
+#[cfg(any(not(feature = "profiling"), target_env = "msvc"))]
+fn disable_heap_profiling_for_current_thread() {}
 
 #[cfg(feature = "metrics")]
 async fn init_metrics_exporter(
