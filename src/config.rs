@@ -19,6 +19,7 @@ impl Default for AppConfig {
             profiling: ProfilingConfig {
                 enabled: None,
                 addr: None,
+                cpu_profile_freq_hz: None,
             },
             metrics: MetricsConfig {
                 addr: None,
@@ -107,6 +108,7 @@ impl Default for LogRotationConfig {
 pub struct ProfilingConfig {
     pub enabled: Option<bool>,
     pub addr: Option<String>,
+    pub cpu_profile_freq_hz: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -167,6 +169,9 @@ impl AppConfig {
         }
         if let Some(addr) = self.profiling.addr.as_ref() {
             opts.profile_addr = Some(addr.clone());
+        }
+        if let Some(freq_hz) = self.profiling.cpu_profile_freq_hz {
+            opts.cpu_profile_freq_hz = Some(freq_hz);
         }
         if let Some(addr) = self.metrics.addr.as_ref() {
             opts.metrics_addr = Some(addr.clone());

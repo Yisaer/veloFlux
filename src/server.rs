@@ -21,7 +21,7 @@ use std::time::Duration as StdDuration;
 use storage::StorageManager;
 
 #[cfg(feature = "profiling")]
-use pprof::{protos::Message, ProfilerGuard};
+use pprof::{protos::Message, ProfilerGuardBuilder};
 #[cfg(feature = "metrics")]
 use sysinfo::{Pid, System};
 #[cfg(feature = "metrics")]
@@ -38,6 +38,10 @@ use tokio::time::{sleep, Duration};
 
 #[cfg(feature = "profiling")]
 const DEFAULT_PROFILE_ADDR: &str = "0.0.0.0:6060";
+#[cfg(feature = "profiling")]
+const DEFAULT_CPU_PROFILE_FREQUENCY_HZ: i32 = 100;
+#[cfg(feature = "profiling")]
+const DEFAULT_CPU_PROFILE_BLOCKLIST: [&str; 4] = ["libc", "libgcc", "pthread", "vdso"];
 #[cfg(feature = "metrics")]
 const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:9898";
 pub const DEFAULT_DATA_DIR: &str = "./tmp";
@@ -59,6 +63,8 @@ pub struct ServerOptions {
     pub manager_addr: Option<String>,
     /// Profiling server bind address (feature-gated); if None, uses default.
     pub profile_addr: Option<String>,
+    /// CPU profiling sample frequency in Hz (feature-gated); if None, uses default.
+    pub cpu_profile_freq_hz: Option<i32>,
     /// Metrics exporter bind address (feature-gated); if None, uses default.
     pub metrics_addr: Option<String>,
     /// Metrics polling interval in seconds (feature-gated); if None, uses default.
@@ -182,6 +188,10 @@ fn start_profile_server(opts: &ServerOptions) {
         .profile_addr
         .clone()
         .unwrap_or_else(|| DEFAULT_PROFILE_ADDR.to_string());
+    let default_freq_hz = opts
+        .cpu_profile_freq_hz
+        .filter(|freq| *freq > 0)
+        .unwrap_or(DEFAULT_CPU_PROFILE_FREQUENCY_HZ);
     let addr: SocketAddr = match addr_str.parse() {
         Ok(a) => a,
         Err(err) => {
@@ -192,7 +202,7 @@ fn start_profile_server(opts: &ServerOptions) {
 
     tracing::info!(profile_addr = %addr, "enabling profiling endpoints");
     thread::spawn(move || {
-        if let Err(err) = run_profile_server(addr) {
+        if let Err(err) = run_profile_server(addr, default_freq_hz) {
             tracing::error!(error = %err, "profile server error");
         }
     });
@@ -202,7 +212,7 @@ fn start_profile_server(opts: &ServerOptions) {
 fn start_profile_server(_opts: &ServerOptions) {}
 
 #[cfg(feature = "profiling")]
-fn run_profile_server(addr: SocketAddr) -> std::io::Result<()> {
+fn run_profile_server(addr: SocketAddr, default_freq_hz: i32) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr)?;
     tracing::info!(
         profile_addr = %addr,
@@ -213,7 +223,7 @@ fn run_profile_server(addr: SocketAddr) -> std::io::Result<()> {
             Ok(stream) => {
                 thread::spawn(move || {
                     disable_heap_profiling_for_current_thread();
-                    if let Err(err) = handle_profile_connection(stream) {
+                    if let Err(err) = handle_profile_connection(stream, default_freq_hz) {
                         tracing::error!(error = %err, "profile connection failed");
                     }
                 });
@@ -225,7 +235,10 @@ fn run_profile_server(addr: SocketAddr) -> std::io::Result<()> {
 }
 
 #[cfg(feature = "profiling")]
-fn handle_profile_connection(mut stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+fn handle_profile_connection(
+    mut stream: TcpStream,
+    default_freq_hz: i32,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 2048];
     let len = stream.read(&mut buf)?;
     if len == 0 {
@@ -245,7 +258,10 @@ fn handle_profile_connection(mut stream: TcpStream) -> Result<(), Box<dyn std::e
     match path {
         "/debug/pprof/profile" => {
             let duration = parse_seconds(query).unwrap_or(30);
-            match generate_profile(duration) {
+            let frequency_hz = parse_i32_param(query, "freq")
+                .filter(|freq| *freq > 0)
+                .unwrap_or(default_freq_hz);
+            match generate_profile(duration, frequency_hz) {
                 Ok(body) => write_response(&mut stream, 200, "application/octet-stream", &body)?,
                 Err(err) => write_response(&mut stream, 500, "text/plain", err.as_bytes())?,
             }
@@ -262,12 +278,22 @@ fn handle_profile_connection(mut stream: TcpStream) -> Result<(), Box<dyn std::e
 }
 
 #[cfg(feature = "profiling")]
-fn generate_profile(duration: u64) -> Result<Vec<u8>, String> {
+fn generate_profile(duration: u64, frequency_hz: i32) -> Result<Vec<u8>, String> {
     // When jemalloc heap profiling is active, generating CPU pprof can allocate heavily and
     // pollute `/debug/pprof/heap` inuse samples. Disable heap profiling for the entire CPU profile
     // request; heap dumps will block until profiling finishes.
     suspend_jemalloc_heap_profiling(|| {
-        let guard = ProfilerGuard::new(100).map_err(|err| err.to_string())?;
+        let mut builder = ProfilerGuardBuilder::default().frequency(frequency_hz);
+        #[cfg(any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "loongarch64"
+        ))]
+        {
+            builder = builder.blocklist(&DEFAULT_CPU_PROFILE_BLOCKLIST);
+        }
+        let guard = builder.build().map_err(|err| err.to_string())?;
         thread::sleep(std::time::Duration::from_secs(duration));
 
         let report = guard.report().build().map_err(|err| err.to_string())?;
@@ -361,6 +387,22 @@ fn parse_seconds(query: Option<&str>) -> Option<u64> {
             })
         })
         .and_then(|value| value.parse::<u64>().ok())
+}
+
+#[cfg(feature = "profiling")]
+fn parse_i32_param(query: Option<&str>, key: &str) -> Option<i32> {
+    query
+        .and_then(|q| {
+            q.split('&').find_map(|pair| {
+                let (k, value) = pair.split_once('=')?;
+                if k == key {
+                    Some(value)
+                } else {
+                    None
+                }
+            })
+        })
+        .and_then(|value| value.parse::<i32>().ok())
 }
 
 #[cfg(feature = "profiling")]
