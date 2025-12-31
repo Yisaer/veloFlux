@@ -13,6 +13,7 @@ logging:
 profiling:
   enabled: true
   addr: "0.0.0.0:6060"
+  cpu_profile_freq_hz: 100
 
 metrics:
   addr: "0.0.0.0:9898"
