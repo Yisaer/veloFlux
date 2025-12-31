@@ -13,6 +13,8 @@ use std::net::{TcpListener, TcpStream};
 #[cfg(any(feature = "metrics", feature = "profiling"))]
 use std::process;
 #[cfg(feature = "profiling")]
+use std::sync::Mutex;
+#[cfg(feature = "profiling")]
 use std::thread;
 #[cfg(feature = "metrics")]
 use std::time::Duration as StdDuration;
@@ -42,6 +44,9 @@ pub const DEFAULT_DATA_DIR: &str = "./tmp";
 pub const DEFAULT_MANAGER_ADDR: &str = "0.0.0.0:8080";
 #[cfg(feature = "metrics")]
 const DEFAULT_METRICS_POLL_INTERVAL_SECS: u64 = 5;
+
+#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+static PPROF_ENDPOINT_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Options for initializing the server runtime.
 #[derive(Debug, Clone, Default)]
@@ -258,24 +263,31 @@ fn handle_profile_connection(mut stream: TcpStream) -> Result<(), Box<dyn std::e
 
 #[cfg(feature = "profiling")]
 fn generate_profile(duration: u64) -> Result<Vec<u8>, String> {
-    let report = run_profiler(duration)?;
-    let profile = report.pprof().map_err(|err| err.to_string())?;
-    let mut body = Vec::new();
-    profile
-        .write_to_vec(&mut body)
-        .map_err(|err| err.to_string())?;
-    Ok(body)
-}
-
-#[cfg(feature = "profiling")]
-fn run_profiler(duration: u64) -> Result<pprof::Report, String> {
     let guard = ProfilerGuard::new(100).map_err(|err| err.to_string())?;
     thread::sleep(StdDuration::from_secs(duration));
-    guard.report().build().map_err(|err| err.to_string())
+
+    // While jemalloc heap profiling is active, generating CPU pprof can itself allocate heavily,
+    // polluting `/debug/pprof/heap` inuse samples. Suspend heap profiling only for the short
+    // finalize/encode section, not for the whole profiling window.
+    suspend_jemalloc_heap_profiling(|| {
+        let report = guard.report().build().map_err(|err| err.to_string())?;
+        let profile = report.pprof().map_err(|err| err.to_string())?;
+        let mut body = Vec::new();
+        profile
+            .write_to_vec(&mut body)
+            .map_err(|err| err.to_string())?;
+        drop(guard);
+        Ok(body)
+    })
 }
 
 #[cfg(feature = "profiling")]
 fn capture_heap_profile() -> Result<Vec<u8>, String> {
+    #[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+    let _lock = PPROF_ENDPOINT_MUTEX
+        .lock()
+        .map_err(|_| "pprof endpoint lock poisoned".to_string())?;
+
     // Ensure profiling is active; if jemalloc lacks profiling support, return a clear error.
     if let Err(err) = unsafe { raw::write(b"prof.active\0", true) } {
         return Err(format!(
@@ -372,6 +384,41 @@ fn disable_heap_profiling_for_current_thread() {
 
 #[cfg(any(not(feature = "profiling"), target_env = "msvc"))]
 fn disable_heap_profiling_for_current_thread() {}
+
+#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    let _lock = PPROF_ENDPOINT_MUTEX
+        .lock()
+        .map_err(|_| "pprof endpoint lock poisoned".to_string())?;
+
+    let prev_active: Option<bool> = match unsafe { raw::read(b"prof.active\0") } {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to read jemalloc prof.active");
+            None
+        }
+    };
+
+    if let Err(err) = unsafe { raw::write(b"prof.active\0", false) } {
+        tracing::warn!(error = %err, "failed to disable jemalloc prof.active");
+        return f();
+    }
+
+    let result = f();
+
+    if let Some(prev_active) = prev_active {
+        if let Err(err) = unsafe { raw::write(b"prof.active\0", prev_active) } {
+            tracing::warn!(error = %err, "failed to restore jemalloc prof.active");
+        }
+    }
+
+    result
+}
+
+#[cfg(any(not(feature = "profiling"), target_env = "msvc"))]
+fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    f()
+}
 
 #[cfg(feature = "metrics")]
 async fn init_metrics_exporter(
