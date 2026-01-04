@@ -220,7 +220,8 @@ pub enum PhysicalPlanNodeKindIR {
     },
     DataSink {
         sink: SinkIR,
-        encoder_plan_index: i64,
+        #[serde(default)]
+        encoder_plan_index: Option<i64>,
     },
     ResultCollect,
     Opaque {
@@ -408,6 +409,9 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
 
     let connector = match sink.connector_kind.as_str() {
         "mqtt" => SinkConnectorConfig::Mqtt(mqtt_sink_from_ir_settings(&sink.connector_settings)?),
+        "kuksa" => {
+            SinkConnectorConfig::Kuksa(kuksa_sink_from_ir_settings(&sink.connector_settings)?)
+        }
         "nop" => {
             let log = sink
                 .connector_settings
@@ -475,6 +479,36 @@ fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, St
         config = config.with_connector_key(connector_key);
     }
     Ok(config)
+}
+
+fn kuksa_sink_from_ir_settings(
+    settings: &JsonValue,
+) -> Result<crate::connector::KuksaSinkConfig, String> {
+    let obj = settings
+        .as_object()
+        .ok_or_else(|| "kuksa sink settings must be an object".to_string())?;
+
+    let sink_name = obj
+        .get("sink_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "kuksa sink settings missing sink_name".to_string())?
+        .to_string();
+    let addr = obj
+        .get("addr")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "kuksa sink settings missing addr".to_string())?
+        .to_string();
+    let vss_path = obj
+        .get("vss_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "kuksa sink settings missing vss_path".to_string())?
+        .to_string();
+
+    Ok(crate::connector::KuksaSinkConfig {
+        sink_name,
+        addr,
+        vss_path,
+    })
 }
 
 fn common_sink_props_from_ir(common: &CommonSinkPropsIR) -> CommonSinkProps {
@@ -676,7 +710,7 @@ fn build_physical_ir(
                 .collect(),
         },
         PhysicalPlan::Encoder(plan) => PhysicalPlanNodeKindIR::Encoder {
-            encoder_kind: plan.encoder.kind().to_string(),
+            encoder_kind: plan.encoder.kind_str().to_string(),
             encoder_props: plan.encoder.props().clone(),
         },
         PhysicalPlan::DataSink(plan) => PhysicalPlanNodeKindIR::DataSink {
@@ -704,7 +738,7 @@ fn sink_to_ir(sink: &PipelineSink) -> SinkIR {
         common: Some(common_sink_props_to_ir(&sink.common)),
         connector_kind,
         connector_settings,
-        encoder_kind: Some(sink.connector.encoder.kind().to_string()),
+        encoder_kind: Some(sink.connector.encoder.kind_str().to_string()),
         encoder_props: Some(sink.connector.encoder.props().clone()),
     }
 }
@@ -741,6 +775,14 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "retain": cfg.retain,
                 "client_id": cfg.client_id,
                 "connector_key": cfg.connector_key,
+            }),
+        ),
+        SinkConnectorConfig::Kuksa(cfg) => (
+            "kuksa".to_string(),
+            serde_json::json!({
+                "sink_name": cfg.sink_name,
+                "addr": cfg.addr,
+                "vss_path": cfg.vss_path,
             }),
         ),
         SinkConnectorConfig::Nop(cfg) => {
