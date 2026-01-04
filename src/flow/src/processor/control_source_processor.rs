@@ -7,7 +7,9 @@ use crate::processor::base::{
     fan_in_control_streams, forward_error, send_control_with_backpressure, send_with_backpressure,
     DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{BarrierControlSignal, ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{
+    BarrierControlSignal, ControlSignal, Processor, ProcessorError, StreamData,
+};
 use futures::stream::StreamExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

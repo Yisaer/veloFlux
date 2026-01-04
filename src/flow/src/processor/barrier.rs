@@ -1,5 +1,5 @@
-use crate::processor::{BarrierControlSignal, BarrierControlSignalKind, ProcessorError};
 use crate::processor::ControlSignal;
+use crate::processor::{BarrierControlSignal, BarrierControlSignalKind, ProcessorError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct BarrierKey {

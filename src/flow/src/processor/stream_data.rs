@@ -22,7 +22,7 @@ pub enum ControlSignal {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BarrierControlSignalKind {
     StreamGracefulEnd,
-    Sync { kind: BarrierKind },
+    SyncTest,
 }
 
 impl BarrierControlSignalKind {
@@ -31,35 +31,39 @@ impl BarrierControlSignalKind {
             BarrierControlSignalKind::StreamGracefulEnd => {
                 BarrierControlSignal::StreamGracefulEnd { barrier_id }
             }
-            BarrierControlSignalKind::Sync { kind } => BarrierControlSignal::Sync { barrier_id, kind },
+            BarrierControlSignalKind::SyncTest => BarrierControlSignal::SyncTest { barrier_id },
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum BarrierKind {
-    Sync,
-}
-
-/// Barrier control signals must carry a monotonically increasing `barrier_id`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BarrierControlSignal {
-    StreamGracefulEnd { barrier_id: u64 },
-    Sync { barrier_id: u64, kind: BarrierKind },
+    StreamGracefulEnd {
+        barrier_id: u64,
+    },
+    /// A no-op barrier signal used by tests to validate barrier alignment.
+    ///
+    /// This signal has no semantic meaning beyond "wait until all upstreams
+    /// deliver the same `(barrier_id, kind)` pair".
+    SyncTest {
+        barrier_id: u64,
+    },
 }
 
 impl BarrierControlSignal {
     pub fn barrier_id(&self) -> u64 {
         match self {
             BarrierControlSignal::StreamGracefulEnd { barrier_id } => *barrier_id,
-            BarrierControlSignal::Sync { barrier_id, .. } => *barrier_id,
+            BarrierControlSignal::SyncTest { barrier_id } => *barrier_id,
         }
     }
 
     pub fn kind(&self) -> BarrierControlSignalKind {
         match self {
-            BarrierControlSignal::StreamGracefulEnd { .. } => BarrierControlSignalKind::StreamGracefulEnd,
-            BarrierControlSignal::Sync { kind, .. } => BarrierControlSignalKind::Sync { kind: kind.clone() },
+            BarrierControlSignal::StreamGracefulEnd { .. } => {
+                BarrierControlSignalKind::StreamGracefulEnd
+            }
+            BarrierControlSignal::SyncTest { .. } => BarrierControlSignalKind::SyncTest,
         }
     }
 }

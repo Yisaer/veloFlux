@@ -11,12 +11,11 @@ use crate::processor::decoder_processor::EventtimeDecodeConfig;
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BatchProcessor, ControlSignal,
-    ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor, FilterProcessor,
-    InstantControlSignal, Processor, ProcessorError, ProjectProcessor, ResultCollectProcessor,
-    SharedStreamProcessor, SinkProcessor, SlidingWindowProcessor, StateWindowProcessor,
-    StatefulFunctionProcessor, StreamData,
-    StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
-    WatermarkProcessor,
+    ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor,
+    FilterProcessor, InstantControlSignal, Processor, ProcessorError, ProjectProcessor,
+    ResultCollectProcessor, SharedStreamProcessor, SinkProcessor, SlidingWindowProcessor,
+    StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
+    StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::stateful::StatefulFunctionRegistry;
 use std::sync::Arc;
@@ -412,7 +411,9 @@ impl ProcessorPipeline {
 
     /// Quickly close the pipeline by delivering StreamQuickEnd to the control channel.
     pub async fn quick_close(&mut self) -> Result<(), ProcessorError> {
-        self.broadcast_control_signal(ControlSignal::Instant(InstantControlSignal::StreamQuickEnd))?;
+        self.broadcast_control_signal(ControlSignal::Instant(
+            InstantControlSignal::StreamQuickEnd,
+        ))?;
         self.replace_input_sender();
         self.await_all_handles().await
     }
