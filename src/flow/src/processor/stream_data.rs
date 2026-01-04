@@ -55,6 +55,13 @@ impl BarrierControlSignal {
             BarrierControlSignal::Sync { barrier_id, .. } => *barrier_id,
         }
     }
+
+    pub fn kind(&self) -> BarrierControlSignalKind {
+        match self {
+            BarrierControlSignal::StreamGracefulEnd { .. } => BarrierControlSignalKind::StreamGracefulEnd,
+            BarrierControlSignal::Sync { kind, .. } => BarrierControlSignalKind::Sync { kind: kind.clone() },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

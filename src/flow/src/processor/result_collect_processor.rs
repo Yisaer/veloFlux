@@ -2,8 +2,9 @@
 //!
 //! This processor receives data from upstream processors and forwards it to a single output.
 
+use crate::processor::barrier::{align_control_signal, BarrierAligner};
 use crate::processor::base::{fan_in_control_streams, fan_in_streams, log_received_data};
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -64,10 +65,18 @@ impl Processor for ResultCollectProcessor {
     }
 
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
-        let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
+        let data_receivers = std::mem::take(&mut self.inputs);
+        let expected_data_upstreams = data_receivers.len();
+        let mut input_streams = fan_in_streams(data_receivers);
+
         let control_receivers = std::mem::take(&mut self.control_inputs);
+        let expected_control_upstreams = control_receivers.len();
         let mut control_streams = fan_in_control_streams(control_receivers);
-        let mut control_active = !control_streams.is_empty();
+        let control_active = !control_streams.is_empty();
+
+        let mut data_barrier = BarrierAligner::new("data", expected_data_upstreams);
+        let mut control_barrier = BarrierAligner::new("control", expected_control_upstreams);
+
         let output = self.output.take().ok_or_else(|| {
             ProcessorError::InvalidConfiguration(
                 "ResultCollectProcessor output must be set before starting".to_string(),
@@ -88,79 +97,79 @@ impl Processor for ResultCollectProcessor {
                 tokio::select! {
                     biased;
                     control_item = control_streams.next(), if control_active => {
-                        if let Some(Ok(control_signal)) = control_item {
-                            // Forward control signal to broadcast
-                            let _ = broadcast_control_output.send(control_signal.clone());
-                            if control_signal.is_terminal() {
-                                tracing::info!(
-                                    processor_id = %processor_id,
-                                    "received StreamEnd (control)"
-                                );
-                                let stream_end = StreamData::stream_end();
-                                let _ = broadcast_output.send(stream_end.clone());
-                                output
-                                    .send(stream_end)
-                                    .await
-                                    .map_err(|_| ProcessorError::ChannelClosed)?;
-                                tracing::info!(processor_id = %processor_id, "stopped");
-                                return Ok(());
+                        match control_item {
+                            Some(Ok(control_signal)) => {
+                                if let Some(signal) =
+                                    align_control_signal(&mut control_barrier, control_signal)?
+                                {
+                                    let is_terminal = signal.is_terminal();
+                                    let _ = broadcast_control_output.send(signal);
+                                    if is_terminal {
+                                        tracing::info!(processor_id = %processor_id, "received terminal signal (control)");
+                                        tracing::info!(processor_id = %processor_id, "stopped");
+                                        return Ok(());
+                                    }
+                                }
+                                continue;
                             }
-                            continue;
-                        } else {
-                            control_active = false;
+                            Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
+                                tracing::warn!(processor_id = %processor_id, skipped = skipped, "control channel lagged");
+                                continue;
+                            }
+                            None => return Err(ProcessorError::ChannelClosed),
                         }
                     }
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                let is_terminal = data.is_terminal();
-                                // Forward data to broadcast
-                                let _ = broadcast_output.send(data.clone());
-                                // Forward data to mpsc output
-                                output
-                                    .send(data)
-                                    .await
-                                    .map_err(|_| ProcessorError::ChannelClosed)?;
-                                if is_terminal {
-                                    tracing::info!(
-                                        processor_id = %processor_id,
-                                        "received StreamEnd (data)"
-                                    );
-                                    return Ok(());
+                                match data {
+                                    StreamData::Control(control_signal) => {
+                                        if let Some(signal) =
+                                            align_control_signal(&mut data_barrier, control_signal)?
+                                        {
+                                            let is_terminal = signal.is_terminal();
+                                            let out = StreamData::control(signal);
+                                            let _ = broadcast_output.send(out.clone());
+                                            output
+                                                .send(out)
+                                                .await
+                                                .map_err(|_| ProcessorError::ChannelClosed)?;
+                                            if is_terminal {
+                                                tracing::info!(
+                                                    processor_id = %processor_id,
+                                                    "received terminal signal (data)"
+                                                );
+                                                return Ok(());
+                                            }
+                                        }
+                                    }
+                                    other => {
+                                        let is_terminal = other.is_terminal();
+                                        let _ = broadcast_output.send(other.clone());
+                                        output
+                                            .send(other)
+                                            .await
+                                            .map_err(|_| ProcessorError::ChannelClosed)?;
+                                        if is_terminal {
+                                            tracing::info!(
+                                                processor_id = %processor_id,
+                                                "received terminal item (data)"
+                                            );
+                                            return Ok(());
+                                        }
+                                    }
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                let message = format!(
-                                    "ResultCollectProcessor input lagged by {} messages",
-                                    skipped
-                                );
                                 tracing::warn!(
                                     processor_id = %processor_id,
                                     skipped = skipped,
                                     "input lagged"
                                 );
-                                let error_data = StreamData::error(
-                                    StreamError::new(message)
-                                        .with_source(processor_id.clone()),
-                                );
-                                let _ = broadcast_output.send(error_data.clone());
-                                output
-                                    .send(error_data)
-                                    .await
-                                    .map_err(|_| ProcessorError::ChannelClosed)?;
                                 continue;
                             }
-                            None => {
-                                let stream_end = StreamData::stream_end();
-                                let _ = broadcast_output.send(stream_end.clone());
-                                output
-                                    .send(stream_end)
-                                    .await
-                                    .map_err(|_| ProcessorError::ChannelClosed)?;
-                                tracing::info!(processor_id = %processor_id, "stopped");
-                                return Ok(());
-                            }
+                            None => return Err(ProcessorError::ChannelClosed),
                         }
                     }
                 }

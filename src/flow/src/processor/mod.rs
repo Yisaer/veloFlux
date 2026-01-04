@@ -10,6 +10,7 @@
 pub mod aggregation_processor;
 pub mod base;
 pub mod batch_processor;
+pub mod barrier;
 pub mod control_source_processor;
 pub mod datasource_processor;
 pub mod decoder_processor;
