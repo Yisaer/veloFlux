@@ -348,6 +348,10 @@ fn convert_value(value: &Value, data_type: DataType) -> Result<KuksaValue, SinkC
         DataType::Float => kuksa_value::TypedValue::Float(match value {
             Value::Float32(v) => *v,
             Value::Float64(v) => *v as f32,
+            Value::Int8(v) => *v as f32,
+            Value::Int16(v) => *v as f32,
+            Value::Int32(v) => *v as f32,
+            Value::Int64(v) => *v as f32,
             other => {
                 return Err(SinkConnectorError::Other(format!(
                     "expected float-compatible, got {other:?}"
@@ -357,6 +361,10 @@ fn convert_value(value: &Value, data_type: DataType) -> Result<KuksaValue, SinkC
         DataType::Double => kuksa_value::TypedValue::Double(match value {
             Value::Float64(v) => *v,
             Value::Float32(v) => *v as f64,
+            Value::Int8(v) => *v as f64,
+            Value::Int16(v) => *v as f64,
+            Value::Int32(v) => *v as f64,
+            Value::Int64(v) => *v as f64,
             other => {
                 return Err(SinkConnectorError::Other(format!(
                     "expected double-compatible, got {other:?}"
