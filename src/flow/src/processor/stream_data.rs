@@ -70,6 +70,13 @@ impl ControlSignal {
                 | ControlSignal::Instant(InstantControlSignal::StreamQuickEnd)
         )
     }
+
+    pub fn is_graceful_end(&self) -> bool {
+        matches!(
+            self,
+            ControlSignal::Barrier(BarrierControlSignal::StreamGracefulEnd { .. })
+        )
+    }
 }
 
 /// Core data type for stream processing - unified enum for all data types
