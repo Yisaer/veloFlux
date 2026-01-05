@@ -6,6 +6,7 @@ use crate::codec::JsonDecoder;
 use crate::connector::{MockSourceConnector, MqttClientManager};
 use crate::shared_stream::SharedStreamConfig;
 use crate::shared_stream_registry;
+use crate::PipelineRegistries;
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use serde_json::Map as JsonMap;
 use std::collections::HashMap;
