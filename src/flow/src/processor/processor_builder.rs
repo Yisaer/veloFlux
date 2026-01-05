@@ -8,6 +8,7 @@ use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
+use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
@@ -21,6 +22,7 @@ use crate::stateful::StatefulFunctionRegistry;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 use uuid::Uuid;
 
 /// Enum for all processor types created from PhysicalPlan
@@ -313,6 +315,8 @@ pub struct ProcessorPipeline {
     handles: Vec<JoinHandle<Result<(), ProcessorError>>>,
     /// Logical pipeline identifier used for diagnostics/subscriptions
     pipeline_id: String,
+    /// Allows callers to wait for specific control signals to reach the tail.
+    ack_manager: Arc<AckManager>,
 }
 
 impl ProcessorPipeline {
@@ -354,6 +358,81 @@ impl ProcessorPipeline {
         self.send_ingress(Ingress::control(signal)).await
     }
 
+    async fn await_control_ack(
+        &self,
+        signal_id: u64,
+        rx: tokio::sync::oneshot::Receiver<ControlSignal>,
+        timeout_duration: std::time::Duration,
+    ) -> Result<ControlSignal, ProcessorError> {
+        match timeout(timeout_duration, rx).await {
+            Ok(Ok(signal)) => Ok(signal),
+            Ok(Err(_)) => Err(ProcessorError::ChannelClosed),
+            Err(_) => {
+                self.ack_manager.unregister(signal_id);
+                Err(ProcessorError::Timeout)
+            }
+        }
+    }
+
+    pub async fn send_quick_end_via_control_with_ack(
+        &self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<u64, ProcessorError> {
+        let signal_id = self.control_source.allocate_control_signal_id();
+        let rx = self.ack_manager.register(signal_id)?;
+        let signal = ControlSignal::Instant(InstantControlSignal::StreamQuickEnd { signal_id });
+        if let Err(err) = self.send_control_signal(signal).await {
+            self.ack_manager.unregister(signal_id);
+            return Err(err);
+        }
+        let _ = self
+            .await_control_ack(signal_id, rx, timeout_duration)
+            .await?;
+        Ok(signal_id)
+    }
+
+    pub async fn send_barrier_via_control_with_ack(
+        &self,
+        kind: BarrierControlSignalKind,
+        timeout_duration: std::time::Duration,
+    ) -> Result<u64, ProcessorError> {
+        let barrier_id = self.control_source.allocate_control_signal_id();
+        let rx = self.ack_manager.register(barrier_id)?;
+        if let Err(err) = self
+            .send_control_signal(ControlSignal::Barrier(kind.with_id(barrier_id)))
+            .await
+        {
+            self.ack_manager.unregister(barrier_id);
+            return Err(err);
+        }
+        let _ = self
+            .await_control_ack(barrier_id, rx, timeout_duration)
+            .await?;
+        Ok(barrier_id)
+    }
+
+    pub async fn send_barrier_via_data_with_ack(
+        &self,
+        kind: BarrierControlSignalKind,
+        timeout_duration: std::time::Duration,
+    ) -> Result<u64, ProcessorError> {
+        let barrier_id = self.control_source.allocate_control_signal_id();
+        let rx = self.ack_manager.register(barrier_id)?;
+        if let Err(err) = self
+            .send_data(StreamData::control(ControlSignal::Barrier(
+                kind.with_id(barrier_id),
+            )))
+            .await
+        {
+            self.ack_manager.unregister(barrier_id);
+            return Err(err);
+        }
+        let _ = self
+            .await_control_ack(barrier_id, rx, timeout_duration)
+            .await?;
+        Ok(barrier_id)
+    }
+
     /// Send a barrier control signal into the pipeline via the control channel.
     ///
     /// The returned `barrier_id` is globally unique within the pipeline instance.
@@ -361,7 +440,7 @@ impl ProcessorPipeline {
         &self,
         kind: BarrierControlSignalKind,
     ) -> Result<u64, ProcessorError> {
-        let barrier_id = self.control_source.allocate_barrier_id();
+        let barrier_id = self.control_source.allocate_control_signal_id();
         self.send_control_signal(ControlSignal::Barrier(kind.with_id(barrier_id)))
             .await?;
         Ok(barrier_id)
@@ -374,7 +453,7 @@ impl ProcessorPipeline {
         &self,
         kind: BarrierControlSignalKind,
     ) -> Result<u64, ProcessorError> {
-        let barrier_id = self.control_source.allocate_barrier_id();
+        let barrier_id = self.control_source.allocate_control_signal_id();
         self.send_data(StreamData::control(ControlSignal::Barrier(
             kind.with_id(barrier_id),
         )))
@@ -395,30 +474,38 @@ impl ProcessorPipeline {
     }
 
     /// Close the pipeline gracefully using the data path.
-    pub async fn close(&mut self) -> Result<(), ProcessorError> {
-        self.graceful_close().await
+    pub async fn close(
+        &mut self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<(), ProcessorError> {
+        self.graceful_close(timeout_duration).await
     }
 
     /// Gracefully close the pipeline by sending StreamEnd via the data channel.
-    pub async fn graceful_close(&mut self) -> Result<(), ProcessorError> {
-        self.send_stream_end_via_data().await?;
+    pub async fn graceful_close(
+        &mut self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<(), ProcessorError> {
+        let _ = self
+            .send_barrier_via_data_with_ack(
+                BarrierControlSignalKind::StreamGracefulEnd,
+                timeout_duration,
+            )
+            .await?;
+        self.replace_ingress_sender();
         self.await_all_handles().await
     }
 
     /// Quickly close the pipeline by delivering StreamQuickEnd to the control channel.
-    pub async fn quick_close(&mut self) -> Result<(), ProcessorError> {
-        self.send_control_signal(ControlSignal::Instant(InstantControlSignal::StreamQuickEnd))
+    pub async fn quick_close(
+        &mut self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<(), ProcessorError> {
+        let _ = self
+            .send_quick_end_via_control_with_ack(timeout_duration)
             .await?;
         self.replace_ingress_sender();
         self.await_all_handles().await
-    }
-
-    async fn send_stream_end_via_data(&mut self) -> Result<(), ProcessorError> {
-        let _ = self
-            .send_barrier_via_data(BarrierControlSignalKind::StreamGracefulEnd)
-            .await?;
-        self.replace_ingress_sender();
-        Ok(())
     }
 
     fn replace_ingress_sender(&mut self) {
@@ -949,6 +1036,7 @@ pub fn create_processor_pipeline(
     let mut control_source = ControlSourceProcessor::new("control_source");
     let (ingress_sender, ingress_receiver) = mpsc::channel(100);
     control_source.set_ingress_input(ingress_receiver);
+    let ack_manager = Arc::new(AckManager::default());
 
     let mut processor_map = ProcessorMap::new();
     let context = ProcessorBuilderContext {
@@ -984,6 +1072,8 @@ pub fn create_processor_pipeline(
         if let PlanProcessor::ResultCollect(mut collector) = middle_processors.swap_remove(pos) {
             let (result_output_sender, pipeline_output_rx) = mpsc::channel(100);
             collector.set_output(result_output_sender);
+            collector.add_bus_hook(Arc::new(ErrorLoggingHook));
+            collector.add_bus_hook(Arc::new(AckHook::new(Arc::clone(&ack_manager))));
             pipeline_output_receiver = Some(pipeline_output_rx);
             result_sink = Some(collector);
         }
@@ -1001,6 +1091,7 @@ pub fn create_processor_pipeline(
         result_sink,
         handles: Vec::new(),
         pipeline_id,
+        ack_manager,
     })
 }
 

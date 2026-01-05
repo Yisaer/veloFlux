@@ -7,15 +7,94 @@ use crate::processor::base::{
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
+use std::sync::Arc;
+use std::sync::Mutex;
+use tokio::sync::oneshot;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+#[derive(Debug, Default)]
+pub(crate) struct AckManager {
+    waiters: Mutex<std::collections::HashMap<u64, oneshot::Sender<ControlSignal>>>,
+}
+
+impl AckManager {
+    pub(crate) fn register(
+        &self,
+        signal_id: u64,
+    ) -> Result<oneshot::Receiver<ControlSignal>, ProcessorError> {
+        let (tx, rx) = oneshot::channel();
+        let mut guard = self.waiters.lock().expect("ack manager lock poisoned");
+        if guard.contains_key(&signal_id) {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "duplicate signal_id registration: {signal_id}"
+            )));
+        }
+        guard.insert(signal_id, tx);
+        Ok(rx)
+    }
+
+    pub(crate) fn unregister(&self, signal_id: u64) {
+        let mut guard = self.waiters.lock().expect("ack manager lock poisoned");
+        guard.remove(&signal_id);
+    }
+
+    pub(crate) fn ack(&self, signal: &ControlSignal) {
+        let mut guard = self.waiters.lock().expect("ack manager lock poisoned");
+        let Some(tx) = guard.remove(&signal.id()) else {
+            return;
+        };
+        let _ = tx.send(signal.clone());
+    }
+}
+
+pub(crate) trait OutputBusHook: Send + Sync {
+    fn on_receive(&self, _processor_id: &str, _item: &StreamData) {}
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ErrorLoggingHook;
+
+impl OutputBusHook for ErrorLoggingHook {
+    fn on_receive(&self, processor_id: &str, item: &StreamData) {
+        let StreamData::Error(err) = item else {
+            return;
+        };
+        tracing::error!(
+            processor_id = %processor_id,
+            source = err.source.as_deref(),
+            message = %err.message,
+            "pipeline emitted error"
+        );
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct AckHook {
+    manager: Arc<AckManager>,
+}
+
+impl AckHook {
+    pub(crate) fn new(manager: Arc<AckManager>) -> Self {
+        Self { manager }
+    }
+}
+
+impl OutputBusHook for AckHook {
+    fn on_receive(&self, _processor_id: &str, item: &StreamData) {
+        let StreamData::Control(signal) = item else {
+            return;
+        };
+        self.manager.ack(signal);
+    }
+}
 
 /// ResultCollectProcessor - forwards received data to a single output
 ///
 /// This processor acts as the final destination in the data flow. It:
 /// - Receives StreamData from multiple upstream processors (multi-input)
 /// - Forwards all received data to a single output channel (single-output)
-/// - Can be used to collect results or forward to external systems
+/// - Forwards both data-channel and control-channel messages to the pipeline output
 pub struct ResultCollectProcessor {
     /// Processor identifier
     id: String,
@@ -25,26 +104,19 @@ pub struct ResultCollectProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     /// Single output channel for forwarding received data (single-output)
     output: Option<mpsc::Sender<StreamData>>,
-    /// Broadcast sender for downstream subscriptions
-    broadcast_output: broadcast::Sender<StreamData>,
-    /// Broadcast sender for control signals
-    broadcast_control_output: broadcast::Sender<ControlSignal>,
+    /// Hooks that observe items after they have been written to the output bus.
+    bus_hooks: Vec<Arc<dyn OutputBusHook>>,
 }
 
 impl ResultCollectProcessor {
     /// Create a new ResultCollectProcessor
     pub fn new(id: impl Into<String>) -> Self {
-        let (broadcast_output, _) =
-            broadcast::channel(crate::processor::base::DEFAULT_CHANNEL_CAPACITY);
-        let (broadcast_control_output, _) =
-            broadcast::channel(crate::processor::base::DEFAULT_CHANNEL_CAPACITY);
         Self {
             id: id.into(),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output: None,
-            broadcast_output,
-            broadcast_control_output,
+            bus_hooks: Vec::new(),
         }
     }
 
@@ -58,6 +130,10 @@ impl ResultCollectProcessor {
     pub fn set_output(&mut self, sender: mpsc::Sender<StreamData>) {
         self.output = Some(sender);
     }
+
+    pub(crate) fn add_bus_hook(&mut self, hook: Arc<dyn OutputBusHook>) {
+        self.bus_hooks.push(hook);
+    }
 }
 
 impl Processor for ResultCollectProcessor {
@@ -66,6 +142,22 @@ impl Processor for ResultCollectProcessor {
     }
 
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+        async fn forward_to_output_bus(
+            output: &mpsc::Sender<StreamData>,
+            processor_id: &str,
+            bus_hooks: &[Arc<dyn OutputBusHook>],
+            data: StreamData,
+        ) -> Result<(), ProcessorError> {
+            for hook in bus_hooks {
+                hook.on_receive(processor_id, &data);
+            }
+            output
+                .send(data)
+                .await
+                .map_err(|_| ProcessorError::ChannelClosed)?;
+            Ok(())
+        }
+
         let data_receivers = std::mem::take(&mut self.inputs);
         let mut input_streams = fan_in_streams(data_receivers);
 
@@ -78,9 +170,8 @@ impl Processor for ResultCollectProcessor {
                 "ResultCollectProcessor output must be set before starting".to_string(),
             )
         });
-        let broadcast_output = self.broadcast_output.clone();
-        let broadcast_control_output = self.broadcast_control_output.clone();
         let processor_id = self.id.clone();
+        let bus_hooks = self.bus_hooks.clone();
         tracing::info!(processor_id = %processor_id, "result collect processor starting");
 
         tokio::spawn(async move {
@@ -95,8 +186,10 @@ impl Processor for ResultCollectProcessor {
                     control_item = control_streams.next(), if control_active => {
                         match control_item {
                             Some(Ok(control_signal)) => {
-                                let is_terminal = control_signal.is_terminal();
-                                let _ = broadcast_control_output.send(control_signal);
+                                let out = StreamData::control(control_signal);
+                                let is_terminal = out.is_terminal();
+                                forward_to_output_bus(&output, &processor_id, &bus_hooks, out)
+                                    .await?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %processor_id, "received terminal signal (control)");
                                     tracing::info!(processor_id = %processor_id, "stopped");
@@ -114,38 +207,15 @@ impl Processor for ResultCollectProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                match data {
-                                    StreamData::Control(control_signal) => {
-                                        let is_terminal = control_signal.is_terminal();
-                                        let out = StreamData::control(control_signal);
-                                        let _ = broadcast_output.send(out.clone());
-                                        output
-                                            .send(out)
-                                            .await
-                                            .map_err(|_| ProcessorError::ChannelClosed)?;
-                                        if is_terminal {
-                                            tracing::info!(
-                                                processor_id = %processor_id,
-                                                "received terminal signal (data)"
-                                            );
-                                            return Ok(());
-                                        }
-                                    }
-                                    other => {
-                                        let is_terminal = other.is_terminal();
-                                        let _ = broadcast_output.send(other.clone());
-                                        output
-                                            .send(other)
-                                            .await
-                                            .map_err(|_| ProcessorError::ChannelClosed)?;
-                                        if is_terminal {
-                                            tracing::info!(
-                                                processor_id = %processor_id,
-                                                "received terminal item (data)"
-                                            );
-                                            return Ok(());
-                                        }
-                                    }
+                                let is_terminal = data.is_terminal();
+                                forward_to_output_bus(&output, &processor_id, &bus_hooks, data)
+                                    .await?;
+                                if is_terminal {
+                                    tracing::info!(
+                                        processor_id = %processor_id,
+                                        "received terminal item (data)"
+                                    );
+                                    return Ok(());
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
@@ -161,7 +231,7 @@ impl Processor for ResultCollectProcessor {
     }
 
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>> {
-        Some(self.broadcast_output.subscribe())
+        None
     }
 
     fn add_input(&mut self, receiver: broadcast::Receiver<StreamData>) {
@@ -169,7 +239,7 @@ impl Processor for ResultCollectProcessor {
     }
 
     fn subscribe_control_output(&self) -> Option<broadcast::Receiver<ControlSignal>> {
-        Some(self.broadcast_control_output.subscribe())
+        None
     }
 
     fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {

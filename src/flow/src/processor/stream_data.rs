@@ -70,15 +70,24 @@ impl BarrierControlSignal {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum InstantControlSignal {
-    StreamQuickEnd,
+    StreamQuickEnd { signal_id: u64 },
 }
 
 impl ControlSignal {
+    pub fn id(&self) -> u64 {
+        match self {
+            ControlSignal::Barrier(barrier) => barrier.barrier_id(),
+            ControlSignal::Instant(instant) => match instant {
+                InstantControlSignal::StreamQuickEnd { signal_id } => *signal_id,
+            },
+        }
+    }
+
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
             ControlSignal::Barrier(BarrierControlSignal::StreamGracefulEnd { .. })
-                | ControlSignal::Instant(InstantControlSignal::StreamQuickEnd)
+                | ControlSignal::Instant(InstantControlSignal::StreamQuickEnd { .. })
         )
     }
 
@@ -290,7 +299,9 @@ impl StreamData {
 
     /// Create quick stream end signal
     pub fn quick_end() -> Self {
-        StreamData::control(ControlSignal::Instant(InstantControlSignal::StreamQuickEnd))
+        StreamData::control(ControlSignal::Instant(
+            InstantControlSignal::StreamQuickEnd { signal_id: 0 },
+        ))
     }
 
     /// Create watermark signal
