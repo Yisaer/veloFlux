@@ -707,6 +707,9 @@ fn create_processor_from_plan_node(
                 PlanProcessor::ResultCollect(processor),
             ))
         }
+        PhysicalPlan::Barrier(_) => Err(ProcessorError::InvalidConfiguration(
+            "PhysicalBarrier is not supported yet (BarrierProcessor not implemented)".to_string(),
+        )),
     }
 }
 
