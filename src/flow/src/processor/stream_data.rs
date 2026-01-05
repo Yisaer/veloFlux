@@ -74,6 +74,15 @@ pub enum InstantControlSignal {
 }
 
 impl ControlSignal {
+    pub fn id(&self) -> u64 {
+        match self {
+            ControlSignal::Barrier(barrier) => barrier.barrier_id(),
+            ControlSignal::Instant(instant) => match instant {
+                InstantControlSignal::StreamQuickEnd { signal_id } => *signal_id,
+            },
+        }
+    }
+
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,

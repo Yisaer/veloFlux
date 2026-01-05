@@ -8,8 +8,45 @@ use crate::processor::base::{
 use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
 use futures::stream::StreamExt;
 use std::sync::Arc;
+use std::sync::Mutex;
+use tokio::sync::oneshot;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+#[derive(Debug, Default)]
+pub(crate) struct AckManager {
+    waiters: Mutex<std::collections::HashMap<u64, oneshot::Sender<ControlSignal>>>,
+}
+
+impl AckManager {
+    pub(crate) fn register(
+        &self,
+        signal_id: u64,
+    ) -> Result<oneshot::Receiver<ControlSignal>, ProcessorError> {
+        let (tx, rx) = oneshot::channel();
+        let mut guard = self.waiters.lock().expect("ack manager lock poisoned");
+        if guard.contains_key(&signal_id) {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "duplicate signal_id registration: {signal_id}"
+            )));
+        }
+        guard.insert(signal_id, tx);
+        Ok(rx)
+    }
+
+    pub(crate) fn unregister(&self, signal_id: u64) {
+        let mut guard = self.waiters.lock().expect("ack manager lock poisoned");
+        guard.remove(&signal_id);
+    }
+
+    pub(crate) fn ack(&self, signal: &ControlSignal) {
+        let mut guard = self.waiters.lock().expect("ack manager lock poisoned");
+        let Some(tx) = guard.remove(&signal.id()) else {
+            return;
+        };
+        let _ = tx.send(signal.clone());
+    }
+}
 
 pub(crate) trait OutputBusHook: Send + Sync {
     fn on_receive(&self, _processor_id: &str, _item: &StreamData) {}
@@ -29,6 +66,26 @@ impl OutputBusHook for ErrorLoggingHook {
             message = %err.message,
             "pipeline emitted error"
         );
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct AckHook {
+    manager: Arc<AckManager>,
+}
+
+impl AckHook {
+    pub(crate) fn new(manager: Arc<AckManager>) -> Self {
+        Self { manager }
+    }
+}
+
+impl OutputBusHook for AckHook {
+    fn on_receive(&self, _processor_id: &str, item: &StreamData) {
+        let StreamData::Control(signal) = item else {
+            return;
+        };
+        self.manager.ack(signal);
     }
 }
 
