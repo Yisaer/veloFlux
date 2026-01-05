@@ -335,6 +335,10 @@ impl PipelineManager {
         Ok(snapshot)
     }
 
+    /// Internal API used by the plan cache write-back path.
+    ///
+    /// Prefer `create_pipeline_with_plan_cache` for user-facing pipeline creation.
+    #[doc(hidden)]
     pub fn create_pipeline_with_logical_ir(
         &self,
         definition: PipelineDefinition,
@@ -363,6 +367,11 @@ impl PipelineManager {
         Ok((snapshot, logical_ir))
     }
 
+    /// Create a pipeline with optional plan-cache support.
+    ///
+    /// When `options.plan_cache.enabled` is `true`, this tries to reuse a persisted logical-plan
+    /// snapshot (hit) and falls back to building from SQL (miss). On miss, it returns
+    /// `logical_plan_ir` for the caller to persist as a plan snapshot.
     pub fn create_pipeline_with_plan_cache(
         &self,
         definition: PipelineDefinition,
@@ -402,6 +411,10 @@ impl PipelineManager {
         })
     }
 
+    /// Internal API used by the plan cache hit path.
+    ///
+    /// Prefer `create_pipeline_with_plan_cache` for user-facing pipeline creation.
+    #[doc(hidden)]
     pub fn create_pipeline_from_logical_ir(
         &self,
         definition: PipelineDefinition,
@@ -981,28 +994,6 @@ fn attach_sources_from_catalog(
     } else {
         Err("no datasource processors available to attach connectors".into())
     }
-}
-
-/// Attach source connectors for every `DataSourceProcessor` in the pipeline using the catalog.
-///
-/// For mock streams this will create a `MockSourceConnector` and register a corresponding
-/// `MockSourceHandle` under key `"{pipeline_id}:{stream_name}:{processor_id}"`.
-pub fn attach_sources_for_pipeline(
-    pipeline: &mut ProcessorPipeline,
-    catalog: &Catalog,
-    mqtt_client_manager: &MqttClientManager,
-) -> Result<(), String> {
-    let mut stream_definitions = HashMap::new();
-    for processor in pipeline.middle_processors.iter() {
-        if let PlanProcessor::DataSource(ds) = processor {
-            let stream_name = ds.stream_name().to_string();
-            let definition = catalog
-                .get(&stream_name)
-                .ok_or_else(|| format!("stream {stream_name} not found in catalog"))?;
-            stream_definitions.insert(stream_name, definition);
-        }
-    }
-    attach_sources_from_catalog(pipeline, &stream_definitions, mqtt_client_manager)
 }
 
 #[cfg(test)]
