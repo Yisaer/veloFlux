@@ -443,6 +443,11 @@ impl ProcessorPipeline {
         &self,
         timeout_duration: std::time::Duration,
     ) -> Result<Vec<ProcessorStatsEntry>, ProcessorError> {
+        if self.result_sink.is_none() {
+            return Err(ProcessorError::InvalidConfiguration(
+                "collect_stats requires a ResultCollectProcessor tail".to_string(),
+            ));
+        }
         let barrier_id = self.control_source.allocate_control_signal_id();
         let rx = self.ack_manager.register(barrier_id)?;
         if let Err(err) = self
