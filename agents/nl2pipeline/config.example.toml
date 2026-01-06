@@ -1,0 +1,47 @@
+[manager]
+url = "http://127.0.0.1:8080"
+timeout_secs = 10
+
+[llm]
+# OpenAI-compatible base URL. For OpenAI public API, use:
+#   https://api.openai.com/v1
+# For DeepSeek, the docs use:
+#   https://api.deepseek.com/beta
+# The client does NOT auto-add /v1; include the correct prefix in base_url.
+base_url = "https://api.deepseek.com/beta"
+timeout_secs = 30
+
+# Prefer reading secrets from environment variables.
+api_key_env = "DEEPSEEK_API_KEY"
+
+# Chat-completions model name.
+model = "deepseek-chat"
+
+[stream]
+# If empty, you will be prompted to select a stream at startup (when multiple exist).
+name = ""
+
+# Optional: create the stream if it is missing.
+create_if_missing = false
+source_broker_url = "tcp://127.0.0.1:1883"
+source_topic = "/demo/in"
+source_qos = 0
+
+# Only used when create_if_missing=true.
+schema_type = "json"
+
+[[stream.columns]]
+name = "user_id"
+data_type = "int64"
+
+[[stream.columns]]
+name = "score"
+data_type = "float64"
+
+[sink]
+broker_url = "tcp://127.0.0.1:1883"
+topic = "/nl2pipeline/out"
+qos = 0
+
+[repl]
+check_max_attempts = 3
