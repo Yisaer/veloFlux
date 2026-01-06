@@ -18,6 +18,7 @@ use crate::processor::{
     StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
     StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
+use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::stateful::StatefulFunctionRegistry;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -317,6 +318,8 @@ pub struct ProcessorPipeline {
     pipeline_id: String,
     /// Allows callers to wait for specific control signals to reach the tail.
     ack_manager: Arc<AckManager>,
+    /// Processor-local stats handles (one per processor instance).
+    processor_stats: Vec<ProcessorStatsHandle>,
 }
 
 impl ProcessorPipeline {
@@ -471,6 +474,10 @@ impl ProcessorPipeline {
 
     pub fn pipeline_id(&self) -> &str {
         &self.pipeline_id
+    }
+
+    pub fn processor_stats(&self) -> &[ProcessorStatsHandle] {
+        &self.processor_stats
     }
 
     /// Close the pipeline gracefully using the data path.
@@ -1078,6 +1085,22 @@ pub fn create_processor_pipeline(
             result_sink = Some(collector);
         }
     }
+
+    let mut processor_stats = Vec::new();
+    let mut register_processor_stats = |processor_id: &str| {
+        processor_stats.push(ProcessorStatsHandle {
+            processor_id: processor_id.to_string(),
+            stats: Arc::new(ProcessorStats::default()),
+        });
+    };
+    register_processor_stats(control_source.id());
+    for processor in &middle_processors {
+        register_processor_stats(processor.id());
+    }
+    if let Some(collector) = &result_sink {
+        register_processor_stats(collector.id());
+    }
+
     let pipeline_id = Uuid::new_v4().to_string();
     for processor in &mut middle_processors {
         processor.set_pipeline_id(&pipeline_id);
@@ -1092,6 +1115,7 @@ pub fn create_processor_pipeline(
         handles: Vec::new(),
         pipeline_id,
         ack_manager,
+        processor_stats,
     })
 }
 
