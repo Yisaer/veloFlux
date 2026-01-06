@@ -6,7 +6,7 @@ use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{
     AggregateCall, PhysicalPlan, PhysicalStreamingAggregation, StreamingWindowSpec,
 };
-use crate::processor::{Processor, ProcessorError};
+use crate::processor::{Processor, ProcessorError, ProcessorStats};
 use datatypes::Value;
 use sqlparser::ast::Expr;
 use std::collections::hash_map::Entry;
@@ -84,6 +84,15 @@ impl StreamingAggregationProcessor {
                 aggregate_registry,
             )),
             _ => None,
+        }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        match self {
+            StreamingAggregationProcessor::Count(p) => p.set_stats(stats),
+            StreamingAggregationProcessor::Tumbling(p) => p.set_stats(stats),
+            StreamingAggregationProcessor::Sliding(p) => p.set_stats(stats),
+            StreamingAggregationProcessor::State(p) => p.set_stats(stats),
         }
     }
 }

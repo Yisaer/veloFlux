@@ -3,10 +3,13 @@
 use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{PhysicalPlan, PhysicalStatefulFunction, StatefulCall};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData, StreamError,
+};
 use crate::stateful::{StatefulFunctionInstance, StatefulFunctionRegistry};
 use futures::stream::StreamExt;
 use std::sync::Arc;
@@ -27,6 +30,7 @@ pub struct StatefulFunctionProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl StatefulFunctionProcessor {
@@ -68,6 +72,7 @@ impl StatefulFunctionProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            stats: Arc::new(ProcessorStats::default()),
         })
     }
 
@@ -116,6 +121,10 @@ impl StatefulFunctionProcessor {
             RecordBatch::new(rows).map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
         Ok(Box::new(batch))
     }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
+    }
 }
 
 impl Processor for StatefulFunctionProcessor {
@@ -133,6 +142,7 @@ impl Processor for StatefulFunctionProcessor {
         let control_output = self.control_output.clone();
         let mut calls = std::mem::take(&mut self.calls);
         let _physical_stateful = Arc::clone(&self.physical_stateful);
+        let stats = Arc::clone(&self.stats);
 
         tracing::info!(processor_id = %id, "stateful function processor starting");
         tokio::spawn(async move {
@@ -141,6 +151,8 @@ impl Processor for StatefulFunctionProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -157,15 +169,19 @@ impl Processor for StatefulFunctionProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 match data {
                                     StreamData::Collection(collection) => {
                                         match Self::apply_stateful(collection, &mut calls) {
                                             Ok(out_collection) => {
-                                                send_with_backpressure(
-                                                    &output,
-                                                    StreamData::collection(out_collection),
-                                                )
-                                                .await?;
+                                                let out = StreamData::collection(out_collection);
+                                                let out_rows = out.num_rows_hint();
+                                                send_with_backpressure(&output, out).await?;
+                                                if let Some(rows) = out_rows {
+                                                    stats.record_out(rows);
+                                                }
                                             }
                                             Err(e) => {
                                                 let error = StreamError::new(e.to_string())

@@ -5,10 +5,11 @@ use crate::planner::physical::{
     WatermarkStrategy,
 };
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
+    log_broadcast_lagged, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -52,6 +53,22 @@ impl WatermarkProcessor {
                 EventtimeWatermarkProcessor::new(id, Arc::new(watermark.clone())),
             )),
             _ => None,
+        }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        match self {
+            WatermarkProcessor::ProcessTime(p) => p.set_stats(stats),
+            WatermarkProcessor::Eventtime(p) => p.set_stats(stats),
+        }
+    }
+}
+
+impl ProcessTimeWatermarkProcessor {
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        match self {
+            ProcessTimeWatermarkProcessor::Tumbling(p) => p.set_stats(stats),
+            ProcessTimeWatermarkProcessor::Sliding(p) => p.set_stats(stats),
         }
     }
 }
@@ -152,6 +169,7 @@ pub struct TumblingWatermarkProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl TumblingWatermarkProcessor {
@@ -165,6 +183,7 @@ impl TumblingWatermarkProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
@@ -178,6 +197,10 @@ impl TumblingWatermarkProcessor {
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
             ticker
         })
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 }
 
@@ -195,6 +218,7 @@ impl Processor for TumblingWatermarkProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let mut ticker = Self::build_interval(self.physical.config.strategy());
+        let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "watermark processor starting");
 
         tokio::spawn(async move {
@@ -203,6 +227,8 @@ impl Processor for TumblingWatermarkProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -239,8 +265,15 @@ impl Processor for TumblingWatermarkProcessor {
                                 }
                             }
                             Some(Ok(data)) => {
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 let is_terminal = data.is_terminal();
+                                let out_rows = data.num_rows_hint();
                                 send_with_backpressure(&output, data).await?;
+                                if let Some(rows) = out_rows {
+                                    stats.record_out(rows);
+                                }
                                 if is_terminal {
                                     tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                     tracing::info!(processor_id = %id, "stopped");
@@ -304,6 +337,7 @@ pub struct SlidingWatermarkProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl SlidingWatermarkProcessor {
@@ -332,7 +366,12 @@ impl SlidingWatermarkProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            stats: Arc::new(ProcessorStats::default()),
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 
     fn id(&self) -> &str {
@@ -378,6 +417,7 @@ impl Processor for SlidingWatermarkProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let mut ticker = self.ticker.take();
+        let stats = Arc::clone(&self.stats);
 
         tokio::spawn(async move {
             let mut pending_deadlines: BinaryHeap<Reverse<u128>> = BinaryHeap::new();
@@ -404,6 +444,8 @@ impl Processor for SlidingWatermarkProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -450,6 +492,7 @@ impl Processor for SlidingWatermarkProcessor {
                             Some(Ok(data)) => {
                                 match data {
                                     StreamData::Collection(collection) => {
+                                        stats.record_in(collection.num_rows() as u64);
                                         if let Some(lookahead) = lookahead {
                                             for row in collection.rows() {
                                                 let deadline = row.timestamp + lookahead;
@@ -463,8 +506,12 @@ impl Processor for SlidingWatermarkProcessor {
                                                 None
                                             };
                                         }
-                                        send_with_backpressure(&output, StreamData::collection(collection))
-                                            .await?;
+                                        let out = StreamData::collection(collection);
+                                        let out_rows = out.num_rows_hint();
+                                        send_with_backpressure(&output, out).await?;
+                                        if let Some(rows) = out_rows {
+                                            stats.record_out(rows);
+                                        }
                                     }
                                     other => {
                                         let is_terminal = other.is_terminal();
@@ -551,6 +598,7 @@ pub struct EventtimeWatermarkProcessor {
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
     state: EventtimeWatermarkState,
+    stats: Arc<ProcessorStats>,
 }
 
 impl EventtimeWatermarkProcessor {
@@ -570,6 +618,7 @@ impl EventtimeWatermarkProcessor {
             output,
             control_output,
             state: EventtimeWatermarkState::new(late_tolerance),
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
@@ -590,6 +639,10 @@ impl EventtimeWatermarkProcessor {
         })?;
         Ok(UNIX_EPOCH + Duration::from_nanos(nanos_u64))
     }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
+    }
 }
 
 impl Processor for EventtimeWatermarkProcessor {
@@ -606,6 +659,7 @@ impl Processor for EventtimeWatermarkProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let mut state = std::mem::take(&mut self.state);
+        let stats = Arc::clone(&self.stats);
 
         tracing::info!(processor_id = %id, "eventtime watermark processor starting");
         tokio::spawn(async move {
@@ -614,6 +668,8 @@ impl Processor for EventtimeWatermarkProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             if control_signal.is_graceful_end() {
                                 match state.on_graceful_end() {
@@ -644,6 +700,7 @@ impl Processor for EventtimeWatermarkProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
+                                stats.record_in(collection.num_rows() as u64);
                                 let rows = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(err) => {
@@ -657,7 +714,11 @@ impl Processor for EventtimeWatermarkProcessor {
                                             forward_error(&output, &id, err).await?;
                                         }
                                         for item in step.outputs {
+                                            let out_rows = item.num_rows_hint();
                                             send_with_backpressure(&output, item).await?;
+                                            if let Some(rows) = out_rows {
+                                                stats.record_out(rows);
+                                            }
                                         }
                                     }
                                     Err(err) => {

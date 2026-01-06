@@ -4,10 +4,11 @@
 //! and it forwards them to downstream processors while preserving channel isolation.
 
 use crate::processor::base::{
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
 use crate::processor::{
-    BarrierControlSignal, ControlSignal, Processor, ProcessorError, StreamData,
+    BarrierControlSignal, ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -59,6 +60,7 @@ pub struct ControlSourceProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     /// Monotonically increasing control-signal id allocator (shared across control/data channels).
     next_control_signal_id: Arc<AtomicU64>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl ControlSourceProcessor {
@@ -72,11 +74,16 @@ impl ControlSourceProcessor {
             output,
             control_output,
             next_control_signal_id: Arc::new(AtomicU64::new(1)),
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
     pub fn set_ingress_input(&mut self, receiver: mpsc::Receiver<Ingress>) {
         self.ingress = Some(receiver);
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 
     pub fn allocate_control_signal_id(&self) -> u64 {
@@ -116,6 +123,7 @@ impl Processor for ControlSourceProcessor {
         let control_output = self.control_output.clone();
         let processor_id = self.id.clone();
         let control_signal_id_allocator = Arc::clone(&self.next_control_signal_id);
+        let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "control source processor starting");
 
         tokio::spawn(async move {
@@ -129,7 +137,14 @@ impl Processor for ControlSourceProcessor {
                 match ingress.target {
                     IngressTarget::Data => {
                         let is_terminal = ingress.data.is_terminal();
+                        let rows = ingress.data.num_rows_hint();
+                        if let Some(rows) = rows {
+                            stats.record_in(rows);
+                        }
                         send_with_backpressure(&output, ingress.data).await?;
+                        if let Some(rows) = rows {
+                            stats.record_out(rows);
+                        }
                         if is_terminal {
                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                             return Ok(());
@@ -144,6 +159,7 @@ impl Processor for ControlSourceProcessor {
                             continue;
                         };
 
+                        let signal = attach_stats_to_collect_barrier(signal, &processor_id, &stats);
                         let is_terminal = signal.is_terminal();
                         send_control_with_backpressure(&control_output, signal).await?;
                         if is_terminal {

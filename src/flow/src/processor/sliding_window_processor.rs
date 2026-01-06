@@ -6,10 +6,11 @@
 use crate::planner::logical::TimeUnit;
 use crate::planner::physical::{PhysicalPlan, PhysicalSlidingWindow};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
+    log_broadcast_lagged, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -25,6 +26,7 @@ pub struct SlidingWindowProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl SlidingWindowProcessor {
@@ -45,6 +47,7 @@ impl SlidingWindowProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
@@ -53,6 +56,10 @@ impl SlidingWindowProcessor {
             PhysicalPlan::SlidingWindow(window) => Some(Self::new(id, Arc::new(window.clone()))),
             _ => None,
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 }
 
@@ -73,7 +80,9 @@ impl Processor for SlidingWindowProcessor {
         let lookback = self.lookback;
         let lookahead = self.lookahead;
 
-        let mut state = ProcessingState::new(lookback, lookahead, output.clone());
+        let stats = Arc::clone(&self.stats);
+        let mut state =
+            ProcessingState::new(lookback, lookahead, output.clone(), Arc::clone(&stats));
 
         tokio::spawn(async move {
             loop {
@@ -81,6 +90,8 @@ impl Processor for SlidingWindowProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -95,6 +106,7 @@ impl Processor for SlidingWindowProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
+                                state.record_in(collection.num_rows() as u64);
                                 if let Err(e) = state.add_collection(collection).await {
                                     forward_error(&output, &id, e.to_string()).await?;
                                 }
@@ -171,12 +183,25 @@ impl ProcessingState {
         lookback: Duration,
         lookahead: Option<Duration>,
         output: broadcast::Sender<StreamData>,
+        stats: Arc<ProcessorStats>,
     ) -> Self {
         match lookahead {
             Some(lookahead) => Self::WithLookahead(ProcessingWithLookaheadState::new(
-                lookback, lookahead, output,
+                lookback,
+                lookahead,
+                output,
+                Arc::clone(&stats),
             )),
-            None => Self::WithoutLookahead(ProcessingWithoutLookaheadState::new(lookback, output)),
+            None => Self::WithoutLookahead(ProcessingWithoutLookaheadState::new(
+                lookback, output, stats,
+            )),
+        }
+    }
+
+    fn record_in(&self, rows: u64) {
+        match self {
+            ProcessingState::WithLookahead(state) => state.stats.record_in(rows),
+            ProcessingState::WithoutLookahead(state) => state.stats.record_in(rows),
         }
     }
 
@@ -209,14 +234,20 @@ struct ProcessingWithoutLookaheadState {
     rows: VecDeque<crate::model::Tuple>,
     lookback: Duration,
     output: broadcast::Sender<StreamData>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl ProcessingWithoutLookaheadState {
-    fn new(lookback: Duration, output: broadcast::Sender<StreamData>) -> Self {
+    fn new(
+        lookback: Duration,
+        output: broadcast::Sender<StreamData>,
+        stats: Arc<ProcessorStats>,
+    ) -> Self {
         Self {
             rows: VecDeque::new(),
             lookback,
             output,
+            stats,
         }
     }
 
@@ -271,6 +302,7 @@ impl ProcessingWithoutLookaheadState {
             }
             rows.push(row.clone());
         }
+        self.stats.record_out(rows.len() as u64);
         let batch = crate::model::RecordBatch::new(rows)
             .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
         send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
@@ -284,16 +316,23 @@ struct ProcessingWithLookaheadState {
     lookback: Duration,
     lookahead: Duration,
     output: broadcast::Sender<StreamData>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl ProcessingWithLookaheadState {
-    fn new(lookback: Duration, lookahead: Duration, output: broadcast::Sender<StreamData>) -> Self {
+    fn new(
+        lookback: Duration,
+        lookahead: Duration,
+        output: broadcast::Sender<StreamData>,
+        stats: Arc<ProcessorStats>,
+    ) -> Self {
         Self {
             rows: VecDeque::new(),
             pending: VecDeque::new(),
             lookback,
             lookahead,
             output,
+            stats,
         }
     }
 
@@ -362,6 +401,7 @@ impl ProcessingWithLookaheadState {
             }
             rows.push(row.clone());
         }
+        self.stats.record_out(rows.len() as u64);
         let batch = crate::model::RecordBatch::new(rows)
             .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
         send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;

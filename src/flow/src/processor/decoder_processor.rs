@@ -4,10 +4,11 @@ use crate::codec::RecordDecoder;
 use crate::eventtime::{EventtimeParseError, EventtimeTypeParser};
 use crate::planner::decode_projection::DecodeProjection;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
+    log_broadcast_lagged, log_received_data, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -33,6 +34,7 @@ pub struct DecoderProcessor {
     projection: Option<Arc<std::sync::RwLock<Vec<String>>>>,
     decode_projection: Option<DecodeProjection>,
     eventtime: Option<EventtimeDecodeConfig>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl DecoderProcessor {
@@ -54,6 +56,7 @@ impl DecoderProcessor {
             projection: None,
             decode_projection: None,
             eventtime: None,
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
@@ -71,6 +74,10 @@ impl DecoderProcessor {
         self.eventtime = Some(eventtime);
         self
     }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
+    }
 }
 
 impl Processor for DecoderProcessor {
@@ -86,6 +93,7 @@ impl Processor for DecoderProcessor {
         let decode_projection = self.decode_projection.clone();
         let eventtime = self.eventtime.clone();
         let processor_id = self.id.clone();
+        let stats = Arc::clone(&self.stats);
         let base_inputs = std::mem::take(&mut self.inputs);
         let mut input_streams = fan_in_streams(base_inputs);
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -98,6 +106,8 @@ impl Processor for DecoderProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &processor_id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -114,6 +124,9 @@ impl Processor for DecoderProcessor {
                         match item {
                             Some(Ok(mut data)) => {
                                 log_received_data(&processor_id, &data);
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 if let StreamData::Bytes(payload) = &data {
                                     let decoded = if let Some(proj) = decode_projection.as_ref() {
                                         decoder.decode_with_projection(payload.as_ref(), Some(proj))
@@ -148,7 +161,11 @@ impl Processor for DecoderProcessor {
                                     }
                                 }
                                 let is_terminal = data.is_terminal();
+                                let out_rows = data.num_rows_hint();
                                 send_with_backpressure(&output, data).await?;
+                                if let Some(rows) = out_rows {
+                                    stats.record_out(rows);
+                                }
                                 if is_terminal {
                                     tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                     tracing::info!(processor_id = %processor_id, "stopped");

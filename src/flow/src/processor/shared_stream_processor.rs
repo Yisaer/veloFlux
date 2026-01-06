@@ -1,11 +1,12 @@
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use crate::shared_stream_registry;
 use futures::stream::StreamExt;
 use std::collections::HashSet;
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration, Instant};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -21,6 +22,7 @@ pub struct SharedStreamProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl SharedStreamProcessor {
@@ -38,6 +40,7 @@ impl SharedStreamProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
@@ -50,6 +53,10 @@ impl SharedStreamProcessor {
     /// This is used to coordinate dynamic projection decode in the shared stream runtime.
     pub fn set_required_columns(&mut self, required_columns: Vec<String>) {
         self.required_columns = required_columns;
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 }
 
@@ -69,6 +76,7 @@ impl Processor for SharedStreamProcessor {
         let control_output = self.control_output.clone();
         let stream_name = self.stream_name.clone();
         let processor_id = self.id.clone();
+        let stats = Arc::clone(&self.stats);
         let required_columns = std::mem::take(&mut self.required_columns);
         let pipeline_id = self
             .pipeline_id
@@ -126,6 +134,7 @@ impl Processor for SharedStreamProcessor {
                     biased;
                     control_msg = control_inputs.next(), if control_inputs_active => {
                         if let Some(Ok(signal)) = control_msg {
+                            let signal = attach_stats_to_collect_barrier(signal, &processor_id, &stats);
                             let is_terminal = signal.is_terminal();
                             send_control_with_backpressure(&control_output, signal).await?;
                             if is_terminal {
@@ -137,6 +146,7 @@ impl Processor for SharedStreamProcessor {
                     }
                     shared_control_msg = shared_control.next() => {
                         if let Some(Ok(signal)) = shared_control_msg {
+                            let signal = attach_stats_to_collect_barrier(signal, &processor_id, &stats);
                             let is_terminal = signal.is_terminal();
                             send_control_with_backpressure(&control_output, signal).await?;
                             if is_terminal {
@@ -148,8 +158,15 @@ impl Processor for SharedStreamProcessor {
                     }
                     data_msg = inputs.next(), if input_active => {
                         if let Some(Ok(data)) = data_msg {
+                            if let Some(rows) = data.num_rows_hint() {
+                                stats.record_in(rows);
+                            }
                             let is_terminal = data.is_terminal();
+                            let out_rows = data.num_rows_hint();
                             send_with_backpressure(&output, data).await?;
+                            if let Some(rows) = out_rows {
+                                stats.record_out(rows);
+                            }
                             if is_terminal {
                                 return Ok(());
                             }
@@ -160,8 +177,15 @@ impl Processor for SharedStreamProcessor {
                     shared_data_msg = shared_data.next() => {
                         match shared_data_msg {
                             Some(Ok(data)) => {
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 let is_terminal = data.is_terminal();
+                                let out_rows = data.num_rows_hint();
                                 send_with_backpressure(&output, data).await?;
+                                if let Some(rows) = out_rows {
+                                    stats.record_out(rows);
+                                }
                                 if is_terminal {
                                     return Ok(());
                                 }

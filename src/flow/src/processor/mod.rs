@@ -26,6 +26,7 @@ pub mod sink_processor;
 pub mod sliding_window_processor;
 pub mod state_window_processor;
 pub mod stateful_function_processor;
+pub mod stats;
 pub mod stream_data;
 pub mod streaming_aggregation_processor;
 pub mod streaming_encoder_processor;
@@ -52,6 +53,9 @@ pub use sink_processor::SinkProcessor;
 pub use sliding_window_processor::SlidingWindowProcessor;
 pub use state_window_processor::StateWindowProcessor;
 pub use stateful_function_processor::StatefulFunctionProcessor;
+pub use stats::{
+    ProcessorStats, ProcessorStatsEntry, ProcessorStatsHandle, ProcessorStatsSnapshot,
+};
 pub use stream_data::{
     BarrierControlSignal, BarrierControlSignalKind, ControlSignal, InstantControlSignal,
     StreamData, StreamError,

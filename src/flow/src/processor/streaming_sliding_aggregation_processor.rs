@@ -3,10 +3,10 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::model::RecordBatch;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
 use futures::stream::StreamExt;
 use std::collections::hash_map::Entry;
@@ -40,6 +40,7 @@ pub struct StreamingSlidingAggregationProcessor {
     group_by_meta: Vec<GroupByMeta>,
     length_secs: u64,
     delay_secs: u64,
+    stats: Arc<ProcessorStats>,
 }
 
 struct WindowGroupState {
@@ -84,11 +85,16 @@ impl StreamingSlidingAggregationProcessor {
             group_by_meta,
             length_secs,
             delay_secs,
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 
     fn validate_supported_aggregates(&self) -> Result<(), ProcessorError> {
@@ -135,6 +141,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
         let group_by_meta = self.group_by_meta.clone();
         let length_secs = self.length_secs;
         let delay_secs = self.delay_secs;
+        let stats = Arc::clone(&self.stats);
 
         tokio::spawn(async move {
             let mut windows: VecDeque<IncAggWindow> = VecDeque::new();
@@ -231,6 +238,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                 physical: &PhysicalStreamingAggregation,
                 group_by_meta: &[GroupByMeta],
                 windows: &VecDeque<IncAggWindow>,
+                stats: &Arc<ProcessorStats>,
             ) -> Result<(), ProcessorError> {
                 let Some(window) = windows.front() else {
                     return Ok(());
@@ -270,6 +278,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                 if out_rows.is_empty() {
                     return Ok(());
                 }
+                stats.record_out(out_rows.len() as u64);
                 let batch = RecordBatch::new(out_rows)
                     .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
                 send_with_backpressure(output, StreamData::collection(Box::new(batch))).await?;
@@ -281,6 +290,8 @@ impl Processor for StreamingSlidingAggregationProcessor {
                     biased;
                     Some(ctrl) = control_streams.next(), if control_active => {
                         if let Ok(control_signal) = ctrl {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -291,6 +302,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                     data_item = input_streams.next() => {
                         match data_item {
                             Some(Ok(StreamData::Collection(collection))) => {
+                                stats.record_in(collection.num_rows() as u64);
                                 let rows = collection.into_rows().map_err(|e| {
                                     ProcessorError::ProcessingError(format!("failed to extract rows: {e}"))
                                 })?;
@@ -323,7 +335,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                     }
 
                                     if delay_secs == 0 {
-                                        emit_oldest_window(&output, &physical, &group_by_meta, &windows)
+                                        emit_oldest_window(&output, &physical, &group_by_meta, &windows, &stats)
                                             .await?;
                                     }
                                 }
@@ -336,7 +348,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                 gc_windows(&mut windows, now_secs, length_secs, delay_secs);
                                 if let Some(front) = windows.front() {
                                     if front.start_secs.saturating_add(delay_secs) <= now_secs {
-                                        emit_oldest_window(&output, &physical, &group_by_meta, &windows)
+                                        emit_oldest_window(&output, &physical, &group_by_meta, &windows, &stats)
                                             .await?;
                                     }
                                 }
@@ -347,7 +359,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                 send_with_backpressure(&output, StreamData::control(control_signal)).await?;
                                 if is_terminal {
                                     if is_graceful {
-                                        emit_oldest_window(&output, &physical, &group_by_meta, &windows)
+                                        emit_oldest_window(&output, &physical, &group_by_meta, &windows, &stats)
                                             .await?;
                                     }
                                     break;

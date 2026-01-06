@@ -3,10 +3,11 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::model::Collection;
 use crate::planner::physical::PhysicalStreamingAggregation;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -44,6 +45,7 @@ pub struct StreamingCountAggregationProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     group_by_meta: Vec<GroupByMeta>,
     target: u64,
+    stats: Arc<ProcessorStats>,
 }
 
 impl StreamingCountAggregationProcessor {
@@ -67,6 +69,7 @@ impl StreamingCountAggregationProcessor {
             control_output,
             group_by_meta,
             target,
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
@@ -92,6 +95,10 @@ impl StreamingCountAggregationProcessor {
     pub fn id(&self) -> &str {
         &self.id
     }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
+    }
 }
 
 impl Processor for StreamingCountAggregationProcessor {
@@ -111,6 +118,7 @@ impl Processor for StreamingCountAggregationProcessor {
         let physical = Arc::clone(&self.physical);
         let group_by_meta = self.group_by_meta.clone();
         let target = self.target;
+        let stats = Arc::clone(&self.stats);
 
         tokio::spawn(async move {
             let mut worker = AggregationWorker::new(physical, aggregate_registry, group_by_meta);
@@ -122,6 +130,8 @@ impl Processor for StreamingCountAggregationProcessor {
                     biased;
                     Some(ctrl) = control_streams.next(), if control_active => {
                         if let Ok(control_signal) = ctrl {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -135,6 +145,7 @@ impl Processor for StreamingCountAggregationProcessor {
                                 log_received_data(&id, &data);
                                 match data {
                                     StreamData::Collection(collection) => {
+                                        stats.record_in(collection.num_rows() as u64);
                                         match StreamingCountAggregationProcessor::process_collection(
                                             &mut worker,
                                             &mut window_state,
@@ -142,6 +153,7 @@ impl Processor for StreamingCountAggregationProcessor {
                                         ) {
                                             Ok(outputs) => {
                                                 for out in outputs {
+                                                    stats.record_out(out.num_rows() as u64);
                                                     let data = StreamData::Collection(out);
                                                     send_with_backpressure(&output, data).await?
                                                 }

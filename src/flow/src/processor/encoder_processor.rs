@@ -6,10 +6,11 @@
 
 use crate::codec::encoder::CollectionEncoder;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
+    log_broadcast_lagged, log_received_data, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -23,6 +24,7 @@ pub struct EncoderProcessor {
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
     encoder: Arc<dyn CollectionEncoder>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl EncoderProcessor {
@@ -37,7 +39,12 @@ impl EncoderProcessor {
             output,
             control_output,
             encoder,
+            stats: Arc::new(ProcessorStats::default()),
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 }
 
@@ -55,6 +62,7 @@ impl Processor for EncoderProcessor {
         let control_output = self.control_output.clone();
         let encoder = Arc::clone(&self.encoder);
         let processor_id = self.id.clone();
+        let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "encoder processor starting");
 
         tokio::spawn(async move {
@@ -63,6 +71,8 @@ impl Processor for EncoderProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &processor_id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -79,16 +89,20 @@ impl Processor for EncoderProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let rows = collection.num_rows() as u64;
                                         match encoder.encode(collection.as_ref()) {
                                             Ok(payload) => {
-                                                send_with_backpressure(
-                                                    &output,
-                                                    StreamData::encoded_bytes(payload, rows),
-                                                )
-                                                .await?;
+                                                let out = StreamData::encoded_bytes(payload, rows);
+                                                let out_rows = out.num_rows_hint();
+                                                send_with_backpressure(&output, out).await?;
+                                                if let Some(rows) = out_rows {
+                                                    stats.record_out(rows);
+                                                }
                                             }
                                             Err(err) => {
                                                 let message = format!("encode error: {err}");

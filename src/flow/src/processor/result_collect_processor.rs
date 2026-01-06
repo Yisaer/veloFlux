@@ -3,9 +3,10 @@
 //! This processor receives data from upstream processors and forwards it to a single output.
 
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -106,6 +107,7 @@ pub struct ResultCollectProcessor {
     output: Option<mpsc::Sender<StreamData>>,
     /// Hooks that observe items after they have been written to the output bus.
     bus_hooks: Vec<Arc<dyn OutputBusHook>>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl ResultCollectProcessor {
@@ -117,6 +119,7 @@ impl ResultCollectProcessor {
             control_inputs: Vec::new(),
             output: None,
             bus_hooks: Vec::new(),
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
@@ -134,6 +137,10 @@ impl ResultCollectProcessor {
     pub(crate) fn add_bus_hook(&mut self, hook: Arc<dyn OutputBusHook>) {
         self.bus_hooks.push(hook);
     }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
+    }
 }
 
 impl Processor for ResultCollectProcessor {
@@ -147,9 +154,13 @@ impl Processor for ResultCollectProcessor {
             processor_id: &str,
             bus_hooks: &[Arc<dyn OutputBusHook>],
             data: StreamData,
+            stats: &Arc<ProcessorStats>,
         ) -> Result<(), ProcessorError> {
             for hook in bus_hooks {
                 hook.on_receive(processor_id, &data);
+            }
+            if let Some(rows) = data.num_rows_hint() {
+                stats.record_out(rows);
             }
             output
                 .send(data)
@@ -172,6 +183,7 @@ impl Processor for ResultCollectProcessor {
         });
         let processor_id = self.id.clone();
         let bus_hooks = self.bus_hooks.clone();
+        let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "result collect processor starting");
 
         tokio::spawn(async move {
@@ -186,9 +198,11 @@ impl Processor for ResultCollectProcessor {
                     control_item = control_streams.next(), if control_active => {
                         match control_item {
                             Some(Ok(control_signal)) => {
+                                let control_signal =
+                                    attach_stats_to_collect_barrier(control_signal, &processor_id, &stats);
                                 let out = StreamData::control(control_signal);
                                 let is_terminal = out.is_terminal();
-                                forward_to_output_bus(&output, &processor_id, &bus_hooks, out)
+                                forward_to_output_bus(&output, &processor_id, &bus_hooks, out, &stats)
                                     .await?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %processor_id, "received terminal signal (control)");
@@ -207,8 +221,11 @@ impl Processor for ResultCollectProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 let is_terminal = data.is_terminal();
-                                forward_to_output_bus(&output, &processor_id, &bus_hooks, data)
+                                forward_to_output_bus(&output, &processor_id, &bus_hooks, data, &stats)
                                     .await?;
                                 if is_terminal {
                                     tracing::info!(

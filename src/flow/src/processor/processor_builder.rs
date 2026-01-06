@@ -10,6 +10,7 @@ use crate::planner::physical::PhysicalPlan;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
 use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
 use crate::processor::EventtimePipelineContext;
+use crate::processor::ProcessorStatsEntry;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
     ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor,
@@ -18,7 +19,9 @@ use crate::processor::{
     StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
     StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
+use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::stateful::StatefulFunctionRegistry;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -173,6 +176,29 @@ impl PlanProcessor {
         }
     }
 
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        match self {
+            PlanProcessor::Aggregation(p) => p.set_stats(stats),
+            PlanProcessor::DataSource(p) => p.set_stats(stats),
+            PlanProcessor::Decoder(p) => p.set_stats(stats),
+            PlanProcessor::SharedSource(p) => p.set_stats(stats),
+            PlanProcessor::Project(p) => p.set_stats(stats),
+            PlanProcessor::StatefulFunction(p) => p.set_stats(stats),
+            PlanProcessor::Filter(p) => p.set_stats(stats),
+            PlanProcessor::Batch(p) => p.set_stats(stats),
+            PlanProcessor::Encoder(p) => p.set_stats(stats),
+            PlanProcessor::StreamingEncoder(p) => p.set_stats(stats),
+            PlanProcessor::StreamingAggregation(p) => p.set_stats(stats),
+            PlanProcessor::Watermark(p) => p.set_stats(stats),
+            PlanProcessor::TumblingWindow(p) => p.set_stats(stats),
+            PlanProcessor::SlidingWindow(p) => p.set_stats(stats),
+            PlanProcessor::StateWindow(p) => p.set_stats(stats),
+            PlanProcessor::Sink(p) => p.set_stats(stats),
+            PlanProcessor::ResultCollect(p) => p.set_stats(stats),
+            PlanProcessor::Barrier(p) => p.set_stats(stats),
+        }
+    }
+
     /// Start the processor
     pub fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         match self {
@@ -317,6 +343,8 @@ pub struct ProcessorPipeline {
     pipeline_id: String,
     /// Allows callers to wait for specific control signals to reach the tail.
     ack_manager: Arc<AckManager>,
+    /// Processor-local stats handles (one per processor instance).
+    processor_stats: Vec<ProcessorStatsHandle>,
 }
 
 impl ProcessorPipeline {
@@ -411,6 +439,48 @@ impl ProcessorPipeline {
         Ok(barrier_id)
     }
 
+    pub async fn collect_stats_via_control_with_ack(
+        &self,
+        timeout_duration: std::time::Duration,
+    ) -> Result<Vec<ProcessorStatsEntry>, ProcessorError> {
+        if self.result_sink.is_none() {
+            return Err(ProcessorError::InvalidConfiguration(
+                "collect_stats requires a ResultCollectProcessor tail".to_string(),
+            ));
+        }
+        let barrier_id = self.control_source.allocate_control_signal_id();
+        let rx = self.ack_manager.register(barrier_id)?;
+        if let Err(err) = self
+            .send_control_signal(ControlSignal::Barrier(
+                BarrierControlSignalKind::CollectStats.with_id(barrier_id),
+            ))
+            .await
+        {
+            self.ack_manager.unregister(barrier_id);
+            return Err(err);
+        }
+
+        let signal = self
+            .await_control_ack(barrier_id, rx, timeout_duration)
+            .await?;
+
+        let ControlSignal::Barrier(crate::processor::BarrierControlSignal::CollectStats {
+            barrier_id: ack_id,
+            stats,
+        }) = signal
+        else {
+            return Err(ProcessorError::ProcessingError(format!(
+                "unexpected stats ack signal: {signal:?}"
+            )));
+        };
+        if ack_id != barrier_id {
+            return Err(ProcessorError::ProcessingError(format!(
+                "unexpected stats ack barrier_id: expected={barrier_id}, got={ack_id}"
+            )));
+        }
+        Ok(stats)
+    }
+
     pub async fn send_barrier_via_data_with_ack(
         &self,
         kind: BarrierControlSignalKind,
@@ -471,6 +541,10 @@ impl ProcessorPipeline {
 
     pub fn pipeline_id(&self) -> &str {
         &self.pipeline_id
+    }
+
+    pub fn processor_stats(&self) -> &[ProcessorStatsHandle] {
+        &self.processor_stats
     }
 
     /// Close the pipeline gracefully using the data path.
@@ -1078,6 +1152,53 @@ pub fn create_processor_pipeline(
             result_sink = Some(collector);
         }
     }
+
+    let mut processor_stats = Vec::new();
+    let mut seen_ids = HashSet::new();
+
+    let stats = Arc::new(ProcessorStats::default());
+    let control_id = control_source.id().to_string();
+    if !seen_ids.insert(control_id.clone()) {
+        return Err(ProcessorError::InvalidConfiguration(format!(
+            "duplicate processor id: {control_id}"
+        )));
+    }
+    control_source.set_stats(Arc::clone(&stats));
+    processor_stats.push(ProcessorStatsHandle {
+        processor_id: control_id,
+        stats,
+    });
+
+    for processor in &mut middle_processors {
+        let id = processor.id().to_string();
+        if !seen_ids.insert(id.clone()) {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "duplicate processor id: {id}"
+            )));
+        }
+        let stats = Arc::new(ProcessorStats::default());
+        processor.set_stats(Arc::clone(&stats));
+        processor_stats.push(ProcessorStatsHandle {
+            processor_id: id,
+            stats,
+        });
+    }
+
+    if let Some(collector) = &mut result_sink {
+        let id = collector.id().to_string();
+        if !seen_ids.insert(id.clone()) {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "duplicate processor id: {id}"
+            )));
+        }
+        let stats = Arc::new(ProcessorStats::default());
+        collector.set_stats(Arc::clone(&stats));
+        processor_stats.push(ProcessorStatsHandle {
+            processor_id: id,
+            stats,
+        });
+    }
+
     let pipeline_id = Uuid::new_v4().to_string();
     for processor in &mut middle_processors {
         processor.set_pipeline_id(&pipeline_id);
@@ -1092,6 +1213,7 @@ pub fn create_processor_pipeline(
         handles: Vec::new(),
         pipeline_id,
         ack_manager,
+        processor_stats,
     })
 }
 

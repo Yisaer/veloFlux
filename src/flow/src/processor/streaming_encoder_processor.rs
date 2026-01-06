@@ -4,10 +4,11 @@
 use crate::codec::{CollectionEncoder, CollectionEncoderStream};
 use crate::model::Collection;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
+    log_broadcast_lagged, log_received_data, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,6 +25,7 @@ pub struct StreamingEncoderProcessor {
     encoder: Arc<dyn CollectionEncoder>,
     batch_count: Option<usize>,
     batch_duration: Option<Duration>,
+    stats: Arc<ProcessorStats>,
 }
 
 enum StreamingBatchMode {
@@ -77,7 +79,12 @@ impl StreamingEncoderProcessor {
             encoder,
             batch_count,
             batch_duration,
+            stats: Arc::new(ProcessorStats::default()),
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 
     fn ensure_stream<'a>(
@@ -107,7 +114,9 @@ impl StreamingEncoderProcessor {
         mode: &StreamingBatchMode,
         output: &broadcast::Sender<StreamData>,
         timer: &mut Option<Pin<Box<Sleep>>>,
+        stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
+        stats.record_in(collection.num_rows() as u64);
         for tuple in collection.rows().iter() {
             let stream = Self::ensure_stream(encoder, stream_state)?;
             stream.append(tuple).map_err(|err| {
@@ -180,6 +189,7 @@ impl Processor for StreamingEncoderProcessor {
         let encoder = Arc::clone(&self.encoder);
         let mode = StreamingBatchMode::new(self.batch_count, self.batch_duration).unwrap();
         let processor_id = self.id.clone();
+        let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "streaming encoder processor starting");
 
         tokio::spawn(async move {
@@ -191,10 +201,19 @@ impl Processor for StreamingEncoderProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &processor_id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut row_count, &mut stream_state, &output).await {
+                                if let Err(err) = StreamingEncoderProcessor::flush_buffer(
+                                    &processor_id,
+                                    &mut row_count,
+                                    &mut stream_state,
+                                    &output,
+                                )
+                                .await
+                                {
                                     tracing::error!(processor_id = %processor_id, error = %err, "flush error");
                                     forward_error(&output, &processor_id, err.to_string()).await?;
                                 }
@@ -211,7 +230,14 @@ impl Processor for StreamingEncoderProcessor {
                             timer.as_mut().await;
                         }
                     }, if timer.is_some() => {
-                        if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut row_count, &mut stream_state, &output).await {
+                        if let Err(err) = StreamingEncoderProcessor::flush_buffer(
+                            &processor_id,
+                            &mut row_count,
+                            &mut stream_state,
+                            &output,
+                        )
+                        .await
+                        {
                             tracing::error!(processor_id = %processor_id, error = %err, "flush error");
                             forward_error(&output, &processor_id, err.to_string()).await?;
                         }
@@ -235,6 +261,7 @@ impl Processor for StreamingEncoderProcessor {
                                                 &mode,
                                                 &output,
                                                 &mut timer,
+                                                &stats,
                                             )
                                             .await
                                         {
@@ -254,14 +281,13 @@ impl Processor for StreamingEncoderProcessor {
                                     data => {
                                         let is_terminal = data.is_terminal();
                                         if is_terminal {
-                                            if let Err(err) =
-                                                StreamingEncoderProcessor::flush_buffer(
-                                                    &processor_id,
-                                                    &mut row_count,
-                                                    &mut stream_state,
-                                                    &output,
-                                                )
-                                                .await
+                                            if let Err(err) = StreamingEncoderProcessor::flush_buffer(
+                                                &processor_id,
+                                                &mut row_count,
+                                                &mut stream_state,
+                                                &output,
+                                            )
+                                            .await
                                             {
                                                 tracing::error!(processor_id = %processor_id, error = %err, "flush error");
                                                 forward_error(
@@ -272,7 +298,11 @@ impl Processor for StreamingEncoderProcessor {
                                                 .await?;
                                             }
                                         }
+                                        let out_rows = data.num_rows_hint();
                                         send_with_backpressure(&output, data).await?;
+                                        if let Some(rows) = out_rows {
+                                            stats.record_out(rows);
+                                        }
                                         if is_terminal {
                                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                             return Ok(());
@@ -296,7 +326,14 @@ impl Processor for StreamingEncoderProcessor {
                                 continue;
                             }
                             None => {
-                                if let Err(err) = StreamingEncoderProcessor::flush_buffer(&processor_id, &mut row_count, &mut stream_state, &output).await {
+                                if let Err(err) = StreamingEncoderProcessor::flush_buffer(
+                                    &processor_id,
+                                    &mut row_count,
+                                    &mut stream_state,
+                                    &output,
+                                )
+                                .await
+                                {
                                     tracing::error!(processor_id = %processor_id, error = %err, "flush error");
                                     forward_error(&output, &processor_id, err.to_string()).await?;
                                 }

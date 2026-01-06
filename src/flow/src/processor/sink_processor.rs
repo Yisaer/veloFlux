@@ -2,13 +2,15 @@
 use crate::connector::SinkConnector;
 use crate::model::Collection;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, forward_error,
+    log_broadcast_lagged, log_received_data, send_control_with_backpressure,
+    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter_vec, IntCounterVec};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -68,6 +70,7 @@ pub struct SinkProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     connector: Option<ConnectorBinding>,
     forward_to_result: bool,
+    stats: Arc<ProcessorStats>,
 }
 
 static SINK_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -101,7 +104,12 @@ impl SinkProcessor {
             control_output,
             connector: None,
             forward_to_result: false,
+            stats: Arc::new(ProcessorStats::default()),
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 
     /// Enable forwarding collections/control signals to downstream consumers (tests).
@@ -170,6 +178,7 @@ impl Processor for SinkProcessor {
         let output = self.output.clone();
         let forward_data = self.forward_to_result;
         let control_output = self.control_output.clone();
+        let stats = Arc::clone(&self.stats);
 
         let Some(mut connector) = self.connector.take() else {
             return tokio::spawn(async {
@@ -188,6 +197,8 @@ impl Processor for SinkProcessor {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            let control_signal =
+                                attach_stats_to_collect_barrier(control_signal, &processor_id, &stats);
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
@@ -205,6 +216,9 @@ impl Processor for SinkProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 match data {
                                     StreamData::EncodedBytes { payload, num_rows } => {
                                         let rows = num_rows;
@@ -221,6 +235,7 @@ impl Processor for SinkProcessor {
                                                 .await?;
                                             continue;
                                         }
+                                        stats.record_out(1);
 
                                         if forward_data {
                                             send_with_backpressure(
@@ -231,6 +246,7 @@ impl Processor for SinkProcessor {
                                         }
                                     }
                                     StreamData::Collection(collection) => {
+                                        let in_rows = collection.num_rows() as u64;
                                         if let Err(err) = Self::handle_collection(
                                             &processor_id,
                                             &mut connector,
@@ -243,6 +259,7 @@ impl Processor for SinkProcessor {
                                                 .await?;
                                             continue;
                                         }
+                                        stats.record_out(in_rows);
 
                                         if forward_data {
                                             send_with_backpressure(
@@ -255,7 +272,6 @@ impl Processor for SinkProcessor {
                                     data => {
                                         let is_terminal = data.is_terminal();
                                         send_with_backpressure(&output, data).await?;
-
                                         if is_terminal {
                                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                             Self::handle_terminal(&mut connector).await?;
