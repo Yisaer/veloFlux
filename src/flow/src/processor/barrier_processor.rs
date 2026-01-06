@@ -142,11 +142,7 @@ impl Processor for BarrierProcessor {
                                     }
                                     other => {
                                         let is_terminal = other.is_terminal();
-                                        let out_rows = other.num_rows_hint();
                                         send_with_backpressure(&output, other).await?;
-                                        if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
-                                        }
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received terminal item (data)");
                                             tracing::info!(processor_id = %id, "stopped");

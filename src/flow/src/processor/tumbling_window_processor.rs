@@ -235,7 +235,6 @@ impl ProcessingState {
             if current_rows.is_empty() {
                 continue;
             }
-            self.stats.record_out(current_rows.len() as u64);
             let batch = crate::model::RecordBatch::new(current_rows)
                 .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
             send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;

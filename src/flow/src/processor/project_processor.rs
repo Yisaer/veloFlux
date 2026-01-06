@@ -144,11 +144,7 @@ impl Processor for ProjectProcessor {
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
-                                        let out_rows = data.num_rows_hint();
                                         send_with_backpressure(&output, data).await?;
-                                        if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
-                                        }
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");

@@ -257,7 +257,6 @@ impl Processor for SinkProcessor {
                                         }
 
                                         if forward_data {
-                                            stats.record_out(in_rows);
                                             send_with_backpressure(
                                                 &output,
                                                 StreamData::Collection(collection),
@@ -267,12 +266,7 @@ impl Processor for SinkProcessor {
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
-                                        let out_rows = data.num_rows_hint();
                                         send_with_backpressure(&output, data).await?;
-                                        if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
-                                        }
-
                                         if is_terminal {
                                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                             Self::handle_terminal(&mut connector).await?;

@@ -297,11 +297,7 @@ impl Processor for AggregationProcessor {
                                     }
                                     other_data => {
                                         // Forward non-collection data (like Encoded, Bytes) as-is
-                                        let out_rows = other_data.num_rows_hint();
                                         send_with_backpressure(&output, other_data).await?;
-                                        if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
-                                        }
                                     }
                                 }
                             }

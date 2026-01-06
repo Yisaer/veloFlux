@@ -249,7 +249,6 @@ impl Processor for StreamingStateAggregationProcessor {
                                             if state.active {
                                                 match state.worker.finalize_current_window() {
                                                     Ok(Some(batch)) => {
-                                                        stats.record_out(batch.num_rows() as u64);
                                                         send_with_backpressure(&output, StreamData::Collection(batch)).await?;
                                                     }
                                                     Ok(None) => {}

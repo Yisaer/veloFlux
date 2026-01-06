@@ -209,7 +209,6 @@ impl Processor for StateWindowProcessor {
                                             if state.active && !state.rows.is_empty() {
                                                 let batch_rows: Vec<_> =
                                                     state.rows.drain(..).collect();
-                                                stats.record_out(batch_rows.len() as u64);
                                                 let batch = crate::model::RecordBatch::new(batch_rows)
                                                     .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
                                                 send_with_backpressure(

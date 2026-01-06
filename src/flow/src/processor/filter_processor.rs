@@ -164,11 +164,7 @@ impl Processor for FilterProcessor {
                                     }
                                     other => {
                                         let is_terminal = other.is_terminal();
-                                        let out_rows = other.num_rows_hint();
                                         send_with_backpressure(&output, other).await?;
-                                        if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
-                                        }
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");

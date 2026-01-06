@@ -238,11 +238,7 @@ impl Processor for BatchProcessor {
                                             )
                                             .await?;
                                         }
-                                        let out_rows = data.num_rows_hint();
                                         send_with_backpressure(&output, data).await?;
-                                        if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
-                                        }
                                         if is_terminal {
                                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                             return Ok(());

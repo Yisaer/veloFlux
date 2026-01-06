@@ -283,7 +283,6 @@ impl ProcessingWindowState {
                 .finalize_current_window()
                 .map_err(ProcessorError::ProcessingError)?
             {
-                stats.record_out(batch.num_rows() as u64);
                 send_with_backpressure(output, StreamData::Collection(batch)).await?;
             }
         }

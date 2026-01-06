@@ -510,11 +510,7 @@ impl Processor for SlidingWatermarkProcessor {
                                     }
                                     other => {
                                         let is_terminal = other.is_terminal();
-                                        let out_rows = other.num_rows_hint();
                                         send_with_backpressure(&output, other).await?;
-                                        if let Some(rows) = out_rows {
-                                            stats.record_out(rows);
-                                        }
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");
@@ -675,11 +671,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                             forward_error(&output, &id, err).await?;
                                         }
                                         for item in step.outputs {
-                                            let out_rows = item.num_rows_hint();
                                             send_with_backpressure(&output, item).await?;
-                                            if let Some(rows) = out_rows {
-                                                stats.record_out(rows);
-                                            }
                                         }
                                     }
                                     Err(err) => {
@@ -744,11 +736,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                                 forward_error(&output, &id, err).await?;
                                             }
                                             for item in step.outputs {
-                                                let out_rows = item.num_rows_hint();
                                                 send_with_backpressure(&output, item).await?;
-                                                if let Some(rows) = out_rows {
-                                                    stats.record_out(rows);
-                                                }
                                             }
                                         }
                                         Err(err) => {
@@ -767,9 +755,6 @@ impl Processor for EventtimeWatermarkProcessor {
                                 let is_terminal = other.is_terminal();
                                 let out_rows = other.num_rows_hint();
                                 send_with_backpressure(&output, other).await?;
-                                if let Some(rows) = out_rows {
-                                    stats.record_out(rows);
-                                }
                                 if is_terminal {
                                     tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                     tracing::info!(processor_id = %id, "stopped");
