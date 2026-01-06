@@ -13,7 +13,7 @@ use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
 use futures::stream::StreamExt;
 use sqlparser::ast::Expr;
@@ -66,6 +66,7 @@ pub struct AggregationProcessor {
     output: broadcast::Sender<StreamData>,
     /// Dedicated control output channel
     control_output: broadcast::Sender<ControlSignal>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl AggregationProcessor {
@@ -187,7 +188,12 @@ impl AggregationProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            stats: Arc::new(ProcessorStats::default()),
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 
     /// Create an AggregationProcessor from a PhysicalPlan
@@ -222,6 +228,7 @@ impl Processor for AggregationProcessor {
         let control_output = self.control_output.clone();
         let physical_aggregation = self.physical_aggregation.clone();
         let aggregate_registry = self.aggregate_registry.clone();
+        let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "aggregation processor starting");
 
         tokio::spawn(async move {
@@ -246,6 +253,9 @@ impl Processor for AggregationProcessor {
                         match data_item {
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 match data {
                                     StreamData::Collection(collection) => {
                                         match Self::process_batch_with_grouping(
@@ -254,14 +264,14 @@ impl Processor for AggregationProcessor {
                                             collection.as_ref(),
                                         ) {
                                             Ok(result_collection) => {
-                                                let result_data =
-                                                    StreamData::Collection(result_collection);
-                                                if let Err(e) =
-                                                    send_with_backpressure(&output, result_data)
-                                                        .await
-                                                {
+                                                let result_data = StreamData::Collection(result_collection);
+                                                let out_rows = result_data.num_rows_hint();
+                                                if let Err(e) = send_with_backpressure(&output, result_data).await {
                                                     tracing::error!(processor_id = %id, error = %e, "failed to send result");
                                                     return Err(e);
+                                                }
+                                                if let Some(rows) = out_rows {
+                                                    stats.record_out(rows);
                                                 }
                                                 tracing::debug!(processor_id = %id, "processed batch and sent grouped results");
                                             }
@@ -277,11 +287,8 @@ impl Processor for AggregationProcessor {
                                     }
                                     StreamData::Control(control_signal) => {
                                         let is_terminal = control_signal.is_terminal();
-                                        send_with_backpressure(
-                                            &output,
-                                            StreamData::control(control_signal),
-                                        )
-                                        .await?;
+                                        let out = StreamData::control(control_signal);
+                                        send_with_backpressure(&output, out).await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             stream_ended = true;
@@ -290,7 +297,11 @@ impl Processor for AggregationProcessor {
                                     }
                                     other_data => {
                                         // Forward non-collection data (like Encoded, Bytes) as-is
+                                        let out_rows = other_data.num_rows_hint();
                                         send_with_backpressure(&output, other_data).await?;
+                                        if let Some(rows) = out_rows {
+                                            stats.record_out(rows);
+                                        }
                                     }
                                 }
                             }

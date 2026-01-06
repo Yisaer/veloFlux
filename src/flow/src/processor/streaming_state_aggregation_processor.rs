@@ -5,7 +5,7 @@ use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
 use futures::stream::StreamExt;
 use std::collections::HashMap;
@@ -27,6 +27,7 @@ pub struct StreamingStateAggregationProcessor {
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
     group_by_meta: Vec<GroupByMeta>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl StreamingStateAggregationProcessor {
@@ -48,11 +49,16 @@ impl StreamingStateAggregationProcessor {
             output,
             control_output,
             group_by_meta,
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 }
 
@@ -72,6 +78,7 @@ impl Processor for StreamingStateAggregationProcessor {
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let physical = Arc::clone(&self.physical);
         let group_by_meta = self.group_by_meta.clone();
+        let stats = Arc::clone(&self.stats);
 
         let (open_expr, emit_expr, open_scalar, emit_scalar, partition_by_scalars) =
             match physical.window.clone() {
@@ -109,6 +116,7 @@ impl Processor for StreamingStateAggregationProcessor {
                     data_item = input_streams.next() => {
                         match data_item {
                             Some(Ok(StreamData::Collection(collection))) => {
+                                stats.record_in(collection.num_rows() as u64);
                                 let tuples = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(e) => {
@@ -216,6 +224,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                     if emit {
                                         match entry.worker.finalize_current_window() {
                                             Ok(Some(batch)) => {
+                                                stats.record_out(batch.num_rows() as u64);
                                                 send_with_backpressure(&output, StreamData::Collection(batch)).await?;
                                             }
                                             Ok(None) => {}
@@ -240,6 +249,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                             if state.active {
                                                 match state.worker.finalize_current_window() {
                                                     Ok(Some(batch)) => {
+                                                        stats.record_out(batch.num_rows() as u64);
                                                         send_with_backpressure(&output, StreamData::Collection(batch)).await?;
                                                     }
                                                     Ok(None) => {}

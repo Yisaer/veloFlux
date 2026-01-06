@@ -8,7 +8,9 @@ use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData, StreamError,
+};
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -33,6 +35,7 @@ pub struct ProjectProcessor {
     output: broadcast::Sender<StreamData>,
     /// Dedicated control output channel
     control_output: broadcast::Sender<ControlSignal>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl ProjectProcessor {
@@ -47,7 +50,12 @@ impl ProjectProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            stats: Arc::new(ProcessorStats::default()),
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 
     /// Create a ProjectProcessor from a PhysicalPlan
@@ -85,6 +93,7 @@ impl Processor for ProjectProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let fields = self.physical_project.fields.clone();
+        let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "project processor starting");
 
         tokio::spawn(async move {
@@ -109,15 +118,19 @@ impl Processor for ProjectProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 match data {
                                     StreamData::Collection(collection) => {
                                         match apply_projection(collection.as_ref(), &fields) {
                                             Ok(projected_collection) => {
-                                                let projected_data = StreamData::collection(
-                                                    projected_collection,
-                                                );
-                                                send_with_backpressure(&output, projected_data)
-                                                    .await?;
+                                                let projected_data = StreamData::collection(projected_collection);
+                                                let out_rows = projected_data.num_rows_hint();
+                                                send_with_backpressure(&output, projected_data).await?;
+                                                if let Some(rows) = out_rows {
+                                                    stats.record_out(rows);
+                                                }
                                             }
                                             Err(e) => {
                                                 let error_data = StreamData::error(
@@ -131,7 +144,11 @@ impl Processor for ProjectProcessor {
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
+                                        let out_rows = data.num_rows_hint();
                                         send_with_backpressure(&output, data).await?;
+                                        if let Some(rows) = out_rows {
+                                            stats.record_out(rows);
+                                        }
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");

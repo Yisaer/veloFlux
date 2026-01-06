@@ -7,7 +7,7 @@ use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -22,6 +22,7 @@ pub struct TumblingWindowProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl TumblingWindowProcessor {
@@ -38,6 +39,7 @@ impl TumblingWindowProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
@@ -46,6 +48,10 @@ impl TumblingWindowProcessor {
             PhysicalPlan::TumblingWindow(window) => Some(Self::new(id, Arc::new(window.clone()))),
             _ => None,
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 }
 
@@ -62,10 +68,11 @@ impl Processor for TumblingWindowProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let stats = Arc::clone(&self.stats);
 
         // Local state captured by the task.
         let len_secs = self.window_length.as_secs().max(1);
-        let mut state = ProcessingState::new(len_secs, output.clone());
+        let mut state = ProcessingState::new(len_secs, output.clone(), Arc::clone(&stats));
 
         tokio::spawn(async move {
             loop {
@@ -87,6 +94,7 @@ impl Processor for TumblingWindowProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
+                                stats.record_in(collection.num_rows() as u64);
                                 if let Err(e) = state.add_collection(collection).await {
                                     forward_error(&output, &id, e.to_string()).await?;
                                 }
@@ -153,14 +161,20 @@ struct ProcessingState {
     rows: VecDeque<crate::model::Tuple>,
     len_secs: u64,
     output: broadcast::Sender<StreamData>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl ProcessingState {
-    fn new(len_secs: u64, output: broadcast::Sender<StreamData>) -> Self {
+    fn new(
+        len_secs: u64,
+        output: broadcast::Sender<StreamData>,
+        stats: Arc<ProcessorStats>,
+    ) -> Self {
         Self {
             rows: VecDeque::new(),
             len_secs,
             output,
+            stats,
         }
     }
 
@@ -199,6 +213,7 @@ impl ProcessingState {
             if current_rows.is_empty() {
                 continue;
             }
+            self.stats.record_out(current_rows.len() as u64);
             let batch = crate::model::RecordBatch::new(current_rows)
                 .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
             send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;
@@ -220,6 +235,7 @@ impl ProcessingState {
             if current_rows.is_empty() {
                 continue;
             }
+            self.stats.record_out(current_rows.len() as u64);
             let batch = crate::model::RecordBatch::new(current_rows)
                 .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
             send_with_backpressure(&self.output, StreamData::collection(Box::new(batch))).await?;

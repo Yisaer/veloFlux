@@ -8,7 +8,9 @@ use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData, StreamError,
+};
 use datatypes::Schema;
 use futures::stream::StreamExt;
 use once_cell::sync::Lazy;
@@ -38,6 +40,7 @@ pub struct DataSourceProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     /// External source connectors that feed this processor
     connectors: Vec<ConnectorBinding>,
+    stats: Arc<ProcessorStats>,
 }
 
 static DATASOURCE_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -181,7 +184,12 @@ impl DataSourceProcessor {
             output,
             control_output,
             connectors: Vec::new(),
+            stats: Arc::new(ProcessorStats::default()),
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 
     /// Register an external source connector and its decoder.
@@ -221,6 +229,7 @@ impl Processor for DataSourceProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let processor_id = self.id.clone();
+        let stats = Arc::clone(&self.stats);
         let plan_label = self
             .plan_index
             .map(|idx| idx.to_string())
@@ -274,6 +283,9 @@ impl Processor for DataSourceProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 if let Some(collection) = data.as_collection() {
                                     // TODO: fix metrics
                                     let rows = collection.num_rows() as u64;
@@ -285,7 +297,11 @@ impl Processor for DataSourceProcessor {
                                         .inc_by(rows);
                                 }
                                 let is_terminal = data.is_terminal();
+                                let out_rows = data.num_rows_hint();
                                 send_with_backpressure(&output, data).await?;
+                                if let Some(rows) = out_rows {
+                                    stats.record_out(rows);
+                                }
 
                                 if is_terminal {
                                     tracing::info!(

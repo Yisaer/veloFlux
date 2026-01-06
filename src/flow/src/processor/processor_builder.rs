@@ -20,6 +20,7 @@ use crate::processor::{
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::stateful::StatefulFunctionRegistry;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -171,6 +172,29 @@ impl PlanProcessor {
     pub fn set_pipeline_id(&mut self, pipeline_id: &str) {
         if let PlanProcessor::SharedSource(proc) = self {
             proc.set_pipeline_id(pipeline_id);
+        }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        match self {
+            PlanProcessor::Aggregation(p) => p.set_stats(stats),
+            PlanProcessor::DataSource(p) => p.set_stats(stats),
+            PlanProcessor::Decoder(p) => p.set_stats(stats),
+            PlanProcessor::SharedSource(p) => p.set_stats(stats),
+            PlanProcessor::Project(p) => p.set_stats(stats),
+            PlanProcessor::StatefulFunction(p) => p.set_stats(stats),
+            PlanProcessor::Filter(p) => p.set_stats(stats),
+            PlanProcessor::Batch(p) => p.set_stats(stats),
+            PlanProcessor::Encoder(p) => p.set_stats(stats),
+            PlanProcessor::StreamingEncoder(p) => p.set_stats(stats),
+            PlanProcessor::StreamingAggregation(p) => p.set_stats(stats),
+            PlanProcessor::Watermark(p) => p.set_stats(stats),
+            PlanProcessor::TumblingWindow(p) => p.set_stats(stats),
+            PlanProcessor::SlidingWindow(p) => p.set_stats(stats),
+            PlanProcessor::StateWindow(p) => p.set_stats(stats),
+            PlanProcessor::Sink(p) => p.set_stats(stats),
+            PlanProcessor::ResultCollect(p) => p.set_stats(stats),
+            PlanProcessor::Barrier(p) => p.set_stats(stats),
         }
     }
 
@@ -1087,18 +1111,49 @@ pub fn create_processor_pipeline(
     }
 
     let mut processor_stats = Vec::new();
-    let mut register_processor_stats = |processor_id: &str| {
-        processor_stats.push(ProcessorStatsHandle {
-            processor_id: processor_id.to_string(),
-            stats: Arc::new(ProcessorStats::default()),
-        });
-    };
-    register_processor_stats(control_source.id());
-    for processor in &middle_processors {
-        register_processor_stats(processor.id());
+    let mut seen_ids = HashSet::new();
+
+    let stats = Arc::new(ProcessorStats::default());
+    let control_id = control_source.id().to_string();
+    if !seen_ids.insert(control_id.clone()) {
+        return Err(ProcessorError::InvalidConfiguration(format!(
+            "duplicate processor id: {control_id}"
+        )));
     }
-    if let Some(collector) = &result_sink {
-        register_processor_stats(collector.id());
+    control_source.set_stats(Arc::clone(&stats));
+    processor_stats.push(ProcessorStatsHandle {
+        processor_id: control_id,
+        stats,
+    });
+
+    for processor in &mut middle_processors {
+        let id = processor.id().to_string();
+        if !seen_ids.insert(id.clone()) {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "duplicate processor id: {id}"
+            )));
+        }
+        let stats = Arc::new(ProcessorStats::default());
+        processor.set_stats(Arc::clone(&stats));
+        processor_stats.push(ProcessorStatsHandle {
+            processor_id: id,
+            stats,
+        });
+    }
+
+    if let Some(collector) = &mut result_sink {
+        let id = collector.id().to_string();
+        if !seen_ids.insert(id.clone()) {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "duplicate processor id: {id}"
+            )));
+        }
+        let stats = Arc::new(ProcessorStats::default());
+        collector.set_stats(Arc::clone(&stats));
+        processor_stats.push(ProcessorStatsHandle {
+            processor_id: id,
+            stats,
+        });
     }
 
     let pipeline_id = Uuid::new_v4().to_string();

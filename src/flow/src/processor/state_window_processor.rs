@@ -10,7 +10,7 @@ use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, forward_error, log_broadcast_lagged,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -30,6 +30,7 @@ pub struct StateWindowProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl StateWindowProcessor {
@@ -43,6 +44,7 @@ impl StateWindowProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
@@ -53,6 +55,10 @@ impl StateWindowProcessor {
             }
             _ => None,
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 }
 
@@ -69,6 +75,7 @@ impl Processor for StateWindowProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let stats = Arc::clone(&self.stats);
 
         let open_expr = self.physical.open_scalar.clone();
         let emit_expr = self.physical.emit_scalar.clone();
@@ -96,6 +103,7 @@ impl Processor for StateWindowProcessor {
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
+                                stats.record_in(collection.num_rows() as u64);
                                 let tuples = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(e) => {
@@ -180,6 +188,7 @@ impl Processor for StateWindowProcessor {
                                             continue;
                                         }
                                         let batch_rows: Vec<_> = state.rows.drain(..).collect();
+                                        stats.record_out(batch_rows.len() as u64);
                                         let batch = crate::model::RecordBatch::new(batch_rows)
                                             .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
                                         send_with_backpressure(&output, StreamData::collection(Box::new(batch))).await?;
@@ -200,6 +209,7 @@ impl Processor for StateWindowProcessor {
                                             if state.active && !state.rows.is_empty() {
                                                 let batch_rows: Vec<_> =
                                                     state.rows.drain(..).collect();
+                                                stats.record_out(batch_rows.len() as u64);
                                                 let batch = crate::model::RecordBatch::new(batch_rows)
                                                     .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
                                                 send_with_backpressure(

@@ -271,6 +271,14 @@ impl StreamData {
         }
     }
 
+    pub fn num_rows_hint(&self) -> Option<u64> {
+        match self {
+            StreamData::Collection(collection) => Some(collection.num_rows() as u64),
+            StreamData::Bytes(_) | StreamData::EncodedBytes { .. } => Some(1),
+            StreamData::Control(_) | StreamData::Watermark(_) | StreamData::Error(_) => None,
+        }
+    }
+
     /// Get a human-readable description
     pub fn description(&self) -> String {
         match self {

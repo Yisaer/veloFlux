@@ -8,7 +8,9 @@ use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData, StreamError};
+use crate::processor::{
+    ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData, StreamError,
+};
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -33,6 +35,7 @@ pub struct FilterProcessor {
     output: broadcast::Sender<StreamData>,
     /// Dedicated control output channel
     control_output: broadcast::Sender<ControlSignal>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl FilterProcessor {
@@ -47,7 +50,12 @@ impl FilterProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            stats: Arc::new(ProcessorStats::default()),
         }
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 
     /// Create a FilterProcessor from a PhysicalPlan
@@ -88,6 +96,7 @@ impl Processor for FilterProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let filter_expr = self.physical_filter.scalar_predicate.clone();
+        let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "filter processor starting");
 
         tokio::spawn(async move {
@@ -118,14 +127,19 @@ impl Processor for FilterProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
+                                if let Some(rows) = data.num_rows_hint() {
+                                    stats.record_in(rows);
+                                }
                                 match data {
                                     StreamData::Collection(collection) => {
                                         match apply_filter(collection.as_ref(), &filter_expr) {
                                             Ok(filtered_collection) => {
-                                                let filtered_data =
-                                                    StreamData::collection(filtered_collection);
-                                                send_with_backpressure(&output, filtered_data)
-                                                    .await?;
+                                                let filtered_data = StreamData::collection(filtered_collection);
+                                                let out_rows = filtered_data.num_rows_hint();
+                                                send_with_backpressure(&output, filtered_data).await?;
+                                                if let Some(rows) = out_rows {
+                                                    stats.record_out(rows);
+                                                }
                                             }
                                             Err(e) => {
                                                 let error = StreamError::new(e.to_string())
@@ -140,11 +154,8 @@ impl Processor for FilterProcessor {
                                     }
                                     StreamData::Control(control_signal) => {
                                         let is_terminal = control_signal.is_terminal();
-                                        send_with_backpressure(
-                                            &output,
-                                            StreamData::control(control_signal),
-                                        )
-                                        .await?;
+                                        let out = StreamData::control(control_signal);
+                                        send_with_backpressure(&output, out).await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");
@@ -153,7 +164,11 @@ impl Processor for FilterProcessor {
                                     }
                                     other => {
                                         let is_terminal = other.is_terminal();
+                                        let out_rows = other.num_rows_hint();
                                         send_with_backpressure(&output, other).await?;
+                                        if let Some(rows) = out_rows {
+                                            stats.record_out(rows);
+                                        }
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");

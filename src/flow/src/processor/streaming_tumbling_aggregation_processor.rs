@@ -5,7 +5,7 @@ use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
     send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, StreamData};
+use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -23,6 +23,7 @@ pub struct StreamingTumblingAggregationProcessor {
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
     group_by_meta: Vec<GroupByMeta>,
+    stats: Arc<ProcessorStats>,
 }
 
 impl StreamingTumblingAggregationProcessor {
@@ -44,11 +45,16 @@ impl StreamingTumblingAggregationProcessor {
             output,
             control_output,
             group_by_meta,
+            stats: Arc::new(ProcessorStats::default()),
         }
     }
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
     }
 }
 
@@ -68,6 +74,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let physical = Arc::clone(&self.physical);
         let group_by_meta = self.group_by_meta.clone();
+        let stats = Arc::clone(&self.stats);
         let len_secs = match physical.window {
             StreamingWindowSpec::Tumbling {
                 time_unit: _,
@@ -102,6 +109,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                 log_received_data(&id, &data);
                                 match data {
                                     StreamData::Collection(collection) => {
+                                        stats.record_in(collection.num_rows() as u64);
                                         for row in collection.rows() {
                                             window_state.add_row(row).map_err(|e| {
                                                 ProcessorError::ProcessingError(format!(
@@ -111,7 +119,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                         }
                                     }
                                     StreamData::Watermark(ts) => {
-                                        window_state.flush_until(ts, &output).await?;
+                                        window_state.flush_until(ts, &output, &stats).await?;
                                     }
                                     StreamData::Control(control_signal) => {
                                         let is_terminal = control_signal.is_terminal();
@@ -123,7 +131,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                         .await?;
                                         if is_terminal {
                                             if is_graceful {
-                                                window_state.flush_all(&output).await?;
+                                                window_state.flush_all(&output, &stats).await?;
                                             }
                                             break;
                                         }
@@ -244,6 +252,7 @@ impl ProcessingWindowState {
         &mut self,
         watermark: SystemTime,
         output: &broadcast::Sender<StreamData>,
+        stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         let watermark_secs = to_secs(watermark, "watermark")?;
         while let Some(front) = self.windows.front() {
@@ -256,6 +265,7 @@ impl ProcessingWindowState {
                 .finalize_current_window()
                 .map_err(ProcessorError::ProcessingError)?
             {
+                stats.record_out(batch.num_rows() as u64);
                 send_with_backpressure(output, StreamData::Collection(batch)).await?;
             }
         }
@@ -265,6 +275,7 @@ impl ProcessingWindowState {
     async fn flush_all(
         &mut self,
         output: &broadcast::Sender<StreamData>,
+        stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         while let Some(mut state) = self.windows.pop_front() {
             if let Some(batch) = state
@@ -272,6 +283,7 @@ impl ProcessingWindowState {
                 .finalize_current_window()
                 .map_err(ProcessorError::ProcessingError)?
             {
+                stats.record_out(batch.num_rows() as u64);
                 send_with_backpressure(output, StreamData::Collection(batch)).await?;
             }
         }
