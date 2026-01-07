@@ -25,25 +25,43 @@ names; always ground on Manager introspection APIs and syntax/function catalogs.
 
 ## CLI
 
-Entry point: `agents/nl2pipeline/nl2pipeline.py`
+Two CLI entrypoints are available (to compare legacy vs LangGraph during migration):
+
+- Legacy (handwritten state machine): `agents/nl2pipeline/nl2pipeline.py`
+- LangGraph (in-memory, v1): `agents/nl2pipeline/langgraph_cli.py`
 
 This tool is configured via a TOML file. Start with `agents/nl2pipeline/config.example.toml`
 and copy it to `agents/nl2pipeline/config.toml`.
 
 ## Code Layout
 
-- `agents/nl2pipeline/workflow.py`: the state machine and the draft→validate→explain loop (primary maintenance surface).
-- `agents/nl2pipeline/repl.py`: interactive shell UI and command handling.
-- `agents/nl2pipeline/chat_client.py`: minimal OpenAI-compatible Chat Completions client.
-- `agents/nl2pipeline/manager_client.py`: minimal SynapseFlow Manager REST client.
-- `agents/nl2pipeline/config.py`: TOML parsing and config dataclasses.
-- `agents/nl2pipeline/catalogs.py`: capability digest building (compaction/filtering).
+- `agents/nl2pipeline/shared/`: shared building blocks (config, Manager/LLM clients, catalogs, history, prompts).
+- `agents/nl2pipeline/legacy/`: legacy CLI engine (handwritten state machine).
+- `agents/nl2pipeline/core/`: LangGraph engine (state + workflow + driver).
+- `agents/nl2pipeline/cli/`: CLI entrypoints.
+- `agents/nl2pipeline/docs/`: design docs.
 
 ### Run
 
 ```bash
 cp agents/nl2pipeline/config.example.toml agents/nl2pipeline/config.toml
 python3 agents/nl2pipeline/nl2pipeline.py --config agents/nl2pipeline/config.toml
+```
+
+### LangGraph CLI (in-memory, v1)
+
+If you want to run the same core workflow via LangGraph (still a CLI; no server in this repo for now):
+
+Install dependency:
+
+```bash
+python3 -m pip install -r agents/nl2pipeline/requirements.txt
+```
+
+Run:
+
+```bash
+python3 agents/nl2pipeline/langgraph_cli.py --config agents/nl2pipeline/config.toml
 ```
 
 ### LLM API
@@ -62,10 +80,8 @@ The agent uses an OpenAI-compatible Chat Completions API. The config must provid
 
 ### REPL commands
 
-- `/help`
-- `/streams` (list available streams)
-- `/use <stream_name>` (select active stream)
-- `/exit`
+- Legacy CLI supports: `/help`, `/streams`, `/use <stream_name>`, `/show ...`, `/exit`.
+- LangGraph CLI currently supports: `/help`, `/exit` (stream/schema selection is handled via interrupts/prompts).
 
 ## Notes
 

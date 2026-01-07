@@ -77,10 +77,10 @@ For each user prompt:
 
 The implementation is split so the workflow is easy to maintain:
 
-- `agents/nl2pipeline/workflow.py`: core workflow state machine (events/phases).
-- `agents/nl2pipeline/repl.py`: REPL wrapper over workflow events.
-- `agents/nl2pipeline/chat_client.py`: Chat Completions API client.
-- `agents/nl2pipeline/manager_client.py`: Manager API client.
+- `agents/nl2pipeline/legacy/workflow.py`: legacy workflow state machine (events/phases).
+- `agents/nl2pipeline/legacy/repl.py`: legacy REPL wrapper over workflow events.
+- `agents/nl2pipeline/shared/chat_client.py`: Chat Completions API client.
+- `agents/nl2pipeline/shared/manager_client.py`: Manager API client.
 
 ## Token budget notes
 

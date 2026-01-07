@@ -5,7 +5,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from .manager_client import ApiError, ManagerClient
+from ..shared.manager_client import ApiError, ManagerClient
 from .router import Intent, route_intent
 from .workflow import EventKind, PipelineCandidate, TurnContext, TurnInput, Workflow
 

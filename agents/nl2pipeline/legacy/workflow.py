@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Iterator, List, Optional
 
-from .chat_client import ChatCompletionsClient, LlmError
-from .catalogs import CapabilitiesDigest
-from .manager_client import ApiError, ManagerClient
+from ..shared.chat_client import ChatCompletionsClient, LlmError
+from ..shared.catalogs import CapabilitiesDigest
+from ..shared.manager_client import ApiError, ManagerClient
+from ..shared.prompts import default_assistant_instructions
+from ..shared.requests import build_create_pipeline_request, build_create_stream_request
 
 
 class Phase(str, Enum):
@@ -68,64 +70,6 @@ class WorkflowEvent:
     result: Optional[PipelineCandidate] = None
 
 
-def default_assistant_instructions() -> str:
-    return (
-        "You convert user requirements into SynapseFlow-valid SQL.\n"
-        "Grounding rules:\n"
-        "- Do not invent stream names, column names, column types, or function names.\n"
-        "- Use only functions present in the provided function catalog.\n"
-        "- Use only syntax constructs and expression operators marked supported/partial in the provided syntax catalog.\n"
-        "Output rules:\n"
-        "- The user payload includes `mode`.\n"
-        "  - mode=preview_sql: output either a single SQL statement, OR a single line starting with `QUESTION:`.\n"
-        "  - mode=json_candidate: return ONLY valid JSON with keys: sql, questions, assumptions.\n"
-        "- If required information is missing, ask instead of guessing.\n"
-    )
-
-
-def build_create_stream_request(
-    name: str,
-    broker_url: str,
-    topic: str,
-    qos: int,
-    columns: List[Dict[str, str]],
-) -> Dict[str, Any]:
-    return {
-        "name": name,
-        "type": "mqtt",
-        "props": {"broker_url": broker_url, "topic": topic, "qos": qos},
-        "schema": {"type": "json", "props": {"columns": columns}},
-        "decoder": {"type": "json", "props": {}},
-        "shared": False,
-    }
-
-
-def build_create_pipeline_request(
-    pipeline_id: str,
-    sql: str,
-    sink_broker_url: str,
-    sink_topic: str,
-    sink_qos: int,
-) -> Dict[str, Any]:
-    return {
-        "id": pipeline_id,
-        "sql": sql,
-        "sinks": [
-            {
-                "type": "mqtt",
-                "props": {
-                    "broker_url": sink_broker_url,
-                    "topic": sink_topic,
-                    "qos": sink_qos,
-                    "retain": False,
-                },
-                "encoder": {"type": "json", "props": {}},
-            }
-        ],
-        "options": {"plan_cache": {"enabled": False}, "eventtime": {"enabled": False}},
-    }
-
-
 def _candidate_from_json(obj: Dict[str, Any]) -> Candidate:
     sql = str(obj.get("sql", "")).strip()
     if not sql:
@@ -137,6 +81,7 @@ def _candidate_from_json(obj: Dict[str, Any]) -> Candidate:
         questions=[str(x) for x in questions],
         assumptions=[str(x) for x in assumptions],
     )
+
 
 def _strip_code_fences(text: str) -> str:
     raw = text.strip()
