@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -153,6 +154,7 @@ class Workflow:
         sink_qos: int,
         max_history_messages: int = 30,
         llm_json_mode: bool = True,
+        llm_stream: bool = False,
     ) -> None:
         self.manager = manager
         self.llm = llm
@@ -163,11 +165,12 @@ class Workflow:
         self.sink_qos = sink_qos
         self.max_history_messages = max_history_messages
         self.llm_json_mode = llm_json_mode
+        self.llm_stream = llm_stream
 
         self._messages: List[Dict[str, str]] = []
         self._seeded = False
 
-    def seed_session(self, ctx: TurnContext) -> None:
+    def seed_session(self) -> None:
         if self._seeded:
             return
         self._messages = [
@@ -178,8 +181,6 @@ class Workflow:
                     {
                         "type": "context",
                         "capabilities_digest": self.digest.to_json(),
-                        "active_stream": ctx.active_stream,
-                        "stream_schema": ctx.stream_schema,
                     },
                     ensure_ascii=False,
                 ),
@@ -202,6 +203,17 @@ class Workflow:
         )
         self._trim_history()
 
+    def add_context_note(self, note: str) -> None:
+        """
+        Add a short, user-visible context note into the chat history.
+
+        Use this for deterministic meta-query results (e.g. list streams) so later turns
+        can reference them without needing to re-ask or re-fetch.
+        """
+        if not note.strip():
+            return
+        self._append_user_json({"type": "context_note", "note": note.strip()})
+
     def _append_assistant_text(self, text: str) -> None:
         self._messages.append({"role": "assistant", "content": text})
         self._trim_history()
@@ -218,7 +230,7 @@ class Workflow:
 
     def run_turn(self, ctx: TurnContext, turn: TurnInput) -> Iterator[WorkflowEvent]:
         if not self._seeded:
-            self.seed_session(ctx)
+            self.seed_session()
 
         previous_error: Optional[str] = None
         previous_sql = turn.previous_sql
@@ -241,12 +253,29 @@ class Workflow:
                 },
             }
             self._append_user_json(llm_payload)
-            parsed = self.llm.complete_json(
-                model=self.llm_model,
-                messages=self._messages,
-                temperature=0.0,
-                response_format_json=self.llm_json_mode,
-            )
+            try:
+                progress_emitted = False
+
+                def _on_delta(_piece: str) -> None:
+                    nonlocal progress_emitted
+                    if not progress_emitted:
+                        progress_emitted = True
+                    # Show minimal progress indicator, not raw JSON.
+                    print(".", end="", file=sys.stderr, flush=True)
+
+                parsed = self.llm.complete_json(
+                    model=self.llm_model,
+                    messages=self._messages,
+                    temperature=0.0,
+                    response_format_json=self.llm_json_mode,
+                    stream=self.llm_stream,
+                    on_stream_delta=_on_delta if self.llm_stream else None,
+                )
+                if self.llm_stream and progress_emitted:
+                    print("", file=sys.stderr)
+            except LlmError as e:
+                yield WorkflowEvent(kind=EventKind.Failed, phase=Phase.Failed, error=str(e))
+                return
             # Keep raw output in history (best-effort) for multi-turn consistency.
             self._append_assistant_text(json.dumps(parsed, ensure_ascii=False))
             candidate = _candidate_from_json(parsed)

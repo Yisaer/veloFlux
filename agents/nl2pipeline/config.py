@@ -16,17 +16,13 @@ class LlmConfig:
     timeout_secs: float
     api_key: str
     model: str
+    stream: bool
     json_mode: bool
 
 
 @dataclass(frozen=True)
 class StreamConfig:
-    name: str
-    create_if_missing: bool
-    source_broker_url: str
-    source_topic: str
-    source_qos: int
-    columns: List[Dict[str, str]]
+    default: str
 
 
 @dataclass(frozen=True)
@@ -101,18 +97,12 @@ def load_config(path: str) -> AppConfig:
         timeout_secs=float(llm_section.get("timeout_secs", 30.0)),
         api_key=_read_api_key(llm_section),
         model=_require_non_empty(str(llm_section.get("model", "")), "[llm].model"),
+        stream=bool(llm_section.get("stream", False)),
         json_mode=bool(llm_section.get("json_mode", True)),
     )
 
     stream = StreamConfig(
-        name=str(stream_section.get("name", "")).strip(),
-        create_if_missing=bool(stream_section.get("create_if_missing", False)),
-        source_broker_url=str(
-            stream_section.get("source_broker_url", "tcp://127.0.0.1:1883")
-        ).strip(),
-        source_topic=str(stream_section.get("source_topic", "")).strip(),
-        source_qos=int(stream_section.get("source_qos", 0)),
-        columns=_read_columns(stream_section),
+        default=str(stream_section.get("default", "")).strip(),
     )
 
     sink = SinkConfig(

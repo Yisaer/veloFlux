@@ -1,4 +1,5 @@
 import json
+import socket
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 import urllib.error
@@ -26,7 +27,11 @@ class HttpJsonClient:
         data = None
         headers = {"Accept": "application/json", **self.headers}
         if body is not None:
-            data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            # Be defensive: terminal input may contain surrogateescaped characters.
+            # Replace invalid sequences so we never crash while sending requests.
+            data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode(
+                "utf-8", errors="replace"
+            )
             headers["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url=url, method=method, data=data, headers=headers)
@@ -36,6 +41,8 @@ class HttpJsonClient:
                 if not raw:
                     return resp.status, None
                 return resp.status, json.loads(raw.decode("utf-8"))
+        except (TimeoutError, socket.timeout) as e:
+            raise ApiError(f"{method} {path} failed: timeout after {self.timeout_secs}s") from e
         except urllib.error.HTTPError as e:
             raw = e.read()
             message = raw.decode("utf-8", errors="replace") if raw else str(e)
@@ -50,7 +57,9 @@ class HttpJsonClient:
         data = None
         headers = {"Accept": "text/plain", **self.headers}
         if body is not None:
-            data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+            data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode(
+                "utf-8", errors="replace"
+            )
             headers["Content-Type"] = "application/json"
 
         req = urllib.request.Request(url=url, method=method, data=data, headers=headers)
@@ -59,6 +68,8 @@ class HttpJsonClient:
                 raw = resp.read()
                 text = raw.decode("utf-8", errors="replace") if raw else ""
                 return resp.status, text
+        except (TimeoutError, socket.timeout) as e:
+            raise ApiError(f"{method} {path} failed: timeout after {self.timeout_secs}s") from e
         except urllib.error.HTTPError as e:
             raw = e.read()
             message = raw.decode("utf-8", errors="replace") if raw else str(e)

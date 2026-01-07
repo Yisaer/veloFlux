@@ -49,11 +49,12 @@ Represent state explicitly to make later migration to LangGraph easy:
    - `GET /functions`
    - `GET /streams`
 2) Resolve an active stream:
-   - If the user explicitly selects one, use it.
-   - Otherwise prompt the user to pick a stream when multiple exist.
+   - Use an LLM router to decide whether the user is asking for stream listing/schema or NL→SQL.
+   - For NL→SQL, ensure an active stream exists; otherwise prompt the user to pick one.
 3) Create an LLM session using Chat Completions:
    - Keep a local message history (system + context + last N turns).
-   - Seed the history with a compact "capabilities digest" (index-like types/functions/syntax) and active stream schema.
+   - Seed the history with a compact "capabilities digest" (index-like types/functions/syntax).
+   - Stream schema is provided per turn (and when active stream changes) to avoid binding a stream at startup.
 
 ### Per-turn loop
 

@@ -6,13 +6,14 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from .manager_client import ApiError, ManagerClient
+from .router import Intent, route_intent
 from .workflow import EventKind, PipelineCandidate, TurnContext, TurnInput, Workflow
 
 
 @dataclass
 class ReplState:
-    active_stream: str
-    stream_schema: Dict[str, Any]
+    active_stream: Optional[str]
+    stream_schema: Optional[Dict[str, Any]]
     last_sql: Optional[str] = None
     last_explain: Optional[str] = None
     last_pipeline_json: Optional[Dict[str, Any]] = None
@@ -31,7 +32,11 @@ def _print_help() -> None:
                 "  /show pipeline",
                 "  /exit",
                 "",
-                "Otherwise, type a natural-language requirement and press Enter.",
+                "Otherwise, type a natural-language message and press Enter.",
+                "The agent will route it to either:",
+                "  - list streams (GET /streams)",
+                "  - describe stream schema (GET /streams/describe/:name)",
+                "  - NL→SQL pipeline drafting (draft→validate→explain loop)",
             ]
         )
     )
@@ -40,6 +45,55 @@ def _print_help() -> None:
 def _print_streams(streams: List[Dict[str, Any]]) -> None:
     for s in streams:
         print(str(s.get("name", "")))
+
+
+def _format_streams_table(streams: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for s in streams:
+        if not isinstance(s, dict):
+            continue
+        name = str(s.get("name", "")).strip()
+        cols = (((s.get("schema") or {}).get("columns")) or []) if isinstance(s, dict) else []
+        col_count = len(cols) if isinstance(cols, list) else 0
+        sample = []
+        if isinstance(cols, list):
+            for c in cols[:5]:
+                if isinstance(c, dict) and c.get("name"):
+                    sample.append(str(c["name"]))
+        suffix = f" cols={col_count}"
+        if sample:
+            suffix += f" sample={','.join(sample)}"
+        lines.append(f"- {name}{suffix}")
+    return "\n".join(lines)
+
+
+def _summarize_stream_names(streams: List[Dict[str, Any]], max_items: int = 20) -> str:
+    names: List[str] = []
+    for s in streams:
+        if isinstance(s, dict) and s.get("name"):
+            names.append(str(s["name"]).strip())
+    names = [n for n in names if n]
+    if len(names) <= max_items:
+        return ", ".join(names)
+    head = ", ".join(names[:max_items])
+    return f"{head}, ... (+{len(names) - max_items} more)"
+
+
+def _summarize_schema(schema: Dict[str, Any], max_cols: int = 12) -> str:
+    cols = schema.get("columns") or []
+    if not isinstance(cols, list) or not cols:
+        return "(no columns)"
+    parts: List[str] = []
+    for c in cols[:max_cols]:
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name", "")).strip()
+        dtype = str(c.get("data_type", "")).strip()
+        if name:
+            parts.append(f"{name}:{dtype}" if dtype else name)
+    if len(cols) > max_cols:
+        return ", ".join(parts) + f", ... (+{len(cols) - max_cols} more)"
+    return ", ".join(parts)
 
 
 def _select_stream_interactively(streams: List[Dict[str, Any]]) -> str:
@@ -94,15 +148,18 @@ def run_repl(
         raise ApiError("no streams found (create one first via Manager)")
 
     active_stream = initial_stream_name.strip()
-    if not active_stream:
-        if len(streams) == 1:
-            active_stream = str(streams[0].get("name", "")).strip()
-        else:
-            active_stream = _select_stream_interactively(streams)
 
-    schema = _get_stream_schema(manager, active_stream)
-    state = ReplState(active_stream=active_stream, stream_schema=schema)
-    workflow.seed_session(TurnContext(active_stream=state.active_stream, stream_schema=state.stream_schema))
+    state = ReplState(active_stream=None, stream_schema=None)
+    workflow.seed_session()
+
+    if active_stream:
+        state = ReplState(
+            active_stream=active_stream,
+            stream_schema=_get_stream_schema(manager, active_stream),
+        )
+        workflow.update_active_stream(
+            TurnContext(active_stream=state.active_stream, stream_schema=state.stream_schema)
+        )
 
     print("Type /help for commands. Enter requirements in plain text.", file=sys.stderr)
 
@@ -129,11 +186,14 @@ def run_repl(
             if not any(s.get("name") == name for s in streams):
                 print(f"stream not found: {name}", file=sys.stderr)
                 continue
-            state.active_stream = name
-            state.stream_schema = _get_stream_schema(manager, name)
-            workflow.update_active_stream(
-                TurnContext(active_stream=state.active_stream, stream_schema=state.stream_schema)
+            state = ReplState(
+                active_stream=name,
+                stream_schema=_get_stream_schema(manager, name),
+                last_sql=state.last_sql,
+                last_explain=state.last_explain,
+                last_pipeline_json=state.last_pipeline_json,
             )
+            workflow.update_active_stream(TurnContext(active_stream=name, stream_schema=state.stream_schema))
             print(f"active stream set to {state.active_stream}", file=sys.stderr)
             continue
         if line == "/show sql":
@@ -146,9 +206,100 @@ def run_repl(
             print(json.dumps(state.last_pipeline_json or {}, indent=2, ensure_ascii=False))
             continue
 
-        prompt = line
+        user_text = line
+        streams = manager.list_streams()
+        try:
+            decision = route_intent(
+                llm=workflow.llm,
+                model=workflow.llm_model,
+                user_text=user_text,
+                streams=streams,
+                active_stream=state.active_stream,
+                json_mode=workflow.llm_json_mode,
+            )
+        except Exception as e:
+            print(f"[ROUTER] failed: {e}", file=sys.stderr)
+            continue
+        print(f"[ROUTER] intent={decision.intent.value}", file=sys.stderr)
+
+        if decision.intent == Intent.ListStreams:
+            print(_format_streams_table(streams))
+            workflow.add_context_note(
+                f"Stream list requested; available streams: {_summarize_stream_names(streams)}."
+            )
+            continue
+
+        if decision.intent == Intent.DescribeStream:
+            target = decision.stream or state.active_stream
+            if not target:
+                question = decision.question or "Which stream?"
+                print(question, file=sys.stderr)
+                target = _select_stream_interactively(streams)
+            schema = _get_stream_schema(manager, target)
+            print(f"stream: {target}")
+            cols = (schema.get("columns") or []) if isinstance(schema, dict) else []
+            if not isinstance(cols, list) or not cols:
+                print("(no columns)")
+            else:
+                for c in cols:
+                    if isinstance(c, dict):
+                        print(f"- {c.get('name','')}: {c.get('data_type','')}")
+            workflow.add_context_note(
+                f"Schema requested; stream={target} columns: {_summarize_schema(schema)}."
+            )
+            state = ReplState(
+                active_stream=target,
+                stream_schema=schema,
+                last_sql=state.last_sql,
+                last_explain=state.last_explain,
+                last_pipeline_json=state.last_pipeline_json,
+            )
+            workflow.update_active_stream(
+                TurnContext(active_stream=state.active_stream, stream_schema=state.stream_schema)
+            )
+            continue
+
+        if decision.intent == Intent.AskUser:
+            print(decision.question or "I need more information.", file=sys.stderr)
+            continue
+
+        # NL→SQL.
+        if decision.stream and decision.stream != state.active_stream:
+            schema = _get_stream_schema(manager, decision.stream)
+            state = ReplState(
+                active_stream=decision.stream,
+                stream_schema=schema,
+                last_sql=state.last_sql,
+                last_explain=state.last_explain,
+                last_pipeline_json=state.last_pipeline_json,
+            )
+            workflow.update_active_stream(
+                TurnContext(active_stream=state.active_stream, stream_schema=state.stream_schema)
+            )
+
+        if state.active_stream is None or state.stream_schema is None:
+            question = decision.question or "Which stream should be used?"
+            print(question, file=sys.stderr)
+            selected = _select_stream_interactively(streams)
+            schema = _get_stream_schema(manager, selected)
+            state = ReplState(
+                active_stream=selected,
+                stream_schema=schema,
+                last_sql=state.last_sql,
+                last_explain=state.last_explain,
+                last_pipeline_json=state.last_pipeline_json,
+            )
+            workflow.update_active_stream(
+                TurnContext(active_stream=state.active_stream, stream_schema=state.stream_schema)
+            )
+
+        print("[LLM] drafting pipeline SQL", file=sys.stderr)
         ctx = TurnContext(active_stream=state.active_stream, stream_schema=state.stream_schema)
-        turn = TurnInput(prompt=prompt, max_attempts=check_max_attempts, previous_sql=state.last_sql)
+        turn = TurnInput(
+            prompt=user_text,
+            max_attempts=check_max_attempts,
+            previous_sql=state.last_sql,
+        )
 
         last_result: Optional[PipelineCandidate] = None
         needs_user_input: Optional[List[str]] = None

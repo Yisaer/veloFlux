@@ -54,6 +54,7 @@ The agent uses an OpenAI-compatible Chat Completions API. The config must provid
 - `llm.api_key_env` (recommended; reads key from env)
 - `llm.model`
 - Optional: `llm.json_mode` (default `true`): requests `response_format={"type":"json_object"}`.
+- Optional: `llm.stream` (default `false`): uses SSE streaming and shows a progress indicator.
 
 ### REPL commands
 
@@ -68,3 +69,11 @@ The agent uses an OpenAI-compatible Chat Completions API. The config must provid
   planner's error strings for feedback. A dedicated `validate_sql` endpoint is planned later.
 - Chat Completions is stateless, so the agent keeps a local message history. The seeded capabilities
   digest is intentionally minimized to keep token usage reasonable.
+
+## Stream Selection
+
+- On startup, the agent fetches existing streams via `GET /streams`.
+- For each user message, the agent first asks the LLM to route intent:
+  - `list_streams` → calls `GET /streams`
+  - `describe_stream` → calls `GET /streams/describe/:name`
+  - `nl2sql` → runs the draft→validate→explain loop (requires an active stream; otherwise asks you to choose)

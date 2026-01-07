@@ -9,7 +9,7 @@ timeout_secs = 10
 #   https://api.deepseek.com/beta
 # The client does NOT auto-add /v1; include the correct prefix in base_url.
 base_url = "https://api.deepseek.com/beta"
-timeout_secs = 30
+timeout_secs = 120
 
 # Prefer reading secrets from environment variables.
 api_key_env = "DEEPSEEK_API_KEY"
@@ -17,26 +17,17 @@ api_key_env = "DEEPSEEK_API_KEY"
 # Chat-completions model name.
 model = "deepseek-chat"
 
+# Whether to use SSE streaming for chat completions (helps responsiveness and avoids long blocking reads).
+stream = true
+
+# Whether to request JSON mode (response_format={"type":"json_object"}).
+json_mode = true
+
 [stream]
-# If empty, you will be prompted to select a stream at startup (when multiple exist).
-name = ""
-
-# Optional: create the stream if it is missing.
-create_if_missing = false
-source_broker_url = "tcp://127.0.0.1:1883"
-source_topic = "/demo/in"
-source_qos = 0
-
-# Only used when create_if_missing=true.
-schema_type = "json"
-
-[[stream.columns]]
-name = "user_id"
-data_type = "int64"
-
-[[stream.columns]]
-name = "score"
-data_type = "float64"
+# Optional default stream for the session. If empty, the agent will pick a stream
+# only when the user prompt explicitly mentions an existing stream name; otherwise
+# it will ask the user to choose.
+default = ""
 
 [sink]
 broker_url = "tcp://127.0.0.1:1883"

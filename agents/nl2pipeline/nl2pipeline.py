@@ -12,7 +12,7 @@ from agents.nl2pipeline.catalogs import build_capabilities_digest  # noqa: E402
 from agents.nl2pipeline.config import load_config  # noqa: E402
 from agents.nl2pipeline.manager_client import ApiError, ManagerClient  # noqa: E402
 from agents.nl2pipeline.repl import run_repl  # noqa: E402
-from agents.nl2pipeline.workflow import Workflow, default_assistant_instructions  # noqa: E402
+from agents.nl2pipeline.workflow import Workflow  # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,25 +26,6 @@ def main(argv: list[str]) -> int:
     cfg = load_config(args.config)
 
     manager = ManagerClient.new(cfg.manager.url, cfg.manager.timeout_secs)
-
-    streams = manager.list_streams()
-    if cfg.stream.name and cfg.stream.create_if_missing:
-        if not any(s.get("name") == cfg.stream.name for s in streams):
-            if not cfg.stream.source_topic:
-                raise ValueError("[stream].source_topic is required when create_if_missing=true")
-            if not cfg.stream.columns:
-                raise ValueError("[[stream.columns]] is required when create_if_missing=true")
-            from agents.nl2pipeline.workflow import build_create_stream_request
-
-            manager.create_stream(
-                build_create_stream_request(
-                    name=cfg.stream.name,
-                    broker_url=cfg.stream.source_broker_url,
-                    topic=cfg.stream.source_topic,
-                    qos=cfg.stream.source_qos,
-                    columns=cfg.stream.columns,
-                )
-            )
 
     functions = manager.list_functions()
     syntax_caps = manager.get_syntax_capabilities()
@@ -61,12 +42,13 @@ def main(argv: list[str]) -> int:
         sink_topic=cfg.sink.topic,
         sink_qos=cfg.sink.qos,
         llm_json_mode=cfg.llm.json_mode,
+        llm_stream=cfg.llm.stream,
     )
 
     return run_repl(
         manager=manager,
         workflow=workflow,
-        initial_stream_name=cfg.stream.name,
+        initial_stream_name=cfg.stream.default,
         check_max_attempts=cfg.repl.check_max_attempts,
     )
 
