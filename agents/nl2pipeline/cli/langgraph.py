@@ -22,6 +22,7 @@ def _print_help() -> None:
             [
                 "Commands:",
                 "  /help",
+                "  /trace",
                 "  /exit",
                 "",
                 "Otherwise, type a natural-language message and press Enter.",
@@ -112,6 +113,14 @@ def main(argv: list[str]) -> int:
         if line == "/help":
             _print_help()
             continue
+        if line == "/trace":
+            trace = engine.synapse.trace()
+            if not trace:
+                print("(no trace)", file=sys.stderr)
+            else:
+                for t in trace[-30:]:
+                    print(json.dumps(t, ensure_ascii=False), file=sys.stderr)
+            continue
 
         # Normal user text.
         resp = engine.run_turn(session_id, TurnRequest(text=line))
@@ -157,6 +166,7 @@ def main(argv: list[str]) -> int:
             revision_text = input("What should be changed? ").strip()
             if not revision_text:
                 continue
+            print("[LLM] revising SQL...", file=sys.stderr, flush=True)
             resp = engine.run_turn(session_id, TurnRequest(feedback=revision_text))
             if resp.explain_pretty and resp.pipeline_request_json and resp.sql:
                 _render_pipeline(resp.sql, resp.explain_pretty, resp.pipeline_request_json)

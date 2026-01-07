@@ -5,9 +5,9 @@ import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
-from ..shared.catalogs import build_capabilities_digest
+from ..shared.catalogs import CapabilitiesDigest
 from ..shared.history import HistoryBuffer
-from ..shared.manager_client import ApiError, ManagerClient
+from ..shared.mcp_client import McpError, SynapseFlowMcpClient
 from ..shared.prompts import default_assistant_instructions
 from ..shared.requests import build_create_pipeline_request
 from ..shared.router import Intent, route_intent
@@ -91,7 +91,7 @@ def _traced(node_name: str, fn: Callable[[State], Dict[str, Any] | State]) -> Ca
 
 def build_langgraph_workflow(
     *,
-    manager: ManagerClient,
+    synapse: SynapseFlowMcpClient,
     llm: Any,
     llm_router_model: str,
     llm_preview_model: str,
@@ -122,20 +122,18 @@ def build_langgraph_workflow(
             return dict(state)
 
         if "catalog_digest" not in state:
-            functions = manager.list_functions()
-            syntax_caps = manager.get_syntax_capabilities()
-            digest = build_capabilities_digest(functions, syntax_caps)
+            digest = synapse.build_capabilities_digest()
             state["catalog_digest"] = digest.to_json()
 
-        streams = manager.list_streams()
+        streams = synapse.streams_list()
         state["available_streams"] = streams
 
         # If a default stream is set, eagerly fetch schema once.
         if state.get("active_stream") and state.get("stream_schema") is None:
             try:
-                desc = manager.describe_stream(str(state["active_stream"]))
+                desc = synapse.streams_describe(str(state["active_stream"]))
                 state["stream_schema"] = (desc.get("spec") or {}).get("schema") or {}
-            except ApiError:
+            except McpError:
                 state["active_stream"] = None
                 state["stream_schema"] = None
 
@@ -160,9 +158,29 @@ def build_langgraph_workflow(
                 v.setdefault("max_attempts", default_max_attempts)
 
         # Refresh streams every turn for correctness.
-        state["available_streams"] = manager.list_streams()
+        state["available_streams"] = synapse.streams_list()
 
         interrupt = state.get("interrupt")
+        # New user request: clear per-turn outputs so we never leak stale SQL/EXPLAIN across turns.
+        # If we're currently in an interrupt/resume flow, keep the previous draft/explain intact.
+        if not interrupt:
+            user_text = str(ui.get("text") or "").strip()
+            if user_text:
+                state["draft"] = {"preview_text": None, "sql": None, "assumptions": [], "questions": []}
+                state["explain"] = {"pretty": None, "pipeline_request_json": None}
+                v = state.get("validation") or {}
+                if not isinstance(v, dict):
+                    v = {}
+                v["tmp_pipeline_id"] = None
+                v["error"] = None
+                v["attempt"] = 1
+                v["max_attempts"] = int(v.get("max_attempts") or default_max_attempts)
+                state["validation"] = v  # type: ignore[assignment]
+                state["pending_action"] = None
+                state["intent"] = None
+                state["intent_stream"] = None
+                state["intent_question"] = None
+
         if interrupt and isinstance(interrupt, dict):
             itype = str(interrupt.get("type", "")).strip()
             pending = str(state.get("pending_action") or "").strip()
@@ -185,7 +203,7 @@ def build_langgraph_workflow(
                 answer = str(ui.get("text") or "").strip()
                 names = [str(s.get("name", "")).strip() for s in state.get("available_streams") or []]
                 if answer and answer in names:
-                    desc = manager.describe_stream(answer)
+                    desc = synapse.streams_describe(answer)
                     schema = (desc.get("spec") or {}).get("schema") or {}
                     state["active_stream"] = answer
                     state["stream_schema"] = schema
@@ -218,6 +236,11 @@ def build_langgraph_workflow(
         interrupt = state.get("interrupt")
         ui = state.get("user_input") or {}
         pending = str(state.get("pending_action") or "").strip()
+
+        # If the user is responding to a confirmation prompt (confirm=true), `pre_turn` will clear
+        # the interrupt. Some providers require we avoid routing on this "control-only" turn.
+        if ui.get("confirm") is True and state.get("confirmed") is True:
+            return "end"
 
         if interrupt and isinstance(interrupt, dict):
             itype = str(interrupt.get("type", "")).strip()
@@ -271,7 +294,7 @@ def build_langgraph_workflow(
         return "ask_user"
 
     def handle_list_streams(state: State) -> Dict[str, Any]:
-        streams = manager.list_streams()
+        streams = synapse.streams_list()
         state["available_streams"] = streams
         history = _get_history(state)
         history.add_note(f"Stream list requested; available streams: {_summarize_stream_names(streams)}.")
@@ -290,7 +313,7 @@ def build_langgraph_workflow(
             }
             state["pending_action"] = "describe_stream"
             return dict(state)
-        desc = manager.describe_stream(str(target))
+        desc = synapse.streams_describe(str(target))
         schema = (desc.get("spec") or {}).get("schema") or {}
         state["active_stream"] = str(target)
         state["stream_schema"] = schema
@@ -312,7 +335,7 @@ def build_langgraph_workflow(
             return dict(state)
         candidate = state.get("intent_stream")
         if candidate:
-            desc = manager.describe_stream(str(candidate))
+            desc = synapse.streams_describe(str(candidate))
             schema = (desc.get("spec") or {}).get("schema") or {}
             state["active_stream"] = str(candidate)
             state["stream_schema"] = schema
@@ -352,7 +375,10 @@ def build_langgraph_workflow(
         state.setdefault("draft", {})
         state["draft"]["preview_text"] = preview  # type: ignore[index]
 
-        history.add_user(json.dumps(payload, ensure_ascii=False))
+        # Keep history small and unambiguous: only store the user's natural-language request.
+        # The structured payload (including `mode` and full schema) is provided as per-turn context.
+        if user_text.strip():
+            history.add_user(user_text)
         history.add_assistant(preview)
         _save_history(state, history)
 
@@ -382,13 +408,16 @@ def build_langgraph_workflow(
                 sink_qos=sink_qos,
             )
             try:
-                manager.create_pipeline(req)
+                synapse.pipelines_create(req)
                 return tmp_id
-            except ApiError as e:
+            except McpError as e:
                 if _is_conflict_error(str(e)):
                     continue
                 raise
-        raise ApiError("POST /pipelines failed: could not allocate a unique temporary pipeline id")
+        raise McpError(
+            code="planner_error",
+            message="POST /pipelines failed: could not allocate a unique temporary pipeline id",
+        )
 
     def validate_sql(state: State) -> Dict[str, Any]:
         sql = ((state.get("draft") or {}).get("sql") or "").strip()
@@ -403,7 +432,7 @@ def build_langgraph_workflow(
         tmp_id: Optional[str] = None
         try:
             tmp_id = _create_tmp_pipeline_with_retry(state, sql)
-        except ApiError as e:
+        except McpError as e:
             state["validation"]["error"] = str(e)  # type: ignore[index]
             state["validation"]["tmp_pipeline_id"] = None  # type: ignore[index]
             return dict(state)
@@ -478,8 +507,8 @@ def build_langgraph_workflow(
     def explain_tmp_pipeline(state: State) -> Dict[str, Any]:
         tmp_id = ((state.get("validation") or {}).get("tmp_pipeline_id") or "").strip()
         if not tmp_id:
-            raise ApiError("missing tmp_pipeline_id for explain")
-        explain = manager.explain_pipeline(tmp_id)
+            raise McpError(code="invalid_state", message="missing tmp_pipeline_id for explain")
+        explain = synapse.pipelines_explain(tmp_id)
         state["explain"] = {
             "pretty": explain,
             "pipeline_request_json": build_create_pipeline_request(
@@ -496,8 +525,8 @@ def build_langgraph_workflow(
         tmp_id = ((state.get("validation") or {}).get("tmp_pipeline_id") or "").strip()
         if tmp_id:
             try:
-                manager.delete_pipeline(tmp_id)
-            except ApiError:
+                synapse.pipelines_delete(tmp_id)
+            except McpError:
                 pass
         v = state.get("validation") or {}
         if isinstance(v, dict):
