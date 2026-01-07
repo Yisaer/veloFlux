@@ -30,3 +30,5 @@ target
 PROJECT_RULES.md
 AGENTS.md
 tmp
+__PYCACHE__
+config.toml
