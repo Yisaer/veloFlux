@@ -161,7 +161,7 @@ pub async fn load_from_storage(
         let shared = req.shared;
         validate_stream_decoder_config(&req, def.decoder())?;
         if let flow::catalog::StreamProps::Memory(memory_props) = def.props() {
-            validate_memory_stream_topic_declared(storage, &req, memory_props, def.decoder())?;
+            validate_memory_stream_topic_declared(&req, memory_props, def.decoder())?;
         }
         instance
             .create_stream(def, shared)

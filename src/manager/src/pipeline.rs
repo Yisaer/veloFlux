@@ -8,9 +8,9 @@ use axum::{
 use flow::EncoderRegistry;
 use flow::FlowInstance;
 use flow::pipeline::{
-    KuksaSinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
-    PipelineOptions, PipelineStatus, PipelineStopMode, PlanCacheOptions, SinkDefinition, SinkProps,
-    SinkType,
+    KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
+    PipelineError, PipelineOptions, PipelineStatus, PipelineStopMode, PlanCacheOptions,
+    SinkDefinition, SinkProps, SinkType,
 };
 use flow::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use serde::{Deserialize, Serialize};
@@ -238,6 +238,11 @@ pub struct MqttSinkPropsRequest {
 #[serde(default)]
 pub struct NopSinkPropsRequest {
     pub log: Option<bool>,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct MemorySinkPropsRequest {
+    pub topic: String,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -1000,12 +1005,47 @@ pub(crate) fn build_pipeline_definition(
                     SinkProps::Kuksa(KuksaSinkProps { addr, vss_path }),
                 )
             }
+            "memory" => {
+                let memory_props: MemorySinkPropsRequest =
+                    serde_json::from_value(sink_req.props.to_value())
+                        .map_err(|err| format!("invalid memory sink props: {err}"))?;
+                let topic = memory_props.topic;
+                if topic.trim().is_empty() {
+                    return Err("memory sink requires topic".to_string());
+                }
+
+                let expects_collection = sink_req.encoder.encode_type.eq_ignore_ascii_case("none");
+                let expected_kind = if expects_collection {
+                    flow::connector::MemoryTopicKind::Collection
+                } else {
+                    flow::connector::MemoryTopicKind::Bytes
+                };
+                let actual_kind = flow::connector::memory_pubsub_registry()
+                    .topic_kind(&topic)
+                    .ok_or_else(|| format!("memory topic `{topic}` not declared"))?;
+                if actual_kind != expected_kind {
+                    return Err(format!(
+                        "memory topic `{topic}` kind mismatch: expected {}, got {}",
+                        expected_kind, actual_kind
+                    ));
+                }
+
+                SinkDefinition::new(
+                    sink_id.clone(),
+                    SinkType::Memory,
+                    SinkProps::Memory(MemorySinkProps::new(topic)),
+                )
+            }
             other => return Err(format!("unsupported sink type: {other}")),
         };
 
         let sink_definition = match sink_definition.sink_type {
             SinkType::Kuksa => {
                 let encoder_config = SinkEncoderConfig::new("none", JsonMap::new());
+                sink_definition.with_encoder(encoder_config)
+            }
+            SinkType::Memory if sink_req.encoder.encode_type.eq_ignore_ascii_case("none") => {
+                let encoder_config = SinkEncoderConfig::new("none", sink_req.encoder.props.clone());
                 sink_definition.with_encoder(encoder_config)
             }
             _ => {

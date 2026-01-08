@@ -86,6 +86,7 @@ pub use mqtt_client::{
 };
 pub use registry::ConnectorRegistry;
 pub use sink::kuksa::{KuksaSinkConfig, KuksaSinkConnector};
+pub use sink::memory::{MemorySinkConfig, MemorySinkConnector};
 pub use sink::mock::{MockSinkConnector, MockSinkHandle};
 pub use sink::mqtt::{MqttSinkConfig, MqttSinkConnector};
 pub use sink::{SinkConnector, SinkConnectorError};

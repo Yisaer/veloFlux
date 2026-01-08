@@ -12,6 +12,7 @@ use flow::catalog::{
     CatalogError, EventtimeDefinition, HistoryStreamProps, MemoryStreamProps, MqttStreamProps,
     StreamDecoderConfig,
 };
+use flow::connector::MemoryTopicKind;
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
 use serde::{Deserialize, Serialize};
@@ -26,7 +27,6 @@ use flow::{
     Uint32Type, Uint64Type,
 };
 use storage::StorageError;
-use storage::{StorageManager, StoredMemoryTopicKind};
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct CreateStreamRequest {
@@ -294,12 +294,7 @@ pub async fn create_stream_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
     if let StreamProps::Memory(memory_props) = &stream_props
-        && let Err(err) = validate_memory_stream_topic_declared(
-            state.storage.as_ref(),
-            &req,
-            memory_props,
-            &decoder,
-        )
+        && let Err(err) = validate_memory_stream_topic_declared(&req, memory_props, &decoder)
     {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
@@ -764,7 +759,6 @@ pub(crate) fn validate_stream_decoder_config(
 }
 
 pub(crate) fn validate_memory_stream_topic_declared(
-    storage: &StorageManager,
     req: &CreateStreamRequest,
     props: &MemoryStreamProps,
     decoder: &StreamDecoderConfig,
@@ -781,26 +775,17 @@ pub(crate) fn validate_memory_stream_topic_declared(
     }
 
     let expected_kind = if decoder.kind() == "none" {
-        StoredMemoryTopicKind::Collection
+        MemoryTopicKind::Collection
     } else {
-        StoredMemoryTopicKind::Bytes
+        MemoryTopicKind::Bytes
     };
-    let stored = storage
-        .get_memory_topic(topic)
-        .map_err(|err| format!("failed to load memory topic `{topic}`: {err}"))?
+    let actual_kind = flow::connector::memory_pubsub_registry()
+        .topic_kind(topic)
         .ok_or_else(|| format!("memory topic `{topic}` not declared"))?;
-
-    if stored.kind != expected_kind {
+    if actual_kind != expected_kind {
         return Err(format!(
             "memory topic `{topic}` kind mismatch: expected {}, got {}",
-            match expected_kind {
-                StoredMemoryTopicKind::Bytes => "bytes",
-                StoredMemoryTopicKind::Collection => "collection",
-            },
-            match stored.kind {
-                StoredMemoryTopicKind::Bytes => "bytes",
-                StoredMemoryTopicKind::Collection => "collection",
-            }
+            expected_kind, actual_kind
         ));
     }
     Ok(())

@@ -2,8 +2,8 @@ use super::*;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
     register_mock_source_handle, HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig,
-    MemorySourceConfig, MemorySourceConnector, MemoryTopicKind, MockSourceConnector,
-    MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
+    MemorySinkConfig, MemorySourceConfig, MemorySourceConnector, MemoryTopicKind,
+    MockSourceConnector, MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan;
@@ -736,6 +736,38 @@ fn build_sinks_from_definition(
                         addr: props.addr.clone(),
                         vss_path: props.vss_path.clone(),
                     }),
+                    sink.encoder.clone(),
+                );
+                let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
+                    .with_common_props(sink.common.clone());
+                sinks.push(pipeline_sink);
+            }
+            SinkType::Memory => {
+                let props = match &sink.props {
+                    SinkProps::Memory(props) => props,
+                    other => {
+                        return Err(format!(
+                            "sink {} expected memory props but received {other:?}",
+                            sink.sink_id
+                        ));
+                    }
+                };
+                let topic = props.topic.trim();
+                if topic.is_empty() {
+                    return Err(format!("sink {} requires topic", sink.sink_id));
+                }
+                let kind = if matches!(sink.encoder.kind(), SinkEncoderKind::None) {
+                    MemoryTopicKind::Collection
+                } else {
+                    MemoryTopicKind::Bytes
+                };
+                let connector = PipelineSinkConnector::new(
+                    sink.sink_id.clone(),
+                    SinkConnectorConfig::Memory(MemorySinkConfig::new(
+                        sink.sink_id.clone(),
+                        topic.to_string(),
+                        kind,
+                    )),
                     sink.encoder.clone(),
                 );
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)

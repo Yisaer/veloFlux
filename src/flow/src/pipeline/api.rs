@@ -29,6 +29,8 @@ pub enum SinkType {
     Nop,
     /// Kuksa sink that updates VSS paths via kuksa.val.v2.
     Kuksa,
+    /// Memory sink that publishes to an in-process pub/sub topic.
+    Memory,
 }
 
 /// Sink configuration payload.
@@ -40,6 +42,8 @@ pub enum SinkProps {
     Nop(NopSinkProps),
     /// Kuksa sink config.
     Kuksa(KuksaSinkProps),
+    /// Memory sink config.
+    Memory(MemorySinkProps),
 }
 
 /// Runtime state for pipeline execution.
@@ -77,6 +81,20 @@ pub struct NopSinkProps {
 pub struct KuksaSinkProps {
     pub addr: String,
     pub vss_path: String,
+}
+
+/// Concrete memory sink configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySinkProps {
+    pub topic: String,
+}
+
+impl MemorySinkProps {
+    pub fn new(topic: impl Into<String>) -> Self {
+        Self {
+            topic: topic.into(),
+        }
+    }
 }
 
 impl MqttSinkProps {
