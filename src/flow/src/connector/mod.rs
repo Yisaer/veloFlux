@@ -8,6 +8,7 @@ use std::pin::Pin;
 
 use crate::model::Collection;
 
+pub mod memory_pubsub;
 pub mod mqtt_client;
 pub mod registry;
 pub mod sink;
@@ -76,6 +77,10 @@ pub enum ConnectorError {
     Other(String),
 }
 
+pub use memory_pubsub::{
+    registry as memory_pubsub_registry, MemoryData, MemoryPubSubRegistry, SharedCollection,
+    DEFAULT_MEMORY_PUBSUB_CAPACITY,
+};
 pub use mqtt_client::{
     MqttClientManager, SharedMqttClient, SharedMqttClientConfig, SharedMqttEvent,
 };
