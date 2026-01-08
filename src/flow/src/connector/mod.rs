@@ -78,8 +78,8 @@ pub enum ConnectorError {
 }
 
 pub use memory_pubsub::{
-    registry as memory_pubsub_registry, MemoryData, MemoryPubSubRegistry, SharedCollection,
-    DEFAULT_MEMORY_PUBSUB_CAPACITY,
+    registry as memory_pubsub_registry, MemoryData, MemoryPubSubError, MemoryPubSubRegistry,
+    MemoryPublisher, MemoryTopicKind, SharedCollection, DEFAULT_MEMORY_PUBSUB_CAPACITY,
 };
 pub use mqtt_client::{
     MqttClientManager, SharedMqttClient, SharedMqttClientConfig, SharedMqttEvent,
@@ -91,6 +91,7 @@ pub use sink::mqtt::{MqttSinkConfig, MqttSinkConnector};
 pub use sink::{SinkConnector, SinkConnectorError};
 /// History source connector implementation.
 pub use source::history::{HistorySourceConfig, HistorySourceConnector};
+pub use source::memory::{MemorySourceConfig, MemorySourceConnector};
 pub use source::mock::{
     get_mock_source_handle, register_mock_source_handle, take_mock_source_handle,
 };

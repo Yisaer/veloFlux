@@ -164,6 +164,9 @@ impl FlowInstance {
             StreamProps::History(_) => Err(FlowInstanceError::Invalid(
                 "history stream props cannot be used to create shared streams".to_string(),
             )),
+            StreamProps::Memory(_) => Err(FlowInstanceError::Invalid(
+                "memory stream props cannot be used to create shared streams".to_string(),
+            )),
         }
     }
 }

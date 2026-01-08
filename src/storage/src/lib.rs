@@ -13,6 +13,7 @@ const PIPELINE_RUN_STATES_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("pipeline_run_states");
 const SHARED_MQTT_CONFIGS_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("shared_mqtt_client_configs");
+const MEMORY_TOPICS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("memory_topics");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageNamespace {
@@ -98,6 +99,20 @@ pub struct StoredMqttClientConfig {
     pub key: String,
     /// Original request serialized as JSON.
     pub raw_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum StoredMemoryTopicKind {
+    Bytes,
+    Collection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredMemoryTopic {
+    pub topic: String,
+    pub kind: StoredMemoryTopicKind,
+    pub capacity: usize,
 }
 
 pub struct MetadataStorage {
@@ -266,6 +281,22 @@ impl MetadataStorage {
         self.delete_entry(SHARED_MQTT_CONFIGS_TABLE, key)
     }
 
+    pub fn create_memory_topic(&self, topic: StoredMemoryTopic) -> Result<(), StorageError> {
+        self.insert_if_absent(MEMORY_TOPICS_TABLE, &topic.topic, &topic)
+    }
+
+    pub fn get_memory_topic(&self, topic: &str) -> Result<Option<StoredMemoryTopic>, StorageError> {
+        self.get_entry(MEMORY_TOPICS_TABLE, topic)
+    }
+
+    pub fn list_memory_topics(&self) -> Result<Vec<StoredMemoryTopic>, StorageError> {
+        self.list_entries(MEMORY_TOPICS_TABLE)
+    }
+
+    pub fn delete_memory_topic(&self, topic: &str) -> Result<(), StorageError> {
+        self.delete_entry(MEMORY_TOPICS_TABLE, topic)
+    }
+
     fn db_path(base_dir: &Path) -> PathBuf {
         base_dir.join("metadata.redb")
     }
@@ -281,6 +312,8 @@ impl MetadataStorage {
         txn.open_table(PIPELINE_RUN_STATES_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(SHARED_MQTT_CONFIGS_TABLE)
+            .map_err(StorageError::backend)?;
+        txn.open_table(MEMORY_TOPICS_TABLE)
             .map_err(StorageError::backend)?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
@@ -460,6 +493,22 @@ impl StorageManager {
 
     pub fn delete_mqtt_config(&self, key: &str) -> Result<(), StorageError> {
         self.metadata.delete_mqtt_config(key)
+    }
+
+    pub fn create_memory_topic(&self, topic: StoredMemoryTopic) -> Result<(), StorageError> {
+        self.metadata.create_memory_topic(topic)
+    }
+
+    pub fn get_memory_topic(&self, topic: &str) -> Result<Option<StoredMemoryTopic>, StorageError> {
+        self.metadata.get_memory_topic(topic)
+    }
+
+    pub fn list_memory_topics(&self) -> Result<Vec<StoredMemoryTopic>, StorageError> {
+        self.metadata.list_memory_topics()
+    }
+
+    pub fn delete_memory_topic(&self, topic: &str) -> Result<(), StorageError> {
+        self.metadata.delete_memory_topic(topic)
     }
 }
 

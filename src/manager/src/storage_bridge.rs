@@ -1,7 +1,7 @@
 use crate::pipeline::{CreatePipelineRequest, build_pipeline_definition};
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
-    validate_shared_stream_decoder,
+    validate_memory_stream_topic_declared, validate_stream_decoder_config,
 };
 use flow::catalog::EventtimeDefinition;
 use flow::catalog::StreamDefinition;
@@ -9,7 +9,9 @@ use flow::connector::SharedMqttClientConfig;
 use flow::pipeline::PipelineDefinition;
 use flow::{DecoderRegistry, EncoderRegistry};
 use std::sync::Arc;
-use storage::{StorageManager, StoredMqttClientConfig, StoredPipeline, StoredStream};
+use storage::{
+    StorageManager, StoredMemoryTopicKind, StoredMqttClientConfig, StoredPipeline, StoredStream,
+};
 
 fn fnv1a_64_hex(input: &str) -> String {
     const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -134,6 +136,17 @@ pub async fn load_from_storage(
 ) -> Result<(), String> {
     let encoder_registry = instance.encoder_registry();
     let decoder_registry = instance.decoder_registry();
+
+    for topic in storage.list_memory_topics().map_err(|e| e.to_string())? {
+        let kind = match topic.kind {
+            StoredMemoryTopicKind::Bytes => flow::connector::MemoryTopicKind::Bytes,
+            StoredMemoryTopicKind::Collection => flow::connector::MemoryTopicKind::Collection,
+        };
+        flow::connector::memory_pubsub_registry()
+            .declare_topic(&topic.topic, kind, topic.capacity)
+            .map_err(|err| err.to_string())?;
+    }
+
     for cfg in storage.list_mqtt_configs().map_err(|e| e.to_string())? {
         instance
             .create_shared_mqtt_client(mqtt_config_from_stored(&cfg))
@@ -143,10 +156,13 @@ pub async fn load_from_storage(
 
     for stream in storage.list_streams().map_err(|e| e.to_string())? {
         let def = stream_definition_from_stored(&stream, decoder_registry.as_ref())?;
-        let shared = serde_json::from_str::<CreateStreamRequest>(&stream.raw_json)
-            .map_err(|err| format!("decode stored stream {}: {err}", stream.id))?
-            .shared;
-        validate_shared_stream_decoder(shared, def.decoder(), def.id())?;
+        let req = serde_json::from_str::<CreateStreamRequest>(&stream.raw_json)
+            .map_err(|err| format!("decode stored stream {}: {err}", stream.id))?;
+        let shared = req.shared;
+        validate_stream_decoder_config(&req, def.decoder())?;
+        if let flow::catalog::StreamProps::Memory(memory_props) = def.props() {
+            validate_memory_stream_topic_declared(storage, &req, memory_props, def.decoder())?;
+        }
         instance
             .create_stream(def, shared)
             .await

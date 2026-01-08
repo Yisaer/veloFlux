@@ -30,6 +30,8 @@ pub enum StreamProps {
     Mock(MockStreamProps),
     /// Stream is backed by a History source (Parquet files).
     History(HistoryStreamProps),
+    /// Stream is backed by an in-process memory pub/sub topic.
+    Memory(MemoryStreamProps),
 }
 
 /// Supported stream types recognized by the catalog.
@@ -41,6 +43,8 @@ pub enum StreamType {
     Mock,
     /// Stream backed by a history source.
     History,
+    /// Stream backed by a memory source.
+    Memory,
 }
 
 /// Properties for MQTT-backed streams.
@@ -92,6 +96,20 @@ pub struct HistoryStreamProps {
     pub decrypt_props: Option<JsonMap<String, JsonValue>>,
 }
 
+/// Properties for memory-backed streams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryStreamProps {
+    pub topic: String,
+}
+
+impl MemoryStreamProps {
+    pub fn new(topic: impl Into<String>) -> Self {
+        Self {
+            topic: topic.into(),
+        }
+    }
+}
+
 /// Complete definition for a stream tracked by the catalog.
 #[derive(Debug, Clone)]
 pub struct StreamDefinition {
@@ -138,6 +156,7 @@ impl StreamDefinition {
             StreamProps::Mqtt(_) => StreamType::Mqtt,
             StreamProps::Mock(_) => StreamType::Mock,
             StreamProps::History(_) => StreamType::History,
+            StreamProps::Memory(_) => StreamType::Memory,
         };
         Self {
             id: id.into(),

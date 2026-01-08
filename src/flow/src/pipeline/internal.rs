@@ -2,7 +2,8 @@ use super::*;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
     register_mock_source_handle, HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig,
-    MockSourceConnector, MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
+    MemorySourceConfig, MemorySourceConnector, MemoryTopicKind, MockSourceConnector,
+    MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan;
@@ -800,6 +801,19 @@ pub(super) fn attach_sources_from_catalog(
                         MockSourceConnector::new(format!("{processor_id}_mock_source_connector"));
                     let key = format!("{pipeline_id}:{stream_name}:{processor_id}");
                     register_mock_source_handle(key, handle);
+                    ds.add_connector(Box::new(connector));
+                }
+                StreamProps::Memory(props) => {
+                    let kind = if definition.decoder().kind() == "none" {
+                        MemoryTopicKind::Collection
+                    } else {
+                        MemoryTopicKind::Bytes
+                    };
+                    let config = MemorySourceConfig::new(props.topic.clone(), kind);
+                    let connector = MemorySourceConnector::new(
+                        format!("{processor_id}_memory_source_connector"),
+                        config,
+                    );
                     ds.add_connector(Box::new(connector));
                 }
             }
