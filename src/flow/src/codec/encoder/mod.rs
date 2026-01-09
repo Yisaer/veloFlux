@@ -1,7 +1,9 @@
 //! Encoder abstractions for turning in-memory [`Collection`]s into outbound payloads.
 
 use crate::model::{Collection, Tuple};
+use crate::planner::physical::ByIndexProjection;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
+use std::sync::Arc;
 
 /// Errors that can occur during encoding.
 #[derive(thiserror::Error, Debug)]
@@ -146,6 +148,112 @@ impl CollectionEncoderStream for JsonStreamingEncoder {
     }
 }
 
+/// JSON encoder that only emits columns listed by `ByIndexProjection`, plus derived affiliate columns.
+pub struct JsonByIndexProjectionEncoder {
+    id: String,
+    props: JsonMap<String, JsonValue>,
+    by_index_projection: Arc<ByIndexProjection>,
+}
+
+impl JsonByIndexProjectionEncoder {
+    pub fn new(
+        id: impl Into<String>,
+        props: JsonMap<String, JsonValue>,
+        by_index_projection: Arc<ByIndexProjection>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            props,
+            by_index_projection,
+        }
+    }
+
+    pub fn props(&self) -> &JsonMap<String, JsonValue> {
+        &self.props
+    }
+}
+
+impl CollectionEncoder for JsonByIndexProjectionEncoder {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError> {
+        let rows = collection.rows();
+        let payload = if rows.is_empty() {
+            serde_json::to_vec(&JsonValue::Array(Vec::new()))
+        } else {
+            let mut json_rows = Vec::with_capacity(rows.len());
+            for tuple in rows {
+                json_rows.push(tuple_to_json_with_by_index_projection(
+                    tuple,
+                    &self.by_index_projection,
+                )?);
+            }
+            serde_json::to_vec(&JsonValue::Array(json_rows))
+        }
+        .map_err(EncodeError::Serialization)?;
+        Ok(payload)
+    }
+
+    fn encode_tuple(&self, tuple: &Tuple) -> Result<Vec<u8>, EncodeError> {
+        serde_json::to_vec(&tuple_to_json_with_by_index_projection(
+            tuple,
+            &self.by_index_projection,
+        )?)
+        .map_err(EncodeError::Serialization)
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
+        Some(Box::new(JsonStreamingByIndexProjectionEncoder::new(
+            Arc::clone(&self.by_index_projection),
+        )))
+    }
+}
+
+struct JsonStreamingByIndexProjectionEncoder {
+    payload: Vec<u8>,
+    is_first_row: bool,
+    by_index_projection: Arc<ByIndexProjection>,
+}
+
+impl JsonStreamingByIndexProjectionEncoder {
+    fn new(by_index_projection: Arc<ByIndexProjection>) -> Self {
+        Self {
+            payload: vec![b'['],
+            is_first_row: true,
+            by_index_projection,
+        }
+    }
+}
+
+impl CollectionEncoderStream for JsonStreamingByIndexProjectionEncoder {
+    fn append(&mut self, tuple: &Tuple) -> Result<(), EncodeError> {
+        if self.is_first_row {
+            self.is_first_row = false;
+        } else {
+            self.payload.push(b',');
+        }
+
+        serde_json::to_writer(
+            &mut self.payload,
+            &tuple_to_json_with_by_index_projection(tuple, &self.by_index_projection)?,
+        )
+        .map_err(EncodeError::Serialization)?;
+        Ok(())
+    }
+
+    fn finish(self: Box<Self>) -> Result<Vec<u8>, EncodeError> {
+        let mut encoder = *self;
+        encoder.payload.push(b']');
+        Ok(encoder.payload)
+    }
+}
+
 use datatypes::Value;
 
 fn value_to_json(value: &Value) -> JsonValue {
@@ -184,6 +292,33 @@ fn tuple_to_json(tuple: &Tuple) -> JsonValue {
         json_row.insert(column_name.to_string(), value_to_json(value));
     }
     JsonValue::Object(json_row)
+}
+
+fn tuple_to_json_with_by_index_projection(
+    tuple: &Tuple,
+    by_index_projection: &ByIndexProjection,
+) -> Result<JsonValue, EncodeError> {
+    let mut json_row = JsonMap::new();
+
+    if let Some(affiliate) = tuple.affiliate() {
+        for (key, value) in affiliate.entries() {
+            json_row.insert(key.as_str().to_string(), value_to_json(value));
+        }
+    }
+
+    for column in by_index_projection.columns().iter() {
+        let value = tuple
+            .value_by_index(column.source_name.as_str(), column.column_index)
+            .ok_or_else(|| {
+                EncodeError::Other(format!(
+                    "by_index_projection column not found: {}#{}",
+                    column.source_name, column.column_index
+                ))
+            })?;
+        json_row.insert(column.output_name.clone(), value_to_json(value));
+    }
+
+    Ok(JsonValue::Object(json_row))
 }
 
 fn number_from_f64(value: f64) -> JsonValue {
