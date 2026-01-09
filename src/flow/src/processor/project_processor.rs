@@ -2,7 +2,8 @@
 //!
 //! This processor evaluates projection expressions and produces output with projected fields.
 
-use crate::model::Collection;
+use crate::expr::ScalarExpr;
+use crate::model::{Collection, RecordBatch, Tuple};
 use crate::planner::physical::{PhysicalPlan, PhysicalProject, PhysicalProjectField};
 use crate::processor::base::{
     attach_stats_to_collect_barrier, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
@@ -15,6 +16,46 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+#[derive(Clone)]
+enum ProjectExecMode {
+    Normal { fields: Vec<PhysicalProjectField> },
+    Passthrough { fields: Vec<AffiliateExpr> },
+}
+
+impl ProjectExecMode {
+    fn new(physical_project: &PhysicalProject) -> Self {
+        if physical_project.passthrough_messages {
+            Self::Passthrough {
+                fields: physical_project
+                    .fields
+                    .iter()
+                    .map(|field| AffiliateExpr {
+                        output_name: Arc::new(field.field_name.clone()),
+                        field_name: field.field_name.clone(),
+                        expr: field.compiled_expr.clone(),
+                    })
+                    .collect(),
+            }
+        } else {
+            Self::Normal {
+                fields: physical_project.fields.clone(),
+            }
+        }
+    }
+
+    fn apply(
+        &self,
+        collection: Box<dyn Collection>,
+    ) -> Result<Box<dyn Collection>, ProcessorError> {
+        match self {
+            Self::Normal { fields } => apply_projection(collection.as_ref(), fields),
+            Self::Passthrough { fields } => {
+                apply_passthrough_projection(collection.as_ref(), fields)
+            }
+        }
+    }
+}
+
 /// ProjectProcessor - evaluates projection expressions
 ///
 /// This processor:
@@ -24,8 +65,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 pub struct ProjectProcessor {
     /// Processor identifier
     id: String,
-    /// Physical projection configuration
-    physical_project: Arc<PhysicalProject>,
+    exec_mode: ProjectExecMode,
     /// Input channels for receiving data
     inputs: Vec<broadcast::Receiver<StreamData>>,
     /// Control input channels
@@ -42,9 +82,10 @@ impl ProjectProcessor {
     pub fn new(id: impl Into<String>, physical_project: Arc<PhysicalProject>) -> Self {
         let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let exec_mode = ProjectExecMode::new(physical_project.as_ref());
         Self {
             id: id.into(),
-            physical_project,
+            exec_mode,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -78,6 +119,70 @@ fn apply_projection(
         .map_err(|e| ProcessorError::ProcessingError(format!("Failed to apply projection: {}", e)))
 }
 
+#[derive(Clone)]
+struct AffiliateExpr {
+    output_name: Arc<String>,
+    field_name: String,
+    expr: ScalarExpr,
+}
+
+fn apply_passthrough_projection(
+    input_collection: &dyn Collection,
+    fields: &[AffiliateExpr],
+) -> Result<Box<dyn Collection>, ProcessorError> {
+    let mut projected_rows = Vec::with_capacity(input_collection.num_rows());
+    for tuple in input_collection.rows() {
+        let mut projected_tuple =
+            Tuple::with_timestamp(Arc::clone(&tuple.messages), tuple.timestamp);
+        for field in fields {
+            let value = field.expr.eval_with_tuple(tuple).map_err(|eval_error| {
+                ProcessorError::ProcessingError(format!(
+                    "Failed to evaluate expression for field '{}': {}",
+                    field.field_name, eval_error
+                ))
+            })?;
+            projected_tuple.add_affiliate_column(Arc::clone(&field.output_name), value);
+        }
+        projected_rows.push(projected_tuple);
+    }
+
+    let projected = RecordBatch::new(projected_rows).map_err(|err| {
+        ProcessorError::ProcessingError(format!("Failed to apply passthrough projection: {err}"))
+    })?;
+    Ok(Box::new(projected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Message;
+    use datatypes::Value;
+    use std::time::SystemTime;
+
+    #[test]
+    fn passthrough_empty_projection_drops_upstream_affiliate() {
+        let keys = vec![Arc::<str>::from("a")];
+        let values = vec![Arc::new(Value::Int64(1))];
+        let message = Arc::new(Message::new(Arc::<str>::from("stream"), keys, values));
+        let timestamp = SystemTime::now();
+        let mut input_tuple = Tuple::with_timestamp(Arc::from(vec![message]), timestamp);
+        input_tuple.add_affiliate_column(Arc::new("tmp".to_string()), Value::Int64(999));
+        assert!(input_tuple.affiliate().is_some(), "precondition");
+
+        let input = RecordBatch::new(vec![input_tuple]).expect("record batch");
+        let output =
+            apply_passthrough_projection(&input, &[]).expect("passthrough projection succeeds");
+        let out_rows = output.rows();
+        assert_eq!(out_rows.len(), 1);
+        assert!(
+            out_rows[0].affiliate().is_none(),
+            "upstream affiliate should not leak in passthrough mode"
+        );
+        assert_eq!(out_rows[0].messages().len(), 1);
+        assert_eq!(out_rows[0].timestamp, timestamp);
+    }
+}
+
 impl Processor for ProjectProcessor {
     fn id(&self) -> &str {
         &self.id
@@ -91,7 +196,7 @@ impl Processor for ProjectProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
-        let fields = self.physical_project.fields.clone();
+        let exec_mode = self.exec_mode.clone();
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "project processor starting");
 
@@ -124,11 +229,13 @@ impl Processor for ProjectProcessor {
                                 }
                                 match data {
                                     StreamData::Collection(collection) => {
-                                        match apply_projection(collection.as_ref(), &fields) {
+                                        match exec_mode.apply(collection) {
                                             Ok(projected_collection) => {
-                                                let projected_data = StreamData::collection(projected_collection);
+                                                let projected_data =
+                                                    StreamData::collection(projected_collection);
                                                 let out_rows = projected_data.num_rows_hint();
-                                                send_with_backpressure(&output, projected_data).await?;
+                                                send_with_backpressure(&output, projected_data)
+                                                    .await?;
                                                 if let Some(rows) = out_rows {
                                                     stats.record_out(rows);
                                                 }

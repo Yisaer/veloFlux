@@ -760,6 +760,19 @@ fn create_processor_from_plan_node(
                 .encoder_registry()
                 .instantiate(&encoder.encoder)
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+            let encoder_impl = if let Some(spec) = encoder.by_index_projection.as_ref() {
+                if !encoder_impl.supports_index_lazy_materialization() {
+                    return Err(ProcessorError::InvalidConfiguration(format!(
+                        "encoder kind `{}` does not support index lazy materialization",
+                        encoder.encoder.kind_str()
+                    )));
+                }
+                encoder_impl
+                    .with_by_index_projection(Arc::clone(spec))
+                    .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?
+            } else {
+                encoder_impl
+            };
             let processor = EncoderProcessor::new(plan_name.clone(), encoder_impl);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Encoder(processor),
@@ -780,6 +793,19 @@ fn create_processor_from_plan_node(
                 .encoder_registry()
                 .instantiate(&streaming.encoder)
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+            let encoder_impl = if let Some(spec) = streaming.by_index_projection.as_ref() {
+                if !encoder_impl.supports_index_lazy_materialization() {
+                    return Err(ProcessorError::InvalidConfiguration(format!(
+                        "encoder kind `{}` does not support index lazy materialization",
+                        streaming.encoder.kind_str()
+                    )));
+                }
+                encoder_impl
+                    .with_by_index_projection(Arc::clone(spec))
+                    .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?
+            } else {
+                encoder_impl
+            };
             let processor = StreamingEncoderProcessor::new(
                 plan_name.clone(),
                 encoder_impl,

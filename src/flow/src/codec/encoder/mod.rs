@@ -1,7 +1,9 @@
 //! Encoder abstractions for turning in-memory [`Collection`]s into outbound payloads.
 
 use crate::model::{Collection, Tuple};
+use crate::planner::physical::ByIndexProjection;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
+use std::sync::Arc;
 
 /// Errors that can occur during encoding.
 #[derive(thiserror::Error, Debug)]
@@ -25,6 +27,19 @@ pub trait CollectionEncoder: Send + Sync + 'static {
     /// Whether this encoder supports streaming aggregation.
     fn supports_streaming(&self) -> bool {
         false
+    }
+    /// Whether this encoder supports index-based lazy materialization (`ByIndexProjection`).
+    fn supports_index_lazy_materialization(&self) -> bool {
+        false
+    }
+    /// Attach a by-index projection spec to enable index-based lazy materialization.
+    fn with_by_index_projection(
+        self: Arc<Self>,
+        _spec: Arc<ByIndexProjection>,
+    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+        Err(EncodeError::Other(
+            "index lazy materialization is not supported for this encoder".to_string(),
+        ))
     }
     /// Start a streaming session if supported.
     fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
@@ -51,13 +66,18 @@ pub trait CollectionEncoderStream: Send {
 pub struct JsonEncoder {
     id: String,
     props: JsonMap<String, JsonValue>,
+    by_index_projection: Option<Arc<ByIndexProjection>>,
 }
 
 impl JsonEncoder {
     /// Create a new JSON encoder with the provided identifier.
     pub fn new(id: impl Into<String>, props: JsonMap<String, JsonValue>) -> Self {
         let id = id.into();
-        Self { id, props }
+        Self {
+            id,
+            props,
+            by_index_projection: None,
+        }
     }
 
     /// Access encoder props (currently unused by JSON encoder).
@@ -71,7 +91,11 @@ impl JsonEncoder {
     }
 
     fn encode_tuple_impl(&self, tuple: &Tuple) -> Result<Vec<u8>, EncodeError> {
-        serde_json::to_vec(&tuple_to_json(tuple)).map_err(EncodeError::Serialization)
+        serde_json::to_vec(&tuple_to_json_maybe_by_index_projection(
+            tuple,
+            self.by_index_projection.as_deref(),
+        )?)
+        .map_err(EncodeError::Serialization)
     }
 }
 
@@ -87,11 +111,10 @@ impl CollectionEncoder for JsonEncoder {
         } else {
             let mut json_rows = Vec::with_capacity(rows.len());
             for tuple in rows {
-                let mut json_row = JsonMap::new();
-                for ((_, column_name), value) in tuple.entries() {
-                    json_row.insert(column_name.to_string(), value_to_json(value));
-                }
-                json_rows.push(JsonValue::Object(json_row));
+                json_rows.push(tuple_to_json_maybe_by_index_projection(
+                    tuple,
+                    self.by_index_projection.as_deref(),
+                )?);
             }
             serde_json::to_vec(&JsonValue::Array(json_rows))
         }
@@ -107,21 +130,40 @@ impl CollectionEncoder for JsonEncoder {
         true
     }
 
+    fn supports_index_lazy_materialization(&self) -> bool {
+        true
+    }
+
+    fn with_by_index_projection(
+        self: Arc<Self>,
+        spec: Arc<ByIndexProjection>,
+    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+        Ok(Arc::new(Self {
+            id: self.id.clone(),
+            props: self.props.clone(),
+            by_index_projection: Some(spec),
+        }))
+    }
+
     fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
-        Some(Box::new(JsonStreamingEncoder::default()))
+        Some(Box::new(JsonStreamingEncoder::new(
+            self.by_index_projection.clone(),
+        )))
     }
 }
 
 struct JsonStreamingEncoder {
     payload: Vec<u8>,
     is_first_row: bool,
+    by_index_projection: Option<Arc<ByIndexProjection>>,
 }
 
-impl Default for JsonStreamingEncoder {
-    fn default() -> Self {
+impl JsonStreamingEncoder {
+    fn new(by_index_projection: Option<Arc<ByIndexProjection>>) -> Self {
         Self {
             payload: vec![b'['],
             is_first_row: true,
+            by_index_projection,
         }
     }
 }
@@ -134,8 +176,11 @@ impl CollectionEncoderStream for JsonStreamingEncoder {
             self.payload.push(b',');
         }
 
-        serde_json::to_writer(&mut self.payload, &tuple_to_json(tuple))
-            .map_err(EncodeError::Serialization)?;
+        serde_json::to_writer(
+            &mut self.payload,
+            &tuple_to_json_maybe_by_index_projection(tuple, self.by_index_projection.as_deref())?,
+        )
+        .map_err(EncodeError::Serialization)?;
         Ok(())
     }
 
@@ -184,6 +229,40 @@ fn tuple_to_json(tuple: &Tuple) -> JsonValue {
         json_row.insert(column_name.to_string(), value_to_json(value));
     }
     JsonValue::Object(json_row)
+}
+
+fn tuple_to_json_maybe_by_index_projection(
+    tuple: &Tuple,
+    by_index_projection: Option<&ByIndexProjection>,
+) -> Result<JsonValue, EncodeError> {
+    let Some(by_index_projection) = by_index_projection else {
+        return Ok(tuple_to_json(tuple));
+    };
+
+    let mut json_row = JsonMap::with_capacity(by_index_projection.columns().len());
+    if let Some(affiliate) = tuple.affiliate() {
+        for (key, value) in affiliate.entries() {
+            json_row.insert(key.as_str().to_string(), value_to_json(value));
+        }
+    }
+
+    for column in by_index_projection.columns().iter() {
+        let value = tuple
+            .value_by_index(column.source_name.as_ref(), column.column_index)
+            .ok_or_else(|| {
+                EncodeError::Other(format!(
+                    "by_index_projection column not found: {}#{}",
+                    column.source_name.as_ref(),
+                    column.column_index
+                ))
+            })?;
+        json_row.insert(
+            column.output_name.as_ref().to_string(),
+            value_to_json(value),
+        );
+    }
+
+    Ok(JsonValue::Object(json_row))
 }
 
 fn number_from_f64(value: f64) -> JsonValue {

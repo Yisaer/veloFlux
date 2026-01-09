@@ -14,6 +14,7 @@ type EncoderFactory =
 struct EncoderEntry {
     factory: EncoderFactory,
     supports_streaming: bool,
+    supports_by_index_projection: bool,
 }
 type DecoderFactory = Arc<
     dyn Fn(&StreamDecoderConfig, Arc<Schema>, &str) -> Result<Arc<dyn RecordDecoder>, CodecError>
@@ -118,6 +119,16 @@ impl EncoderRegistry {
         factory: EncoderFactory,
         supports_streaming: bool,
     ) {
+        self.register_encoder_with_caps(kind, factory, supports_streaming, false);
+    }
+
+    pub fn register_encoder_with_caps(
+        &self,
+        kind: impl Into<String>,
+        factory: EncoderFactory,
+        supports_streaming: bool,
+        supports_by_index_projection: bool,
+    ) {
         self.factories
             .write()
             .expect("encoder registry poisoned")
@@ -126,6 +137,7 @@ impl EncoderRegistry {
                 EncoderEntry {
                     factory,
                     supports_streaming,
+                    supports_by_index_projection,
                 },
             );
     }
@@ -155,8 +167,16 @@ impl EncoderRegistry {
             .unwrap_or(false)
     }
 
+    pub fn supports_by_index_projection(&self, kind: &str) -> bool {
+        let guard = self.factories.read().expect("encoder registry poisoned");
+        guard
+            .get(kind)
+            .map(|entry| entry.supports_by_index_projection)
+            .unwrap_or(false)
+    }
+
     fn register_builtin_encoders(&self) {
-        self.register_encoder(
+        self.register_encoder_with_caps(
             "json",
             Arc::new(|config| {
                 Ok(Arc::new(JsonEncoder::new(
@@ -164,6 +184,7 @@ impl EncoderRegistry {
                     config.props().clone(),
                 )) as Arc<_>)
             }),
+            true,
             true,
         );
     }
