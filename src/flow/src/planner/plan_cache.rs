@@ -421,6 +421,9 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
                 .unwrap_or(false);
             SinkConnectorConfig::Nop(crate::planner::sink::NopSinkConfig { log })
         }
+        "memory" => {
+            SinkConnectorConfig::Memory(memory_sink_from_ir_settings(&sink.connector_settings)?)
+        }
         other => SinkConnectorConfig::Custom(CustomSinkConnectorConfig {
             kind: other.to_string(),
             settings: sink.connector_settings.clone(),
@@ -434,6 +437,39 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
         pipeline_sink = pipeline_sink.with_common_props(common_sink_props_from_ir(common));
     }
     Ok(pipeline_sink)
+}
+
+fn memory_sink_from_ir_settings(
+    settings: &JsonValue,
+) -> Result<crate::connector::MemorySinkConfig, String> {
+    let obj = settings
+        .as_object()
+        .ok_or_else(|| "memory sink settings must be an object".to_string())?;
+
+    let sink_name = obj
+        .get("sink_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "memory sink settings missing sink_name".to_string())?
+        .to_string();
+    let topic = obj
+        .get("topic")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "memory sink settings missing topic".to_string())?
+        .to_string();
+    let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or("bytes");
+    let kind = match kind {
+        "bytes" => crate::connector::MemoryTopicKind::Bytes,
+        "collection" => crate::connector::MemoryTopicKind::Collection,
+        other => {
+            return Err(format!(
+                "memory sink settings invalid kind `{other}` (expected bytes|collection)"
+            ));
+        }
+    };
+
+    Ok(crate::connector::MemorySinkConfig::new(
+        sink_name, topic, kind,
+    ))
 }
 
 fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, String> {
@@ -792,6 +828,14 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 ("nop".to_string(), JsonValue::Object(JsonMap::new()))
             }
         }
+        SinkConnectorConfig::Memory(cfg) => (
+            "memory".to_string(),
+            serde_json::json!({
+                "sink_name": cfg.sink_name,
+                "topic": cfg.topic,
+                "kind": cfg.kind.to_string(),
+            }),
+        ),
         SinkConnectorConfig::Custom(custom) => (custom.kind.clone(), custom.settings.clone()),
     }
 }

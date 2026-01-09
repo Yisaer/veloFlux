@@ -107,6 +107,14 @@ impl ConnectorBinding {
                             break;
                         }
                     }
+                    Ok(ConnectorEvent::Collection(collection)) => {
+                        if send_with_backpressure(&sender, StreamData::collection(collection))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
                     Ok(ConnectorEvent::EndOfStream) => break,
                     Err(err) => {
                         let message = format!("connector error: {err}");

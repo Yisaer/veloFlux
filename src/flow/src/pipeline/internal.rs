@@ -2,6 +2,7 @@ use super::*;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
     register_mock_source_handle, HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig,
+    MemorySinkConfig, MemorySourceConfig, MemorySourceConnector, MemoryTopicKind,
     MockSourceConnector, MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
@@ -741,6 +742,38 @@ fn build_sinks_from_definition(
                     .with_common_props(sink.common.clone());
                 sinks.push(pipeline_sink);
             }
+            SinkType::Memory => {
+                let props = match &sink.props {
+                    SinkProps::Memory(props) => props,
+                    other => {
+                        return Err(format!(
+                            "sink {} expected memory props but received {other:?}",
+                            sink.sink_id
+                        ));
+                    }
+                };
+                let topic = props.topic.trim();
+                if topic.is_empty() {
+                    return Err(format!("sink {} requires topic", sink.sink_id));
+                }
+                let kind = if matches!(sink.encoder.kind(), SinkEncoderKind::None) {
+                    MemoryTopicKind::Collection
+                } else {
+                    MemoryTopicKind::Bytes
+                };
+                let connector = PipelineSinkConnector::new(
+                    sink.sink_id.clone(),
+                    SinkConnectorConfig::Memory(MemorySinkConfig::new(
+                        sink.sink_id.clone(),
+                        topic.to_string(),
+                        kind,
+                    )),
+                    sink.encoder.clone(),
+                );
+                let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
+                    .with_common_props(sink.common.clone());
+                sinks.push(pipeline_sink);
+            }
         }
     }
     Ok(sinks)
@@ -800,6 +833,19 @@ pub(super) fn attach_sources_from_catalog(
                         MockSourceConnector::new(format!("{processor_id}_mock_source_connector"));
                     let key = format!("{pipeline_id}:{stream_name}:{processor_id}");
                     register_mock_source_handle(key, handle);
+                    ds.add_connector(Box::new(connector));
+                }
+                StreamProps::Memory(props) => {
+                    let kind = if definition.decoder().kind() == "none" {
+                        MemoryTopicKind::Collection
+                    } else {
+                        MemoryTopicKind::Bytes
+                    };
+                    let config = MemorySourceConfig::new(props.topic.clone(), kind);
+                    let connector = MemorySourceConnector::new(
+                        format!("{processor_id}_memory_source_connector"),
+                        config,
+                    );
                     ds.add_connector(Box::new(connector));
                 }
             }

@@ -6,6 +6,9 @@
 use futures::stream::Stream;
 use std::pin::Pin;
 
+use crate::model::Collection;
+
+pub mod memory_pubsub;
 pub mod mqtt_client;
 pub mod registry;
 pub mod sink;
@@ -16,12 +19,26 @@ pub type ConnectorStream =
     Pin<Box<dyn Stream<Item = Result<ConnectorEvent, ConnectorError>> + Send>>;
 
 /// Events emitted by an upstream connector.
-#[derive(Debug)]
 pub enum ConnectorEvent {
     /// Binary payload received from the source.
     Payload(Vec<u8>),
+    /// Decoded collection received from the source.
+    Collection(Box<dyn Collection>),
     /// The connector has no more data to produce.
     EndOfStream,
+}
+
+impl std::fmt::Debug for ConnectorEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectorEvent::Payload(payload) => f
+                .debug_tuple("Payload")
+                .field(&format_args!("len={}", payload.len()))
+                .finish(),
+            ConnectorEvent::Collection(_) => f.debug_tuple("Collection").finish(),
+            ConnectorEvent::EndOfStream => f.write_str("EndOfStream"),
+        }
+    }
 }
 
 /// Trait implemented by every data source connector.
@@ -60,16 +77,22 @@ pub enum ConnectorError {
     Other(String),
 }
 
+pub use memory_pubsub::{
+    registry as memory_pubsub_registry, MemoryData, MemoryPubSubError, MemoryPubSubRegistry,
+    MemoryPublisher, MemoryTopicKind, SharedCollection, DEFAULT_MEMORY_PUBSUB_CAPACITY,
+};
 pub use mqtt_client::{
     MqttClientManager, SharedMqttClient, SharedMqttClientConfig, SharedMqttEvent,
 };
 pub use registry::ConnectorRegistry;
 pub use sink::kuksa::{KuksaSinkConfig, KuksaSinkConnector};
+pub use sink::memory::{MemorySinkConfig, MemorySinkConnector};
 pub use sink::mock::{MockSinkConnector, MockSinkHandle};
 pub use sink::mqtt::{MqttSinkConfig, MqttSinkConnector};
 pub use sink::{SinkConnector, SinkConnectorError};
 /// History source connector implementation.
 pub use source::history::{HistorySourceConfig, HistorySourceConnector};
+pub use source::memory::{MemorySourceConfig, MemorySourceConnector};
 pub use source::mock::{
     get_mock_source_handle, register_mock_source_handle, take_mock_source_handle,
 };

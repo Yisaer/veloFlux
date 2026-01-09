@@ -9,8 +9,10 @@ use axum::{
 };
 use flow::DecoderRegistry;
 use flow::catalog::{
-    CatalogError, EventtimeDefinition, HistoryStreamProps, MqttStreamProps, StreamDecoderConfig,
+    CatalogError, EventtimeDefinition, HistoryStreamProps, MemoryStreamProps, MqttStreamProps,
+    StreamDecoderConfig,
 };
+use flow::connector::MemoryTopicKind;
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
 use serde::{Deserialize, Serialize};
@@ -204,6 +206,12 @@ pub struct HistoryStreamPropsRequest {
     pub send_interval_ms: Option<u64>,
 }
 
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct MemoryStreamPropsRequest {
+    pub topic: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct StreamInfo {
     pub name: String,
@@ -282,6 +290,14 @@ pub async fn create_stream_handler(
         Ok(config) => config,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
+    if let Err(err) = validate_stream_decoder_config(&req, &decoder) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+    if let StreamProps::Memory(memory_props) = &stream_props
+        && let Err(err) = validate_memory_stream_topic_declared(&req, memory_props, &decoder)
+    {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
 
     let stored = match storage_bridge::stored_stream_from_request(&req) {
         Ok(stored) => stored,
@@ -536,6 +552,7 @@ fn stream_type_label(stream_type: flow::catalog::StreamType) -> &'static str {
         flow::catalog::StreamType::Mqtt => "mqtt",
         flow::catalog::StreamType::Mock => "mock",
         flow::catalog::StreamType::History => "history",
+        flow::catalog::StreamType::Memory => "memory",
     }
 }
 
@@ -561,6 +578,11 @@ fn stream_props_value(props: &StreamProps) -> JsonValue {
                     JsonValue::String(connector_key.clone()),
                 );
             }
+            JsonValue::Object(map)
+        }
+        StreamProps::Memory(memory) => {
+            let mut map = JsonMap::new();
+            map.insert("topic".to_string(), JsonValue::String(memory.topic.clone()));
             JsonValue::Object(map)
         }
         StreamProps::Mock(_) => JsonValue::Object(JsonMap::new()),
@@ -666,6 +688,16 @@ pub(crate) fn build_stream_props(
                 decrypt_props: None,
             }))
         }
+        "memory" => {
+            let memory_props: MemoryStreamPropsRequest =
+                serde_json::from_value(props.to_value())
+                    .map_err(|err| format!("invalid memory props: {err}"))?;
+            let topic = memory_props
+                .topic
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "memory stream requires topic".to_string())?;
+            Ok(StreamProps::Memory(MemoryStreamProps::new(topic)))
+        }
         other => Err(format!("unsupported stream type: {other}")),
     }
 }
@@ -675,6 +707,12 @@ pub(crate) fn build_stream_decoder(
     decoder_registry: &DecoderRegistry,
 ) -> Result<StreamDecoderConfig, String> {
     let decoder_config = req.decoder.clone();
+    if decoder_config.decode_type == "none" {
+        return Ok(StreamDecoderConfig::new(
+            decoder_config.decode_type,
+            decoder_config.props,
+        ));
+    }
     if !decoder_registry.is_registered(&decoder_config.decode_type) {
         return Err(format!(
             "decoder kind `{}` not registered",
@@ -685,6 +723,72 @@ pub(crate) fn build_stream_decoder(
         decoder_config.decode_type,
         decoder_config.props,
     ))
+}
+
+pub(crate) fn validate_stream_decoder_config(
+    req: &CreateStreamRequest,
+    decoder: &StreamDecoderConfig,
+) -> Result<(), String> {
+    let stream_type = req.stream_type.to_ascii_lowercase();
+    let is_none = decoder.kind() == "none";
+    if req.shared && stream_type == "memory" {
+        return Err(format!(
+            "shared stream `{}` does not support stream type `memory`",
+            req.name
+        ));
+    }
+    if req.shared && is_none {
+        return Err(format!(
+            "shared stream `{}` does not support decoder type `none`",
+            req.name
+        ));
+    }
+    if is_none && stream_type != "memory" {
+        return Err(format!(
+            "stream `{}` decoder type `none` only supported for memory streams",
+            req.name
+        ));
+    }
+    if is_none && req.eventtime.is_some() {
+        return Err(format!(
+            "stream `{}` eventtime requires a decoder (decoder type `none` unsupported)",
+            req.name
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_memory_stream_topic_declared(
+    req: &CreateStreamRequest,
+    props: &MemoryStreamProps,
+    decoder: &StreamDecoderConfig,
+) -> Result<(), String> {
+    if !req.stream_type.eq_ignore_ascii_case("memory") {
+        return Ok(());
+    }
+    let topic = props.topic.trim();
+    if topic.is_empty() {
+        return Err(format!(
+            "stream `{}` memory topic must not be empty",
+            req.name
+        ));
+    }
+
+    let expected_kind = if decoder.kind() == "none" {
+        MemoryTopicKind::Collection
+    } else {
+        MemoryTopicKind::Bytes
+    };
+    let actual_kind = flow::connector::memory_pubsub_registry()
+        .topic_kind(topic)
+        .ok_or_else(|| format!("memory topic `{topic}` not declared"))?;
+    if actual_kind != expected_kind {
+        return Err(format!(
+            "memory topic `{topic}` kind mismatch: expected {}, got {}",
+            expected_kind, actual_kind
+        ));
+    }
+    Ok(())
 }
 
 fn column_schema_from_request(

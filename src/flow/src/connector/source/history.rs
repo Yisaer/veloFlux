@@ -438,6 +438,9 @@ mod tests {
                         row_count += 1;
                     }
                 }
+                Ok(ConnectorEvent::Collection(_)) => {
+                    panic!("history source should not emit collections");
+                }
                 Ok(ConnectorEvent::EndOfStream) => break,
                 Err(e) => panic!("Connector error: {}", e),
             }

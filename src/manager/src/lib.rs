@@ -1,5 +1,6 @@
 mod capabilities;
 mod function;
+mod memory_topic;
 mod pipeline;
 pub mod storage_bridge;
 mod stream;
@@ -67,6 +68,11 @@ pub async fn start_server(
             axum::routing::get(capabilities::get_syntax_capabilities_handler),
         )
         .route("/streams/:name", delete(stream::delete_stream_handler))
+        .route(
+            "/memory/topics",
+            post(memory_topic::create_memory_topic_handler)
+                .get(memory_topic::list_memory_topics_handler),
+        )
         .with_state(state);
 
     let addr: SocketAddr = addr.parse()?;
