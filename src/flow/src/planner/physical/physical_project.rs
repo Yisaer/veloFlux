@@ -25,6 +25,11 @@ pub struct PhysicalProjectField {
 pub struct PhysicalProject {
     pub base: BasePhysicalPlan,
     pub fields: Vec<PhysicalProjectField>,
+    /// Whether this project node should pass through input messages unchanged.
+    ///
+    /// This is used by physical rewrite rules that delay `ColumnRef::ByIndex`
+    /// materialization into downstream encoders.
+    pub passthrough_messages: bool,
 }
 
 impl PhysicalProjectField {
@@ -69,7 +74,11 @@ impl PhysicalProject {
         index: i64,
     ) -> Self {
         let base = BasePhysicalPlan::new(children, index);
-        Self { base, fields }
+        Self {
+            base,
+            fields,
+            passthrough_messages: false,
+        }
     }
 
     /// Create a new PhysicalProject with a single child
@@ -79,6 +88,10 @@ impl PhysicalProject {
         index: i64,
     ) -> Self {
         let base = BasePhysicalPlan::new(vec![child], index);
-        Self { base, fields }
+        Self {
+            base,
+            fields,
+            passthrough_messages: false,
+        }
     }
 }

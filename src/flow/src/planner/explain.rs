@@ -618,6 +618,9 @@ fn build_physical_node_with_prefix(
                 .map(|f| f.original_expr.to_string())
                 .collect::<Vec<_>>();
             info.push(format!("fields=[{}]", fields.join("; ")));
+            if project.passthrough_messages {
+                info.push("passthrough_messages=true".to_string());
+            }
         }
         PhysicalPlan::Aggregation(aggregation) => {
             info.push(format!(
@@ -707,12 +710,32 @@ fn build_physical_node_with_prefix(
         PhysicalPlan::Encoder(encoder) => {
             info.push(format!("sink_id={}", encoder.sink_id));
             info.push(format!("encoder={}", encoder.encoder.kind_str()));
+            if let Some(spec) = &encoder.by_index_projection {
+                if !spec.is_empty() {
+                    let cols = spec
+                        .columns()
+                        .iter()
+                        .map(|c| format!("{}#{}->{}", c.source_name, c.column_index, c.output_name))
+                        .collect::<Vec<_>>();
+                    info.push(format!("by_index_projection=[{}]", cols.join("; ")));
+                }
+            }
         }
         PhysicalPlan::StreamingEncoder(streaming) => {
             info.push(format!("sink_id={}", streaming.sink_id));
             info.push(format!("encoder={}", streaming.encoder.kind_str()));
             if streaming.common.is_batching_enabled() {
                 info.push("batching=true".to_string());
+            }
+            if let Some(spec) = &streaming.by_index_projection {
+                if !spec.is_empty() {
+                    let cols = spec
+                        .columns()
+                        .iter()
+                        .map(|c| format!("{}#{}->{}", c.source_name, c.column_index, c.output_name))
+                        .collect::<Vec<_>>();
+                    info.push(format!("by_index_projection=[{}]", cols.join("; ")));
+                }
             }
         }
         PhysicalPlan::ResultCollect(rc) => {

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 pub mod base_physical;
+pub mod by_index_projection;
 pub mod physical_aggregation;
 pub mod physical_barrier;
 pub mod physical_batch;
@@ -21,6 +22,7 @@ pub mod physical_watermark;
 pub mod physical_window;
 
 pub use base_physical::BasePhysicalPlan;
+pub use by_index_projection::{ByIndexProjection, ByIndexProjectionColumn};
 pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
 pub use physical_barrier::PhysicalBarrier;
 pub use physical_batch::PhysicalBatch;

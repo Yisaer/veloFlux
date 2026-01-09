@@ -1,4 +1,5 @@
 use crate::planner::physical::BasePhysicalPlan;
+use crate::planner::physical::ByIndexProjection;
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use std::fmt;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ pub struct PhysicalStreamingEncoder {
     pub sink_id: String,
     pub encoder: SinkEncoderConfig,
     pub common: CommonSinkProps,
+    pub by_index_projection: Option<Arc<ByIndexProjection>>,
 }
 
 impl PhysicalStreamingEncoder {
@@ -30,6 +32,7 @@ impl PhysicalStreamingEncoder {
             sink_id,
             encoder,
             common,
+            by_index_projection: None,
         }
     }
 }

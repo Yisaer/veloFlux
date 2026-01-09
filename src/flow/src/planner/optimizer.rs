@@ -1,9 +1,14 @@
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::codec::EncoderRegistry;
+use crate::expr::scalar::ColumnRef;
+use crate::expr::ScalarExpr;
 use crate::planner::physical::{
-    PhysicalBarrier, PhysicalDataSink, PhysicalPlan, PhysicalSinkConnector,
-    PhysicalStreamingAggregation, PhysicalStreamingEncoder, StreamingWindowSpec,
+    ByIndexProjection, ByIndexProjectionColumn, PhysicalBarrier, PhysicalDataSink, PhysicalPlan,
+    PhysicalProjectField, PhysicalSinkConnector, PhysicalStreamingAggregation,
+    PhysicalStreamingEncoder, StreamingWindowSpec,
 };
+use sqlparser::ast::Expr;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// A physical optimization rule.
@@ -27,6 +32,7 @@ pub fn optimize_physical_plan(
             aggregate_registry: Arc::clone(&aggregate_registry),
         }),
         Box::new(StreamingEncoderRewrite),
+        Box::new(ByIndexProjectionIntoEncoderRewrite),
         Box::new(InsertBarrierForFanIn),
     ];
     let mut current = physical_plan;
@@ -53,6 +59,14 @@ struct StreamingAggregationRewrite {
 ///
 /// This is a topology rewrite rule and is intentionally applied as the last physical optimization.
 struct InsertBarrierForFanIn;
+
+/// Rule: detect shared `Project` nodes that are pure `ColumnRef::ByIndex` projections
+/// (with no aliases) directly upstream of encoders, and prepare them for
+/// encoder-side delayed materialization.
+///
+/// Note: The actual rewrite (removing `Project` and attaching projection specs to encoders)
+/// is implemented in subsequent steps once encoder-side support is wired up.
+struct ByIndexProjectionIntoEncoderRewrite;
 
 impl PhysicalOptRule for StreamingAggregationRewrite {
     fn name(&self) -> &str {
@@ -270,6 +284,230 @@ impl StreamingEncoderRewrite {
             Arc::new(PhysicalPlan::StreamingEncoder(streaming_encoder)),
             connector,
         ))
+    }
+}
+
+impl PhysicalOptRule for ByIndexProjectionIntoEncoderRewrite {
+    fn name(&self) -> &str {
+        "by_index_projection_into_encoder_rewrite"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        rewrite_by_index_projection_into_encoder(plan, encoder_registry)
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ProjectConsumer {
+    Encoder { encoder_index: i64, kind: String },
+    StreamingEncoder { encoder_index: i64, kind: String },
+    Other,
+}
+
+#[derive(Clone, Debug)]
+struct ByIndexRewriteState {
+    projects_to_passthrough: HashSet<i64>,
+    encoder_to_projection: HashMap<i64, Arc<ByIndexProjection>>,
+}
+
+fn rewrite_by_index_projection_into_encoder(
+    plan: Arc<PhysicalPlan>,
+    encoder_registry: &EncoderRegistry,
+) -> Arc<PhysicalPlan> {
+    let (node_map, consumer_map) = build_node_and_consumer_maps(&plan);
+
+    let mut state = ByIndexRewriteState {
+        projects_to_passthrough: HashSet::new(),
+        encoder_to_projection: HashMap::new(),
+    };
+
+    for (node_index, node) in node_map.iter() {
+        let PhysicalPlan::Project(project) = node.as_ref() else {
+            continue;
+        };
+        if !is_pure_unaliased_by_index_project(&project.fields) {
+            continue;
+        }
+
+        let consumers = consumer_map.get(node_index).cloned().unwrap_or_default();
+        if consumers.is_empty() {
+            continue;
+        }
+
+        // Design constraint: when a `Project` is shared (DAG), only apply this rewrite
+        // if every consumer is an encoder that can honor delayed materialization.
+        if !consumers.iter().all(|consumer| match consumer {
+            ProjectConsumer::Encoder { kind, .. } => {
+                supports_by_index_projection(kind, encoder_registry)
+            }
+            ProjectConsumer::StreamingEncoder { kind, .. } => {
+                supports_by_index_projection(kind, encoder_registry)
+            }
+            ProjectConsumer::Other => false,
+        }) {
+            continue;
+        }
+
+        let columns = project
+            .fields
+            .iter()
+            .filter_map(by_index_projection_column_from_field)
+            .collect::<Vec<_>>();
+        if columns.is_empty() {
+            continue;
+        }
+        let spec = Arc::new(ByIndexProjection::new(columns));
+
+        state.projects_to_passthrough.insert(*node_index);
+        for consumer in consumers {
+            match consumer {
+                ProjectConsumer::Encoder { encoder_index, .. }
+                | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
+                    state.encoder_to_projection.insert(encoder_index, Arc::clone(&spec));
+                }
+                ProjectConsumer::Other { .. } => {}
+            }
+        }
+    }
+
+    if state.projects_to_passthrough.is_empty() && state.encoder_to_projection.is_empty() {
+        return plan;
+    }
+
+    let mut memo = HashMap::new();
+    rewrite_by_index_nodes(plan, &state, &mut memo)
+}
+
+fn supports_by_index_projection(kind: &str, _encoder_registry: &EncoderRegistry) -> bool {
+    _encoder_registry.supports_by_index_projection(kind)
+}
+
+fn by_index_projection_column_from_field(field: &PhysicalProjectField) -> Option<ByIndexProjectionColumn> {
+    let ScalarExpr::Column(ColumnRef::ByIndex {
+        source_name,
+        column_index,
+    }) = &field.compiled_expr
+    else {
+        return None;
+    };
+
+    Some(ByIndexProjectionColumn::new(
+        source_name.clone(),
+        *column_index,
+        field.field_name.clone(),
+    ))
+}
+
+fn build_node_and_consumer_maps(
+    root: &Arc<PhysicalPlan>,
+) -> (
+    HashMap<i64, Arc<PhysicalPlan>>,
+    HashMap<i64, Vec<ProjectConsumer>>,
+) {
+    fn helper(
+        plan: &Arc<PhysicalPlan>,
+        nodes: &mut HashMap<i64, Arc<PhysicalPlan>>,
+        consumers: &mut HashMap<i64, Vec<ProjectConsumer>>,
+        visited: &mut HashSet<i64>,
+    ) {
+        let index = plan.get_plan_index();
+        let already_visited = !visited.insert(index);
+        nodes.entry(index).or_insert_with(|| Arc::clone(plan));
+
+        for child in plan.children() {
+            let child_index = child.get_plan_index();
+            let consumer = match plan.as_ref() {
+                PhysicalPlan::Encoder(encoder) => ProjectConsumer::Encoder {
+                    encoder_index: encoder.base.index(),
+                    kind: encoder.encoder.kind_str().to_string(),
+                },
+                PhysicalPlan::StreamingEncoder(encoder) => ProjectConsumer::StreamingEncoder {
+                    encoder_index: encoder.base.index(),
+                    kind: encoder.encoder.kind_str().to_string(),
+                },
+                _ => ProjectConsumer::Other,
+            };
+            consumers.entry(child_index).or_default().push(consumer);
+
+            if !already_visited {
+                helper(child, nodes, consumers, visited);
+            }
+        }
+    }
+
+    let mut nodes = HashMap::new();
+    let mut consumers = HashMap::new();
+    let mut visited = HashSet::new();
+    helper(root, &mut nodes, &mut consumers, &mut visited);
+    (nodes, consumers)
+}
+
+fn rewrite_by_index_nodes(
+    plan: Arc<PhysicalPlan>,
+    state: &ByIndexRewriteState,
+    memo: &mut HashMap<i64, Arc<PhysicalPlan>>,
+) -> Arc<PhysicalPlan> {
+    let index = plan.get_plan_index();
+    if let Some(rewritten) = memo.get(&index) {
+        return Arc::clone(rewritten);
+    }
+
+    let rewritten_children = plan
+        .children()
+        .iter()
+        .map(|child| rewrite_by_index_nodes(Arc::clone(child), state, memo))
+        .collect::<Vec<_>>();
+
+    let rebuilt = match plan.as_ref() {
+        PhysicalPlan::Project(project) if state.projects_to_passthrough.contains(&index) => {
+            let mut new = project.clone();
+            new.base.children = rewritten_children;
+            new.fields = Vec::new();
+            new.passthrough_messages = true;
+            Arc::new(PhysicalPlan::Project(new))
+        }
+        PhysicalPlan::Encoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
+            let mut new = encoder.clone();
+            new.base.children = rewritten_children;
+            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::Encoder(new))
+        }
+        PhysicalPlan::StreamingEncoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
+            let mut new = encoder.clone();
+            new.base.children = rewritten_children;
+            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::StreamingEncoder(new))
+        }
+        _ => rebuild_with_children(plan.as_ref(), rewritten_children),
+    };
+
+    memo.insert(index, Arc::clone(&rebuilt));
+    rebuilt
+}
+
+fn is_pure_unaliased_by_index_project(fields: &[PhysicalProjectField]) -> bool {
+    if fields.is_empty() {
+        return false;
+    }
+    fields.iter().all(is_unaliased_by_index_field)
+}
+
+fn is_unaliased_by_index_field(field: &PhysicalProjectField) -> bool {
+    let ScalarExpr::Column(ColumnRef::ByIndex { .. }) = &field.compiled_expr else {
+        return false;
+    };
+    original_expr_matches_field_name(&field.original_expr, &field.field_name)
+}
+
+fn original_expr_matches_field_name(original_expr: &Expr, field_name: &str) -> bool {
+    match original_expr {
+        Expr::Identifier(ident) => ident.value == field_name,
+        Expr::CompoundIdentifier(parts) => parts.last().is_some_and(|ident| ident.value == field_name),
+        _ => false,
     }
 }
 
