@@ -5,6 +5,7 @@ use bytes::Bytes;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 pub const DEFAULT_MEMORY_PUBSUB_CAPACITY: usize = 1024;
@@ -118,6 +119,14 @@ pub enum MemoryPubSubError {
     },
     #[error("topic `{topic}` capacity mismatch: expected {expected}, got {actual}")]
     TopicCapacityMismatch {
+        topic: String,
+        expected: usize,
+        actual: usize,
+    },
+    #[error(
+        "timeout waiting for subscribers on topic `{topic}`: expected >= {expected}, got {actual}"
+    )]
+    TimeoutWaitingForSubscribers {
         topic: String,
         expected: usize,
         actual: usize,
@@ -311,6 +320,44 @@ impl MemoryPubSubRegistry {
     pub fn topic_kind(&self, topic: &str) -> Option<MemoryTopicKind> {
         let guard = self.topics.read().expect("memory pubsub registry poisoned");
         guard.get(topic).map(|entry| entry.kind)
+    }
+
+    pub fn subscriber_count(
+        &self,
+        topic: &str,
+        kind: MemoryTopicKind,
+    ) -> Result<usize, MemoryPubSubError> {
+        let entry = self.get_existing_topic(topic, kind)?;
+        Ok(entry.sender.receiver_count())
+    }
+
+    pub async fn wait_for_subscribers(
+        &self,
+        topic: &str,
+        kind: MemoryTopicKind,
+        min: usize,
+        timeout: Duration,
+    ) -> Result<(), MemoryPubSubError> {
+        if min == 0 {
+            return Ok(());
+        }
+
+        let entry = self.get_existing_topic(topic, kind)?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let receivers = entry.sender.receiver_count();
+            if receivers >= min {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MemoryPubSubError::TimeoutWaitingForSubscribers {
+                    topic: topic.to_string(),
+                    expected: min,
+                    actual: receivers,
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
 
@@ -744,5 +791,55 @@ mod tests {
             .publish_bytes(Bytes::from_static(b"hello"))
             .expect("publish");
         assert_eq!(delivered, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_pubsub_wait_for_subscribers_succeeds() {
+        let registry = MemoryPubSubRegistry::new();
+        let topic = "wait_for_subscribers_succeeds";
+        registry
+            .declare_topic(
+                topic,
+                MemoryTopicKind::Bytes,
+                DEFAULT_MEMORY_PUBSUB_CAPACITY,
+            )
+            .expect("declare");
+
+        let registry_clone = registry.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _rx = registry_clone
+                .open_subscribe_bytes(topic)
+                .expect("subscribe");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        registry
+            .wait_for_subscribers(topic, MemoryTopicKind::Bytes, 1, Duration::from_secs(1))
+            .await
+            .expect("wait");
+        handle.await.expect("subscriber task");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn memory_pubsub_wait_for_subscribers_timeout() {
+        let registry = MemoryPubSubRegistry::new();
+        let topic = "wait_for_subscribers_timeout";
+        registry
+            .declare_topic(
+                topic,
+                MemoryTopicKind::Bytes,
+                DEFAULT_MEMORY_PUBSUB_CAPACITY,
+            )
+            .expect("declare");
+
+        let err = registry
+            .wait_for_subscribers(topic, MemoryTopicKind::Bytes, 1, Duration::from_millis(50))
+            .await
+            .expect_err("expected timeout");
+        assert!(matches!(
+            err,
+            MemoryPubSubError::TimeoutWaitingForSubscribers { .. }
+        ));
     }
 }

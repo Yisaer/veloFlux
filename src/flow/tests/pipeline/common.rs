@@ -1,12 +1,73 @@
 use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
-use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
-use flow::processor::StreamData;
+use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
+use flow::connector::{
+    memory_pubsub_registry, MemoryData, MemoryPubSubRegistry, MemoryTopicKind, SharedCollection,
+    DEFAULT_MEMORY_PUBSUB_CAPACITY,
+};
+use flow::model::Collection;
 use flow::FlowInstance;
-use serde_json::Value as JsonValue;
+use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
-pub async fn install_stream_schema(instance: &FlowInstance, columns: &[(String, Vec<Value>)]) {
+static TOPIC_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+fn sanitize_topic_fragment(fragment: &str) -> String {
+    let mut out = String::with_capacity(fragment.len());
+    for ch in fragment.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    let out = out.trim_matches('_');
+    if out.is_empty() {
+        "case".to_string()
+    } else {
+        out.to_string()
+    }
+}
+
+pub fn make_memory_topics(test_suite: &str, case_name: &str) -> (String, String) {
+    let counter = TOPIC_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let suite = sanitize_topic_fragment(test_suite);
+    let case_name = sanitize_topic_fragment(case_name);
+    let base = format!("tests.{suite}.{case_name}.{counter}");
+    (format!("{base}.input"), format!("{base}.output"))
+}
+
+pub fn memory_registry() -> MemoryPubSubRegistry {
+    memory_pubsub_registry().clone()
+}
+
+pub fn declare_memory_input_output_topics(
+    registry: &MemoryPubSubRegistry,
+    input_topic: &str,
+    output_topic: &str,
+) {
+    registry
+        .declare_topic(
+            input_topic,
+            MemoryTopicKind::Collection,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input memory topic");
+    registry
+        .declare_topic(
+            output_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output memory topic");
+}
+
+pub async fn install_memory_stream_schema(
+    instance: &FlowInstance,
+    input_topic: &str,
+    columns: &[(String, Vec<Value>)],
+) {
     let schema_columns = columns
         .iter()
         .map(|(name, values)| {
@@ -22,8 +83,8 @@ pub async fn install_stream_schema(instance: &FlowInstance, columns: &[(String, 
     let definition = StreamDefinition::new(
         "stream".to_string(),
         Arc::new(schema),
-        StreamProps::Mock(MockStreamProps::default()),
-        StreamDecoderConfig::json(),
+        StreamProps::Memory(MemoryStreamProps::new(input_topic.to_string())),
+        StreamDecoderConfig::new("none".to_string(), JsonMap::new()),
     );
     instance
         .create_stream(definition, false)
@@ -38,26 +99,53 @@ pub struct ColumnCheck {
 }
 
 pub async fn recv_next_json(
-    output: &mut tokio::sync::mpsc::Receiver<StreamData>,
+    output: &mut tokio::sync::broadcast::Receiver<MemoryData>,
     timeout_duration: Duration,
 ) -> JsonValue {
+    use tokio::sync::broadcast::error::RecvError;
+
     let deadline = tokio::time::Instant::now() + timeout_duration;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let item = timeout(remaining, output.recv())
             .await
-            .expect("timeout waiting for pipeline output")
-            .expect("pipeline output channel closed");
+            .expect("timeout waiting for pipeline output");
+
         match item {
-            StreamData::EncodedBytes { payload, .. } => {
-                return serde_json::from_slice(&payload).expect("invalid JSON payload")
+            Ok(MemoryData::Bytes(payload)) => {
+                return serde_json::from_slice(payload.as_ref()).expect("invalid JSON payload")
             }
-            StreamData::Control(_) => continue,
-            StreamData::Watermark(_) => continue,
-            StreamData::Error(err) => panic!("pipeline returned error: {}", err.message),
-            other => panic!("unexpected stream data: {}", other.description()),
+            Ok(MemoryData::Collection(_)) => {
+                panic!("unexpected collection payload on bytes topic")
+            }
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => panic!("pipeline output topic closed"),
         }
     }
+}
+
+pub async fn publish_input_collection(
+    registry: &MemoryPubSubRegistry,
+    input_topic: &str,
+    collection: Box<dyn Collection>,
+    timeout_duration: Duration,
+) {
+    registry
+        .wait_for_subscribers(
+            input_topic,
+            MemoryTopicKind::Collection,
+            1,
+            timeout_duration,
+        )
+        .await
+        .expect("wait for memory source subscriber");
+
+    let publisher = registry
+        .open_publisher_collection(input_topic)
+        .expect("open memory publisher");
+    publisher
+        .publish_collection(SharedCollection::from_box(collection))
+        .expect("publish collection");
 }
 
 pub fn build_expected_json(expected_rows: usize, column_checks: &[ColumnCheck]) -> JsonValue {

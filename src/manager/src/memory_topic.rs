@@ -97,6 +97,10 @@ pub async fn create_memory_topic_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("unexpected memory pubsub error: {err}"),
             ),
+            MemoryPubSubError::TimeoutWaitingForSubscribers { .. } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("unexpected memory pubsub error: {err}"),
+            ),
             MemoryPubSubError::TopicKindMismatch { .. }
             | MemoryPubSubError::TopicCapacityMismatch { .. } => {
                 (StatusCode::CONFLICT, err.to_string())
