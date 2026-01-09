@@ -28,6 +28,19 @@ pub trait CollectionEncoder: Send + Sync + 'static {
     fn supports_streaming(&self) -> bool {
         false
     }
+    /// Whether this encoder supports index-based lazy materialization (`ByIndexProjection`).
+    fn supports_index_lazy_materialization(&self) -> bool {
+        false
+    }
+    /// Attach a by-index projection spec to enable index-based lazy materialization.
+    fn with_by_index_projection(
+        self: Arc<Self>,
+        _spec: Arc<ByIndexProjection>,
+    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+        Err(EncodeError::Other(
+            "index lazy materialization is not supported for this encoder".to_string(),
+        ))
+    }
     /// Start a streaming session if supported.
     fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
         None
@@ -53,13 +66,18 @@ pub trait CollectionEncoderStream: Send {
 pub struct JsonEncoder {
     id: String,
     props: JsonMap<String, JsonValue>,
+    by_index_projection: Option<Arc<ByIndexProjection>>,
 }
 
 impl JsonEncoder {
     /// Create a new JSON encoder with the provided identifier.
     pub fn new(id: impl Into<String>, props: JsonMap<String, JsonValue>) -> Self {
         let id = id.into();
-        Self { id, props }
+        Self {
+            id,
+            props,
+            by_index_projection: None,
+        }
     }
 
     /// Access encoder props (currently unused by JSON encoder).
@@ -73,7 +91,11 @@ impl JsonEncoder {
     }
 
     fn encode_tuple_impl(&self, tuple: &Tuple) -> Result<Vec<u8>, EncodeError> {
-        serde_json::to_vec(&tuple_to_json(tuple)).map_err(EncodeError::Serialization)
+        serde_json::to_vec(&tuple_to_json_maybe_by_index_projection(
+            tuple,
+            self.by_index_projection.as_deref(),
+        )?)
+        .map_err(EncodeError::Serialization)
     }
 }
 
@@ -89,11 +111,10 @@ impl CollectionEncoder for JsonEncoder {
         } else {
             let mut json_rows = Vec::with_capacity(rows.len());
             for tuple in rows {
-                let mut json_row = JsonMap::new();
-                for ((_, column_name), value) in tuple.entries() {
-                    json_row.insert(column_name.to_string(), value_to_json(value));
-                }
-                json_rows.push(JsonValue::Object(json_row));
+                json_rows.push(tuple_to_json_maybe_by_index_projection(
+                    tuple,
+                    self.by_index_projection.as_deref(),
+                )?);
             }
             serde_json::to_vec(&JsonValue::Array(json_rows))
         }
@@ -109,21 +130,40 @@ impl CollectionEncoder for JsonEncoder {
         true
     }
 
+    fn supports_index_lazy_materialization(&self) -> bool {
+        true
+    }
+
+    fn with_by_index_projection(
+        self: Arc<Self>,
+        spec: Arc<ByIndexProjection>,
+    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+        Ok(Arc::new(Self {
+            id: self.id.clone(),
+            props: self.props.clone(),
+            by_index_projection: Some(spec),
+        }))
+    }
+
     fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
-        Some(Box::new(JsonStreamingEncoder::default()))
+        Some(Box::new(JsonStreamingEncoder::new(
+            self.by_index_projection.clone(),
+        )))
     }
 }
 
 struct JsonStreamingEncoder {
     payload: Vec<u8>,
     is_first_row: bool,
+    by_index_projection: Option<Arc<ByIndexProjection>>,
 }
 
-impl Default for JsonStreamingEncoder {
-    fn default() -> Self {
+impl JsonStreamingEncoder {
+    fn new(by_index_projection: Option<Arc<ByIndexProjection>>) -> Self {
         Self {
             payload: vec![b'['],
             is_first_row: true,
+            by_index_projection,
         }
     }
 }
@@ -136,112 +176,9 @@ impl CollectionEncoderStream for JsonStreamingEncoder {
             self.payload.push(b',');
         }
 
-        serde_json::to_writer(&mut self.payload, &tuple_to_json(tuple))
-            .map_err(EncodeError::Serialization)?;
-        Ok(())
-    }
-
-    fn finish(self: Box<Self>) -> Result<Vec<u8>, EncodeError> {
-        let mut encoder = *self;
-        encoder.payload.push(b']');
-        Ok(encoder.payload)
-    }
-}
-
-/// JSON encoder that only emits columns listed by `ByIndexProjection`, plus derived affiliate columns.
-pub struct JsonByIndexProjectionEncoder {
-    id: String,
-    props: JsonMap<String, JsonValue>,
-    by_index_projection: Arc<ByIndexProjection>,
-}
-
-impl JsonByIndexProjectionEncoder {
-    pub fn new(
-        id: impl Into<String>,
-        props: JsonMap<String, JsonValue>,
-        by_index_projection: Arc<ByIndexProjection>,
-    ) -> Self {
-        Self {
-            id: id.into(),
-            props,
-            by_index_projection,
-        }
-    }
-
-    pub fn props(&self) -> &JsonMap<String, JsonValue> {
-        &self.props
-    }
-}
-
-impl CollectionEncoder for JsonByIndexProjectionEncoder {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError> {
-        let rows = collection.rows();
-        let payload = if rows.is_empty() {
-            serde_json::to_vec(&JsonValue::Array(Vec::new()))
-        } else {
-            let mut json_rows = Vec::with_capacity(rows.len());
-            for tuple in rows {
-                json_rows.push(tuple_to_json_with_by_index_projection(
-                    tuple,
-                    &self.by_index_projection,
-                )?);
-            }
-            serde_json::to_vec(&JsonValue::Array(json_rows))
-        }
-        .map_err(EncodeError::Serialization)?;
-        Ok(payload)
-    }
-
-    fn encode_tuple(&self, tuple: &Tuple) -> Result<Vec<u8>, EncodeError> {
-        serde_json::to_vec(&tuple_to_json_with_by_index_projection(
-            tuple,
-            &self.by_index_projection,
-        )?)
-        .map_err(EncodeError::Serialization)
-    }
-
-    fn supports_streaming(&self) -> bool {
-        true
-    }
-
-    fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
-        Some(Box::new(JsonStreamingByIndexProjectionEncoder::new(
-            Arc::clone(&self.by_index_projection),
-        )))
-    }
-}
-
-struct JsonStreamingByIndexProjectionEncoder {
-    payload: Vec<u8>,
-    is_first_row: bool,
-    by_index_projection: Arc<ByIndexProjection>,
-}
-
-impl JsonStreamingByIndexProjectionEncoder {
-    fn new(by_index_projection: Arc<ByIndexProjection>) -> Self {
-        Self {
-            payload: vec![b'['],
-            is_first_row: true,
-            by_index_projection,
-        }
-    }
-}
-
-impl CollectionEncoderStream for JsonStreamingByIndexProjectionEncoder {
-    fn append(&mut self, tuple: &Tuple) -> Result<(), EncodeError> {
-        if self.is_first_row {
-            self.is_first_row = false;
-        } else {
-            self.payload.push(b',');
-        }
-
         serde_json::to_writer(
             &mut self.payload,
-            &tuple_to_json_with_by_index_projection(tuple, &self.by_index_projection)?,
+            &tuple_to_json_maybe_by_index_projection(tuple, self.by_index_projection.as_deref())?,
         )
         .map_err(EncodeError::Serialization)?;
         Ok(())
@@ -294,12 +231,15 @@ fn tuple_to_json(tuple: &Tuple) -> JsonValue {
     JsonValue::Object(json_row)
 }
 
-fn tuple_to_json_with_by_index_projection(
+fn tuple_to_json_maybe_by_index_projection(
     tuple: &Tuple,
-    by_index_projection: &ByIndexProjection,
+    by_index_projection: Option<&ByIndexProjection>,
 ) -> Result<JsonValue, EncodeError> {
-    let mut json_row = JsonMap::new();
+    let Some(by_index_projection) = by_index_projection else {
+        return Ok(tuple_to_json(tuple));
+    };
 
+    let mut json_row = JsonMap::with_capacity(by_index_projection.columns().len());
     if let Some(affiliate) = tuple.affiliate() {
         for (key, value) in affiliate.entries() {
             json_row.insert(key.as_str().to_string(), value_to_json(value));

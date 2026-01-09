@@ -4,7 +4,6 @@
 //! connecting ControlSourceProcessor outputs to leaf nodes (nodes without children).
 
 use crate::aggregation::AggregateFunctionRegistry;
-use crate::codec::encoder::JsonByIndexProjectionEncoder;
 use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::physical::PhysicalPlan;
@@ -757,24 +756,22 @@ fn create_processor_from_plan_node(
             )))
         }
         PhysicalPlan::Encoder(encoder) => {
+            let encoder_impl = context
+                .encoder_registry()
+                .instantiate(&encoder.encoder)
+                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             let encoder_impl = if let Some(spec) = encoder.by_index_projection.as_ref() {
-                match encoder.encoder.kind_str() {
-                    "json" => Arc::new(JsonByIndexProjectionEncoder::new(
-                        encoder.encoder.kind_str().to_string(),
-                        encoder.encoder.props().clone(),
-                        Arc::clone(spec),
-                    )) as Arc<dyn crate::codec::CollectionEncoder>,
-                    other => {
-                        return Err(ProcessorError::InvalidConfiguration(format!(
-                            "by_index_projection is not supported for encoder kind `{other}`"
-                        )));
-                    }
+                if !encoder_impl.supports_index_lazy_materialization() {
+                    return Err(ProcessorError::InvalidConfiguration(format!(
+                        "encoder kind `{}` does not support index lazy materialization",
+                        encoder.encoder.kind_str()
+                    )));
                 }
-            } else {
-                context
-                    .encoder_registry()
-                    .instantiate(&encoder.encoder)
+                encoder_impl
+                    .with_by_index_projection(Arc::clone(spec))
                     .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?
+            } else {
+                encoder_impl
             };
             let processor = EncoderProcessor::new(plan_name.clone(), encoder_impl);
             Ok(ProcessorBuildOutput::with_processor(
@@ -792,24 +789,22 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::StreamingEncoder(streaming) => {
+            let encoder_impl = context
+                .encoder_registry()
+                .instantiate(&streaming.encoder)
+                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             let encoder_impl = if let Some(spec) = streaming.by_index_projection.as_ref() {
-                match streaming.encoder.kind_str() {
-                    "json" => Arc::new(JsonByIndexProjectionEncoder::new(
-                        streaming.encoder.kind_str().to_string(),
-                        streaming.encoder.props().clone(),
-                        Arc::clone(spec),
-                    )) as Arc<dyn crate::codec::CollectionEncoder>,
-                    other => {
-                        return Err(ProcessorError::InvalidConfiguration(format!(
-                            "by_index_projection is not supported for encoder kind `{other}`"
-                        )));
-                    }
+                if !encoder_impl.supports_index_lazy_materialization() {
+                    return Err(ProcessorError::InvalidConfiguration(format!(
+                        "encoder kind `{}` does not support index lazy materialization",
+                        streaming.encoder.kind_str()
+                    )));
                 }
-            } else {
-                context
-                    .encoder_registry()
-                    .instantiate(&streaming.encoder)
+                encoder_impl
+                    .with_by_index_projection(Arc::clone(spec))
                     .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?
+            } else {
+                encoder_impl
             };
             let processor = StreamingEncoderProcessor::new(
                 plan_name.clone(),
