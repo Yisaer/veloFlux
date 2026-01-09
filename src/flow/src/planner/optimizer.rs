@@ -311,6 +311,7 @@ enum ProjectConsumer {
 #[derive(Clone, Debug)]
 struct ByIndexRewriteState {
     projects_to_passthrough: HashSet<i64>,
+    project_to_remaining_fields: HashMap<i64, Vec<PhysicalProjectField>>,
     encoder_to_projection: HashMap<i64, Arc<ByIndexProjection>>,
 }
 
@@ -322,6 +323,7 @@ fn rewrite_by_index_projection_into_encoder(
 
     let mut state = ByIndexRewriteState {
         projects_to_passthrough: HashSet::new(),
+        project_to_remaining_fields: HashMap::new(),
         encoder_to_projection: HashMap::new(),
     };
 
@@ -329,7 +331,23 @@ fn rewrite_by_index_projection_into_encoder(
         let PhysicalPlan::Project(project) = node.as_ref() else {
             continue;
         };
-        if !is_pure_unaliased_by_index_project(&project.fields) {
+        if project.fields.is_empty() {
+            continue;
+        }
+
+        let mut columns = Vec::new();
+        let mut remaining_fields = Vec::new();
+        for field in &project.fields {
+            if is_unaliased_by_index_field(field) {
+                if let Some(column) = by_index_projection_column_from_field(field) {
+                    columns.push(column);
+                }
+            } else {
+                remaining_fields.push(field.clone());
+            }
+        }
+
+        if columns.is_empty() {
             continue;
         }
 
@@ -352,24 +370,21 @@ fn rewrite_by_index_projection_into_encoder(
             continue;
         }
 
-        let columns = project
-            .fields
-            .iter()
-            .filter_map(by_index_projection_column_from_field)
-            .collect::<Vec<_>>();
-        if columns.is_empty() {
-            continue;
-        }
         let spec = Arc::new(ByIndexProjection::new(columns));
 
         state.projects_to_passthrough.insert(*node_index);
+        state
+            .project_to_remaining_fields
+            .insert(*node_index, remaining_fields);
         for consumer in consumers {
             match consumer {
                 ProjectConsumer::Encoder { encoder_index, .. }
                 | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
-                    state.encoder_to_projection.insert(encoder_index, Arc::clone(&spec));
+                    state
+                        .encoder_to_projection
+                        .insert(encoder_index, Arc::clone(&spec));
                 }
-                ProjectConsumer::Other { .. } => {}
+                ProjectConsumer::Other => {}
             }
         }
     }
@@ -386,7 +401,9 @@ fn supports_by_index_projection(kind: &str, _encoder_registry: &EncoderRegistry)
     _encoder_registry.supports_by_index_projection(kind)
 }
 
-fn by_index_projection_column_from_field(field: &PhysicalProjectField) -> Option<ByIndexProjectionColumn> {
+fn by_index_projection_column_from_field(
+    field: &PhysicalProjectField,
+) -> Option<ByIndexProjectionColumn> {
     let ScalarExpr::Column(ColumnRef::ByIndex {
         source_name,
         column_index,
@@ -466,7 +483,11 @@ fn rewrite_by_index_nodes(
         PhysicalPlan::Project(project) if state.projects_to_passthrough.contains(&index) => {
             let mut new = project.clone();
             new.base.children = rewritten_children;
-            new.fields = Vec::new();
+            new.fields = state
+                .project_to_remaining_fields
+                .get(&index)
+                .cloned()
+                .unwrap_or_default();
             new.passthrough_messages = true;
             Arc::new(PhysicalPlan::Project(new))
         }
@@ -476,7 +497,9 @@ fn rewrite_by_index_nodes(
             new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
             Arc::new(PhysicalPlan::Encoder(new))
         }
-        PhysicalPlan::StreamingEncoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
+        PhysicalPlan::StreamingEncoder(encoder)
+            if state.encoder_to_projection.contains_key(&index) =>
+        {
             let mut new = encoder.clone();
             new.base.children = rewritten_children;
             new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
@@ -489,13 +512,6 @@ fn rewrite_by_index_nodes(
     rebuilt
 }
 
-fn is_pure_unaliased_by_index_project(fields: &[PhysicalProjectField]) -> bool {
-    if fields.is_empty() {
-        return false;
-    }
-    fields.iter().all(is_unaliased_by_index_field)
-}
-
 fn is_unaliased_by_index_field(field: &PhysicalProjectField) -> bool {
     let ScalarExpr::Column(ColumnRef::ByIndex { .. }) = &field.compiled_expr else {
         return false;
@@ -506,7 +522,9 @@ fn is_unaliased_by_index_field(field: &PhysicalProjectField) -> bool {
 fn original_expr_matches_field_name(original_expr: &Expr, field_name: &str) -> bool {
     match original_expr {
         Expr::Identifier(ident) => ident.value == field_name,
-        Expr::CompoundIdentifier(parts) => parts.last().is_some_and(|ident| ident.value == field_name),
+        Expr::CompoundIdentifier(parts) => {
+            parts.last().is_some_and(|ident| ident.value == field_name)
+        }
         _ => false,
     }
 }
