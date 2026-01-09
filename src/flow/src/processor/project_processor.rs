@@ -49,7 +49,6 @@ impl ProjectExecMode {
     ) -> Result<Box<dyn Collection>, ProcessorError> {
         match self {
             Self::Normal { fields } => apply_projection(collection.as_ref(), fields),
-            Self::Passthrough { fields } if fields.is_empty() => Ok(collection),
             Self::Passthrough { fields } => {
                 apply_passthrough_projection(collection.as_ref(), fields)
             }
@@ -151,6 +150,37 @@ fn apply_passthrough_projection(
         ProcessorError::ProcessingError(format!("Failed to apply passthrough projection: {err}"))
     })?;
     Ok(Box::new(projected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Message;
+    use datatypes::Value;
+    use std::time::SystemTime;
+
+    #[test]
+    fn passthrough_empty_projection_drops_upstream_affiliate() {
+        let keys = vec![Arc::<str>::from("a")];
+        let values = vec![Arc::new(Value::Int64(1))];
+        let message = Arc::new(Message::new(Arc::<str>::from("stream"), keys, values));
+        let timestamp = SystemTime::now();
+        let mut input_tuple = Tuple::with_timestamp(Arc::from(vec![message]), timestamp);
+        input_tuple.add_affiliate_column(Arc::new("tmp".to_string()), Value::Int64(999));
+        assert!(input_tuple.affiliate().is_some(), "precondition");
+
+        let input = RecordBatch::new(vec![input_tuple]).expect("record batch");
+        let output =
+            apply_passthrough_projection(&input, &[]).expect("passthrough projection succeeds");
+        let out_rows = output.rows();
+        assert_eq!(out_rows.len(), 1);
+        assert!(
+            out_rows[0].affiliate().is_none(),
+            "upstream affiliate should not leak in passthrough mode"
+        );
+        assert_eq!(out_rows[0].messages().len(), 1);
+        assert_eq!(out_rows[0].timestamp, timestamp);
+    }
 }
 
 impl Processor for ProjectProcessor {
