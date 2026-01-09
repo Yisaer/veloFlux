@@ -179,6 +179,40 @@ async fn pipeline_table_driven_queries() {
             ],
         },
         TestCase {
+            name: "projection_with_alias",
+            sql: "SELECT a, a + b + c AS abc FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
+                ),
+                (
+                    "c".to_string(),
+                    vec![Value::Int64(1000), Value::Int64(2000), Value::Int64(3000)],
+                ),
+            ],
+            expected_rows: 3,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "a".to_string(),
+                    expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                },
+                ColumnCheck {
+                    expected_name: "abc".to_string(),
+                    expected_values: vec![
+                        Value::Int64(1110),
+                        Value::Int64(2220),
+                        Value::Int64(3330),
+                    ],
+                },
+            ],
+        },
+        TestCase {
             name: "simple_filter",
             sql: "SELECT a, b FROM stream WHERE a > 15",
             input_data: vec![
