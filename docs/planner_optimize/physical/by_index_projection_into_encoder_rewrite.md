@@ -6,7 +6,7 @@
 **encoder-side delayed materialization** for `Project` nodes that are effectively doing:
 
 - `ScalarExpr::Column(ColumnRef::ByIndex { .. })`
-- with **no alias** (output field name equals the original identifier)
+- with or without an alias (the encoder uses the projected output field name)
 
 The goal is to reduce CPU overhead in large `SELECT` lists (e.g. 15k columns) by avoiding
 rebuilding messages and repeatedly cloning `Arc`-backed values during projection.
@@ -32,8 +32,7 @@ where:
 
 - `project.fields` is non-empty, and
 - every field is `ScalarExpr::Column(ColumnRef::ByIndex { .. })`, and
-- every field is **unaliased**, i.e. the original SQL expression is an identifier matching
-  `field_name` (e.g. `SELECT a` → `field_name == "a"`).
+- the fields are eligible for encoder-side by-index projection (aliases are allowed).
 
 ## Preconditions (When It Is Safe)
 
@@ -96,7 +95,5 @@ Test function: `plan_explain_by_index_projection_rewrite_table_driven`.
 ## Limitations / Follow-ups
 
 - Supports **mixed projections** by delaying only the eligible unaliased `ColumnRef::ByIndex` fields
-  into the encoder while keeping the remaining expressions in the `Project`.
-- Alias support is intentionally excluded in v1.
-  - Supporting aliases would require the encoder-side projection to emit `output_name` that differs
-    from the source identifier, and ensuring name mapping is consistent across later stages.
+- Supports **mixed projections** by delaying eligible `ColumnRef::ByIndex` fields into the encoder
+  while keeping the remaining expressions in the `Project`.
