@@ -142,8 +142,8 @@ pub fn create_logical_plan(
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
 ) -> Result<Arc<LogicalPlan>, String> {
     validate_group_by_requires_aggregates(&select_stmt)?;
-    validate_aggregation_projection(&select_stmt)?;
     validate_having_constraints(&select_stmt)?;
+    validate_aggregation_projection(&select_stmt)?;
     validate_expression_types(&select_stmt, stream_defs)?;
 
     let start_index = 0i64;
@@ -605,29 +605,6 @@ fn validate_aggregation_projection(select_stmt: &SelectStmt) -> Result<(), Strin
                 return Err(format!(
                     "SELECT expression '{}' references column '{}' which must appear in GROUP BY",
                     field.expr, column
-                ));
-            }
-        }
-    }
-
-    if let Some(having) = &select_stmt.having {
-        if group_by_exprs.contains(&having.to_string()) {
-            return Ok(());
-        }
-
-        if !expr_contains_aggregate_placeholder(having) {
-            return Err(format!(
-                "HAVING expression '{}' must be an aggregate or appear in GROUP BY",
-                having
-            ));
-        }
-
-        let referenced_columns = collect_non_placeholder_column_refs(having);
-        for column in referenced_columns {
-            if !group_by_exprs.contains(&column) {
-                return Err(format!(
-                    "HAVING expression '{}' references column '{}' which must appear in GROUP BY",
-                    having, column
                 ));
             }
         }
