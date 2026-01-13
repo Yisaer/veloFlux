@@ -213,6 +213,20 @@ async fn pipeline_table_driven_queries() {
             ],
         },
         TestCase {
+            name: "by_index_projection_with_alias",
+            sql: "SELECT a AS a1 FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+            )],
+            expected_rows: 3,
+            expected_columns: 1,
+            column_checks: vec![ColumnCheck {
+                expected_name: "a1".to_string(),
+                expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+            }],
+        },
+        TestCase {
             name: "simple_filter",
             sql: "SELECT a, b FROM stream WHERE a > 15",
             input_data: vec![

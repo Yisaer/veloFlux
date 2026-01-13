@@ -7,7 +7,6 @@ use crate::planner::physical::{
     PhysicalProjectField, PhysicalSinkConnector, PhysicalStreamingAggregation,
     PhysicalStreamingEncoder, StreamingWindowSpec,
 };
-use sqlparser::ast::Expr;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -345,7 +344,7 @@ fn rewrite_by_index_projection_into_encoder(
         let mut columns = Vec::new();
         let mut remaining_fields = Vec::new();
         for field in &project.fields {
-            if is_unaliased_by_index_field(field) {
+            if is_by_index_field(field) {
                 if let Some(column) = by_index_projection_column_from_field(field) {
                     columns.push(column);
                 }
@@ -519,21 +518,11 @@ fn rewrite_by_index_nodes(
     rebuilt
 }
 
-fn is_unaliased_by_index_field(field: &PhysicalProjectField) -> bool {
-    let ScalarExpr::Column(ColumnRef::ByIndex { .. }) = &field.compiled_expr else {
-        return false;
-    };
-    original_expr_matches_field_name(&field.original_expr, &field.field_name)
-}
-
-fn original_expr_matches_field_name(original_expr: &Expr, field_name: &str) -> bool {
-    match original_expr {
-        Expr::Identifier(ident) => ident.value == field_name,
-        Expr::CompoundIdentifier(parts) => {
-            parts.last().is_some_and(|ident| ident.value == field_name)
-        }
-        _ => false,
-    }
+fn is_by_index_field(field: &PhysicalProjectField) -> bool {
+    matches!(
+        &field.compiled_expr,
+        ScalarExpr::Column(ColumnRef::ByIndex { .. })
+    )
 }
 
 impl PhysicalOptRule for InsertBarrierForFanIn {
