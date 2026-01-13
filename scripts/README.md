@@ -1,6 +1,6 @@
 # Scripts: Heap Flamegraph Tooling (Ubuntu)
 
-This directory contains helper scripts to capture a jemalloc heap dump from a running SynapseFlow process and convert it into a flamegraph SVG.
+This directory contains helper scripts to capture a jemalloc heap dump from a running veloFlux process and convert it into a flamegraph SVG.
 
 ## Other scripts
 

@@ -1,4 +1,4 @@
-//! Bootstrap utilities for initializing the synapseFlow server.
+//! Bootstrap utilities for initializing the veloFlux server.
 //!
 //! This module provides a default initialization function that handles:
 //! - CLI argument parsing (--config, --data-dir)

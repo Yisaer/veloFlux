@@ -1,8 +1,8 @@
-# synapseFlow
+# veloFlux
 
 an open-source streaming processor written in Rust and designed for resource-sensitive environments.
 
-[![codecov](https://codecov.io/gh/Yisaer/synapseFlow/branch/main/graph/badge.svg)](https://app.codecov.io/gh/Yisaer/synapseFlow)
+[![codecov](https://codecov.io/gh/Yisaer/veloFlux/branch/main/graph/badge.svg)](https://app.codecov.io/gh/Yisaer/veloFlux)
 
 ## Quick start
 Prereq: Rust stable toolchain and `make`.
