@@ -5,9 +5,11 @@ use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter_vec, IntCounterVec};
 use rumqttc::{
-    AsyncClient, ClientError, ConnectionError, Event, EventLoop, MqttOptions, QoS, Transport,
+    AsyncClient, ClientError, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS,
+    Transport,
 };
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use url::Url;
 
 use crate::connector::mqtt_client::{MqttClientManager, SharedMqttClient};
@@ -164,13 +166,23 @@ impl StandaloneMqttClient {
 }
 
 async fn run_event_loop(mut event_loop: EventLoop) {
+    let mut backoff = std::time::Duration::from_millis(100);
+    let max_backoff = std::time::Duration::from_secs(5);
     loop {
         match event_loop.poll().await {
-            Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) => {}
+            Ok(Event::Incoming(Packet::Disconnect)) => {
+                tracing::warn!("mqtt sink disconnected; reconnecting");
+                event_loop.clean();
+                backoff = std::time::Duration::from_millis(100);
+            }
+            Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) => {
+                backoff = std::time::Duration::from_millis(100);
+            }
             Err(ConnectionError::RequestsDone) => break,
             Err(err) => {
-                tracing::error!(error = %err, "mqtt sink event loop error");
-                break;
+                tracing::warn!(error = %err, "mqtt sink event loop error; reconnecting");
+                sleep(backoff).await;
+                backoff = std::cmp::min(backoff * 2, max_backoff);
             }
         }
     }

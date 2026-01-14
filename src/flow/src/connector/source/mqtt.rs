@@ -7,6 +7,7 @@ use prometheus::{register_int_counter_vec, IntCounterVec};
 use rumqttc::{AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::sleep;
 use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 
@@ -145,9 +146,12 @@ impl SourceConnector for MqttSourceConnector {
                                         }
                                         Ok(Err(err)) => {
                                             let _ = sender.send(Err(err)).await;
+                                            continue;
+                                        }
+                                        Err(_) => {
+                                            let _ = sender.send(Ok(ConnectorEvent::EndOfStream)).await;
                                             break;
                                         }
-                                        Err(_) => break,
                                     }
                                 }
                             }
@@ -200,9 +204,12 @@ async fn run_standalone_loop(
     let (client, mut event_loop) = AsyncClient::new(mqtt_options, 32);
 
     client
-        .subscribe(topic, qos)
+        .subscribe(topic.clone(), qos)
         .await
         .map_err(|e| ConnectorError::Connection(e.to_string()))?;
+
+    let mut backoff = Duration::from_millis(100);
+    let max_backoff = Duration::from_secs(5);
 
     loop {
         tokio::select! {
@@ -223,10 +230,21 @@ async fn run_standalone_loop(
                             Err(_) => break,
                         }
                     }
-                    Ok(Event::Incoming(Packet::Disconnect)) => break,
+                    Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                        backoff = Duration::from_millis(100);
+                        let _ = client.subscribe(topic.clone(), qos).await;
+                    }
+                    Ok(Event::Incoming(Packet::Disconnect)) => {
+                        tracing::warn!(connector_id = %connector_id, "mqtt source disconnected; reconnecting");
+                        event_loop.clean();
+                    }
                     Ok(_) => {}
                     Err(ConnectionError::RequestsDone) => break,
-                    Err(err) => return Err(ConnectorError::Connection(err.to_string())),
+                    Err(err) => {
+                        let _ = sender.send(Err(ConnectorError::Connection(err.to_string()))).await;
+                        sleep(backoff).await;
+                        backoff = std::cmp::min(backoff * 2, max_backoff);
+                    }
                 }
             }
         }

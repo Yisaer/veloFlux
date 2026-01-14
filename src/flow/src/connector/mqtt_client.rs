@@ -8,6 +8,7 @@ use rumqttc::{
 };
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
+use tokio::time::sleep;
 use url::Url;
 
 use crate::connector::ConnectorError;
@@ -65,6 +66,8 @@ struct MqttClientEntry {
     shutdown_tx: watch::Sender<bool>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
     ref_count: AtomicUsize,
+    topic: String,
+    qos: QoS,
 }
 
 impl MqttClientEntry {
@@ -73,10 +76,11 @@ impl MqttClientEntry {
         options.set_keep_alive(Duration::from_secs(30));
 
         let qos = map_qos(config.qos)?;
+        let topic = config.topic.clone();
 
         let (client, event_loop) = AsyncClient::new(options, 64);
         client
-            .subscribe(config.topic.clone(), qos)
+            .subscribe(topic.clone(), qos)
             .await
             .map_err(|err| ConnectorError::Connection(err.to_string()))?;
 
@@ -90,28 +94,41 @@ impl MqttClientEntry {
                 shutdown_tx,
                 join_handle: Mutex::new(None),
                 ref_count: AtomicUsize::new(0),
+                topic,
+                qos,
             },
             event_loop,
         ))
     }
 
-    fn start_event_loop(entry: &Arc<MqttClientEntry>, mut event_loop: EventLoop, topic: String) {
+    fn start_event_loop(entry: &Arc<MqttClientEntry>, mut event_loop: EventLoop) {
         let mut shutdown_rx = entry.shutdown_tx.subscribe();
         let events_tx = entry.events_tx.clone();
+        let topic = entry.topic.clone();
+        let qos = entry.qos;
+        let client = entry.client.clone();
 
         let handle = tokio::spawn(async move {
+            let mut backoff = Duration::from_millis(100);
+            let max_backoff = Duration::from_secs(5);
+
             loop {
                 tokio::select! {
                     _ = shutdown_rx.changed() => break,
                     event = event_loop.poll() => match event {
                         Ok(Event::Incoming(Packet::Publish(publish))) => {
+                            backoff = Duration::from_millis(100);
                             if publish.topic == topic {
                                 let _ = events_tx.send(Ok(SharedMqttEvent::Payload(publish.payload.to_vec())));
                             }
                         }
                         Ok(Event::Incoming(Packet::Disconnect)) => {
-                            let _ = events_tx.send(Ok(SharedMqttEvent::EndOfStream));
-                            break;
+                            tracing::warn!("shared mqtt client disconnected; reconnecting");
+                            event_loop.clean();
+                        }
+                        Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                            backoff = Duration::from_millis(100);
+                            let _ = client.subscribe(topic.clone(), qos).await;
                         }
                         Ok(_) => {}
                         Err(ConnectionError::RequestsDone) => {
@@ -120,7 +137,8 @@ impl MqttClientEntry {
                         }
                         Err(err) => {
                             let _ = events_tx.send(Err(ConnectorError::Connection(err.to_string())));
-                            break;
+                            sleep(backoff).await;
+                            backoff = std::cmp::min(backoff * 2, max_backoff);
                         }
                     }
                 }
@@ -167,7 +185,7 @@ impl MqttClientManager {
 
         let (entry, event_loop) = MqttClientEntry::new(&config).await?;
         let entry = Arc::new(entry);
-        MqttClientEntry::start_event_loop(&entry, event_loop, config.topic.clone());
+        MqttClientEntry::start_event_loop(&entry, event_loop);
 
         self.entries.lock().unwrap().insert(key, entry);
         Ok(())
