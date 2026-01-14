@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use rumqttc::{
@@ -52,6 +52,37 @@ impl SharedMqttClient {
     pub fn subscribe(&self) -> broadcast::Receiver<Result<SharedMqttEvent, ConnectorError>> {
         self.entry.events_tx.subscribe()
     }
+
+    pub fn is_connected(&self) -> bool {
+        self.entry.connected.load(Ordering::Acquire)
+    }
+
+    pub async fn publish(
+        &self,
+        topic: String,
+        qos: QoS,
+        retain: bool,
+        payload: Vec<u8>,
+    ) -> Result<(), ConnectorError> {
+        if !self.is_connected() {
+            let last_error = self
+                .entry
+                .last_error
+                .read()
+                .expect("mqtt client error lock poisoned")
+                .clone();
+            let message = last_error
+                .map(|err| format!("mqtt not connected: {err}"))
+                .unwrap_or_else(|| "mqtt not connected".to_string());
+            return Err(ConnectorError::Connection(message));
+        }
+
+        self.entry
+            .client
+            .publish(topic, qos, retain, payload)
+            .await
+            .map_err(|err| ConnectorError::Connection(err.to_string()))
+    }
 }
 
 impl Drop for SharedMqttClient {
@@ -68,6 +99,8 @@ struct MqttClientEntry {
     ref_count: AtomicUsize,
     topic: String,
     qos: QoS,
+    connected: AtomicBool,
+    last_error: RwLock<Option<String>>,
 }
 
 impl MqttClientEntry {
@@ -96,12 +129,15 @@ impl MqttClientEntry {
                 ref_count: AtomicUsize::new(0),
                 topic,
                 qos,
+                connected: AtomicBool::new(false),
+                last_error: RwLock::new(None),
             },
             event_loop,
         ))
     }
 
     fn start_event_loop(entry: &Arc<MqttClientEntry>, mut event_loop: EventLoop) {
+        let entry_for_task = Arc::clone(entry);
         let mut shutdown_rx = entry.shutdown_tx.subscribe();
         let events_tx = entry.events_tx.clone();
         let topic = entry.topic.clone();
@@ -117,25 +153,39 @@ impl MqttClientEntry {
                     _ = shutdown_rx.changed() => break,
                     event = event_loop.poll() => match event {
                         Ok(Event::Incoming(Packet::Publish(publish))) => {
+                            entry_for_task.connected.store(true, Ordering::Release);
                             backoff = Duration::from_millis(100);
                             if publish.topic == topic {
                                 let _ = events_tx.send(Ok(SharedMqttEvent::Payload(publish.payload.to_vec())));
                             }
                         }
                         Ok(Event::Incoming(Packet::Disconnect)) => {
+                            entry_for_task.connected.store(false, Ordering::Release);
+                            if let Ok(mut guard) = entry_for_task.last_error.write() {
+                                *guard = Some("disconnect".to_string());
+                            }
                             tracing::warn!("shared mqtt client disconnected; reconnecting");
                             event_loop.clean();
                         }
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                            entry_for_task.connected.store(true, Ordering::Release);
+                            if let Ok(mut guard) = entry_for_task.last_error.write() {
+                                *guard = None;
+                            }
                             backoff = Duration::from_millis(100);
                             let _ = client.subscribe(topic.clone(), qos).await;
                         }
                         Ok(_) => {}
                         Err(ConnectionError::RequestsDone) => {
+                            entry_for_task.connected.store(false, Ordering::Release);
                             let _ = events_tx.send(Ok(SharedMqttEvent::EndOfStream));
                             break;
                         }
                         Err(err) => {
+                            entry_for_task.connected.store(false, Ordering::Release);
+                            if let Ok(mut guard) = entry_for_task.last_error.write() {
+                                *guard = Some(err.to_string());
+                            }
                             let _ = events_tx.send(Err(ConnectorError::Connection(err.to_string())));
                             sleep(backoff).await;
                             backoff = std::cmp::min(backoff * 2, max_backoff);

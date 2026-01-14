@@ -8,6 +8,8 @@ use rumqttc::{
     AsyncClient, ClientError, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS,
     Transport,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use url::Url;
@@ -106,7 +108,6 @@ impl SinkClient {
     ) -> Result<(), SinkConnectorError> {
         match self {
             SinkClient::Shared(shared) => shared
-                .client()
                 .publish(topic.to_string(), qos, retain, payload)
                 .await
                 .map_err(|err| SinkConnectorError::Other(format!("mqtt publish error: {err}"))),
@@ -127,16 +128,54 @@ impl SinkClient {
 struct StandaloneMqttClient {
     client: AsyncClient,
     event_loop_handle: JoinHandle<()>,
+    state: MqttConnectionState,
+}
+
+#[derive(Clone, Default)]
+struct MqttConnectionState {
+    connected: Arc<AtomicBool>,
+    last_error: Arc<RwLock<Option<String>>>,
+}
+
+impl MqttConnectionState {
+    fn is_connected(&self) -> bool {
+        self.connected.load(Ordering::Acquire)
+    }
+
+    fn set_connected(&self, connected: bool) {
+        self.connected.store(connected, Ordering::Release);
+        if connected {
+            if let Ok(mut guard) = self.last_error.write() {
+                *guard = None;
+            }
+        }
+    }
+
+    fn set_error(&self, err: impl Into<String>) {
+        self.connected.store(false, Ordering::Release);
+        if let Ok(mut guard) = self.last_error.write() {
+            *guard = Some(err.into());
+        }
+    }
+
+    fn last_error(&self) -> Option<String> {
+        self.last_error
+            .read()
+            .expect("mqtt sink error lock poisoned")
+            .clone()
+    }
 }
 
 impl StandaloneMqttClient {
     async fn new(config: &MqttSinkConfig) -> Result<Self, SinkConnectorError> {
         let options = build_mqtt_options(config)?;
         let (client, event_loop) = AsyncClient::new(options, 32);
-        let event_loop_handle = tokio::spawn(run_event_loop(event_loop));
+        let state = MqttConnectionState::default();
+        let event_loop_handle = tokio::spawn(run_event_loop(event_loop, state.clone()));
         Ok(Self {
             client,
             event_loop_handle,
+            state,
         })
     }
 
@@ -147,6 +186,15 @@ impl StandaloneMqttClient {
         retain: bool,
         payload: Vec<u8>,
     ) -> Result<(), SinkConnectorError> {
+        if !self.state.is_connected() {
+            let message = self
+                .state
+                .last_error()
+                .map(|err| format!("mqtt not connected: {err}"))
+                .unwrap_or_else(|| "mqtt not connected".to_string());
+            return Err(SinkConnectorError::Other(message));
+        }
+
         self.client
             .publish(topic.to_string(), qos, retain, payload)
             .await
@@ -165,22 +213,29 @@ impl StandaloneMqttClient {
     }
 }
 
-async fn run_event_loop(mut event_loop: EventLoop) {
+async fn run_event_loop(mut event_loop: EventLoop, state: MqttConnectionState) {
     let mut backoff = std::time::Duration::from_millis(100);
     let max_backoff = std::time::Duration::from_secs(5);
     loop {
         match event_loop.poll().await {
+            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                state.set_connected(true);
+                backoff = std::time::Duration::from_millis(100);
+            }
             Ok(Event::Incoming(Packet::Disconnect)) => {
                 tracing::warn!("mqtt sink disconnected; reconnecting");
+                state.set_error("disconnect");
                 event_loop.clean();
                 backoff = std::time::Duration::from_millis(100);
             }
             Ok(Event::Incoming(_)) | Ok(Event::Outgoing(_)) => {
+                state.set_connected(true);
                 backoff = std::time::Duration::from_millis(100);
             }
             Err(ConnectionError::RequestsDone) => break,
             Err(err) => {
                 tracing::warn!(error = %err, "mqtt sink event loop error; reconnecting");
+                state.set_error(err.to_string());
                 sleep(backoff).await;
                 backoff = std::cmp::min(backoff * 2, max_backoff);
             }
