@@ -10,7 +10,7 @@ use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
-use tokio::time::{interval, timeout, MissedTickBehavior};
+use tokio::time::{interval_at, timeout, Instant, MissedTickBehavior};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 const SINK_READY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
@@ -201,7 +201,7 @@ impl SinkProcessor {
     }
 
     fn new_ready_interval() -> tokio::time::Interval {
-        let mut interval = interval(SINK_READY_RETRY_INTERVAL);
+        let mut interval = interval_at(Instant::now(), SINK_READY_RETRY_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         interval
     }
