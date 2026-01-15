@@ -8,8 +8,83 @@ use crate::processor::base::{
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
+use tokio::time::{interval_at, timeout, Instant, MissedTickBehavior};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+const SINK_READY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const SINK_READY_TIMEOUT: Duration = Duration::from_secs(2);
+const SINK_READY_FAST_TIMEOUT: Duration = Duration::from_millis(1);
+
+struct ReadyState {
+    ready: bool,
+    last_error: Option<String>,
+    drop_logged: bool,
+}
+
+impl ReadyState {
+    fn new() -> Self {
+        Self {
+            ready: false,
+            last_error: None,
+            drop_logged: false,
+        }
+    }
+
+    fn is_ready(&self) -> bool {
+        self.ready
+    }
+
+    fn mark_ready(&mut self, processor_id: &str) {
+        if self.last_error.is_some() {
+            tracing::info!(processor_id = %processor_id, "sink connector ready");
+        }
+        self.ready = true;
+        self.last_error = None;
+        self.drop_logged = false;
+    }
+
+    fn record_ready_error(&mut self, processor_id: &str, stats: &ProcessorStats, message: String) {
+        let should_report = self.last_error.as_ref() != Some(&message);
+        if should_report {
+            tracing::warn!(
+                processor_id = %processor_id,
+                error = %message,
+                "sink connector ready error"
+            );
+            stats.record_error(message.clone());
+        }
+        self.last_error = Some(message);
+        self.drop_logged = false;
+    }
+
+    fn should_drop_data(&mut self, processor_id: &str, stats: &ProcessorStats) -> bool {
+        if self.ready {
+            return false;
+        }
+        if !self.drop_logged {
+            let message = self
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "sink connector not ready".to_string());
+            tracing::warn!(
+                processor_id = %processor_id,
+                error = %message,
+                "sink connector not ready; dropping data"
+            );
+            stats.record_error(message);
+            self.drop_logged = true;
+        }
+        true
+    }
+}
+
+enum ControlAction {
+    Continue,
+    Deactivate,
+    Stop,
+}
 
 struct ConnectorBinding {
     connector: Box<dyn SinkConnector>,
@@ -125,6 +200,126 @@ impl SinkProcessor {
     async fn handle_terminal(connector: &mut ConnectorBinding) -> Result<(), ProcessorError> {
         connector.close().await
     }
+
+    fn new_ready_interval() -> tokio::time::Interval {
+        let mut interval = interval_at(Instant::now(), SINK_READY_RETRY_INTERVAL);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        interval
+    }
+
+    async fn attempt_ready_with_timeout(
+        connector: &mut ConnectorBinding,
+        timeout_duration: Duration,
+    ) -> Result<(), String> {
+        match timeout(timeout_duration, connector.ready()).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(err)) => Err(err.to_string()),
+            Err(_) => Err(format!(
+                "sink connector ready timeout after {:?}",
+                timeout_duration
+            )),
+        }
+    }
+
+    async fn handle_control_item(
+        processor_id: &str,
+        control_output: &broadcast::Sender<ControlSignal>,
+        connector: &mut ConnectorBinding,
+        item: Option<Result<ControlSignal, BroadcastStreamRecvError>>,
+    ) -> Result<ControlAction, ProcessorError> {
+        let Some(Ok(control_signal)) = item else {
+            return Ok(ControlAction::Deactivate);
+        };
+        let is_terminal = control_signal.is_terminal();
+        send_control_with_backpressure(control_output, control_signal).await?;
+        if is_terminal {
+            tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
+            Self::handle_terminal(connector).await?;
+            tracing::info!(processor_id = %processor_id, "stopped");
+            return Ok(ControlAction::Stop);
+        }
+        Ok(ControlAction::Continue)
+    }
+
+    async fn handle_input_item(
+        processor_id: &str,
+        stats: &ProcessorStats,
+        ready_state: &mut ReadyState,
+        connector: &mut ConnectorBinding,
+        forward_data: bool,
+        output: &broadcast::Sender<StreamData>,
+        data: StreamData,
+    ) -> Result<bool, ProcessorError> {
+        log_received_data(processor_id, &data);
+        if let Some(rows) = data.num_rows_hint() {
+            stats.record_in(rows);
+        }
+        match data {
+            StreamData::EncodedBytes { payload, num_rows } => {
+                if !ready_state.is_ready()
+                    && Self::attempt_ready_with_timeout(connector, SINK_READY_FAST_TIMEOUT)
+                        .await
+                        .is_ok()
+                {
+                    ready_state.mark_ready(processor_id);
+                }
+                if ready_state.should_drop_data(processor_id, stats) {
+                    return Ok(false);
+                }
+                if let Err(err) = Self::handle_payload(connector, payload.as_ref()).await {
+                    tracing::error!(
+                        processor_id = %processor_id,
+                        error = %err,
+                        "payload handling error"
+                    );
+                    stats.record_error(err.to_string());
+                    return Ok(false);
+                }
+                stats.record_out(1);
+                if forward_data {
+                    send_with_backpressure(output, StreamData::EncodedBytes { payload, num_rows })
+                        .await?;
+                }
+            }
+            StreamData::Collection(collection) => {
+                if !ready_state.is_ready()
+                    && Self::attempt_ready_with_timeout(connector, SINK_READY_FAST_TIMEOUT)
+                        .await
+                        .is_ok()
+                {
+                    ready_state.mark_ready(processor_id);
+                }
+                if ready_state.should_drop_data(processor_id, stats) {
+                    return Ok(false);
+                }
+                let in_rows = collection.num_rows() as u64;
+                if let Err(err) = Self::handle_collection(connector, collection.as_ref()).await {
+                    tracing::error!(
+                        processor_id = %processor_id,
+                        error = %err,
+                        "collection handling error"
+                    );
+                    stats.record_error(err.to_string());
+                    return Ok(false);
+                }
+                stats.record_out(in_rows);
+                if forward_data {
+                    send_with_backpressure(output, StreamData::Collection(collection)).await?;
+                }
+            }
+            data => {
+                let is_terminal = data.is_terminal();
+                send_with_backpressure(output, data).await?;
+                if is_terminal {
+                    tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
+                    Self::handle_terminal(connector).await?;
+                    tracing::info!(processor_id = %processor_id, "stopped");
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
 }
 
 impl Processor for SinkProcessor {
@@ -153,86 +348,53 @@ impl Processor for SinkProcessor {
         tracing::info!(processor_id = %processor_id, "sink processor starting");
 
         tokio::spawn(async move {
-            connector.ready().await?;
+            let mut ready_state = ReadyState::new();
+            let mut ready_interval = Self::new_ready_interval();
             loop {
                 tokio::select! {
                     biased;
                     control_item = control_streams.next(), if control_active => {
-                        if let Some(Ok(control_signal)) = control_item {
-                            let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
-                            if is_terminal {
-                                tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
-                                Self::handle_terminal(&mut connector).await?;
-                                tracing::info!(processor_id = %processor_id, "stopped");
-                                return Ok(());
+                        match Self::handle_control_item(
+                            &processor_id,
+                            &control_output,
+                            &mut connector,
+                            control_item,
+                        )
+                        .await?
+                        {
+                            ControlAction::Continue => {}
+                            ControlAction::Deactivate => control_active = false,
+                            ControlAction::Stop => return Ok(()),
+                        };
+                    }
+                    _ = ready_interval.tick(), if !ready_state.is_ready() => {
+                        match Self::attempt_ready_with_timeout(
+                            &mut connector,
+                            SINK_READY_TIMEOUT,
+                        )
+                        .await
+                        {
+                            Ok(()) => ready_state.mark_ready(&processor_id),
+                            Err(message) => {
+                                ready_state.record_ready_error(&processor_id, stats.as_ref(), message);
                             }
-                            continue;
-                        } else {
-                            control_active = false;
                         }
                     }
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(data)) => {
-                                log_received_data(&processor_id, &data);
-                                if let Some(rows) = data.num_rows_hint() {
-                                    stats.record_in(rows);
-                                }
-                                match data {
-                                    StreamData::EncodedBytes { payload, num_rows } => {
-                                        if let Err(err) = Self::handle_payload(
-                                            &mut connector,
-                                            payload.as_ref(),
-                                        )
-                                        .await
-                                        {
-                                            tracing::error!(processor_id = %processor_id, error = %err, "payload handling error");
-                                            stats.record_error(err.to_string());
-                                            continue;
-                                        }
-                                        stats.record_out(1);
-
-                                        if forward_data {
-                                            send_with_backpressure(
-                                                &output,
-                                                StreamData::EncodedBytes { payload, num_rows },
-                                            )
-                                            .await?;
-                                        }
-                                    }
-                                    StreamData::Collection(collection) => {
-                                        let in_rows = collection.num_rows() as u64;
-                                        if let Err(err) = Self::handle_collection(
-                                            &mut connector,
-                                            collection.as_ref(),
-                                        )
-                                        .await
-                                        {
-                                            tracing::error!(processor_id = %processor_id, error = %err, "collection handling error");
-                                            stats.record_error(err.to_string());
-                                            continue;
-                                        }
-                                        stats.record_out(in_rows);
-
-                                        if forward_data {
-                                            send_with_backpressure(
-                                                &output,
-                                                StreamData::Collection(collection),
-                                            )
-                                            .await?;
-                                        }
-                                    }
-                                    data => {
-                                        let is_terminal = data.is_terminal();
-                                        send_with_backpressure(&output, data).await?;
-                                        if is_terminal {
-                                            tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
-                                            Self::handle_terminal(&mut connector).await?;
-                                            tracing::info!(processor_id = %processor_id, "stopped");
-                                            return Ok(());
-                                        }
-                                    }
+                                if Self::handle_input_item(
+                                    &processor_id,
+                                    stats.as_ref(),
+                                    &mut ready_state,
+                                    &mut connector,
+                                    forward_data,
+                                    &output,
+                                    data,
+                                )
+                                .await?
+                                {
+                                    return Ok(());
                                 }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
