@@ -44,12 +44,7 @@ impl ReadyState {
         self.drop_logged = false;
     }
 
-    fn record_ready_error(
-        &mut self,
-        processor_id: &str,
-        stats: &ProcessorStats,
-        message: String,
-    ) {
+    fn record_ready_error(&mut self, processor_id: &str, stats: &ProcessorStats, message: String) {
         let should_report = self
             .last_error
             .as_ref()
@@ -274,11 +269,8 @@ impl SinkProcessor {
                 }
                 stats.record_out(1);
                 if forward_data {
-                    send_with_backpressure(
-                        output,
-                        StreamData::EncodedBytes { payload, num_rows },
-                    )
-                    .await?;
+                    send_with_backpressure(output, StreamData::EncodedBytes { payload, num_rows })
+                        .await?;
                 }
             }
             StreamData::Collection(collection) => {
