@@ -8,8 +8,13 @@ use crate::processor::base::{
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
+use tokio::time::{interval, timeout, MissedTickBehavior};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+const SINK_READY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const SINK_READY_TIMEOUT: Duration = Duration::from_secs(2);
 
 struct ConnectorBinding {
     connector: Box<dyn SinkConnector>,
@@ -153,7 +158,11 @@ impl Processor for SinkProcessor {
         tracing::info!(processor_id = %processor_id, "sink processor starting");
 
         tokio::spawn(async move {
-            connector.ready().await?;
+            let mut connector_ready = false;
+            let mut last_ready_error: Option<String> = None;
+            let mut drop_logged = false;
+            let mut ready_interval = interval(SINK_READY_RETRY_INTERVAL);
+            ready_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     biased;
@@ -172,6 +181,54 @@ impl Processor for SinkProcessor {
                             control_active = false;
                         }
                     }
+                    _ = ready_interval.tick(), if !connector_ready => {
+                        let ready_result = timeout(SINK_READY_TIMEOUT, connector.ready()).await;
+                        match ready_result {
+                            Ok(Ok(())) => {
+                                if last_ready_error.is_some() {
+                                    tracing::info!(processor_id = %processor_id, "sink connector ready");
+                                }
+                                connector_ready = true;
+                                last_ready_error = None;
+                                drop_logged = false;
+                            }
+                            Ok(Err(err)) => {
+                                let message = err.to_string();
+                                let should_report = last_ready_error
+                                    .as_ref()
+                                    .map_or(true, |prev| prev != &message);
+                                if should_report {
+                                    tracing::warn!(
+                                        processor_id = %processor_id,
+                                        error = %message,
+                                        "sink connector ready error"
+                                    );
+                                    stats.record_error(message.clone());
+                                }
+                                last_ready_error = Some(message);
+                                drop_logged = false;
+                            }
+                            Err(_) => {
+                                let message = format!(
+                                    "sink connector ready timeout after {:?}",
+                                    SINK_READY_TIMEOUT
+                                );
+                                let should_report = last_ready_error
+                                    .as_ref()
+                                    .map_or(true, |prev| prev != &message);
+                                if should_report {
+                                    tracing::warn!(
+                                        processor_id = %processor_id,
+                                        error = %message,
+                                        "sink connector ready error"
+                                    );
+                                    stats.record_error(message.clone());
+                                }
+                                last_ready_error = Some(message);
+                                drop_logged = false;
+                            }
+                        }
+                    }
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(data)) => {
@@ -181,6 +238,21 @@ impl Processor for SinkProcessor {
                                 }
                                 match data {
                                     StreamData::EncodedBytes { payload, num_rows } => {
+                                        if !connector_ready {
+                                            if !drop_logged {
+                                                let message = last_ready_error.clone().unwrap_or_else(|| {
+                                                    "sink connector not ready".to_string()
+                                                });
+                                                tracing::warn!(
+                                                    processor_id = %processor_id,
+                                                    error = %message,
+                                                    "sink connector not ready; dropping data"
+                                                );
+                                                stats.record_error(message);
+                                                drop_logged = true;
+                                            }
+                                            continue;
+                                        }
                                         if let Err(err) = Self::handle_payload(
                                             &mut connector,
                                             payload.as_ref(),
@@ -202,6 +274,21 @@ impl Processor for SinkProcessor {
                                         }
                                     }
                                     StreamData::Collection(collection) => {
+                                        if !connector_ready {
+                                            if !drop_logged {
+                                                let message = last_ready_error.clone().unwrap_or_else(|| {
+                                                    "sink connector not ready".to_string()
+                                                });
+                                                tracing::warn!(
+                                                    processor_id = %processor_id,
+                                                    error = %message,
+                                                    "sink connector not ready; dropping data"
+                                                );
+                                                stats.record_error(message);
+                                                drop_logged = true;
+                                            }
+                                            continue;
+                                        }
                                         let in_rows = collection.num_rows() as u64;
                                         if let Err(err) = Self::handle_collection(
                                             &mut connector,
