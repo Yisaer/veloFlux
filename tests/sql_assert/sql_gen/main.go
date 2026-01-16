@@ -36,7 +36,8 @@ type SchemaConfig struct {
 }
 
 func main() {
-	defaultConfig := "tests/sql_assert/config.toml"
+	// Default to the sibling config file so `go -C tests/sql_assert/sql_gen run .` works.
+	defaultConfig := "../config-test.toml"
 	configPath := flag.String("config", defaultConfig, "path to config.toml")
 	flag.Parse()
 
