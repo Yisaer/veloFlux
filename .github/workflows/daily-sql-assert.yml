@@ -37,7 +37,8 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Generate SQL
-        run: go -C tests/sql_assert/sql_gen run . --config ../config-test.toml
+        working-directory: tests/sql_assert/sql_gen
+        run: go run . --config ../config-test.toml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
