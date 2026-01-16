@@ -76,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if sqls.is_empty() {
         return Err(format!("no SQL statements found in {}", sql_path.display()).into());
     }
+    let sql_count = sqls.len();
 
     let table_name = config
         .schema
@@ -97,6 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = Connection::open(sqlite_path.as_str())?;
     reset_sqlite_table(&conn, &table_name, &columns)?;
 
+    let mut tested_sqls = 0usize;
     for (index, sql) in sqls.iter().enumerate() {
         truncate_sqlite_table(&conn, &table_name)?;
         let instance = FlowInstance::new();
@@ -161,8 +163,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let expected_multiset = multiset_diff(&current_multiset, &previous_results);
             previous_results = current_multiset;
 
+            let input_row = row_as_json_object(&columns, &row_values)?;
             publisher
-                .publish_bytes(encode_row_as_json(&columns, &row_values)?)
+                .publish_bytes(serde_json::to_vec(&input_row)?)
                 .expect("publish bytes");
 
             let actual_rows = recv_next_json_rows(&mut output, timeout_duration).await?;
@@ -172,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let expected_debug = JsonValue::Array(expand_multiset(&expected_multiset));
                 let actual_debug = JsonValue::Array(expand_multiset(&actual_multiset));
                 return Err(format!(
-                    "mismatch at sql index {index}, row {row_index}\nSQL: {sql}\nExpected: {expected_debug}\nActual: {actual_debug}"
+                    "mismatch at sql index {index}, row {row_index}\nSQL: {sql}\nInput: {input_row}\nExpected: {expected_debug}\nActual: {actual_debug}"
                 )
                 .into());
             }
@@ -186,8 +189,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .delete_pipeline(&pipeline_id)
             .await
             .unwrap_or_else(|_| panic!("failed to delete pipeline for SQL: {sql}"));
+
+        tested_sqls += 1;
     }
 
+    println!(
+        "sql_assert ok: tested {} SQL statements (configured {})",
+        tested_sqls, sql_count
+    );
     Ok(())
 }
 
@@ -501,10 +510,10 @@ fn declare_memory_topics(
         .expect("declare output memory topic");
 }
 
-fn encode_row_as_json(
+fn row_as_json_object(
     columns: &[ColumnSpec],
     values: &[Value],
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+) -> Result<JsonValue, Box<dyn std::error::Error>> {
     let mut obj = JsonMap::with_capacity(columns.len());
     for (col, value) in columns.iter().zip(values.iter()) {
         let json = match value {
@@ -522,7 +531,7 @@ fn encode_row_as_json(
         };
         obj.insert(col.name.clone(), json);
     }
-    Ok(serde_json::to_vec(&JsonValue::Object(obj))?)
+    Ok(JsonValue::Object(obj))
 }
 
 async fn install_stream_schema(
