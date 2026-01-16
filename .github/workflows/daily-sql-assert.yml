@@ -1,6 +1,11 @@
 name: Daily SQL Assert
 
 on:
+  # TEMP: enable running this workflow from the PR branch via push.
+  # Remove this after validation and keep only `schedule` + `workflow_dispatch`.
+  push:
+    branches:
+      - fix_action
   schedule:
     # 07:00 (UTC+8) == 23:00 UTC (previous day)
     - cron: "0 23 * * *"
@@ -37,7 +42,8 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Generate SQL
-        run: go -C tests/sql_assert/sql_gen run . --config ../config-test.toml
+        working-directory: tests/sql_assert/sql_gen
+        run: go run . --config ../config-test.toml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
