@@ -288,6 +288,7 @@ mod tests {
             shared: false,
             decoder: crate::stream::DecoderConfigRequest::default(),
             eventtime: None,
+            sampler: None,
         }
     }
 
