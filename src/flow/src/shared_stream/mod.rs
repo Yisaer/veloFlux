@@ -1,9 +1,10 @@
 use crate::codec::RecordDecoder;
 use crate::connector::SourceConnector;
 use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
+use crate::processor::SamplerConfig;
 use crate::processor::{
     ControlSignal, DataSourceProcessor, DecoderProcessor, InstantControlSignal, Processor,
-    ProcessorError, StreamData,
+    ProcessorError, SamplerProcessor, StreamData,
 };
 use datatypes::Schema;
 use once_cell::sync::Lazy;
@@ -247,6 +248,7 @@ pub struct SharedStreamConfig {
     pub schema: Arc<Schema>,
     pub connector: Option<SharedStreamConnectorSpec>,
     pub channel_capacity: usize,
+    pub sampler: Option<SamplerConfig>,
 }
 
 impl SharedStreamConfig {
@@ -256,6 +258,7 @@ impl SharedStreamConfig {
             schema,
             connector: None,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            sampler: None,
         }
     }
 
@@ -295,6 +298,15 @@ impl SharedStreamConfig {
 
     pub fn set_connector_factory(&mut self, factory: Arc<dyn SharedStreamConnectorFactory>) {
         self.connector = Some(SharedStreamConnectorSpec::Factory(factory));
+    }
+
+    pub fn with_sampler(mut self, sampler: SamplerConfig) -> Self {
+        self.sampler = Some(sampler);
+        self
+    }
+
+    pub fn set_sampler(&mut self, sampler: SamplerConfig) {
+        self.sampler = Some(sampler);
     }
 }
 
@@ -377,6 +389,7 @@ struct SharedStreamInner {
     created_at: SystemTime,
     connector_id: String,
     connector_factory: Arc<dyn SharedStreamConnectorFactory>,
+    sampler: Option<SamplerConfig>,
     runtime_lock: Mutex<()>,
     decoding_columns: Arc<std::sync::RwLock<Vec<String>>>,
     data_sender: broadcast::Sender<StreamData>,
@@ -390,6 +403,7 @@ struct SharedStreamInner {
 struct SharedStreamHandles {
     datasource: Option<JoinHandle<Result<(), ProcessorError>>>,
     decoder: Option<JoinHandle<Result<(), ProcessorError>>>,
+    sampler: Option<JoinHandle<Result<(), ProcessorError>>>,
     forward: Option<JoinHandle<()>>,
     control_forward: Option<JoinHandle<()>>,
     data_anchor: Option<broadcast::Receiver<StreamData>>,
@@ -411,6 +425,7 @@ impl SharedStreamInner {
             schema,
             connector,
             channel_capacity,
+            sampler,
         } = config;
 
         let connector_factory: Arc<dyn SharedStreamConnectorFactory> = match connector {
@@ -447,6 +462,7 @@ impl SharedStreamInner {
             created_at: SystemTime::now(),
             connector_id,
             connector_factory,
+            sampler,
             runtime_lock: Mutex::new(()),
             decoding_columns: Arc::clone(&decoding_columns),
             data_sender,
@@ -455,6 +471,7 @@ impl SharedStreamInner {
             handles: Mutex::new(SharedStreamHandles {
                 datasource: None,
                 decoder: None,
+                sampler: None,
                 forward: None,
                 control_forward: None,
                 data_anchor: Some(data_anchor),
@@ -519,12 +536,27 @@ impl SharedStreamInner {
             .with_projection(Arc::clone(&self.decoding_columns));
         decoder_processor.add_input(datasource_data_rx);
         decoder_processor.add_control_input(self.control_input.subscribe());
-        let mut data_rx = decoder_processor
+        let decoder_data_rx = decoder_processor
             .subscribe_output()
             .ok_or_else(|| SharedStreamError::Internal("decoder output unavailable".into()))?;
 
         let datasource_handle = datasource.start();
         let decoder_handle = decoder_processor.start();
+
+        // Optionally insert SamplerProcessor if configured
+        let (mut data_rx, sampler_handle) = if let Some(ref sampler_config) = self.sampler {
+            let sampler_id = format!("shared:{}/PhysicalSampler_2", self.name);
+            let mut sampler = SamplerProcessor::new(sampler_id, sampler_config.clone());
+            sampler.add_input(decoder_data_rx);
+            sampler.add_control_input(self.control_input.subscribe());
+            let sampler_rx = sampler
+                .subscribe_output()
+                .ok_or_else(|| SharedStreamError::Internal("sampler output unavailable".into()))?;
+            let handle = sampler.start();
+            (sampler_rx, Some(handle))
+        } else {
+            (decoder_data_rx, None)
+        };
 
         let name_for_data = self.name.clone();
         let data_tx = self.data_sender.clone();
@@ -590,6 +622,7 @@ impl SharedStreamInner {
         }
         handles.datasource = Some(datasource_handle);
         handles.decoder = Some(decoder_handle);
+        handles.sampler = sampler_handle;
         handles.forward = Some(forward);
         handles.control_forward = Some(control_forward);
         drop(handles);
