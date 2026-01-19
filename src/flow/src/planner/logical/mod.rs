@@ -144,6 +144,7 @@ pub fn create_logical_plan(
     validate_group_by_requires_aggregates(&select_stmt)?;
     validate_having_constraints(&select_stmt)?;
     validate_aggregation_projection(&select_stmt)?;
+    validate_select_alias_names(&select_stmt, stream_defs)?;
     validate_expression_types(&select_stmt, stream_defs)?;
 
     let start_index = 0i64;
@@ -322,6 +323,49 @@ fn validate_expression_types(
     }
     for expr in &select_stmt.group_by_exprs {
         validate_expr_against_sources(expr, &sources)?;
+    }
+
+    Ok(())
+}
+
+fn validate_select_alias_names(
+    select_stmt: &SelectStmt,
+    stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+) -> Result<(), String> {
+    use crate::expr::internal_columns::is_reserved_user_name;
+    use std::collections::HashSet;
+
+    // Collect all source column names; alias must not collide with any of them.
+    let mut source_column_names = HashSet::<String>::new();
+    for source_info in &select_stmt.source_infos {
+        let Some(definition) = stream_defs.get(&source_info.name) else {
+            continue;
+        };
+        for col in definition.schema().column_schemas() {
+            source_column_names.insert(col.name.clone());
+        }
+    }
+
+    let mut seen_aliases = HashSet::<String>::new();
+    for field in &select_stmt.select_fields {
+        let Some(alias) = field.alias.as_ref() else {
+            continue;
+        };
+
+        if is_reserved_user_name(alias.as_str()) {
+            return Err(format!("SELECT alias `{}` is reserved", alias));
+        }
+
+        if source_column_names.contains(alias) {
+            return Err(format!(
+                "SELECT alias `{}` collides with an input column name",
+                alias
+            ));
+        }
+
+        if !seen_aliases.insert(alias.clone()) {
+            return Err(format!("duplicate SELECT alias `{}`", alias));
+        }
     }
 
     Ok(())

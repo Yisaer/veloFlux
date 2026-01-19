@@ -1,4 +1,4 @@
-use crate::expr::internal_columns::is_parser_placeholder;
+use crate::expr::internal_columns::is_internal_derived;
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry};
 use crate::planner::decode_projection::{DecodeProjection, FieldPath, FieldPathSegment, ListIndex};
 use crate::planner::logical::{LogicalPlan, TailPlan};
@@ -318,7 +318,7 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
             return;
         }
 
-        if is_parser_placeholder(column_name) {
+        if is_internal_derived(column_name) {
             return;
         }
 

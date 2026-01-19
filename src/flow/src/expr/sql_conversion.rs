@@ -1,6 +1,6 @@
 use super::custom_func::CustomFuncRegistry;
 use super::func::{BinaryFunc, UnaryFunc};
-use super::internal_columns::is_parser_placeholder;
+use super::internal_columns::is_internal_derived;
 use super::scalar::ScalarExpr;
 use datatypes::{BooleanType, ConcreteDatatype, Float64Type, Int64Type, Schema, StringType, Value};
 use sqlparser::ast::{
@@ -319,7 +319,7 @@ fn convert_identifier_to_column(
         return Ok(ScalarExpr::wildcard_all());
     }
 
-    if is_parser_placeholder(column_name) {
+    if is_internal_derived(column_name) {
         // Aggregation placeholders (e.g., col_1) are produced during aggregate rewrite
         // and do not belong to any source schema. Treat them as derived columns.
         return Ok(ScalarExpr::column_with_column_name(column_name.to_string()));
