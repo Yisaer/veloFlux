@@ -16,7 +16,7 @@ use crate::processor::{
     FilterProcessor, Ingress, InstantControlSignal, Processor, ProcessorError, ProjectProcessor,
     ResultCollectProcessor, SharedStreamProcessor, SinkProcessor, SlidingWindowProcessor,
     StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
-    StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
+    StreamingEncoderProcessor, ThrottlerProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::stateful::StatefulFunctionRegistry;
@@ -68,6 +68,8 @@ pub enum PlanProcessor {
     ResultCollect(ResultCollectProcessor),
     /// BarrierProcessor created from PhysicalBarrier
     Barrier(BarrierProcessor),
+    /// ThrottlerProcessor for rate limiting
+    Throttler(ThrottlerProcessor),
 }
 
 #[derive(Clone)]
@@ -166,6 +168,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.id(),
             PlanProcessor::ResultCollect(p) => p.id(),
             PlanProcessor::Barrier(p) => p.id(),
+            PlanProcessor::Throttler(p) => p.id(),
         }
     }
 
@@ -189,6 +192,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(_) => "sink",
             PlanProcessor::ResultCollect(_) => "result_collect",
             PlanProcessor::Barrier(_) => "barrier",
+            PlanProcessor::Throttler(_) => "throttler",
         }
     }
 
@@ -218,6 +222,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.set_stats(stats),
             PlanProcessor::ResultCollect(p) => p.set_stats(stats),
             PlanProcessor::Barrier(p) => p.set_stats(stats),
+            PlanProcessor::Throttler(_) => { /* ThrottlerProcessor doesn't use stats */ }
         }
     }
 
@@ -242,6 +247,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.start(),
             PlanProcessor::ResultCollect(p) => p.start(),
             PlanProcessor::Barrier(p) => p.start(),
+            PlanProcessor::Throttler(p) => p.start(),
         }
     }
 
@@ -266,6 +272,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.subscribe_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_output(),
             PlanProcessor::Barrier(p) => p.subscribe_output(),
+            PlanProcessor::Throttler(p) => p.subscribe_output(),
         }
     }
 
@@ -290,6 +297,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.subscribe_control_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_control_output(),
             PlanProcessor::Barrier(p) => p.subscribe_control_output(),
+            PlanProcessor::Throttler(p) => p.subscribe_control_output(),
         }
     }
 
@@ -314,6 +322,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.add_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_input(receiver),
             PlanProcessor::Barrier(p) => p.add_input(receiver),
+            PlanProcessor::Throttler(p) => p.add_input(receiver),
         }
     }
 
@@ -338,6 +347,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.add_control_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_control_input(receiver),
             PlanProcessor::Barrier(p) => p.add_control_input(receiver),
+            PlanProcessor::Throttler(p) => p.add_control_input(receiver),
         }
     }
 }
@@ -890,6 +900,12 @@ fn create_processor_from_plan_node(
             let processor = BarrierProcessor::new(plan_name.clone(), expected_upstreams);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Barrier(processor),
+            ))
+        }
+        PhysicalPlan::Throttler(throttler) => {
+            let processor = ThrottlerProcessor::new(plan_name.clone(), throttler.rate_limit);
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::Throttler(processor),
             ))
         }
     }

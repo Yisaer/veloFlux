@@ -927,6 +927,9 @@ fn build_physical_node_with_prefix(
                 ));
             }
         }
+        PhysicalPlan::Throttler(throttler) => {
+            info.push(format!("rate_limit={:?}", throttler.rate_limit));
+        }
     }
 
     let mut children: Vec<ExplainNode> = plan
