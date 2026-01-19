@@ -251,21 +251,23 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             }
         }
         LogicalPlan::Compute(compute) => {
-            let mut temps = compute
+            // Keep compute fields in order; it reflects evaluation order (later fields may depend on earlier ones).
+            let temps = compute
                 .fields
                 .iter()
                 .map(|f| format!("{} = {}", f.field_name, f.expr))
                 .collect::<Vec<_>>();
-            temps.sort();
             info.push(format!("temps=[{}]", temps.join("; ")));
         }
         LogicalPlan::Project(project) => {
+            // Preserve legacy explain behavior: Project prints the output field list only.
+            // (Identity projections like `a` remain `fields=[a]`, not `a = a`.)
             let fields = project
                 .fields
                 .iter()
-                .map(|f| format!("{} = {}", f.field_name, f.expr))
+                .map(|f| f.field_name.clone())
                 .collect::<Vec<_>>();
-            info.push(format!("projections=[{}]", fields.join("; ")));
+            info.push(format!("fields=[{}]", fields.join("; ")));
         }
         LogicalPlan::DataSink(DataSinkPlan { sink, .. }) => {
             info.push(format!("sink_id={}", sink.sink_id));
@@ -621,21 +623,23 @@ fn build_physical_node_with_prefix(
             info.push(format!("predicate={}", filter.predicate));
         }
         PhysicalPlan::Compute(compute) => {
-            let mut temps = compute
+            // Keep compute fields in order; it reflects evaluation order (later fields may depend on earlier ones).
+            let temps = compute
                 .fields
                 .iter()
                 .map(|f| format!("{} = {}", f.field_name, f.original_expr))
                 .collect::<Vec<_>>();
-            temps.sort();
             info.push(format!("temps=[{}]", temps.join("; ")));
         }
         PhysicalPlan::Project(project) => {
+            // Preserve legacy explain behavior: PhysicalProject prints the output field list only.
+            // (Identity projections like `a` remain `fields=[a]`, not `a = a`.)
             let fields = project
                 .fields
                 .iter()
-                .map(|f| format!("{} = {}", f.field_name, f.original_expr))
+                .map(|f| f.field_name.clone())
                 .collect::<Vec<_>>();
-            info.push(format!("projections=[{}]", fields.join("; ")));
+            info.push(format!("fields=[{}]", fields.join("; ")));
             if project.passthrough_messages {
                 info.push("passthrough_messages=true".to_string());
             }
