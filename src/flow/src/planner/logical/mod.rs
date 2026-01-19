@@ -7,6 +7,7 @@ use std::sync::Arc;
 use datatypes::{ConcreteDatatype, Schema};
 
 pub mod aggregation;
+pub mod compute;
 pub mod datasource;
 pub mod filter;
 pub mod project;
@@ -17,6 +18,7 @@ pub mod window;
 
 use crate::planner::sink::PipelineSink;
 pub use aggregation::Aggregation;
+pub use compute::Compute;
 pub use datasource::DataSource;
 pub use filter::Filter;
 pub use project::Project;
@@ -51,6 +53,7 @@ pub enum LogicalPlan {
     StatefulFunction(StatefulFunctionPlan),
     Filter(Filter),
     Aggregation(Aggregation),
+    Compute(Compute),
     Project(Project),
     DataSink(DataSinkPlan),
     Tail(TailPlan),
@@ -64,6 +67,7 @@ impl LogicalPlan {
             LogicalPlan::StatefulFunction(plan) => plan.base.children(),
             LogicalPlan::Filter(plan) => plan.base.children(),
             LogicalPlan::Aggregation(plan) => plan.base.children(),
+            LogicalPlan::Compute(plan) => plan.base.children(),
             LogicalPlan::Project(plan) => plan.base.children(),
             LogicalPlan::DataSink(plan) => plan.base.children(),
             LogicalPlan::Tail(plan) => plan.base.children(),
@@ -77,6 +81,7 @@ impl LogicalPlan {
             LogicalPlan::StatefulFunction(_) => "StatefulFunction",
             LogicalPlan::Filter(_) => "Filter",
             LogicalPlan::Aggregation(_) => "Aggregation",
+            LogicalPlan::Compute(_) => "Compute",
             LogicalPlan::Project(_) => "Project",
             LogicalPlan::DataSink(_) => "DataSink",
             LogicalPlan::Tail(_) => "Tail",
@@ -90,6 +95,7 @@ impl LogicalPlan {
             LogicalPlan::StatefulFunction(plan) => plan.base.index(),
             LogicalPlan::Filter(plan) => plan.base.index(),
             LogicalPlan::Aggregation(plan) => plan.base.index(),
+            LogicalPlan::Compute(plan) => plan.base.index(),
             LogicalPlan::Project(plan) => plan.base.index(),
             LogicalPlan::DataSink(plan) => plan.base.index(),
             LogicalPlan::Tail(plan) => plan.base.index(),
@@ -141,8 +147,12 @@ pub fn create_logical_plan(
     sinks: Vec<PipelineSink>,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
 ) -> Result<Arc<LogicalPlan>, String> {
+    let mut select_stmt = select_stmt;
+
     validate_group_by_requires_aggregates(&select_stmt)?;
     validate_having_constraints(&select_stmt)?;
+    validate_select_alias_names(&select_stmt, stream_defs)?;
+    resolve_select_aliases(&mut select_stmt)?;
     validate_aggregation_projection(&select_stmt)?;
     validate_expression_types(&select_stmt, stream_defs)?;
 
@@ -266,17 +276,34 @@ pub fn create_logical_plan(
 
 pub fn verify_logical_plan(plan: &LogicalPlan) -> Result<(), String> {
     fn verify_node(plan: &LogicalPlan) -> Result<(), String> {
-        if let LogicalPlan::Project(project) = plan {
-            let mut seen = std::collections::HashSet::<&str>::with_capacity(project.fields.len());
-            for field in &project.fields {
-                if !seen.insert(field.field_name.as_str()) {
-                    return Err(format!(
-                        "duplicate project field name `{}` in {}",
-                        field.field_name,
-                        plan.get_plan_name()
-                    ));
+        match plan {
+            LogicalPlan::Project(project) => {
+                let mut seen =
+                    std::collections::HashSet::<&str>::with_capacity(project.fields.len());
+                for field in &project.fields {
+                    if !seen.insert(field.field_name.as_str()) {
+                        return Err(format!(
+                            "duplicate project field name `{}` in {}",
+                            field.field_name,
+                            plan.get_plan_name()
+                        ));
+                    }
                 }
             }
+            LogicalPlan::Compute(compute) => {
+                let mut seen =
+                    std::collections::HashSet::<&str>::with_capacity(compute.fields.len());
+                for field in &compute.fields {
+                    if !seen.insert(field.field_name.as_str()) {
+                        return Err(format!(
+                            "duplicate compute field name `{}` in {}",
+                            field.field_name,
+                            plan.get_plan_name()
+                        ));
+                    }
+                }
+            }
+            _ => {}
         }
 
         for child in plan.children() {
@@ -325,6 +352,499 @@ fn validate_expression_types(
     }
 
     Ok(())
+}
+
+fn validate_select_alias_names(
+    select_stmt: &SelectStmt,
+    stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+) -> Result<(), String> {
+    use crate::expr::internal_columns::is_reserved_user_name;
+    use std::collections::HashSet;
+
+    // Collect all source column names; alias must not collide with any of them.
+    let mut source_column_names = HashSet::<String>::new();
+    for source_info in &select_stmt.source_infos {
+        let Some(definition) = stream_defs.get(&source_info.name) else {
+            continue;
+        };
+        for col in definition.schema().column_schemas() {
+            source_column_names.insert(col.name.clone());
+        }
+    }
+
+    let mut seen_aliases = HashSet::<String>::new();
+    for field in &select_stmt.select_fields {
+        let Some(alias) = field.alias.as_ref() else {
+            continue;
+        };
+
+        if is_reserved_user_name(alias.as_str()) {
+            return Err(format!("SELECT alias `{}` is reserved", alias));
+        }
+
+        if source_column_names.contains(alias) {
+            return Err(format!(
+                "SELECT alias `{}` collides with an input column name",
+                alias
+            ));
+        }
+
+        if !seen_aliases.insert(alias.clone()) {
+            return Err(format!("duplicate SELECT alias `{}`", alias));
+        }
+    }
+
+    Ok(())
+}
+
+fn resolve_select_aliases(select_stmt: &mut SelectStmt) -> Result<(), String> {
+    use parser::window::Window;
+    use sqlparser::ast::Expr;
+    use std::collections::{HashMap, HashSet};
+
+    let all_aliases: HashSet<String> = select_stmt
+        .select_fields
+        .iter()
+        .filter_map(|f| f.alias.clone())
+        .collect();
+
+    if all_aliases.is_empty() {
+        return Ok(());
+    }
+
+    // For now, aliases are only supported in SELECT and WHERE.
+    //
+    // We intentionally fail fast for other clauses so users get a clear error rather
+    // than a later "column not found" during physical compilation.
+    if let Some(expr) = select_stmt.having.as_ref() {
+        if expr_references_any_alias(expr, &all_aliases) {
+            return Err("aliases in HAVING are not supported yet".to_string());
+        }
+    }
+    for expr in &select_stmt.group_by_exprs {
+        if expr_references_any_alias(expr, &all_aliases) {
+            return Err("aliases in GROUP BY are not supported yet".to_string());
+        }
+    }
+    if let Some(window) = select_stmt.window.as_ref() {
+        match window {
+            Window::State {
+                open,
+                emit,
+                partition_by,
+            } => {
+                if expr_references_any_alias(open.as_ref(), &all_aliases)
+                    || expr_references_any_alias(emit.as_ref(), &all_aliases)
+                    || partition_by
+                        .iter()
+                        .any(|expr| expr_references_any_alias(expr, &all_aliases))
+                {
+                    return Err("aliases in window definitions are not supported yet".to_string());
+                }
+            }
+            Window::Tumbling { .. } | Window::Count { .. } | Window::Sliding { .. } => {}
+        }
+    }
+
+    // Resolve aliases left-to-right.
+    //
+    // Example:
+    //   SELECT a + 1 AS b, b + 1 AS c
+    // becomes:
+    //   b := a + 1
+    //   c := (a + 1) + 1
+    let mut env: HashMap<String, Expr> = HashMap::new();
+    for field in &mut select_stmt.select_fields {
+        let rewritten = rewrite_expr_with_aliases_select_item(&field.expr, &env, &all_aliases)?;
+        field.expr = rewritten;
+        if let Some(alias) = field.alias.as_ref() {
+            env.insert(alias.clone(), field.expr.clone());
+        }
+    }
+
+    // Resolve aliases in WHERE using the final environment.
+    if let Some(expr) = select_stmt.where_condition.as_mut() {
+        let rewritten = rewrite_expr_with_aliases(expr, &env);
+        *expr = rewritten;
+    }
+
+    Ok(())
+}
+
+fn expr_references_any_alias(
+    expr: &sqlparser::ast::Expr,
+    aliases: &std::collections::HashSet<String>,
+) -> bool {
+    use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr};
+
+    match expr {
+        Expr::Identifier(ident) => aliases.contains(ident.value.as_str()),
+        Expr::CompoundIdentifier(_) => false,
+        Expr::BinaryOp { left, right, .. } => {
+            expr_references_any_alias(left, aliases) || expr_references_any_alias(right, aliases)
+        }
+        Expr::UnaryOp { expr, .. } => expr_references_any_alias(expr, aliases),
+        Expr::Nested(expr) => expr_references_any_alias(expr, aliases),
+        Expr::Cast { expr, .. } => expr_references_any_alias(expr, aliases),
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            expr_references_any_alias(expr, aliases)
+                || expr_references_any_alias(low, aliases)
+                || expr_references_any_alias(high, aliases)
+        }
+        Expr::InList { expr, list, .. } => {
+            expr_references_any_alias(expr, aliases)
+                || list
+                    .iter()
+                    .any(|item| expr_references_any_alias(item, aliases))
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            operand
+                .as_ref()
+                .is_some_and(|expr| expr_references_any_alias(expr, aliases))
+                || conditions
+                    .iter()
+                    .any(|expr| expr_references_any_alias(expr, aliases))
+                || results
+                    .iter()
+                    .any(|expr| expr_references_any_alias(expr, aliases))
+                || else_result
+                    .as_ref()
+                    .is_some_and(|expr| expr_references_any_alias(expr, aliases))
+        }
+        Expr::Function(func) => func.args.iter().any(|arg| match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
+                expr_references_any_alias(expr, aliases)
+            }
+            FunctionArg::Named {
+                arg: FunctionArgExpr::Expr(expr),
+                ..
+            } => expr_references_any_alias(expr, aliases),
+            _ => false,
+        }),
+        Expr::JsonAccess { left, right, .. } => {
+            expr_references_any_alias(left, aliases) || expr_references_any_alias(right, aliases)
+        }
+        Expr::MapAccess { column, keys } => {
+            expr_references_any_alias(column, aliases)
+                || keys
+                    .iter()
+                    .any(|expr| expr_references_any_alias(expr, aliases))
+        }
+        _ => false,
+    }
+}
+
+fn rewrite_expr_with_aliases_select_item(
+    expr: &sqlparser::ast::Expr,
+    env: &std::collections::HashMap<String, sqlparser::ast::Expr>,
+    all_aliases: &std::collections::HashSet<String>,
+) -> Result<sqlparser::ast::Expr, String> {
+    use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr};
+
+    Ok(match expr {
+        Expr::Identifier(ident) => {
+            let name = ident.value.as_str();
+            if let Some(replacement) = env.get(name) {
+                Expr::Nested(Box::new(replacement.clone()))
+            } else if all_aliases.contains(name) {
+                return Err(format!(
+                    "forward reference to SELECT alias `{}` is not allowed",
+                    name
+                ));
+            } else {
+                Expr::Identifier(ident.clone())
+            }
+        }
+        Expr::CompoundIdentifier(idents) => Expr::CompoundIdentifier(idents.clone()),
+        Expr::Value(v) => Expr::Value(v.clone()),
+        Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+            left: Box::new(rewrite_expr_with_aliases_select_item(
+                left,
+                env,
+                all_aliases,
+            )?),
+            op: op.clone(),
+            right: Box::new(rewrite_expr_with_aliases_select_item(
+                right,
+                env,
+                all_aliases,
+            )?),
+        },
+        Expr::UnaryOp { op, expr } => Expr::UnaryOp {
+            op: *op,
+            expr: Box::new(rewrite_expr_with_aliases_select_item(
+                expr,
+                env,
+                all_aliases,
+            )?),
+        },
+        Expr::Nested(expr) => Expr::Nested(Box::new(rewrite_expr_with_aliases_select_item(
+            expr,
+            env,
+            all_aliases,
+        )?)),
+        Expr::Cast {
+            expr,
+            data_type,
+            format,
+        } => Expr::Cast {
+            expr: Box::new(rewrite_expr_with_aliases_select_item(
+                expr,
+                env,
+                all_aliases,
+            )?),
+            data_type: data_type.clone(),
+            format: format.clone(),
+        },
+        Expr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => Expr::Between {
+            expr: Box::new(rewrite_expr_with_aliases_select_item(
+                expr,
+                env,
+                all_aliases,
+            )?),
+            negated: *negated,
+            low: Box::new(rewrite_expr_with_aliases_select_item(
+                low,
+                env,
+                all_aliases,
+            )?),
+            high: Box::new(rewrite_expr_with_aliases_select_item(
+                high,
+                env,
+                all_aliases,
+            )?),
+        },
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => Expr::InList {
+            expr: Box::new(rewrite_expr_with_aliases_select_item(
+                expr,
+                env,
+                all_aliases,
+            )?),
+            list: list
+                .iter()
+                .map(|item| rewrite_expr_with_aliases_select_item(item, env, all_aliases))
+                .collect::<Result<Vec<_>, _>>()?,
+            negated: *negated,
+        },
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => Expr::Case {
+            operand: operand
+                .as_ref()
+                .map(|expr| rewrite_expr_with_aliases_select_item(expr, env, all_aliases))
+                .transpose()?
+                .map(Box::new),
+            conditions: conditions
+                .iter()
+                .map(|expr| rewrite_expr_with_aliases_select_item(expr, env, all_aliases))
+                .collect::<Result<Vec<_>, _>>()?,
+            results: results
+                .iter()
+                .map(|expr| rewrite_expr_with_aliases_select_item(expr, env, all_aliases))
+                .collect::<Result<Vec<_>, _>>()?,
+            else_result: else_result
+                .as_ref()
+                .map(|expr| rewrite_expr_with_aliases_select_item(expr, env, all_aliases))
+                .transpose()?
+                .map(Box::new),
+        },
+        Expr::Function(func) => {
+            let mut new = func.clone();
+            new.args = new
+                .args
+                .into_iter()
+                .map(|arg| match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
+                        Ok(FunctionArg::Unnamed(FunctionArgExpr::Expr(
+                            rewrite_expr_with_aliases_select_item(&expr, env, all_aliases)?,
+                        )))
+                    }
+                    FunctionArg::Named { name, arg } => match arg {
+                        FunctionArgExpr::Expr(expr) => Ok(FunctionArg::Named {
+                            name,
+                            arg: FunctionArgExpr::Expr(rewrite_expr_with_aliases_select_item(
+                                &expr,
+                                env,
+                                all_aliases,
+                            )?),
+                        }),
+                        other => Ok(FunctionArg::Named { name, arg: other }),
+                    },
+                    other => Ok(other),
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Expr::Function(new)
+        }
+        Expr::JsonAccess {
+            left,
+            operator,
+            right,
+        } => Expr::JsonAccess {
+            left: Box::new(rewrite_expr_with_aliases_select_item(
+                left,
+                env,
+                all_aliases,
+            )?),
+            operator: *operator,
+            right: Box::new(rewrite_expr_with_aliases_select_item(
+                right,
+                env,
+                all_aliases,
+            )?),
+        },
+        Expr::MapAccess { column, keys } => Expr::MapAccess {
+            column: Box::new(rewrite_expr_with_aliases_select_item(
+                column,
+                env,
+                all_aliases,
+            )?),
+            keys: keys
+                .iter()
+                .map(|expr| rewrite_expr_with_aliases_select_item(expr, env, all_aliases))
+                .collect::<Result<Vec<_>, _>>()?,
+        },
+        other => other.clone(),
+    })
+}
+
+fn rewrite_expr_with_aliases(
+    expr: &sqlparser::ast::Expr,
+    env: &std::collections::HashMap<String, sqlparser::ast::Expr>,
+) -> sqlparser::ast::Expr {
+    use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr};
+
+    match expr {
+        Expr::Identifier(ident) => {
+            let name = ident.value.as_str();
+            if let Some(replacement) = env.get(name) {
+                Expr::Nested(Box::new(replacement.clone()))
+            } else {
+                Expr::Identifier(ident.clone())
+            }
+        }
+        Expr::CompoundIdentifier(idents) => Expr::CompoundIdentifier(idents.clone()),
+        Expr::Value(v) => Expr::Value(v.clone()),
+        Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+            left: Box::new(rewrite_expr_with_aliases(left, env)),
+            op: op.clone(),
+            right: Box::new(rewrite_expr_with_aliases(right, env)),
+        },
+        Expr::UnaryOp { op, expr } => Expr::UnaryOp {
+            op: *op,
+            expr: Box::new(rewrite_expr_with_aliases(expr, env)),
+        },
+        Expr::Nested(expr) => Expr::Nested(Box::new(rewrite_expr_with_aliases(expr, env))),
+        Expr::Cast {
+            expr,
+            data_type,
+            format,
+        } => Expr::Cast {
+            expr: Box::new(rewrite_expr_with_aliases(expr, env)),
+            data_type: data_type.clone(),
+            format: format.clone(),
+        },
+        Expr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => Expr::Between {
+            expr: Box::new(rewrite_expr_with_aliases(expr, env)),
+            negated: *negated,
+            low: Box::new(rewrite_expr_with_aliases(low, env)),
+            high: Box::new(rewrite_expr_with_aliases(high, env)),
+        },
+        Expr::InList {
+            expr,
+            list,
+            negated,
+        } => Expr::InList {
+            expr: Box::new(rewrite_expr_with_aliases(expr, env)),
+            list: list
+                .iter()
+                .map(|item| rewrite_expr_with_aliases(item, env))
+                .collect(),
+            negated: *negated,
+        },
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => Expr::Case {
+            operand: operand
+                .as_ref()
+                .map(|expr| Box::new(rewrite_expr_with_aliases(expr, env))),
+            conditions: conditions
+                .iter()
+                .map(|expr| rewrite_expr_with_aliases(expr, env))
+                .collect(),
+            results: results
+                .iter()
+                .map(|expr| rewrite_expr_with_aliases(expr, env))
+                .collect(),
+            else_result: else_result
+                .as_ref()
+                .map(|expr| Box::new(rewrite_expr_with_aliases(expr, env))),
+        },
+        Expr::Function(func) => {
+            let mut new = func.clone();
+            new.args = new
+                .args
+                .into_iter()
+                .map(|arg| match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => FunctionArg::Unnamed(
+                        FunctionArgExpr::Expr(rewrite_expr_with_aliases(&expr, env)),
+                    ),
+                    FunctionArg::Named { name, arg } => match arg {
+                        FunctionArgExpr::Expr(expr) => FunctionArg::Named {
+                            name,
+                            arg: FunctionArgExpr::Expr(rewrite_expr_with_aliases(&expr, env)),
+                        },
+                        other => FunctionArg::Named { name, arg: other },
+                    },
+                    other => other,
+                })
+                .collect();
+            Expr::Function(new)
+        }
+        Expr::JsonAccess {
+            left,
+            operator,
+            right,
+        } => Expr::JsonAccess {
+            left: Box::new(rewrite_expr_with_aliases(left, env)),
+            operator: *operator,
+            right: Box::new(rewrite_expr_with_aliases(right, env)),
+        },
+        Expr::MapAccess { column, keys } => Expr::MapAccess {
+            column: Box::new(rewrite_expr_with_aliases(column, env)),
+            keys: keys
+                .iter()
+                .map(|expr| rewrite_expr_with_aliases(expr, env))
+                .collect(),
+        },
+        other => other.clone(),
+    }
 }
 
 fn validate_expr_against_sources(
@@ -617,11 +1137,7 @@ fn collect_non_placeholder_column_refs(expr: &sqlparser::ast::Expr) -> Vec<Strin
     use sqlparser::ast::Expr;
 
     fn is_placeholder(ident: &sqlparser::ast::Ident) -> bool {
-        let value = ident.value.as_str();
-        let Some(rest) = value.strip_prefix("col_") else {
-            return false;
-        };
-        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+        crate::expr::internal_columns::is_parser_placeholder(ident.value.as_str())
     }
 
     fn collect(expr: &Expr, out: &mut std::collections::HashSet<String>) {
@@ -712,11 +1228,7 @@ fn expr_contains_aggregate_placeholder(expr: &sqlparser::ast::Expr) -> bool {
     use sqlparser::ast::Expr;
 
     fn is_placeholder(ident: &sqlparser::ast::Ident) -> bool {
-        let value = ident.value.as_str();
-        let Some(rest) = value.strip_prefix("col_") else {
-            return false;
-        };
-        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+        crate::expr::internal_columns::is_parser_placeholder(ident.value.as_str())
     }
 
     match expr {

@@ -12,11 +12,12 @@ use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggi
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
-    ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor,
-    FilterProcessor, Ingress, InstantControlSignal, Processor, ProcessorError, ProjectProcessor,
-    ResultCollectProcessor, SharedStreamProcessor, SinkProcessor, SlidingWindowProcessor,
-    StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
-    StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
+    ComputeProcessor, ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor,
+    EncoderProcessor, FilterProcessor, Ingress, InstantControlSignal, Processor, ProcessorError,
+    ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor,
+    SlidingWindowProcessor, StateWindowProcessor, StatefulFunctionProcessor, StreamData,
+    StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
+    WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::stateful::StatefulFunctionRegistry;
@@ -40,6 +41,8 @@ pub enum PlanProcessor {
     Decoder(DecoderProcessor),
     /// SharedStreamProcessor created from PhysicalSharedStream
     SharedSource(SharedStreamProcessor),
+    /// ComputeProcessor created from PhysicalCompute
+    Compute(ComputeProcessor),
     /// ProjectProcessor created from PhysicalProject
     Project(ProjectProcessor),
     /// StatefulFunctionProcessor created from PhysicalStatefulFunction
@@ -152,6 +155,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.id(),
             PlanProcessor::Decoder(p) => p.id(),
             PlanProcessor::SharedSource(p) => p.id(),
+            PlanProcessor::Compute(p) => p.id(),
             PlanProcessor::Project(p) => p.id(),
             PlanProcessor::StatefulFunction(p) => p.id(),
             PlanProcessor::Filter(p) => p.id(),
@@ -175,6 +179,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(_) => "datasource",
             PlanProcessor::Decoder(_) => "decoder",
             PlanProcessor::SharedSource(_) => "shared_source",
+            PlanProcessor::Compute(_) => "compute",
             PlanProcessor::Project(_) => "project",
             PlanProcessor::StatefulFunction(_) => "stateful_function",
             PlanProcessor::Filter(_) => "filter",
@@ -204,6 +209,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.set_stats(stats),
             PlanProcessor::Decoder(p) => p.set_stats(stats),
             PlanProcessor::SharedSource(p) => p.set_stats(stats),
+            PlanProcessor::Compute(p) => p.set_stats(stats),
             PlanProcessor::Project(p) => p.set_stats(stats),
             PlanProcessor::StatefulFunction(p) => p.set_stats(stats),
             PlanProcessor::Filter(p) => p.set_stats(stats),
@@ -228,6 +234,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.start(),
             PlanProcessor::Decoder(p) => p.start(),
             PlanProcessor::SharedSource(p) => p.start(),
+            PlanProcessor::Compute(p) => p.start(),
             PlanProcessor::Project(p) => p.start(),
             PlanProcessor::StatefulFunction(p) => p.start(),
             PlanProcessor::Filter(p) => p.start(),
@@ -252,6 +259,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.subscribe_output(),
             PlanProcessor::Decoder(p) => p.subscribe_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_output(),
+            PlanProcessor::Compute(p) => p.subscribe_output(),
             PlanProcessor::Project(p) => p.subscribe_output(),
             PlanProcessor::StatefulFunction(p) => p.subscribe_output(),
             PlanProcessor::Filter(p) => p.subscribe_output(),
@@ -276,6 +284,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.subscribe_control_output(),
             PlanProcessor::Decoder(p) => p.subscribe_control_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_control_output(),
+            PlanProcessor::Compute(p) => p.subscribe_control_output(),
             PlanProcessor::Project(p) => p.subscribe_control_output(),
             PlanProcessor::StatefulFunction(p) => p.subscribe_control_output(),
             PlanProcessor::Filter(p) => p.subscribe_control_output(),
@@ -300,6 +309,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.add_input(receiver),
             PlanProcessor::Decoder(p) => p.add_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_input(receiver),
+            PlanProcessor::Compute(p) => p.add_input(receiver),
             PlanProcessor::Project(p) => p.add_input(receiver),
             PlanProcessor::StatefulFunction(p) => p.add_input(receiver),
             PlanProcessor::Filter(p) => p.add_input(receiver),
@@ -324,6 +334,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.add_control_input(receiver),
             PlanProcessor::Decoder(p) => p.add_control_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_control_input(receiver),
+            PlanProcessor::Compute(p) => p.add_control_input(receiver),
             PlanProcessor::Project(p) => p.add_control_input(receiver),
             PlanProcessor::StatefulFunction(p) => p.add_control_input(receiver),
             PlanProcessor::Filter(p) => p.add_control_input(receiver),
@@ -694,6 +705,12 @@ fn create_processor_from_plan_node(
             processor.set_required_columns(shared.required_columns().to_vec());
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::SharedSource(processor),
+            ))
+        }
+        PhysicalPlan::Compute(compute) => {
+            let processor = ComputeProcessor::new(plan_name.clone(), Arc::new(compute.clone()));
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::Compute(processor),
             ))
         }
         PhysicalPlan::Project(project) => {

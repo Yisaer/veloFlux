@@ -304,7 +304,7 @@ fn create_logical_plan_table_driven() {
         Case {
             name: "test_create_logical_plan_with_func_field",
             sql: "SELECT a, concat(b), c AS custom_name FROM users",
-            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; concat(b); c]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; concat(b); custom_name]"],"operator":"Project"}"##,
         },
     ];
 

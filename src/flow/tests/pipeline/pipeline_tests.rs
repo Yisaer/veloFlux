@@ -319,6 +319,23 @@ async fn pipeline_table_driven_queries() {
             }],
         },
         TestCase {
+            name: "alias_can_be_used_in_select_and_where",
+            sql: "SELECT a + 1 AS b1, b1 + 1 AS c1 FROM stream WHERE b1 > 1 AND c1 > 1",
+            input_data: vec![("a".to_string(), vec![Value::Int64(0), Value::Int64(1), Value::Int64(2)])],
+            expected_rows: 2,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "b1".to_string(),
+                    expected_values: vec![Value::Int64(2), Value::Int64(3)],
+                },
+                ColumnCheck {
+                    expected_name: "c1".to_string(),
+                    expected_values: vec![Value::Int64(3), Value::Int64(4)],
+                },
+            ],
+        },
+        TestCase {
             name: "having_filters_groups_countwindow",
             sql: "SELECT sum(a) AS s, b FROM stream GROUP BY countwindow(4), b HAVING sum(a) > 2 AND sum(a) < 10",
             input_data: vec![
