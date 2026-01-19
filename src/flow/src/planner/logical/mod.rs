@@ -617,11 +617,7 @@ fn collect_non_placeholder_column_refs(expr: &sqlparser::ast::Expr) -> Vec<Strin
     use sqlparser::ast::Expr;
 
     fn is_placeholder(ident: &sqlparser::ast::Ident) -> bool {
-        let value = ident.value.as_str();
-        let Some(rest) = value.strip_prefix("col_") else {
-            return false;
-        };
-        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+        crate::expr::internal_columns::is_parser_placeholder(ident.value.as_str())
     }
 
     fn collect(expr: &Expr, out: &mut std::collections::HashSet<String>) {
@@ -712,11 +708,7 @@ fn expr_contains_aggregate_placeholder(expr: &sqlparser::ast::Expr) -> bool {
     use sqlparser::ast::Expr;
 
     fn is_placeholder(ident: &sqlparser::ast::Ident) -> bool {
-        let value = ident.value.as_str();
-        let Some(rest) = value.strip_prefix("col_") else {
-            return false;
-        };
-        !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
+        crate::expr::internal_columns::is_parser_placeholder(ident.value.as_str())
     }
 
     match expr {

@@ -1,6 +1,7 @@
 pub mod context;
 pub mod custom_func;
 pub mod func;
+pub mod internal_columns;
 pub mod scalar;
 pub mod sql_conversion;
 

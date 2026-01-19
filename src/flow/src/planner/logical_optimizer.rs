@@ -1,3 +1,4 @@
+use crate::expr::internal_columns::is_parser_placeholder;
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry};
 use crate::planner::decode_projection::{DecodeProjection, FieldPath, FieldPathSegment, ListIndex};
 use crate::planner::logical::{LogicalPlan, TailPlan};
@@ -317,7 +318,7 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
             return;
         }
 
-        if is_aggregate_placeholder(column_name) {
+        if is_parser_placeholder(column_name) {
             return;
         }
 
@@ -1353,8 +1354,4 @@ fn clone_with_children(plan: &LogicalPlan, children: Vec<Arc<LogicalPlan>>) -> A
             Arc::new(LogicalPlan::Window(new))
         }
     }
-}
-
-fn is_aggregate_placeholder(name: &str) -> bool {
-    name.starts_with("col_") && name[4..].chars().all(|c| c.is_ascii_digit())
 }
