@@ -37,6 +37,9 @@ pub fn optimize_logical_plan_with_options(
     options: &LogicalOptimizerOptions,
 ) -> (Arc<LogicalPlan>, SchemaBinding) {
     let rules: Vec<Box<dyn LogicalOptRule>> = vec![
+        // Must run before pruning rules; CSE can introduce new expressions whose source columns
+        // must be accounted for when pruning schemas.
+        Box::new(CommonSubexpressionElimination),
         Box::new(TopLevelColumnPruning {
             eventtime_enabled: options.eventtime_enabled,
         }),
@@ -54,6 +57,963 @@ pub fn optimize_logical_plan_with_options(
     }
 
     (current_plan, current_bindings)
+}
+
+/// Rule: eliminate repeated common subexpressions by computing them once into the tuple affiliate.
+///
+/// This inserts a `LogicalCompute` node that materializes CSE temps (`__vf_cse_N`) and rewrites
+/// expressions in `Project` (and its adjacent `Filter`, if needed) to reference those temps.
+struct CommonSubexpressionElimination;
+
+impl LogicalOptRule for CommonSubexpressionElimination {
+    fn name(&self) -> &str {
+        "common_subexpression_elimination"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<LogicalPlan>,
+        bindings: &SchemaBinding,
+    ) -> (Arc<LogicalPlan>, SchemaBinding) {
+        let mut cache = HashMap::<i64, Arc<LogicalPlan>>::new();
+        let max_idx = max_logical_plan_index(plan.as_ref());
+
+        // Avoid colliding with any existing column names in sources.
+        let mut used_names = HashSet::<String>::new();
+        for entry in bindings.entries() {
+            for col in entry.schema.column_schemas() {
+                used_names.insert(col.name.clone());
+            }
+        }
+
+        let max_existing_cse = max_existing_cse_temp_id_in_plan(plan.as_ref());
+        let mut ctx = CseContext {
+            next_plan_index: max_idx + 1,
+            next_temp_id: max_existing_cse + 1,
+            used_names,
+        };
+
+        let updated = apply_cse_with_cache(plan, &mut ctx, &mut cache);
+        (updated, bindings.clone())
+    }
+}
+
+struct CseContext {
+    next_plan_index: i64,
+    next_temp_id: u64,
+    used_names: HashSet<String>,
+}
+
+impl CseContext {
+    fn alloc_compute_index(&mut self) -> i64 {
+        let idx = self.next_plan_index;
+        self.next_plan_index += 1;
+        idx
+    }
+
+    fn alloc_temp_name(&mut self) -> String {
+        use crate::expr::internal_columns::CSE_TEMP_PREFIX;
+
+        loop {
+            let candidate = format!("{}{}", CSE_TEMP_PREFIX, self.next_temp_id);
+            self.next_temp_id += 1;
+            if self.used_names.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+    }
+}
+
+fn max_logical_plan_index(plan: &LogicalPlan) -> i64 {
+    let mut max_idx = plan.get_plan_index();
+    for child in plan.children() {
+        max_idx = max_idx.max(max_logical_plan_index(child.as_ref()));
+    }
+    max_idx
+}
+
+fn max_existing_cse_temp_id_in_plan(plan: &LogicalPlan) -> u64 {
+    use crate::expr::internal_columns::is_cse_temp;
+
+    fn parse_id(name: &str) -> Option<u64> {
+        name.strip_prefix(crate::expr::internal_columns::CSE_TEMP_PREFIX)?
+            .parse::<u64>()
+            .ok()
+    }
+
+    fn visit_expr(expr: &SqlExpr, max_id: &mut u64) {
+        match expr {
+            SqlExpr::Identifier(ident) => {
+                if is_cse_temp(&ident.value) {
+                    if let Some(id) = parse_id(&ident.value) {
+                        *max_id = (*max_id).max(id);
+                    }
+                }
+            }
+            SqlExpr::BinaryOp { left, right, .. } => {
+                visit_expr(left, max_id);
+                visit_expr(right, max_id);
+            }
+            SqlExpr::UnaryOp { expr, .. } => visit_expr(expr, max_id),
+            SqlExpr::Nested(expr) => visit_expr(expr, max_id),
+            SqlExpr::Cast { expr, .. } => visit_expr(expr, max_id),
+            SqlExpr::Between {
+                expr, low, high, ..
+            } => {
+                visit_expr(expr, max_id);
+                visit_expr(low, max_id);
+                visit_expr(high, max_id);
+            }
+            SqlExpr::InList { expr, list, .. } => {
+                visit_expr(expr, max_id);
+                for e in list {
+                    visit_expr(e, max_id);
+                }
+            }
+            SqlExpr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
+                if let Some(op) = operand.as_ref() {
+                    visit_expr(op, max_id);
+                }
+                for e in conditions {
+                    visit_expr(e, max_id);
+                }
+                for e in results {
+                    visit_expr(e, max_id);
+                }
+                if let Some(e) = else_result.as_ref() {
+                    visit_expr(e, max_id);
+                }
+            }
+            SqlExpr::Function(func) => {
+                for arg in &func.args {
+                    match arg {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => visit_expr(e, max_id),
+                        FunctionArg::Named {
+                            arg: FunctionArgExpr::Expr(e),
+                            ..
+                        } => visit_expr(e, max_id),
+                        _ => {}
+                    }
+                }
+            }
+            SqlExpr::JsonAccess { left, right, .. } => {
+                visit_expr(left, max_id);
+                visit_expr(right, max_id);
+            }
+            SqlExpr::MapAccess { column, keys } => {
+                visit_expr(column, max_id);
+                for e in keys {
+                    visit_expr(e, max_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn visit_plan(plan: &LogicalPlan, max_id: &mut u64) {
+        match plan {
+            LogicalPlan::Compute(compute) => {
+                for f in &compute.fields {
+                    visit_expr(&f.expr, max_id);
+                }
+            }
+            LogicalPlan::Project(project) => {
+                for f in &project.fields {
+                    visit_expr(&f.expr, max_id);
+                }
+            }
+            LogicalPlan::Filter(filter) => visit_expr(&filter.predicate, max_id),
+            LogicalPlan::StatefulFunction(stateful) => {
+                for expr in stateful.stateful_mappings.values() {
+                    visit_expr(expr, max_id);
+                }
+            }
+            LogicalPlan::Aggregation(agg) => {
+                for expr in agg.aggregate_mappings.values() {
+                    visit_expr(expr, max_id);
+                }
+                for expr in &agg.group_by_exprs {
+                    visit_expr(expr, max_id);
+                }
+            }
+            LogicalPlan::Window(window) => {
+                if let crate::planner::logical::LogicalWindowSpec::State {
+                    open,
+                    emit,
+                    partition_by,
+                } = &window.spec
+                {
+                    visit_expr(open.as_ref(), max_id);
+                    visit_expr(emit.as_ref(), max_id);
+                    for e in partition_by {
+                        visit_expr(e, max_id);
+                    }
+                }
+            }
+            _ => {}
+        }
+        for child in plan.children() {
+            visit_plan(child.as_ref(), max_id);
+        }
+    }
+
+    let mut max_id = 0u64;
+    visit_plan(plan, &mut max_id);
+    max_id
+}
+
+fn apply_cse_with_cache(
+    plan: Arc<LogicalPlan>,
+    ctx: &mut CseContext,
+    cache: &mut HashMap<i64, Arc<LogicalPlan>>,
+) -> Arc<LogicalPlan> {
+    let idx = plan.get_plan_index();
+    if let Some(existing) = cache.get(&idx) {
+        return existing.clone();
+    }
+
+    let updated = match plan.as_ref() {
+        LogicalPlan::DataSource(ds) => Arc::new(LogicalPlan::DataSource(ds.clone())),
+        LogicalPlan::StatefulFunction(stateful) => {
+            let new_children = stateful
+                .base
+                .children
+                .iter()
+                .map(|c| apply_cse_with_cache(c.clone(), ctx, cache))
+                .collect::<Vec<_>>();
+            let mut new = stateful.clone();
+            new.base.children = new_children;
+            Arc::new(LogicalPlan::StatefulFunction(new))
+        }
+        LogicalPlan::Filter(filter) => {
+            let new_children = filter
+                .base
+                .children
+                .iter()
+                .map(|c| apply_cse_with_cache(c.clone(), ctx, cache))
+                .collect::<Vec<_>>();
+            let mut new = filter.clone();
+            new.base.children = new_children;
+            Arc::new(LogicalPlan::Filter(new))
+        }
+        LogicalPlan::Aggregation(agg) => {
+            let new_children = agg
+                .base
+                .children
+                .iter()
+                .map(|c| apply_cse_with_cache(c.clone(), ctx, cache))
+                .collect::<Vec<_>>();
+            let mut new = agg.clone();
+            new.base.children = new_children;
+            Arc::new(LogicalPlan::Aggregation(new))
+        }
+        LogicalPlan::Compute(compute) => {
+            let new_children = compute
+                .base
+                .children
+                .iter()
+                .map(|c| apply_cse_with_cache(c.clone(), ctx, cache))
+                .collect::<Vec<_>>();
+            let mut new = compute.clone();
+            new.base.children = new_children;
+            Arc::new(LogicalPlan::Compute(new))
+        }
+        LogicalPlan::Project(project) => {
+            // Project is the anchor: attempt to CSE within this project and (optionally) its
+            // adjacent filter.
+            let new_children = project
+                .base
+                .children
+                .iter()
+                .map(|c| apply_cse_with_cache(c.clone(), ctx, cache))
+                .collect::<Vec<_>>();
+
+            let mut new = project.clone();
+            new.base.children = new_children;
+
+            // Only support the common single-child pipeline shape for now.
+            if new.base.children.len() != 1 {
+                Arc::new(LogicalPlan::Project(new))
+            } else {
+                let child = new.base.children[0].clone();
+                let (project_plan, maybe_filter_plan) = apply_cse_at_project(new, child, ctx);
+                if let Some(filter_plan) = maybe_filter_plan {
+                    cache.insert(filter_plan.get_plan_index(), filter_plan.clone());
+                }
+                project_plan
+            }
+        }
+        LogicalPlan::DataSink(sink) => {
+            let new_children = sink
+                .base
+                .children
+                .iter()
+                .map(|c| apply_cse_with_cache(c.clone(), ctx, cache))
+                .collect::<Vec<_>>();
+            let mut new = sink.clone();
+            new.base.children = new_children;
+            Arc::new(LogicalPlan::DataSink(new))
+        }
+        LogicalPlan::Tail(tail) => {
+            let new_children = tail
+                .base
+                .children
+                .iter()
+                .map(|c| apply_cse_with_cache(c.clone(), ctx, cache))
+                .collect::<Vec<_>>();
+            let mut new = tail.clone();
+            new.base.children = new_children;
+            Arc::new(LogicalPlan::Tail(new))
+        }
+        LogicalPlan::Window(window) => {
+            let new_children = window
+                .base
+                .children
+                .iter()
+                .map(|c| apply_cse_with_cache(c.clone(), ctx, cache))
+                .collect::<Vec<_>>();
+            let mut new = window.clone();
+            new.base.children = new_children;
+            Arc::new(LogicalPlan::Window(new))
+        }
+    };
+
+    cache.insert(idx, updated.clone());
+    updated
+}
+
+fn apply_cse_at_project(
+    mut project: crate::planner::logical::Project,
+    child: Arc<LogicalPlan>,
+    ctx: &mut CseContext,
+) -> (Arc<LogicalPlan>, Option<Arc<LogicalPlan>>) {
+    use crate::planner::logical::compute::Compute;
+
+    // Recognize the common shape:
+    //   <child> -> Filter -> Project
+    // and enable rewriting both the Filter predicate and Project expressions.
+    let (maybe_filter, filter_child) = match child.as_ref() {
+        LogicalPlan::Filter(filter) if filter.base.children.len() == 1 => {
+            (Some(filter.clone()), Some(filter.base.children[0].clone()))
+        }
+        _ => (None, None),
+    };
+
+    let filter_predicate = maybe_filter.as_ref().map(|f| f.predicate.clone());
+
+    let (new_project_fields, new_filter_predicate, compute_fields) =
+        cse_rewrite_expressions(&project.fields, filter_predicate.as_ref(), ctx);
+
+    if compute_fields.is_empty() {
+        project.fields = new_project_fields;
+        project.base.children = vec![child];
+        return (Arc::new(LogicalPlan::Project(project)), None);
+    }
+
+    // Determine whether the filter needs the computed temps (if present).
+    let temp_names: HashSet<String> = compute_fields
+        .iter()
+        .map(|f| f.field_name.clone())
+        .collect();
+
+    let filter_uses_temps = new_filter_predicate
+        .as_ref()
+        .is_some_and(|pred| expr_references_any_ident(pred, &temp_names));
+
+    let compute_idx = ctx.alloc_compute_index();
+
+    let (new_child, new_filter_plan) = if let Some(mut filter) = maybe_filter {
+        if let Some(pred) = new_filter_predicate {
+            filter.predicate = pred;
+        }
+
+        if filter_uses_temps {
+            // Place Compute below Filter so Filter can reference computed temps.
+            let input = filter_child.expect("checked above");
+            let compute = Arc::new(LogicalPlan::Compute(Compute::new(
+                compute_fields,
+                vec![input],
+                compute_idx,
+            )));
+            filter.base.children = vec![compute];
+            let filter_plan = Arc::new(LogicalPlan::Filter(filter));
+            (filter_plan.clone(), Some(filter_plan))
+        } else {
+            // Filter does not reference temps; keep it selective by placing Compute above it.
+            let filter_plan = Arc::new(LogicalPlan::Filter(filter));
+            let compute = Arc::new(LogicalPlan::Compute(Compute::new(
+                compute_fields,
+                vec![filter_plan.clone()],
+                compute_idx,
+            )));
+            (compute, Some(filter_plan))
+        }
+    } else {
+        let compute = Arc::new(LogicalPlan::Compute(Compute::new(
+            compute_fields,
+            vec![child.clone()],
+            compute_idx,
+        )));
+        (compute, None)
+    };
+
+    project.fields = new_project_fields;
+    project.base.children = vec![new_child];
+    (Arc::new(LogicalPlan::Project(project)), new_filter_plan)
+}
+
+fn expr_references_any_ident(expr: &SqlExpr, names: &HashSet<String>) -> bool {
+    match expr {
+        SqlExpr::Identifier(ident) => names.contains(ident.value.as_str()),
+        SqlExpr::BinaryOp { left, right, .. } => {
+            expr_references_any_ident(left, names) || expr_references_any_ident(right, names)
+        }
+        SqlExpr::UnaryOp { expr, .. } => expr_references_any_ident(expr, names),
+        SqlExpr::Nested(expr) => expr_references_any_ident(expr, names),
+        SqlExpr::Cast { expr, .. } => expr_references_any_ident(expr, names),
+        SqlExpr::Between {
+            expr, low, high, ..
+        } => {
+            expr_references_any_ident(expr, names)
+                || expr_references_any_ident(low, names)
+                || expr_references_any_ident(high, names)
+        }
+        SqlExpr::InList { expr, list, .. } => {
+            expr_references_any_ident(expr, names)
+                || list.iter().any(|e| expr_references_any_ident(e, names))
+        }
+        SqlExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            operand
+                .as_ref()
+                .is_some_and(|e| expr_references_any_ident(e, names))
+                || conditions
+                    .iter()
+                    .any(|e| expr_references_any_ident(e, names))
+                || results.iter().any(|e| expr_references_any_ident(e, names))
+                || else_result
+                    .as_ref()
+                    .is_some_and(|e| expr_references_any_ident(e, names))
+        }
+        SqlExpr::Function(func) => func.args.iter().any(|arg| match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => expr_references_any_ident(e, names),
+            FunctionArg::Named {
+                arg: FunctionArgExpr::Expr(e),
+                ..
+            } => expr_references_any_ident(e, names),
+            _ => false,
+        }),
+        SqlExpr::JsonAccess { left, right, .. } => {
+            expr_references_any_ident(left, names) || expr_references_any_ident(right, names)
+        }
+        SqlExpr::MapAccess { column, keys } => {
+            expr_references_any_ident(column, names)
+                || keys.iter().any(|e| expr_references_any_ident(e, names))
+        }
+        _ => false,
+    }
+}
+
+fn cse_rewrite_expressions(
+    project_fields: &[crate::planner::logical::project::ProjectField],
+    filter_predicate: Option<&SqlExpr>,
+    ctx: &mut CseContext,
+) -> (
+    Vec<crate::planner::logical::project::ProjectField>,
+    Option<SqlExpr>,
+    Vec<crate::planner::logical::compute::ComputeField>,
+) {
+    use crate::planner::logical::compute::ComputeField;
+    use crate::planner::logical::project::ProjectField;
+
+    let mut project_exprs = project_fields
+        .iter()
+        .map(|f| f.expr.clone())
+        .collect::<Vec<_>>();
+    let mut predicate = filter_predicate.cloned();
+
+    let mut compute_fields = Vec::<ComputeField>::new();
+
+    loop {
+        let mut stats = HashMap::<String, SubexprStats>::new();
+        for expr in &project_exprs {
+            collect_subexpr_stats(expr, &mut stats);
+        }
+        if let Some(pred) = predicate.as_ref() {
+            collect_subexpr_stats(pred, &mut stats);
+        }
+
+        let Some(best) = choose_best_cse_candidate(&stats) else {
+            break;
+        };
+
+        let temp_name = ctx.alloc_temp_name();
+        let replacement = SqlExpr::Identifier(Ident::new(temp_name.clone()));
+        compute_fields.push(ComputeField {
+            field_name: temp_name.clone(),
+            expr: best.expr.clone(),
+        });
+
+        for expr in &mut project_exprs {
+            *expr = replace_subexpr(expr, best.key.as_str(), &replacement);
+        }
+        if let Some(pred) = predicate.as_mut() {
+            *pred = replace_subexpr(pred, best.key.as_str(), &replacement);
+        }
+    }
+
+    let new_project_fields = project_fields
+        .iter()
+        .zip(project_exprs)
+        .map(|(old, expr)| ProjectField {
+            field_name: old.field_name.clone(),
+            expr,
+        })
+        .collect::<Vec<_>>();
+
+    (new_project_fields, predicate, compute_fields)
+}
+
+#[derive(Debug, Clone)]
+struct SubexprStats {
+    key: String,
+    expr: SqlExpr,
+    count: usize,
+    cost: usize,
+}
+
+fn collect_subexpr_stats(expr: &SqlExpr, stats: &mut HashMap<String, SubexprStats>) {
+    // Parentheses are represented as `Nested`; they shouldn't introduce an extra "occurrence"
+    // of the same subexpression, otherwise we double-count `(x)` and `x`.
+    if let SqlExpr::Nested(inner) = expr {
+        collect_subexpr_stats(inner, stats);
+        return;
+    }
+
+    let key = normalized_expr_key(expr);
+    let cost = expr_node_count(expr);
+    stats
+        .entry(key.clone())
+        .and_modify(|s| {
+            s.count += 1;
+        })
+        .or_insert(SubexprStats {
+            key,
+            expr: expr.clone(),
+            count: 1,
+            cost,
+        });
+
+    match expr {
+        SqlExpr::BinaryOp { left, right, .. } => {
+            collect_subexpr_stats(left, stats);
+            collect_subexpr_stats(right, stats);
+        }
+        SqlExpr::UnaryOp { expr, .. } => collect_subexpr_stats(expr, stats),
+        SqlExpr::Cast { expr, .. } => collect_subexpr_stats(expr, stats),
+        SqlExpr::Between {
+            expr, low, high, ..
+        } => {
+            collect_subexpr_stats(expr, stats);
+            collect_subexpr_stats(low, stats);
+            collect_subexpr_stats(high, stats);
+        }
+        SqlExpr::InList { expr, list, .. } => {
+            collect_subexpr_stats(expr, stats);
+            for e in list {
+                collect_subexpr_stats(e, stats);
+            }
+        }
+        SqlExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            if let Some(op) = operand.as_ref() {
+                collect_subexpr_stats(op, stats);
+            }
+            for e in conditions {
+                collect_subexpr_stats(e, stats);
+            }
+            for e in results {
+                collect_subexpr_stats(e, stats);
+            }
+            if let Some(e) = else_result.as_ref() {
+                collect_subexpr_stats(e, stats);
+            }
+        }
+        SqlExpr::Function(func) => {
+            for arg in &func.args {
+                match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => {
+                        collect_subexpr_stats(e, stats)
+                    }
+                    FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(e),
+                        ..
+                    } => collect_subexpr_stats(e, stats),
+                    _ => {}
+                }
+            }
+        }
+        SqlExpr::JsonAccess { left, right, .. } => {
+            collect_subexpr_stats(left, stats);
+            collect_subexpr_stats(right, stats);
+        }
+        SqlExpr::MapAccess { column, keys } => {
+            collect_subexpr_stats(column, stats);
+            for e in keys {
+                collect_subexpr_stats(e, stats);
+            }
+        }
+        _ => {}
+    }
+}
+
+struct BestCandidate {
+    key: String,
+    expr: SqlExpr,
+}
+
+fn choose_best_cse_candidate(stats: &HashMap<String, SubexprStats>) -> Option<BestCandidate> {
+    let mut best: Option<(i64, BestCandidate)> = None;
+
+    for s in stats.values() {
+        if s.count < 2 {
+            continue;
+        }
+        if !is_cse_eligible_root(&s.expr) {
+            continue;
+        }
+        if s.cost < 2 {
+            continue;
+        }
+
+        // Benefit is the amount of repeated work removed.
+        let score = ((s.count - 1) as i64) * (s.cost as i64);
+        match &best {
+            Some((best_score, _)) if *best_score >= score => {}
+            _ => {
+                best = Some((
+                    score,
+                    BestCandidate {
+                        key: s.key.clone(),
+                        expr: s.expr.clone(),
+                    },
+                ));
+            }
+        }
+    }
+
+    best.map(|(_, c)| c)
+}
+
+fn is_cse_eligible_root(expr: &SqlExpr) -> bool {
+    match strip_nested(expr) {
+        SqlExpr::Identifier(ident) => {
+            !is_internal_derived(ident.value.as_str()) && ident.value != "*"
+        }
+        SqlExpr::CompoundIdentifier(_) => false,
+        SqlExpr::Value(_) => false,
+        SqlExpr::Function(_) => false, // Avoid changing semantics for non-deterministic functions.
+        _ => true,
+    }
+}
+
+fn strip_nested(expr: &SqlExpr) -> &SqlExpr {
+    match expr {
+        SqlExpr::Nested(inner) => strip_nested(inner.as_ref()),
+        _ => expr,
+    }
+}
+
+fn normalized_expr_key(expr: &SqlExpr) -> String {
+    match strip_nested(expr) {
+        SqlExpr::Identifier(ident) => format!("ident:{}", ident.value),
+        SqlExpr::CompoundIdentifier(idents) => format!(
+            "cident:{}",
+            idents
+                .iter()
+                .map(|i| i.value.as_str())
+                .collect::<Vec<_>>()
+                .join(".")
+        ),
+        SqlExpr::Value(v) => format!("val:{v}"),
+        SqlExpr::BinaryOp { left, op, right } => format!(
+            "bin:{}:{}:{}",
+            op,
+            normalized_expr_key(left),
+            normalized_expr_key(right)
+        ),
+        SqlExpr::UnaryOp { op, expr } => format!("un:{op}:{}", normalized_expr_key(expr)),
+        SqlExpr::Cast {
+            expr, data_type, ..
+        } => {
+            format!("cast:{data_type}:{}", normalized_expr_key(expr))
+        }
+        SqlExpr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => format!(
+            "between:{}:{}:{}:{}",
+            negated,
+            normalized_expr_key(expr),
+            normalized_expr_key(low),
+            normalized_expr_key(high)
+        ),
+        SqlExpr::InList {
+            expr,
+            list,
+            negated,
+        } => format!(
+            "inlist:{}:{}:[{}]",
+            negated,
+            normalized_expr_key(expr),
+            list.iter()
+                .map(normalized_expr_key)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        SqlExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => format!(
+            "case:{}:[{}]:[{}]:{}",
+            operand
+                .as_ref()
+                .map(|e| normalized_expr_key(e))
+                .unwrap_or_else(|| "none".to_string()),
+            conditions
+                .iter()
+                .map(normalized_expr_key)
+                .collect::<Vec<_>>()
+                .join(","),
+            results
+                .iter()
+                .map(normalized_expr_key)
+                .collect::<Vec<_>>()
+                .join(","),
+            else_result
+                .as_ref()
+                .map(|e| normalized_expr_key(e))
+                .unwrap_or_else(|| "none".to_string())
+        ),
+        SqlExpr::Function(func) => {
+            let args = func
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => normalized_expr_key(e),
+                    FunctionArg::Named {
+                        name,
+                        arg: FunctionArgExpr::Expr(e),
+                        ..
+                    } => format!("{}={}", name, normalized_expr_key(e)),
+                    _ => "unsupported".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("func:{}({})", func.name, args)
+        }
+        SqlExpr::JsonAccess { left, right, .. } => format!(
+            "json_access:{}:{}",
+            normalized_expr_key(left),
+            normalized_expr_key(right)
+        ),
+        SqlExpr::MapAccess { column, keys } => format!(
+            "map_access:{}:[{}]",
+            normalized_expr_key(column),
+            keys.iter()
+                .map(normalized_expr_key)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        other => format!("dbg:{:?}", other),
+    }
+}
+
+fn expr_node_count(expr: &SqlExpr) -> usize {
+    match expr {
+        SqlExpr::BinaryOp { left, right, .. } => 1 + expr_node_count(left) + expr_node_count(right),
+        SqlExpr::UnaryOp { expr, .. } => 1 + expr_node_count(expr),
+        SqlExpr::Nested(expr) => expr_node_count(expr),
+        SqlExpr::Cast { expr, .. } => 1 + expr_node_count(expr),
+        SqlExpr::Between {
+            expr, low, high, ..
+        } => 1 + expr_node_count(expr) + expr_node_count(low) + expr_node_count(high),
+        SqlExpr::InList { expr, list, .. } => {
+            1 + expr_node_count(expr) + list.iter().map(expr_node_count).sum::<usize>()
+        }
+        SqlExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            1 + operand
+                .as_ref()
+                .map(|e| expr_node_count(e.as_ref()))
+                .unwrap_or(0)
+                + conditions.iter().map(expr_node_count).sum::<usize>()
+                + results.iter().map(expr_node_count).sum::<usize>()
+                + else_result
+                    .as_ref()
+                    .map(|e| expr_node_count(e.as_ref()))
+                    .unwrap_or(0)
+        }
+        SqlExpr::Function(func) => {
+            1 + func
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => expr_node_count(e),
+                    FunctionArg::Named {
+                        arg: FunctionArgExpr::Expr(e),
+                        ..
+                    } => expr_node_count(e),
+                    _ => 0,
+                })
+                .sum::<usize>()
+        }
+        SqlExpr::JsonAccess { left, right, .. } => {
+            1 + expr_node_count(left) + expr_node_count(right)
+        }
+        SqlExpr::MapAccess { column, keys } => {
+            1 + expr_node_count(column) + keys.iter().map(expr_node_count).sum::<usize>()
+        }
+        _ => 1,
+    }
+}
+
+fn replace_subexpr(expr: &SqlExpr, target_key: &str, replacement: &SqlExpr) -> SqlExpr {
+    if normalized_expr_key(expr) == target_key {
+        return replacement.clone();
+    }
+
+    match expr {
+        SqlExpr::BinaryOp { left, op, right } => SqlExpr::BinaryOp {
+            left: Box::new(replace_subexpr(left, target_key, replacement)),
+            op: op.clone(),
+            right: Box::new(replace_subexpr(right, target_key, replacement)),
+        },
+        SqlExpr::UnaryOp { op, expr } => SqlExpr::UnaryOp {
+            op: *op,
+            expr: Box::new(replace_subexpr(expr, target_key, replacement)),
+        },
+        SqlExpr::Nested(expr) => {
+            SqlExpr::Nested(Box::new(replace_subexpr(expr, target_key, replacement)))
+        }
+        SqlExpr::Cast {
+            expr,
+            data_type,
+            format,
+        } => SqlExpr::Cast {
+            expr: Box::new(replace_subexpr(expr, target_key, replacement)),
+            data_type: data_type.clone(),
+            format: format.clone(),
+        },
+        SqlExpr::Between {
+            expr,
+            negated,
+            low,
+            high,
+        } => SqlExpr::Between {
+            expr: Box::new(replace_subexpr(expr, target_key, replacement)),
+            negated: *negated,
+            low: Box::new(replace_subexpr(low, target_key, replacement)),
+            high: Box::new(replace_subexpr(high, target_key, replacement)),
+        },
+        SqlExpr::InList {
+            expr,
+            list,
+            negated,
+        } => SqlExpr::InList {
+            expr: Box::new(replace_subexpr(expr, target_key, replacement)),
+            list: list
+                .iter()
+                .map(|e| replace_subexpr(e, target_key, replacement))
+                .collect(),
+            negated: *negated,
+        },
+        SqlExpr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => SqlExpr::Case {
+            operand: operand
+                .as_ref()
+                .map(|e| Box::new(replace_subexpr(e, target_key, replacement))),
+            conditions: conditions
+                .iter()
+                .map(|e| replace_subexpr(e, target_key, replacement))
+                .collect(),
+            results: results
+                .iter()
+                .map(|e| replace_subexpr(e, target_key, replacement))
+                .collect(),
+            else_result: else_result
+                .as_ref()
+                .map(|e| Box::new(replace_subexpr(e, target_key, replacement))),
+        },
+        SqlExpr::Function(func) => {
+            let mut new_func = func.clone();
+            new_func.args = func
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => FunctionArg::Unnamed(
+                        FunctionArgExpr::Expr(replace_subexpr(e, target_key, replacement)),
+                    ),
+                    FunctionArg::Named { name, arg } => {
+                        let new_arg = match arg {
+                            FunctionArgExpr::Expr(e) => {
+                                FunctionArgExpr::Expr(replace_subexpr(e, target_key, replacement))
+                            }
+                            other => other.clone(),
+                        };
+                        FunctionArg::Named {
+                            name: name.clone(),
+                            arg: new_arg,
+                        }
+                    }
+                    _ => arg.clone(),
+                })
+                .collect();
+            SqlExpr::Function(new_func)
+        }
+        SqlExpr::JsonAccess {
+            left,
+            operator,
+            right,
+        } => SqlExpr::JsonAccess {
+            left: Box::new(replace_subexpr(left, target_key, replacement)),
+            right: Box::new(replace_subexpr(right, target_key, replacement)),
+            operator: *operator,
+        },
+        SqlExpr::MapAccess { column, keys } => SqlExpr::MapAccess {
+            column: Box::new(replace_subexpr(column, target_key, replacement)),
+            keys: keys
+                .iter()
+                .map(|e| replace_subexpr(e, target_key, replacement))
+                .collect(),
+        },
+        _ => expr.clone(),
+    }
 }
 
 /// Rule: prune unused top-level columns from data sources.
