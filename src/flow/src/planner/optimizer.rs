@@ -607,6 +607,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::Filter(new))
         }
+        PhysicalPlan::Compute(compute) => {
+            let mut new = compute.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::Compute(new))
+        }
         PhysicalPlan::Project(project) => {
             let mut new = project.clone();
             new.base.children = children;

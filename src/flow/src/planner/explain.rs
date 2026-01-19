@@ -250,13 +250,22 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 info.push(format!("group_by=[{}]", group_exprs.join(", ")));
             }
         }
+        LogicalPlan::Compute(compute) => {
+            let mut temps = compute
+                .fields
+                .iter()
+                .map(|f| format!("{} = {}", f.field_name, f.expr))
+                .collect::<Vec<_>>();
+            temps.sort();
+            info.push(format!("temps=[{}]", temps.join("; ")));
+        }
         LogicalPlan::Project(project) => {
             let fields = project
                 .fields
                 .iter()
-                .map(|f| f.expr.to_string())
+                .map(|f| format!("{} = {}", f.field_name, f.expr))
                 .collect::<Vec<_>>();
-            info.push(format!("fields=[{}]", fields.join("; ")));
+            info.push(format!("projections=[{}]", fields.join("; ")));
         }
         LogicalPlan::DataSink(DataSinkPlan { sink, .. }) => {
             info.push(format!("sink_id={}", sink.sink_id));
@@ -611,13 +620,22 @@ fn build_physical_node_with_prefix(
         PhysicalPlan::Filter(filter) => {
             info.push(format!("predicate={}", filter.predicate));
         }
+        PhysicalPlan::Compute(compute) => {
+            let mut temps = compute
+                .fields
+                .iter()
+                .map(|f| format!("{} = {}", f.field_name, f.original_expr))
+                .collect::<Vec<_>>();
+            temps.sort();
+            info.push(format!("temps=[{}]", temps.join("; ")));
+        }
         PhysicalPlan::Project(project) => {
             let fields = project
                 .fields
                 .iter()
-                .map(|f| f.original_expr.to_string())
+                .map(|f| format!("{} = {}", f.field_name, f.original_expr))
                 .collect::<Vec<_>>();
-            info.push(format!("fields=[{}]", fields.join("; ")));
+            info.push(format!("projections=[{}]", fields.join("; ")));
             if project.passthrough_messages {
                 info.push("passthrough_messages=true".to_string());
             }

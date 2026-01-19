@@ -202,6 +202,11 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
 
     fn collect_from_plan(&mut self, plan: &LogicalPlan) {
         match plan {
+            LogicalPlan::Compute(compute) => {
+                for field in &compute.fields {
+                    self.collect_expr_ast(&field.expr);
+                }
+            }
             LogicalPlan::Project(project) => {
                 for field in &project.fields {
                     self.collect_expr_ast(&field.expr);
@@ -572,6 +577,11 @@ impl<'a> StructFieldUsageCollector<'a> {
 
     fn collect_from_plan(&mut self, plan: &LogicalPlan) {
         match plan {
+            LogicalPlan::Compute(compute) => {
+                for field in &compute.fields {
+                    self.collect_expr_ast(&field.expr);
+                }
+            }
             LogicalPlan::Project(project) => {
                 for field in &project.fields {
                     self.collect_expr_ast(&field.expr);
@@ -836,6 +846,11 @@ impl<'a> ListElementUsageCollector<'a> {
 
     fn collect_from_plan(&mut self, plan: &LogicalPlan) {
         match plan {
+            LogicalPlan::Compute(compute) => {
+                for field in &compute.fields {
+                    self.collect_expr_ast(&field.expr);
+                }
+            }
             LogicalPlan::Project(project) => {
                 for field in &project.fields {
                     self.collect_expr_ast(&field.expr);
@@ -1332,6 +1347,11 @@ fn clone_with_children(plan: &LogicalPlan, children: Vec<Arc<LogicalPlan>>) -> A
             let mut new = agg.clone();
             new.base.children = children;
             Arc::new(LogicalPlan::Aggregation(new))
+        }
+        LogicalPlan::Compute(compute) => {
+            let mut new = compute.clone();
+            new.base.children = children;
+            Arc::new(LogicalPlan::Compute(new))
         }
         LogicalPlan::Project(project) => {
             let mut new = project.clone();
