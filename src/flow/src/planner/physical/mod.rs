@@ -14,11 +14,11 @@ pub mod physical_filter;
 pub mod physical_process_time_watermark;
 pub mod physical_project;
 pub mod physical_result_collect;
+pub mod physical_sampler;
 pub mod physical_shared_stream;
 pub mod physical_stateful_function;
 pub mod physical_streaming_aggregation;
 pub mod physical_streaming_encoder;
-pub mod physical_throttler;
 pub mod physical_watermark;
 pub mod physical_window;
 
@@ -37,11 +37,11 @@ pub use physical_filter::PhysicalFilter;
 pub use physical_process_time_watermark::PhysicalProcessTimeWatermark;
 pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_result_collect::PhysicalResultCollect;
+pub use physical_sampler::PhysicalSampler;
 pub use physical_shared_stream::PhysicalSharedStream;
 pub use physical_stateful_function::{PhysicalStatefulFunction, StatefulCall};
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
 pub use physical_streaming_encoder::PhysicalStreamingEncoder;
-pub use physical_throttler::PhysicalThrottler;
 pub use physical_watermark::{PhysicalWatermark, WatermarkConfig, WatermarkStrategy};
 pub use physical_window::{
     PhysicalCountWindow, PhysicalSlidingWindow, PhysicalStateWindow, PhysicalTumblingWindow,
@@ -75,8 +75,8 @@ pub enum PhysicalPlan {
     EventtimeWatermark(PhysicalEventtimeWatermark),
     /// Back-compat (deprecated).
     Watermark(PhysicalWatermark),
-    /// Throttler for rate limiting.
-    Throttler(PhysicalThrottler),
+    /// Sampler for stream downsampling.
+    Sampler(PhysicalSampler),
 }
 
 impl PhysicalPlan {
@@ -104,7 +104,7 @@ impl PhysicalPlan {
             PhysicalPlan::ProcessTimeWatermark(plan) => plan.base.children(),
             PhysicalPlan::EventtimeWatermark(plan) => plan.base.children(),
             PhysicalPlan::Watermark(plan) => plan.base.children(),
-            PhysicalPlan::Throttler(plan) => plan.base.children(),
+            PhysicalPlan::Sampler(plan) => plan.base.children(),
         }
     }
 
@@ -132,7 +132,7 @@ impl PhysicalPlan {
             PhysicalPlan::ProcessTimeWatermark(_) => "PhysicalProcessTimeWatermark",
             PhysicalPlan::EventtimeWatermark(_) => "PhysicalEventtimeWatermark",
             PhysicalPlan::Watermark(_) => "PhysicalWatermark",
-            PhysicalPlan::Throttler(_) => "PhysicalThrottler",
+            PhysicalPlan::Sampler(_) => "PhysicalSampler",
         }
     }
 
@@ -160,7 +160,7 @@ impl PhysicalPlan {
             PhysicalPlan::ProcessTimeWatermark(plan) => plan.base.index(),
             PhysicalPlan::EventtimeWatermark(plan) => plan.base.index(),
             PhysicalPlan::Watermark(plan) => plan.base.index(),
-            PhysicalPlan::Throttler(plan) => plan.base.index(),
+            PhysicalPlan::Sampler(plan) => plan.base.index(),
         }
     }
 
@@ -207,7 +207,7 @@ impl PhysicalPlan {
             PhysicalPlan::ProcessTimeWatermark(plan) => &mut plan.base.children,
             PhysicalPlan::EventtimeWatermark(plan) => &mut plan.base.children,
             PhysicalPlan::Watermark(plan) => &mut plan.base.children,
-            PhysicalPlan::Throttler(plan) => &mut plan.base.children,
+            PhysicalPlan::Sampler(plan) => &mut plan.base.children,
         }
     }
 }

@@ -21,6 +21,7 @@ pub mod filter_processor;
 pub mod processor_builder;
 pub mod project_processor;
 pub mod result_collect_processor;
+pub mod sampler_processor;
 pub mod shared_stream_processor;
 pub mod sink_processor;
 pub mod sliding_window_processor;
@@ -30,7 +31,6 @@ pub mod stats;
 pub mod stream_data;
 pub mod streaming_aggregation_processor;
 pub mod streaming_encoder_processor;
-pub mod throttler_processor;
 pub mod tumbling_window_processor;
 pub mod watermark_processor;
 
@@ -49,6 +49,7 @@ pub use processor_builder::{
 };
 pub use project_processor::ProjectProcessor;
 pub use result_collect_processor::ResultCollectProcessor;
+pub use sampler_processor::{SamplerConfig, SamplerProcessor, SamplingStrategy};
 pub use shared_stream_processor::SharedStreamProcessor;
 pub use sink_processor::SinkProcessor;
 pub use sliding_window_processor::SlidingWindowProcessor;
@@ -67,6 +68,5 @@ pub use streaming_aggregation_processor::{
     StreamingTumblingAggregationProcessor,
 };
 pub use streaming_encoder_processor::StreamingEncoderProcessor;
-pub use throttler_processor::ThrottlerProcessor;
 pub use tumbling_window_processor::TumblingWindowProcessor;
 pub use watermark_processor::WatermarkProcessor;

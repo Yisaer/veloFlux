@@ -927,8 +927,8 @@ fn build_physical_node_with_prefix(
                 ));
             }
         }
-        PhysicalPlan::Throttler(throttler) => {
-            info.push(format!("rate_limit={:?}", throttler.rate_limit));
+        PhysicalPlan::Sampler(throttler) => {
+            info.push(format!("interval={:?}", throttler.interval));
         }
     }
 

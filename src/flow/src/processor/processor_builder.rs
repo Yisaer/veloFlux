@@ -14,9 +14,10 @@ use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
     ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor,
     FilterProcessor, Ingress, InstantControlSignal, Processor, ProcessorError, ProjectProcessor,
-    ResultCollectProcessor, SharedStreamProcessor, SinkProcessor, SlidingWindowProcessor,
-    StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
-    StreamingEncoderProcessor, ThrottlerProcessor, TumblingWindowProcessor, WatermarkProcessor,
+    ResultCollectProcessor, SamplerProcessor, SharedStreamProcessor, SinkProcessor,
+    SlidingWindowProcessor, StateWindowProcessor, StatefulFunctionProcessor, StreamData,
+    StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
+    WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::stateful::StatefulFunctionRegistry;
@@ -68,8 +69,8 @@ pub enum PlanProcessor {
     ResultCollect(ResultCollectProcessor),
     /// BarrierProcessor created from PhysicalBarrier
     Barrier(BarrierProcessor),
-    /// ThrottlerProcessor for rate limiting
-    Throttler(ThrottlerProcessor),
+    /// SamplerProcessor for rate limiting
+    Sampler(SamplerProcessor),
 }
 
 #[derive(Clone)]
@@ -168,7 +169,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.id(),
             PlanProcessor::ResultCollect(p) => p.id(),
             PlanProcessor::Barrier(p) => p.id(),
-            PlanProcessor::Throttler(p) => p.id(),
+            PlanProcessor::Sampler(p) => p.id(),
         }
     }
 
@@ -192,7 +193,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(_) => "sink",
             PlanProcessor::ResultCollect(_) => "result_collect",
             PlanProcessor::Barrier(_) => "barrier",
-            PlanProcessor::Throttler(_) => "throttler",
+            PlanProcessor::Sampler(_) => "sampler",
         }
     }
 
@@ -222,7 +223,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.set_stats(stats),
             PlanProcessor::ResultCollect(p) => p.set_stats(stats),
             PlanProcessor::Barrier(p) => p.set_stats(stats),
-            PlanProcessor::Throttler(_) => { /* ThrottlerProcessor doesn't use stats */ }
+            PlanProcessor::Sampler(p) => p.set_stats(stats),
         }
     }
 
@@ -247,7 +248,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.start(),
             PlanProcessor::ResultCollect(p) => p.start(),
             PlanProcessor::Barrier(p) => p.start(),
-            PlanProcessor::Throttler(p) => p.start(),
+            PlanProcessor::Sampler(p) => p.start(),
         }
     }
 
@@ -272,7 +273,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.subscribe_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_output(),
             PlanProcessor::Barrier(p) => p.subscribe_output(),
-            PlanProcessor::Throttler(p) => p.subscribe_output(),
+            PlanProcessor::Sampler(p) => p.subscribe_output(),
         }
     }
 
@@ -297,7 +298,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.subscribe_control_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_control_output(),
             PlanProcessor::Barrier(p) => p.subscribe_control_output(),
-            PlanProcessor::Throttler(p) => p.subscribe_control_output(),
+            PlanProcessor::Sampler(p) => p.subscribe_control_output(),
         }
     }
 
@@ -322,7 +323,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.add_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_input(receiver),
             PlanProcessor::Barrier(p) => p.add_input(receiver),
-            PlanProcessor::Throttler(p) => p.add_input(receiver),
+            PlanProcessor::Sampler(p) => p.add_input(receiver),
         }
     }
 
@@ -347,7 +348,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.add_control_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_control_input(receiver),
             PlanProcessor::Barrier(p) => p.add_control_input(receiver),
-            PlanProcessor::Throttler(p) => p.add_control_input(receiver),
+            PlanProcessor::Sampler(p) => p.add_control_input(receiver),
         }
     }
 }
@@ -902,10 +903,10 @@ fn create_processor_from_plan_node(
                 PlanProcessor::Barrier(processor),
             ))
         }
-        PhysicalPlan::Throttler(throttler) => {
-            let processor = ThrottlerProcessor::new(plan_name.clone(), throttler.rate_limit);
+        PhysicalPlan::Sampler(sampler) => {
+            let processor = SamplerProcessor::latest(plan_name.clone(), sampler.interval);
             Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::Throttler(processor),
+                PlanProcessor::Sampler(processor),
             ))
         }
     }

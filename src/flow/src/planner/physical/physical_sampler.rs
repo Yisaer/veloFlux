@@ -3,16 +3,16 @@ use std::time::Duration;
 
 /// Physical plan node for throttling (rate limiting) a stream.
 #[derive(Debug, Clone)]
-pub struct PhysicalThrottler {
+pub struct PhysicalSampler {
     pub base: BasePhysicalPlan,
-    pub rate_limit: Duration,
+    pub interval: Duration,
 }
 
-impl PhysicalThrottler {
-    pub fn new(index: i64, rate_limit: Duration) -> Self {
+impl PhysicalSampler {
+    pub fn new(index: i64, interval: Duration) -> Self {
         Self {
             base: BasePhysicalPlan::new(Vec::new(), index),
-            rate_limit,
+            interval,
         }
     }
 }
