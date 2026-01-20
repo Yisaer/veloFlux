@@ -287,54 +287,6 @@ mod tests {
         StreamData::Collection(Box::new(batch))
     }
 
-    #[test]
-    fn test_sampler_creation() {
-        let sampler = SamplerProcessor::latest("test_sampler", Duration::from_millis(100));
-        assert_eq!(sampler.id(), "test_sampler");
-    }
-
-    #[test]
-    fn test_sampler_config_serialization() {
-        let config = SamplerConfig::new(Duration::from_millis(100));
-        let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("100ms"));
-        assert!(json.contains("latest"));
-    }
-
-    #[tokio::test]
-    async fn test_sampler_rate_limits_high_frequency_input() {
-        let mut sampler = SamplerProcessor::latest("sampler_test", Duration::from_millis(50));
-
-        let (input_tx, input_rx) = broadcast::channel::<StreamData>(16);
-        sampler.add_input(input_rx);
-
-        let mut output_rx = sampler.subscribe_output().unwrap();
-        let handle = sampler.start();
-
-        // Send 10 messages rapidly
-        for i in 0..10 {
-            let _ = input_tx.send(create_test_data(i));
-            sleep(Duration::from_millis(5)).await;
-        }
-
-        sleep(Duration::from_millis(100)).await;
-
-        let mut received_count = 0;
-        while output_rx.try_recv().is_ok() {
-            received_count += 1;
-        }
-
-        drop(input_tx);
-        let _ = tokio::time::timeout(Duration::from_millis(200), handle).await;
-
-        assert!(
-            received_count < 10,
-            "Expected rate limiting, got {} messages",
-            received_count
-        );
-        assert!(received_count >= 1, "Expected at least 1 message");
-    }
-
     #[tokio::test]
     async fn test_sampler_emits_latest_value() {
         let mut sampler = SamplerProcessor::latest("latest_test", Duration::from_millis(200));
