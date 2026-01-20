@@ -6,6 +6,7 @@ pub mod optimizer;
 pub mod physical;
 pub mod physical_plan_builder;
 pub mod plan_cache;
+pub(crate) mod shared_stream_plan;
 pub mod sink;
 
 pub use logical_optimizer::{

@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod codec;
 pub mod connector;
 pub mod eventtime;
+mod explain_shared_stream;
 pub mod expr;
 pub mod instance;
 pub mod model;
@@ -43,7 +44,7 @@ pub use pipeline::{
     SinkDefinition, SinkProps, SinkType,
 };
 pub use planner::create_physical_plan;
-pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain};
+pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};
 pub use planner::logical::{
     BaseLogicalPlan, DataSinkPlan, DataSource, Filter, LogicalPlan, Project,
 };
@@ -64,6 +65,7 @@ pub use shared_stream::{
 pub use stateful::StatefulFunctionRegistry;
 
 use connector::{ConnectorRegistry, MqttClientManager};
+use explain_shared_stream::shared_stream_decode_applied_snapshot;
 use planner::logical::create_logical_plan;
 use processor::{create_processor_pipeline, ProcessorPipeline, ProcessorPipelineDependencies};
 use shared_stream::SharedStreamRegistry;
@@ -178,7 +180,11 @@ fn build_physical_plan_from_sql(
         registries.encoder_registry().as_ref(),
         registries.aggregate_registry(),
     );
-    let explain = PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&optimized_plan));
+    let explain = PipelineExplain::new(
+        Arc::clone(&logical_plan),
+        Arc::clone(&optimized_plan),
+        PipelineExplainConfig::default(),
+    );
     tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
     Ok(optimized_plan)
 }
@@ -356,13 +362,19 @@ pub fn explain_pipeline_with_options(
         registries.aggregate_registry(),
     );
 
-    Ok(PipelineExplain::new_with_pipeline_options(
-        crate::planner::explain::PipelineExplainOptions {
-            eventtime_enabled: options.eventtime.enabled,
-            eventtime_late_tolerance_ms: options.eventtime.late_tolerance.as_millis(),
-        },
+    let shared_stream_decode_applied =
+        shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
+
+    Ok(PipelineExplain::new(
         logical_plan,
         optimized_plan,
+        PipelineExplainConfig {
+            pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
+                eventtime_enabled: options.eventtime.enabled,
+                eventtime_late_tolerance_ms: options.eventtime.late_tolerance.as_millis(),
+            }),
+            shared_stream_decode_applied,
+        },
     ))
 }
 

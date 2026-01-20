@@ -9,9 +9,9 @@ use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind}
 use flow::Catalog;
 use flow::EventtimeDefinition;
 use flow::{
-    CommonSinkProps, MqttStreamProps, NopSinkConfig, PipelineExplain, PipelineRegistries,
-    PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
-    StreamDecoderConfig, StreamDefinition, StreamProps,
+    CommonSinkProps, MqttStreamProps, NopSinkConfig, PipelineExplain, PipelineExplainConfig,
+    PipelineRegistries, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
+    SinkEncoderConfig, StreamDecoderConfig, StreamDefinition, StreamProps,
 };
 use parser::parse_sql;
 use serde_json::json;
@@ -246,7 +246,11 @@ fn explain_json(sql: &str, sinks: Vec<PipelineSink>) -> String {
         registries.encoder_registry().as_ref(),
         registries.aggregate_registry(),
     );
-    let explain = PipelineExplain::new(logical_plan, physical_plan);
+    let explain = PipelineExplain::new(
+        logical_plan,
+        physical_plan,
+        PipelineExplainConfig::default(),
+    );
     println!("{sql}");
     println!("{}", explain.to_pretty_string());
     explain.to_json().to_string()
@@ -267,8 +271,11 @@ fn explain_json_before_after_physical_opt(sql: &str, sinks: Vec<PipelineSink>) -
         flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
             .expect("physical");
 
-    let explain_before =
-        PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&physical_plan));
+    let explain_before = PipelineExplain::new(
+        Arc::clone(&logical_plan),
+        Arc::clone(&physical_plan),
+        PipelineExplainConfig::default(),
+    );
     let before = explain_before.to_json().to_string();
 
     let optimized = flow::optimize_physical_plan(
@@ -276,7 +283,8 @@ fn explain_json_before_after_physical_opt(sql: &str, sinks: Vec<PipelineSink>) -
         registries.encoder_registry().as_ref(),
         registries.aggregate_registry(),
     );
-    let explain_after = PipelineExplain::new(logical_plan, optimized);
+    let explain_after =
+        PipelineExplain::new(logical_plan, optimized, PipelineExplainConfig::default());
     let after = explain_after.to_json().to_string();
 
     println!("{sql}");
