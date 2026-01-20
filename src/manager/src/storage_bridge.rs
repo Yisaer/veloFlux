@@ -82,6 +82,9 @@ pub fn stream_definition_from_stored(
             cfg.eventtime_type.clone(),
         ));
     }
+    if let Some(sampler) = &req.sampler {
+        definition = definition.with_sampler(sampler.clone());
+    }
     Ok(definition)
 }
 
