@@ -5,6 +5,7 @@ use crate::connector::{
     MemorySinkConfig, MemorySourceConfig, MemorySourceConnector, MemoryTopicKind,
     MockSourceConnector, MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
+use crate::explain_shared_stream::shared_stream_decode_applied_snapshot;
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan;
 use crate::planner::plan_cache::{logical_plan_from_ir, sources_from_logical_ir, LogicalPlanIR};
@@ -480,13 +481,12 @@ fn build_pipeline_runtime_with_logical_ir(
     if definition.options().eventtime.enabled {
         validate_eventtime_enabled(&stream_definitions, registries)?;
     }
-    let explain = PipelineExplain::new_with_pipeline_options(
-        crate::planner::explain::PipelineExplainOptions {
-            eventtime_enabled: definition.options().eventtime.enabled,
-            eventtime_late_tolerance_ms: definition.options().eventtime.late_tolerance.as_millis(),
-        },
+    let shared_stream_decode_applied =
+        shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
+    let explain = PipelineExplain::new_with_shared_stream_decode_applied(
         Arc::clone(&logical_plan),
         Arc::clone(&optimized_plan),
+        shared_stream_decode_applied,
     );
     tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
 
@@ -593,7 +593,17 @@ fn build_pipeline_runtime_from_logical_ir(
     if definition.options().eventtime.enabled {
         validate_eventtime_enabled(&stream_definitions, registries)?;
     }
-    let explain = PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&optimized_plan));
+    let shared_stream_decode_applied =
+        shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
+    let explain = PipelineExplain::new_with_pipeline_options_and_shared_stream_decode_applied(
+        crate::planner::explain::PipelineExplainOptions {
+            eventtime_enabled: definition.options().eventtime.enabled,
+            eventtime_late_tolerance_ms: definition.options().eventtime.late_tolerance.as_millis(),
+        },
+        Arc::clone(&logical_plan),
+        Arc::clone(&optimized_plan),
+        shared_stream_decode_applied,
+    );
     tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
 
     let eventtime = if definition.options().eventtime.enabled {

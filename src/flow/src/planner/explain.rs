@@ -5,6 +5,7 @@ use crate::planner::physical::{WatermarkConfig, WatermarkStrategy};
 use datatypes::{ConcreteDatatype, ListType, Schema, StructField, StructType};
 use serde::Serialize;
 use sqlparser::ast::Expr;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +100,27 @@ impl PipelineExplain {
         }
     }
 
+    pub fn new_with_shared_stream_decode_applied(
+        logical_plan: Arc<LogicalPlan>,
+        physical_plan: Arc<PhysicalPlan>,
+        shared_stream_decode_applied: HashMap<String, Vec<String>>,
+    ) -> Self {
+        let logical = ExplainReport {
+            root: build_logical_node(&logical_plan),
+        };
+        let physical = ExplainReport {
+            root: build_physical_node_with_shared_stream_decode_applied(
+                &physical_plan,
+                Some(&shared_stream_decode_applied),
+            ),
+        };
+        Self {
+            options: None,
+            logical,
+            physical,
+        }
+    }
+
     pub fn new_with_pipeline_options(
         options: PipelineExplainOptions,
         logical_plan: Arc<LogicalPlan>,
@@ -109,6 +131,28 @@ impl PipelineExplain {
         };
         let physical = ExplainReport {
             root: build_physical_node(&physical_plan),
+        };
+        Self {
+            options: Some(options),
+            logical,
+            physical,
+        }
+    }
+
+    pub fn new_with_pipeline_options_and_shared_stream_decode_applied(
+        options: PipelineExplainOptions,
+        logical_plan: Arc<LogicalPlan>,
+        physical_plan: Arc<PhysicalPlan>,
+        shared_stream_decode_applied: HashMap<String, Vec<String>>,
+    ) -> Self {
+        let logical = ExplainReport {
+            root: build_logical_node(&logical_plan),
+        };
+        let physical = ExplainReport {
+            root: build_physical_node_with_shared_stream_decode_applied(
+                &physical_plan,
+                Some(&shared_stream_decode_applied),
+            ),
         };
         Self {
             options: Some(options),
@@ -568,13 +612,21 @@ fn format_struct_field_projection_with_decode_projection(
 }
 
 fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
-    build_physical_node_with_prefix(plan, None, None)
+    build_physical_node_with_shared_stream_decode_applied(plan, None)
+}
+
+fn build_physical_node_with_shared_stream_decode_applied(
+    plan: &Arc<PhysicalPlan>,
+    shared_stream_decode_applied: Option<&HashMap<String, Vec<String>>>,
+) -> ExplainNode {
+    build_physical_node_with_prefix(plan, None, None, shared_stream_decode_applied)
 }
 
 fn build_physical_node_with_prefix(
     plan: &Arc<PhysicalPlan>,
     id_prefix: Option<&str>,
     scope_info: Option<&str>,
+    shared_stream_decode_applied: Option<&HashMap<String, Vec<String>>>,
 ) -> ExplainNode {
     let mut info = Vec::new();
     if let Some(scope_info) = scope_info {
@@ -593,10 +645,18 @@ fn build_physical_node_with_prefix(
         }
         PhysicalPlan::Decoder(decoder) => {
             info.push(format!("decoder={}", decoder.decoder().kind()));
-            info.push(format_schema_with_decode_projection(
-                decoder.schema().as_ref(),
-                decoder.decode_projection(),
-            ));
+            if scope_info == Some("scope=shared_stream") {
+                if let Some(shared_stream_decode_applied) = shared_stream_decode_applied {
+                    if let Some(applied) = shared_stream_decode_applied.get(decoder.source_name()) {
+                        info.push(format!("shared.decode_applied=[{}]", applied.join(", ")));
+                    }
+                }
+            } else {
+                info.push(format_schema_with_decode_projection(
+                    decoder.schema().as_ref(),
+                    decoder.decode_projection(),
+                ));
+            }
             if let Some(eventtime) = decoder.eventtime() {
                 info.push(format!("eventtime.column={}", eventtime.column_name));
                 info.push(format!("eventtime.type={}", eventtime.type_key));
@@ -954,7 +1014,14 @@ fn build_physical_node_with_prefix(
     let mut children: Vec<ExplainNode> = plan
         .children()
         .iter()
-        .map(|child| build_physical_node_with_prefix(child, id_prefix, scope_info))
+        .map(|child| {
+            build_physical_node_with_prefix(
+                child,
+                id_prefix,
+                scope_info,
+                shared_stream_decode_applied,
+            )
+        })
         .collect();
 
     if let PhysicalPlan::SharedStream(shared) = plan.as_ref() {
@@ -964,6 +1031,7 @@ fn build_physical_node_with_prefix(
                 &ingest_plan,
                 Some(prefix.as_str()),
                 Some("scope=shared_stream"),
+                shared_stream_decode_applied,
             ));
         }
     }
@@ -1066,5 +1134,64 @@ mod tests {
         assert!(output.contains("DataSource"));
         assert!(output.contains("Signal0"));
         assert!(output.contains("Signal4999"));
+    }
+
+    #[test]
+    fn test_shared_stream_ingest_decoder_shows_decode_applied_snapshot() {
+        use crate::catalog::StreamDecoderConfig;
+        use crate::planner::physical::{PhysicalPlan, PhysicalSharedStream};
+        use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
+        use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
+        use std::collections::HashMap;
+
+        let stream_name = "shared_stream";
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                stream_name.to_string(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                stream_name.to_string(),
+                "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+        ]));
+
+        let ingest_plan = create_physical_plan_for_shared_stream(
+            stream_name,
+            Arc::clone(&schema),
+            StreamDecoderConfig::json(),
+        );
+
+        let plan = Arc::new(PhysicalPlan::SharedStream(PhysicalSharedStream::new(
+            stream_name.to_string(),
+            None,
+            Arc::clone(&schema),
+            vec!["a".to_string()],
+            StreamDecoderConfig::json(),
+            Some(ingest_plan),
+            0,
+        )));
+
+        let mut snapshot = HashMap::new();
+        snapshot.insert(stream_name.to_string(), vec!["a".to_string()]);
+
+        let report = ExplainReport {
+            root: build_physical_node_with_shared_stream_decode_applied(&plan, Some(&snapshot)),
+        };
+        let output = report.table_string();
+        assert!(output.contains("shared/shared_stream/PhysicalDecoder"));
+        assert!(output.contains("shared.decode_applied=[a]"));
+
+        let decoder_row = report
+            .rows()
+            .into_iter()
+            .find(|row| row.id.contains("shared/shared_stream/PhysicalDecoder"))
+            .expect("decoder row should exist");
+        assert!(
+            !decoder_row.info.contains("schema=["),
+            "shared stream ingest decoder should omit schema info"
+        );
     }
 }
