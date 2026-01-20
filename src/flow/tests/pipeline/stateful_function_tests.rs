@@ -137,6 +137,73 @@ async fn run_stateful_case(case: StatefulCase) {
 async fn stateful_function_table_driven() {
     let cases = vec![
         StatefulCase {
+            name: "aggregation_sum_countwindow",
+            sql: "SELECT sum(a) FROM stream GROUP BY countwindow(2)",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Int64(10),
+                    Value::Int64(20),
+                    Value::Int64(30),
+                    Value::Int64(40),
+                    Value::Int64(50),
+                ],
+            )],
+            expected_outputs: vec![
+                ExpectedCollection {
+                    expected_rows: 1,
+                    expected_columns: 1,
+                    column_checks: vec![ColumnCheck {
+                        expected_name: "sum(a)".to_string(),
+                        expected_values: vec![Value::Int64(30)],
+                    }],
+                },
+                ExpectedCollection {
+                    expected_rows: 1,
+                    expected_columns: 1,
+                    column_checks: vec![ColumnCheck {
+                        expected_name: "sum(a)".to_string(),
+                        expected_values: vec![Value::Int64(70)],
+                    }],
+                },
+            ],
+            wait_after_send: Duration::from_millis(200),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "last_row_countwindow",
+            sql: "SELECT last_row(a) FROM stream GROUP BY countwindow(2)",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Int64(10),
+                    Value::Int64(20),
+                    Value::Int64(30),
+                    Value::Int64(40),
+                ],
+            )],
+            expected_outputs: vec![
+                ExpectedCollection {
+                    expected_rows: 1,
+                    expected_columns: 1,
+                    column_checks: vec![ColumnCheck {
+                        expected_name: "last_row(a)".to_string(),
+                        expected_values: vec![Value::Int64(20)],
+                    }],
+                },
+                ExpectedCollection {
+                    expected_rows: 1,
+                    expected_columns: 1,
+                    column_checks: vec![ColumnCheck {
+                        expected_name: "last_row(a)".to_string(),
+                        expected_values: vec![Value::Int64(40)],
+                    }],
+                },
+            ],
+            wait_after_send: Duration::from_millis(200),
+            close_before_read: false,
+        },
+        StatefulCase {
             name: "lag_basic",
             sql: "SELECT lag(a) AS prev FROM stream",
             input_data: vec![(
