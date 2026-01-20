@@ -692,8 +692,8 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::DataSink(new))
         }
-        PhysicalPlan::Sampler(throttler) => {
-            let mut new = throttler.clone();
+        PhysicalPlan::Sampler(sampler) => {
+            let mut new = sampler.clone();
             new.base.children = children;
             Arc::new(PhysicalPlan::Sampler(new))
         }

@@ -154,6 +154,8 @@ curl -s -XDELETE http://127.0.0.1:8080/streams/source_stream
 
 The `sampler` property enables stream-level downsampling. All pipelines consuming from this stream will receive downsampled data.
 
+> **Note**: The sampler operates on raw bytes *before* decoding, enabling efficient rate limiting at the byte level.
+
 - `interval: string` (required) – Duration between emissions (e.g., `"1s"`, `"100ms"`, `"5m"`)
 - `strategy: object` (required) – Sampling strategy:
   - `{ "type": "latest" }` – Emits the most recent value received during each interval
