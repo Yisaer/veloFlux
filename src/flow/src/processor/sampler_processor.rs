@@ -100,9 +100,9 @@ impl Processor for SamplerProcessor {
     }
 
     fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
-        let input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
+        let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
-        let control_streams = fan_in_control_streams(control_receivers);
+        let mut control_streams = fan_in_control_streams(control_receivers);
         let control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
@@ -119,19 +119,75 @@ impl Processor for SamplerProcessor {
         );
 
         tokio::spawn(async move {
-            match strategy {
-                SamplingStrategy::Latest => {
-                    Self::run_latest_strategy(
-                        processor_id,
-                        emit_interval,
-                        input_streams,
-                        control_streams,
-                        control_active,
-                        output,
-                        control_output,
-                        stats,
-                    )
-                    .await
+            let mut ticker = interval(emit_interval);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+            let mut strategy_state = StrategyState::new(strategy);
+            let mut control_active = control_active;
+
+            loop {
+                tokio::select! {
+                    biased;
+                    control_item = control_streams.next(), if control_active => {
+                        if let Some(Ok(control_signal)) = control_item {
+                            let is_terminal = control_signal.is_terminal();
+                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            if is_terminal {
+                                if let Some(pending) = strategy_state.flush() {
+                                    emit_data(&output, &stats, pending).await?;
+                                }
+                                tracing::info!(processor_id = %processor_id, "sampler received terminal signal, shutting down");
+                                return Ok(());
+                            }
+                        } else if control_item.is_none() {
+                            control_active = false;
+                        } else if let Some(Err(BroadcastStreamRecvError::Lagged(n))) = control_item {
+                            log_broadcast_lagged(&processor_id, n, "control");
+                        }
+                    }
+                    _ = ticker.tick() => {
+                        if let Some(data) = strategy_state.on_tick() {
+                            emit_data(&output, &stats, data).await?;
+                            tracing::trace!(processor_id = %processor_id, "sampler emitted tick value");
+                        }
+                    }
+                    data_item = input_streams.next() => {
+                        match data_item {
+                            Some(Ok(data)) => {
+                                log_received_data(&processor_id, &data);
+                                stats.record_in(data.num_rows_hint().unwrap_or(0));
+
+                                if !should_sample_data(&data) {
+                                    // Do not throttle non-data items received on the data channel.
+                                    // This keeps watermark/error/control events flowing promptly.
+                                    let is_terminal = data.is_terminal();
+                                    if is_terminal {
+                                        if let Some(pending) = strategy_state.flush() {
+                                            emit_data(&output, &stats, pending).await?;
+                                        }
+                                        emit_data(&output, &stats, data).await?;
+                                        tracing::info!(processor_id = %processor_id, "sampler received terminal item on data channel, shutting down");
+                                        return Ok(());
+                                    }
+                                    emit_data(&output, &stats, data).await?;
+                                    continue;
+                                }
+
+                                // Sample data based on selected strategy (lossy).
+                                strategy_state.on_sampled_data(data);
+                            }
+                            Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
+                                log_broadcast_lagged(&processor_id, n, "data");
+                            }
+                            None => {
+                                if let Some(pending) = strategy_state.flush() {
+                                    emit_data(&output, &stats, pending).await?;
+                                }
+                                tracing::info!(processor_id = %processor_id, "sampler input closed, shutting down");
+                                return Ok(());
+                            }
+                        }
+                    }
                 }
             }
         })
@@ -154,115 +210,52 @@ impl Processor for SamplerProcessor {
     }
 }
 
-impl SamplerProcessor {
-    fn should_sample_data(item: &StreamData) -> bool {
-        matches!(
-            item,
-            StreamData::Bytes(_) | StreamData::Collection(_) | StreamData::EncodedBytes { .. }
-        )
-    }
+enum StrategyState {
+    Latest { latest: Option<StreamData> },
+}
 
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
-    async fn run_latest_strategy(
-        processor_id: String,
-        emit_interval: Duration,
-        mut input_streams: futures::stream::SelectAll<
-            tokio_stream::wrappers::BroadcastStream<StreamData>,
-        >,
-        mut control_streams: futures::stream::SelectAll<
-            tokio_stream::wrappers::BroadcastStream<ControlSignal>,
-        >,
-        mut control_active: bool,
-        output: broadcast::Sender<StreamData>,
-        control_output: broadcast::Sender<ControlSignal>,
-        stats: Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
-        let mut ticker = interval(emit_interval);
-        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-        let mut latest: Option<StreamData> = None;
-
-        loop {
-            tokio::select! {
-                biased;
-                control_item = control_streams.next(), if control_active => {
-                    if let Some(Ok(control_signal)) = control_item {
-                        let is_terminal = control_signal.is_terminal();
-                        send_control_with_backpressure(&control_output, control_signal).await?;
-                        if is_terminal {
-                            // Emit latest before shutdown if present
-                            if let Some(data) = latest.take() {
-                                let row_count = data.num_rows_hint().unwrap_or(0);
-                                send_with_backpressure(&output, data).await?;
-                                stats.record_out(row_count);
-                            }
-                            tracing::info!(processor_id = %processor_id, "sampler received terminal signal, shutting down");
-                            return Ok(());
-                        }
-                    } else if control_item.is_none() {
-                        control_active = false;
-                    } else if let Some(Err(BroadcastStreamRecvError::Lagged(n))) = control_item {
-                        log_broadcast_lagged(&processor_id, n, "control");
-                    }
-                }
-                _ = ticker.tick() => {
-                    // Emit latest value if present
-                    if let Some(data) = latest.take() {
-                        let row_count = data.num_rows_hint().unwrap_or(0);
-                        send_with_backpressure(&output, data).await?;
-                        stats.record_out(row_count);
-                        tracing::trace!(processor_id = %processor_id, "sampler emitted latest value");
-                    }
-                }
-                data_item = input_streams.next() => {
-                    match data_item {
-                        Some(Ok(data)) => {
-                            log_received_data(&processor_id, &data);
-                            stats.record_in(data.num_rows_hint().unwrap_or(0));
-                            if !Self::should_sample_data(&data) {
-                                // Do not throttle non-data items received on the data channel.
-                                // This keeps control/watermark/error events flowing promptly.
-                                let is_terminal = data.is_terminal();
-                                if is_terminal {
-                                    if let Some(pending) = latest.take() {
-                                        let row_count = pending.num_rows_hint().unwrap_or(0);
-                                        send_with_backpressure(&output, pending).await?;
-                                        stats.record_out(row_count);
-                                    }
-                                    let out_rows = data.num_rows_hint().unwrap_or(0);
-                                    send_with_backpressure(&output, data).await?;
-                                    stats.record_out(out_rows);
-                                    tracing::info!(processor_id = %processor_id, "sampler received terminal item on data channel, shutting down");
-                                    return Ok(());
-                                }
-                                let out_rows = data.num_rows_hint().unwrap_or(0);
-                                send_with_backpressure(&output, data).await?;
-                                stats.record_out(out_rows);
-                                continue;
-                            }
-
-                            // Replace latest with new data (discard old).
-                            latest = Some(data);
-                        }
-                        Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
-                            log_broadcast_lagged(&processor_id, n, "data");
-                        }
-                        None => {
-                            // Input closed, emit final value and exit
-                            if let Some(data) = latest.take() {
-                                let row_count = data.num_rows_hint().unwrap_or(0);
-                                send_with_backpressure(&output, data).await?;
-                                stats.record_out(row_count);
-                            }
-                            tracing::info!(processor_id = %processor_id, "sampler input closed, shutting down");
-                            return Ok(());
-                        }
-                    }
-                }
-            }
+impl StrategyState {
+    fn new(strategy: SamplingStrategy) -> Self {
+        match strategy {
+            SamplingStrategy::Latest => StrategyState::Latest { latest: None },
         }
     }
+
+    fn on_sampled_data(&mut self, data: StreamData) {
+        match self {
+            StrategyState::Latest { latest } => *latest = Some(data),
+        }
+    }
+
+    fn on_tick(&mut self) -> Option<StreamData> {
+        match self {
+            StrategyState::Latest { latest } => latest.take(),
+        }
+    }
+
+    fn flush(&mut self) -> Option<StreamData> {
+        match self {
+            StrategyState::Latest { latest } => latest.take(),
+        }
+    }
+}
+
+fn should_sample_data(item: &StreamData) -> bool {
+    matches!(
+        item,
+        StreamData::Bytes(_) | StreamData::Collection(_) | StreamData::EncodedBytes { .. }
+    )
+}
+
+async fn emit_data(
+    output: &broadcast::Sender<StreamData>,
+    stats: &Arc<ProcessorStats>,
+    data: StreamData,
+) -> Result<(), ProcessorError> {
+    let row_count = data.num_rows_hint().unwrap_or(0);
+    send_with_backpressure(output, data).await?;
+    stats.record_out(row_count);
+    Ok(())
 }
 
 #[cfg(test)]
