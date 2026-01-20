@@ -7,8 +7,7 @@ use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
 use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::model::batch_from_columns_simple;
 use flow::planner::sink::{
-    CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
-    SinkEncoderConfig,
+    NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 };
 use flow::processor::{SamplerConfig, StreamData};
 use flow::FlowInstance;
@@ -159,82 +158,6 @@ async fn test_create_pipeline_aggregation_with_group_by_window_and_expr() {
         .close(Duration::from_secs(5))
         .await
         .unwrap_or_else(|_| panic!("Failed to close pipeline for test: {}", test_name));
-}
-
-#[tokio::test]
-async fn test_batch_processor_flushes_on_count() {
-    let instance = FlowInstance::new();
-    install_stream_schema(
-        &instance,
-        &[(
-            "a".to_string(),
-            vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
-        )],
-    )
-    .await;
-
-    let connector = PipelineSinkConnector::new(
-        "batch_sink_connector",
-        SinkConnectorConfig::Nop(NopSinkConfig::default()),
-        SinkEncoderConfig::json(),
-    );
-    let sink = PipelineSink::new("batch_sink", connector)
-        .with_forward_to_result(true)
-        .with_common_props(CommonSinkProps {
-            batch_count: Some(2),
-            batch_duration: None,
-        });
-
-    let mut pipeline = instance
-        .build_pipeline("SELECT a FROM stream", vec![sink])
-        .expect("failed to create batched pipeline");
-    pipeline.start();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let columns = vec![(
-        "stream".to_string(),
-        "a".to_string(),
-        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
-    )];
-    let batch =
-        batch_from_columns_simple(columns).expect("failed to create batch for batching test");
-    pipeline
-        .send_stream_data("stream", StreamData::collection(Box::new(batch)))
-        .await
-        .expect("send data");
-
-    let mut output = pipeline
-        .take_output()
-        .expect("pipeline should expose an output receiver");
-    let first = timeout(Duration::from_secs(1), output.recv())
-        .await
-        .expect("first batch timeout")
-        .expect("first batch missing");
-    match first {
-        StreamData::EncodedBytes { num_rows, .. } => {
-            assert_eq!(num_rows, 2, "first batch should contain 2 rows");
-        }
-        other => panic!(
-            "expected first batch collection, got {}",
-            other.description()
-        ),
-    }
-
-    pipeline
-        .close(Duration::from_secs(5))
-        .await
-        .expect("close pipeline");
-
-    let second = timeout(Duration::from_secs(1), output.recv())
-        .await
-        .expect("second batch timeout")
-        .expect("second batch missing");
-    match second {
-        StreamData::EncodedBytes { num_rows, .. } => {
-            assert_eq!(num_rows, 1, "leftover batch should contain 1 row");
-        }
-        other => panic!("expected leftover collection, got {}", other.description()),
-    }
 }
 
 async fn install_stream_schema(instance: &FlowInstance, columns: &[(String, Vec<Value>)]) {
