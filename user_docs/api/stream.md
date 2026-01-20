@@ -36,6 +36,10 @@ Request body: `CreateStreamRequest`
   "decoder": {
     "type": "json",
     "props": {}
+  },
+  "sampler": {
+    "interval": "10s",
+    "strategy": { "type": "latest" }
   }
 }
 ```
@@ -125,6 +129,7 @@ curl -s -XDELETE http://127.0.0.1:8080/streams/source_stream
 - `shared: boolean` (optional, defaults to `false`)
 - `decoder: { type: string, props: object }` (optional, defaults to `{ "type": "json", "props": {} }`)
 - Optional `eventtime: { column: string, type: string }`
+- Optional `sampler: { interval: string, strategy: object }` (stream-level downsampling, see below)
 
 ### Stream `props` by `type`
 
@@ -144,6 +149,22 @@ curl -s -XDELETE http://127.0.0.1:8080/streams/source_stream
 - Optional `end: int64` (timestamp integer; compared against the history Parquet `ts` column as-is)
 - Optional `batch_size: number`
 - Optional `send_interval_ms: number`
+
+### Sampler Configuration (`sampler`)
+
+The `sampler` property enables stream-level downsampling. All pipelines consuming from this stream will receive downsampled data.
+
+- `interval: string` (required) – Duration between emissions (e.g., `"1s"`, `"100ms"`, `"5m"`)
+- `strategy: object` (required) – Sampling strategy:
+  - `{ "type": "latest" }` – Emits the most recent value received during each interval
+
+Example:
+```json
+"sampler": {
+  "interval": "10s",
+  "strategy": { "type": "latest" }
+}
+```
 
 ### Schema JSON format (`schema.type == "json"`)
 
@@ -200,3 +221,4 @@ Supported type strings:
 - `shared: boolean`
 - `decoder: { type: string, props: object }`
 - Optional `eventtime: { column: string, type: string }`
+- Optional `sampler: { interval: string, strategy: object }`
