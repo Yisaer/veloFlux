@@ -4,18 +4,21 @@ use crate::expr::sql_conversion::{
     SourceBindingKind,
 };
 use crate::planner::logical::{
-    aggregation::Aggregation as LogicalAggregation, DataSinkPlan, DataSource as LogicalDataSource,
-    Filter as LogicalFilter, LogicalPlan, LogicalWindow, LogicalWindowSpec,
-    Project as LogicalProject, StatefulFunctionPlan as LogicalStatefulFunction,
+    aggregation::Aggregation as LogicalAggregation, compute::Compute as LogicalCompute,
+    DataSinkPlan, DataSource as LogicalDataSource, Filter as LogicalFilter, LogicalPlan,
+    LogicalWindow, LogicalWindowSpec, Project as LogicalProject,
+    StatefulFunctionPlan as LogicalStatefulFunction,
 };
+use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
-    PhysicalAggregation, PhysicalBatch, PhysicalDataSink, PhysicalDataSource, PhysicalDecoder,
-    PhysicalDecoderEventtimeSpec, PhysicalEncoder, PhysicalEventtimeWatermark, PhysicalFilter,
-    PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect,
-    PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector, PhysicalStatefulFunction,
-    StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PhysicalAggregation, PhysicalBatch, PhysicalCompute, PhysicalDataSink, PhysicalDataSource,
+    PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEncoder, PhysicalEventtimeWatermark,
+    PhysicalFilter, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
+    PhysicalResultCollect, PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector,
+    PhysicalStatefulFunction, StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
+use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
 use crate::PipelineRegistries;
 use std::sync::Arc;
@@ -177,6 +180,14 @@ fn create_physical_plan_with_builder_cached_with_options(
         }
         LogicalPlan::Filter(logical_filter) => create_physical_filter_with_builder_cached(
             logical_filter,
+            &logical_plan,
+            bindings,
+            registries,
+            options,
+            builder,
+        )?,
+        LogicalPlan::Compute(logical_compute) => create_physical_compute_with_builder_cached(
+            logical_compute,
             &logical_plan,
             bindings,
             registries,
@@ -637,26 +648,12 @@ fn create_physical_data_source_with_builder(
                         .map(|col| col.name.clone())
                         .collect()
                 });
-            let explain_ingest_plan = {
-                let ds = PhysicalDataSource::new(
-                    logical_ds.source_name.clone(),
-                    logical_ds.alias.clone(),
-                    Arc::clone(&schema),
-                    logical_ds.decode_projection.clone(),
-                    0,
-                );
-                let ds_plan = Arc::new(PhysicalPlan::DataSource(ds));
-                let decoder = PhysicalDecoder::new(
-                    logical_ds.source_name.clone(),
-                    logical_ds.decoder().clone(),
-                    Arc::clone(&schema),
-                    logical_ds.decode_projection.clone(),
-                    eventtime.clone(),
-                    vec![ds_plan],
-                    1,
-                );
-                Arc::new(PhysicalPlan::Decoder(decoder))
-            };
+            let explain_ingest_plan = create_physical_plan_for_shared_stream(
+                &logical_ds.source_name,
+                Arc::clone(&schema),
+                logical_ds.decoder().clone(),
+                None,
+            );
             let physical_shared = PhysicalSharedStream::new(
                 logical_ds.source_name.clone(),
                 logical_ds.alias.clone(),
@@ -714,6 +711,44 @@ fn create_physical_filter_with_builder_cached(
         index,
     );
     Ok(Arc::new(PhysicalPlan::Filter(physical_filter)))
+}
+
+/// Create a PhysicalCompute from a LogicalCompute using centralized index management with caching
+fn create_physical_compute_with_builder_cached(
+    logical_compute: &LogicalCompute,
+    logical_plan: &Arc<LogicalPlan>,
+    bindings: &SchemaBinding,
+    registries: &PipelineRegistries,
+    options: &PhysicalPlanBuildOptions,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    // Convert children first using the builder with caching
+    let mut physical_children = Vec::new();
+    for child in logical_plan.children() {
+        let physical_child = create_physical_plan_with_builder_cached_with_options(
+            child.clone(),
+            bindings,
+            registries,
+            options,
+            builder,
+        )?;
+        physical_children.push(physical_child);
+    }
+
+    let mut physical_fields = Vec::new();
+    for logical_field in &logical_compute.fields {
+        let physical_field = PhysicalComputeField::from_logical(
+            logical_field.field_name.clone(),
+            logical_field.expr.clone(),
+            bindings,
+            registries.custom_func_registry().as_ref(),
+        )?;
+        physical_fields.push(physical_field);
+    }
+
+    let index = builder.allocate_index();
+    let physical_compute = PhysicalCompute::new(physical_fields, physical_children, index);
+    Ok(Arc::new(PhysicalPlan::Compute(physical_compute)))
 }
 
 /// Create a PhysicalProject from a LogicalProject using centralized index management with caching

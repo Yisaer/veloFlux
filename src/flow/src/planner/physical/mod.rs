@@ -5,6 +5,7 @@ pub mod by_index_projection;
 pub mod physical_aggregation;
 pub mod physical_barrier;
 pub mod physical_batch;
+pub mod physical_compute;
 pub mod physical_data_sink;
 pub mod physical_data_source;
 pub mod physical_decoder;
@@ -27,6 +28,7 @@ pub use by_index_projection::{ByIndexProjection, ByIndexProjectionColumn};
 pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
 pub use physical_barrier::PhysicalBarrier;
 pub use physical_batch::PhysicalBatch;
+pub use physical_compute::{PhysicalCompute, PhysicalComputeField};
 pub use physical_data_sink::{PhysicalDataSink, PhysicalSinkConnector};
 pub use physical_data_source::PhysicalDataSource;
 pub use physical_decoder::PhysicalDecoder;
@@ -55,6 +57,7 @@ pub enum PhysicalPlan {
     Decoder(PhysicalDecoder),
     StatefulFunction(PhysicalStatefulFunction),
     Filter(PhysicalFilter),
+    Compute(PhysicalCompute),
     Project(PhysicalProject),
     Aggregation(PhysicalAggregation),
     SharedStream(PhysicalSharedStream),
@@ -87,6 +90,7 @@ impl PhysicalPlan {
             PhysicalPlan::Decoder(plan) => plan.base.children(),
             PhysicalPlan::StatefulFunction(plan) => plan.base.children(),
             PhysicalPlan::Filter(plan) => plan.base.children(),
+            PhysicalPlan::Compute(plan) => plan.base.children(),
             PhysicalPlan::Project(plan) => plan.base.children(),
             PhysicalPlan::Aggregation(plan) => plan.base.children(),
             PhysicalPlan::SharedStream(plan) => plan.base.children(),
@@ -115,6 +119,7 @@ impl PhysicalPlan {
             PhysicalPlan::Decoder(_) => "PhysicalDecoder",
             PhysicalPlan::StatefulFunction(_) => "PhysicalStatefulFunction",
             PhysicalPlan::Filter(_) => "PhysicalFilter",
+            PhysicalPlan::Compute(_) => "PhysicalCompute",
             PhysicalPlan::Project(_) => "PhysicalProject",
             PhysicalPlan::Aggregation(_) => "PhysicalAggregation",
             PhysicalPlan::SharedStream(_) => "PhysicalSharedStream",
@@ -143,6 +148,7 @@ impl PhysicalPlan {
             PhysicalPlan::Decoder(plan) => plan.base.index(),
             PhysicalPlan::StatefulFunction(plan) => plan.base.index(),
             PhysicalPlan::Filter(plan) => plan.base.index(),
+            PhysicalPlan::Compute(plan) => plan.base.index(),
             PhysicalPlan::Project(plan) => plan.base.index(),
             PhysicalPlan::Aggregation(plan) => plan.base.index(),
             PhysicalPlan::SharedStream(plan) => plan.base.index(),
@@ -190,6 +196,7 @@ impl PhysicalPlan {
             PhysicalPlan::Decoder(plan) => &mut plan.base.children,
             PhysicalPlan::StatefulFunction(plan) => &mut plan.base.children,
             PhysicalPlan::Filter(plan) => &mut plan.base.children,
+            PhysicalPlan::Compute(plan) => &mut plan.base.children,
             PhysicalPlan::Project(plan) => &mut plan.base.children,
             PhysicalPlan::Aggregation(plan) => &mut plan.base.children,
             PhysicalPlan::SharedStream(plan) => &mut plan.base.children,

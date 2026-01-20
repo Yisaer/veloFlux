@@ -155,6 +155,13 @@ impl Processor for SamplerProcessor {
 }
 
 impl SamplerProcessor {
+    fn should_sample_data(item: &StreamData) -> bool {
+        matches!(
+            item,
+            StreamData::Bytes(_) | StreamData::Collection(_) | StreamData::EncodedBytes { .. }
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     async fn run_latest_strategy(
@@ -213,7 +220,29 @@ impl SamplerProcessor {
                         Some(Ok(data)) => {
                             log_received_data(&processor_id, &data);
                             stats.record_in(data.num_rows_hint().unwrap_or(0));
-                            // Replace latest with new data (discard old)
+                            if !Self::should_sample_data(&data) {
+                                // Do not throttle non-data items received on the data channel.
+                                // This keeps control/watermark/error events flowing promptly.
+                                let is_terminal = data.is_terminal();
+                                if is_terminal {
+                                    if let Some(pending) = latest.take() {
+                                        let row_count = pending.num_rows_hint().unwrap_or(0);
+                                        send_with_backpressure(&output, pending).await?;
+                                        stats.record_out(row_count);
+                                    }
+                                    let out_rows = data.num_rows_hint().unwrap_or(0);
+                                    send_with_backpressure(&output, data).await?;
+                                    stats.record_out(out_rows);
+                                    tracing::info!(processor_id = %processor_id, "sampler received terminal item on data channel, shutting down");
+                                    return Ok(());
+                                }
+                                let out_rows = data.num_rows_hint().unwrap_or(0);
+                                send_with_backpressure(&output, data).await?;
+                                stats.record_out(out_rows);
+                                continue;
+                            }
+
+                            // Replace latest with new data (discard old).
                             latest = Some(data);
                         }
                         Some(Err(BroadcastStreamRecvError::Lagged(n))) => {

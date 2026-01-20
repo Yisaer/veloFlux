@@ -4,7 +4,7 @@
 //! connecting ControlSourceProcessor outputs to leaf nodes (nodes without children).
 
 use crate::aggregation::AggregateFunctionRegistry;
-use crate::codec::{DecoderRegistry, EncoderRegistry};
+use crate::codec::{DecoderRegistry, EncoderRegistry, RecordDecoder};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
@@ -12,11 +12,11 @@ use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggi
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
-    ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor, EncoderProcessor,
-    FilterProcessor, Ingress, InstantControlSignal, Processor, ProcessorError, ProjectProcessor,
-    ResultCollectProcessor, SamplerProcessor, SharedStreamProcessor, SinkProcessor,
-    SlidingWindowProcessor, StateWindowProcessor, StatefulFunctionProcessor, StreamData,
-    StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
+    ComputeProcessor, ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor,
+    EncoderProcessor, FilterProcessor, Ingress, InstantControlSignal, Processor, ProcessorError,
+    ProjectProcessor, ResultCollectProcessor, SamplerProcessor, SharedStreamProcessor,
+    SinkProcessor, SlidingWindowProcessor, StateWindowProcessor, StatefulFunctionProcessor,
+    StreamData, StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
     WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
@@ -27,6 +27,13 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
+
+#[derive(Clone)]
+pub(crate) struct SharedStreamPipelineOptions {
+    pub stream_name: String,
+    pub decoder: Arc<dyn RecordDecoder>,
+    pub projection: Arc<std::sync::RwLock<Vec<String>>>,
+}
 
 /// Enum for all processor types created from PhysicalPlan
 ///
@@ -41,6 +48,8 @@ pub enum PlanProcessor {
     Decoder(DecoderProcessor),
     /// SharedStreamProcessor created from PhysicalSharedStream
     SharedSource(SharedStreamProcessor),
+    /// ComputeProcessor created from PhysicalCompute
+    Compute(ComputeProcessor),
     /// ProjectProcessor created from PhysicalProject
     Project(ProjectProcessor),
     /// StatefulFunctionProcessor created from PhysicalStatefulFunction
@@ -108,42 +117,78 @@ impl ProcessorPipelineDependencies {
 
 #[derive(Clone)]
 struct ProcessorBuilderContext {
-    mqtt_clients: MqttClientManager,
-    connector_registry: Arc<ConnectorRegistry>,
-    encoder_registry: Arc<EncoderRegistry>,
-    decoder_registry: Arc<DecoderRegistry>,
-    aggregate_registry: Arc<AggregateFunctionRegistry>,
-    stateful_registry: Arc<StatefulFunctionRegistry>,
+    mqtt_clients: Option<MqttClientManager>,
+    connector_registry: Option<Arc<ConnectorRegistry>>,
+    encoder_registry: Option<Arc<EncoderRegistry>>,
+    decoder_registry: Option<Arc<DecoderRegistry>>,
+    aggregate_registry: Option<Arc<AggregateFunctionRegistry>>,
+    stateful_registry: Option<Arc<StatefulFunctionRegistry>>,
     eventtime: Option<EventtimePipelineContext>,
+    shared_stream: Option<SharedStreamPipelineOptions>,
 }
 
 impl ProcessorBuilderContext {
-    fn mqtt_clients_ref(&self) -> &MqttClientManager {
-        &self.mqtt_clients
+    fn mqtt_clients_ref(&self) -> Result<&MqttClientManager, ProcessorError> {
+        self.mqtt_clients.as_ref().ok_or_else(|| {
+            ProcessorError::InvalidConfiguration("mqtt client manager unavailable".into())
+        })
     }
 
-    fn connector_registry(&self) -> Arc<ConnectorRegistry> {
-        Arc::clone(&self.connector_registry)
+    fn connector_registry(&self) -> Result<Arc<ConnectorRegistry>, ProcessorError> {
+        self.connector_registry
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration("connector registry unavailable".into())
+            })
     }
 
-    fn encoder_registry(&self) -> Arc<EncoderRegistry> {
-        Arc::clone(&self.encoder_registry)
+    fn encoder_registry(&self) -> Result<Arc<EncoderRegistry>, ProcessorError> {
+        self.encoder_registry
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration("encoder registry unavailable".into())
+            })
     }
 
-    fn decoder_registry(&self) -> Arc<DecoderRegistry> {
-        Arc::clone(&self.decoder_registry)
+    fn decoder_registry(&self) -> Result<Arc<DecoderRegistry>, ProcessorError> {
+        self.decoder_registry
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration("decoder registry unavailable".into())
+            })
     }
 
-    fn aggregate_registry(&self) -> Arc<AggregateFunctionRegistry> {
-        Arc::clone(&self.aggregate_registry)
+    fn aggregate_registry(&self) -> Result<Arc<AggregateFunctionRegistry>, ProcessorError> {
+        self.aggregate_registry
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration(
+                    "aggregate function registry unavailable".into(),
+                )
+            })
     }
 
-    fn stateful_registry(&self) -> Arc<StatefulFunctionRegistry> {
-        Arc::clone(&self.stateful_registry)
+    fn stateful_registry(&self) -> Result<Arc<StatefulFunctionRegistry>, ProcessorError> {
+        self.stateful_registry
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration(
+                    "stateful function registry unavailable".into(),
+                )
+            })
     }
 
     fn eventtime(&self) -> Option<EventtimePipelineContext> {
         self.eventtime.clone()
+    }
+
+    fn shared_stream(&self) -> Option<&SharedStreamPipelineOptions> {
+        self.shared_stream.as_ref()
     }
 }
 
@@ -155,6 +200,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.id(),
             PlanProcessor::Decoder(p) => p.id(),
             PlanProcessor::SharedSource(p) => p.id(),
+            PlanProcessor::Compute(p) => p.id(),
             PlanProcessor::Project(p) => p.id(),
             PlanProcessor::StatefulFunction(p) => p.id(),
             PlanProcessor::Filter(p) => p.id(),
@@ -179,6 +225,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(_) => "datasource",
             PlanProcessor::Decoder(_) => "decoder",
             PlanProcessor::SharedSource(_) => "shared_source",
+            PlanProcessor::Compute(_) => "compute",
             PlanProcessor::Project(_) => "project",
             PlanProcessor::StatefulFunction(_) => "stateful_function",
             PlanProcessor::Filter(_) => "filter",
@@ -209,6 +256,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.set_stats(stats),
             PlanProcessor::Decoder(p) => p.set_stats(stats),
             PlanProcessor::SharedSource(p) => p.set_stats(stats),
+            PlanProcessor::Compute(p) => p.set_stats(stats),
             PlanProcessor::Project(p) => p.set_stats(stats),
             PlanProcessor::StatefulFunction(p) => p.set_stats(stats),
             PlanProcessor::Filter(p) => p.set_stats(stats),
@@ -234,6 +282,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.start(),
             PlanProcessor::Decoder(p) => p.start(),
             PlanProcessor::SharedSource(p) => p.start(),
+            PlanProcessor::Compute(p) => p.start(),
             PlanProcessor::Project(p) => p.start(),
             PlanProcessor::StatefulFunction(p) => p.start(),
             PlanProcessor::Filter(p) => p.start(),
@@ -259,6 +308,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.subscribe_output(),
             PlanProcessor::Decoder(p) => p.subscribe_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_output(),
+            PlanProcessor::Compute(p) => p.subscribe_output(),
             PlanProcessor::Project(p) => p.subscribe_output(),
             PlanProcessor::StatefulFunction(p) => p.subscribe_output(),
             PlanProcessor::Filter(p) => p.subscribe_output(),
@@ -284,6 +334,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.subscribe_control_output(),
             PlanProcessor::Decoder(p) => p.subscribe_control_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_control_output(),
+            PlanProcessor::Compute(p) => p.subscribe_control_output(),
             PlanProcessor::Project(p) => p.subscribe_control_output(),
             PlanProcessor::StatefulFunction(p) => p.subscribe_control_output(),
             PlanProcessor::Filter(p) => p.subscribe_control_output(),
@@ -309,6 +360,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.add_input(receiver),
             PlanProcessor::Decoder(p) => p.add_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_input(receiver),
+            PlanProcessor::Compute(p) => p.add_input(receiver),
             PlanProcessor::Project(p) => p.add_input(receiver),
             PlanProcessor::StatefulFunction(p) => p.add_input(receiver),
             PlanProcessor::Filter(p) => p.add_input(receiver),
@@ -334,6 +386,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.add_control_input(receiver),
             PlanProcessor::Decoder(p) => p.add_control_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_control_input(receiver),
+            PlanProcessor::Compute(p) => p.add_control_input(receiver),
             PlanProcessor::Project(p) => p.add_control_input(receiver),
             PlanProcessor::StatefulFunction(p) => p.add_control_input(receiver),
             PlanProcessor::Filter(p) => p.add_control_input(receiver),
@@ -652,29 +705,42 @@ fn create_processor_from_plan_node(
     context: &ProcessorBuilderContext,
 ) -> Result<ProcessorBuildOutput, ProcessorError> {
     let plan_name = plan.get_plan_name();
+    let processor_id = context
+        .shared_stream()
+        .map(|opts| format!("shared:{}/{}", opts.stream_name, plan_name))
+        .unwrap_or_else(|| plan_name.clone());
     match plan.as_ref() {
         PhysicalPlan::DataSource(ds) => {
             let schema = ds.schema();
             let processor =
-                DataSourceProcessor::new(&plan_name, ds.source_name().to_string(), schema);
+                DataSourceProcessor::new(&processor_id, ds.source_name().to_string(), schema);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::DataSource(processor),
             ))
         }
         PhysicalPlan::Decoder(decoder_plan) => {
             let schema = decoder_plan.schema();
-            let decoder = context
-                .decoder_registry()
-                .instantiate(
-                    decoder_plan.decoder(),
-                    decoder_plan.source_name(),
-                    Arc::clone(&schema),
-                )
-                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-            let mut processor = DecoderProcessor::new(plan_name.clone(), decoder);
-            if let Some(projection) = decoder_plan.decode_projection().cloned() {
-                processor = processor.with_decode_projection(projection);
-            }
+            let mut processor = match context.shared_stream() {
+                Some(opts) if opts.stream_name == decoder_plan.source_name() => {
+                    DecoderProcessor::new(processor_id.clone(), Arc::clone(&opts.decoder))
+                        .with_projection(Arc::clone(&opts.projection))
+                }
+                _ => {
+                    let decoder = context
+                        .decoder_registry()?
+                        .instantiate(
+                            decoder_plan.decoder(),
+                            decoder_plan.source_name(),
+                            Arc::clone(&schema),
+                        )
+                        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+                    let mut processor = DecoderProcessor::new(processor_id.clone(), decoder);
+                    if let Some(projection) = decoder_plan.decode_projection().cloned() {
+                        processor = processor.with_decode_projection(projection);
+                    }
+                    processor
+                }
+            };
             if let (Some(eventtime_ctx), Some(eventtime_spec)) =
                 (context.eventtime(), decoder_plan.eventtime())
             {
@@ -701,23 +767,29 @@ fn create_processor_from_plan_node(
         }
         PhysicalPlan::SharedStream(shared) => {
             let mut processor =
-                SharedStreamProcessor::new(&plan_name, shared.stream_name().to_string());
+                SharedStreamProcessor::new(&processor_id, shared.stream_name().to_string());
             processor.set_required_columns(shared.required_columns().to_vec());
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::SharedSource(processor),
             ))
         }
+        PhysicalPlan::Compute(compute) => {
+            let processor = ComputeProcessor::new(processor_id.clone(), Arc::new(compute.clone()));
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::Compute(processor),
+            ))
+        }
         PhysicalPlan::Project(project) => {
-            let processor = ProjectProcessor::new(plan_name.clone(), Arc::new(project.clone()));
+            let processor = ProjectProcessor::new(processor_id.clone(), Arc::new(project.clone()));
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Project(processor),
             ))
         }
         PhysicalPlan::StatefulFunction(stateful) => {
             let processor = StatefulFunctionProcessor::new(
-                plan_name.clone(),
+                processor_id.clone(),
                 Arc::new(stateful.clone()),
-                context.stateful_registry(),
+                context.stateful_registry()?,
             )?;
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::StatefulFunction(processor),
@@ -725,23 +797,23 @@ fn create_processor_from_plan_node(
         }
         PhysicalPlan::Aggregation(aggregation) => {
             let processor = AggregationProcessor::new(
-                plan_name.clone(),
+                processor_id.clone(),
                 Arc::new(aggregation.clone()),
-                context.aggregate_registry(),
+                context.aggregate_registry()?,
             );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Aggregation(processor),
             ))
         }
         PhysicalPlan::Filter(filter) => {
-            let processor = FilterProcessor::new(plan_name.clone(), Arc::new(filter.clone()));
+            let processor = FilterProcessor::new(processor_id.clone(), Arc::new(filter.clone()));
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Filter(
                 processor,
             )))
         }
         PhysicalPlan::Batch(batch) => {
             let processor = BatchProcessor::new(
-                plan_name.clone(),
+                processor_id.clone(),
                 batch.common.batch_count,
                 batch.common.batch_duration,
             );
@@ -751,7 +823,7 @@ fn create_processor_from_plan_node(
         }
         PhysicalPlan::Encoder(encoder) => {
             let encoder_impl = context
-                .encoder_registry()
+                .encoder_registry()?
                 .instantiate(&encoder.encoder)
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             let encoder_impl = if let Some(spec) = encoder.by_index_projection.as_ref() {
@@ -767,16 +839,16 @@ fn create_processor_from_plan_node(
             } else {
                 encoder_impl
             };
-            let processor = EncoderProcessor::new(plan_name.clone(), encoder_impl);
+            let processor = EncoderProcessor::new(processor_id.clone(), encoder_impl);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Encoder(processor),
             ))
         }
         PhysicalPlan::StreamingAggregation(agg) => {
             let processor = StreamingAggregationProcessor::new(
-                plan_name.clone(),
+                processor_id.clone(),
                 Arc::new(agg.clone()),
-                context.aggregate_registry(),
+                context.aggregate_registry()?,
             );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::StreamingAggregation(processor),
@@ -784,7 +856,7 @@ fn create_processor_from_plan_node(
         }
         PhysicalPlan::StreamingEncoder(streaming) => {
             let encoder_impl = context
-                .encoder_registry()
+                .encoder_registry()?
                 .instantiate(&streaming.encoder)
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             let encoder_impl = if let Some(spec) = streaming.by_index_projection.as_ref() {
@@ -801,7 +873,7 @@ fn create_processor_from_plan_node(
                 encoder_impl
             };
             let processor = StreamingEncoderProcessor::new(
-                plan_name.clone(),
+                processor_id.clone(),
                 encoder_impl,
                 streaming.common.batch_count,
                 streaming.common.batch_duration,
@@ -812,7 +884,7 @@ fn create_processor_from_plan_node(
         }
         PhysicalPlan::ProcessTimeWatermark(_) | PhysicalPlan::EventtimeWatermark(_) => {
             let processor =
-                WatermarkProcessor::from_physical_plan(plan_name.clone(), Arc::clone(plan))
+                WatermarkProcessor::from_physical_plan(processor_id.clone(), Arc::clone(plan))
                     .ok_or_else(|| {
                         ProcessorError::InvalidConfiguration(
                             "Unsupported watermark configuration".to_string(),
@@ -826,15 +898,18 @@ fn create_processor_from_plan_node(
             "PhysicalWatermark is deprecated; use PhysicalProcessTimeWatermark".to_string(),
         )),
         PhysicalPlan::CountWindow(count_window) => {
-            let processor =
-                BatchProcessor::new(plan_name.clone(), Some(count_window.count as usize), None);
+            let processor = BatchProcessor::new(
+                processor_id.clone(),
+                Some(count_window.count as usize),
+                None,
+            );
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Batch(
                 processor,
             )))
         }
         PhysicalPlan::TumblingWindow(_) => {
             let processor =
-                TumblingWindowProcessor::from_physical_plan(plan_name.clone(), Arc::clone(plan))
+                TumblingWindowProcessor::from_physical_plan(processor_id.clone(), Arc::clone(plan))
                     .ok_or_else(|| {
                         ProcessorError::InvalidConfiguration(
                             "Unsupported tumbling window configuration".to_string(),
@@ -846,7 +921,7 @@ fn create_processor_from_plan_node(
         }
         PhysicalPlan::SlidingWindow(_) => {
             let processor =
-                SlidingWindowProcessor::from_physical_plan(plan_name.clone(), Arc::clone(plan))
+                SlidingWindowProcessor::from_physical_plan(processor_id.clone(), Arc::clone(plan))
                     .ok_or_else(|| {
                         ProcessorError::InvalidConfiguration(
                             "Unsupported sliding window configuration".to_string(),
@@ -858,7 +933,7 @@ fn create_processor_from_plan_node(
         }
         PhysicalPlan::StateWindow(_) => {
             let processor =
-                StateWindowProcessor::from_physical_plan(plan_name.clone(), Arc::clone(plan))
+                StateWindowProcessor::from_physical_plan(processor_id.clone(), Arc::clone(plan))
                     .ok_or_else(|| {
                         ProcessorError::InvalidConfiguration(
                             "Unsupported state window configuration".to_string(),
@@ -869,20 +944,20 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::DataSink(sink_plan) => {
-            let processor_id = format!("{}_{}", plan_name, sink_plan.connector.sink_id);
-            let mut processor = SinkProcessor::new(processor_id);
+            let processor_id = format!("{}_{}", processor_id, sink_plan.connector.sink_id);
+            let mut processor = SinkProcessor::new(processor_id.clone());
             if sink_plan.connector.forward_to_result {
                 processor.enable_result_forwarding();
             } else {
                 processor.disable_result_forwarding();
             }
             let connector_impl = context
-                .connector_registry()
+                .connector_registry()?
                 .instantiate_sink(
                     sink_plan.connector.connector.kind(),
                     &sink_plan.connector.sink_id,
                     &sink_plan.connector.connector,
-                    context.mqtt_clients_ref(),
+                    context.mqtt_clients_ref()?,
                 )
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             processor.add_connector(connector_impl);
@@ -891,14 +966,14 @@ fn create_processor_from_plan_node(
             )))
         }
         PhysicalPlan::ResultCollect(_result_collect) => {
-            let processor = ResultCollectProcessor::new(plan_name.clone());
+            let processor = ResultCollectProcessor::new(processor_id.clone());
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::ResultCollect(processor),
             ))
         }
         PhysicalPlan::Barrier(barrier) => {
             let expected_upstreams = barrier.base.children.len();
-            let processor = BarrierProcessor::new(plan_name.clone(), expected_upstreams);
+            let processor = BarrierProcessor::new(processor_id.clone(), expected_upstreams);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Barrier(processor),
             ))
@@ -1129,9 +1204,9 @@ fn connect_processors(
 ///
 /// The provided plan is expected to terminate in a `PhysicalDataSink` node that
 /// carries the declarative sink configuration.
-pub fn create_processor_pipeline(
+fn create_processor_pipeline_with_context(
     physical_plan: Arc<PhysicalPlan>,
-    dependencies: ProcessorPipelineDependencies,
+    context: ProcessorBuilderContext,
 ) -> Result<ProcessorPipeline, ProcessorError> {
     let mut control_source = ControlSourceProcessor::new("control_source");
     let (ingress_sender, ingress_receiver) = mpsc::channel(100);
@@ -1139,15 +1214,6 @@ pub fn create_processor_pipeline(
     let ack_manager = Arc::new(AckManager::default());
 
     let mut processor_map = ProcessorMap::new();
-    let context = ProcessorBuilderContext {
-        mqtt_clients: dependencies.mqtt_clients,
-        connector_registry: dependencies.connector_registry,
-        encoder_registry: dependencies.encoder_registry,
-        decoder_registry: dependencies.decoder_registry,
-        aggregate_registry: dependencies.aggregate_registry,
-        stateful_registry: dependencies.stateful_registry,
-        eventtime: dependencies.eventtime,
-    };
     build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map, &context)?;
 
     connect_processors(
@@ -1243,6 +1309,44 @@ pub fn create_processor_pipeline(
     })
 }
 
+pub(crate) fn create_processor_pipeline_for_shared_stream(
+    physical_plan: Arc<PhysicalPlan>,
+    options: SharedStreamPipelineOptions,
+) -> Result<ProcessorPipeline, ProcessorError> {
+    create_processor_pipeline_with_context(
+        physical_plan,
+        ProcessorBuilderContext {
+            mqtt_clients: None,
+            connector_registry: None,
+            encoder_registry: None,
+            decoder_registry: None,
+            aggregate_registry: None,
+            stateful_registry: None,
+            eventtime: None,
+            shared_stream: Some(options),
+        },
+    )
+}
+
+pub fn create_processor_pipeline(
+    physical_plan: Arc<PhysicalPlan>,
+    dependencies: ProcessorPipelineDependencies,
+) -> Result<ProcessorPipeline, ProcessorError> {
+    create_processor_pipeline_with_context(
+        physical_plan,
+        ProcessorBuilderContext {
+            mqtt_clients: Some(dependencies.mqtt_clients),
+            connector_registry: Some(dependencies.connector_registry),
+            encoder_registry: Some(dependencies.encoder_registry),
+            decoder_registry: Some(dependencies.decoder_registry),
+            aggregate_registry: Some(dependencies.aggregate_registry),
+            stateful_registry: Some(dependencies.stateful_registry),
+            eventtime: dependencies.eventtime,
+            shared_stream: None,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1300,13 +1404,14 @@ mod tests {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let context = ProcessorBuilderContext {
-            mqtt_clients: MqttClientManager::new(),
-            connector_registry,
-            encoder_registry,
-            decoder_registry,
-            aggregate_registry,
-            stateful_registry,
+            mqtt_clients: Some(MqttClientManager::new()),
+            connector_registry: Some(connector_registry),
+            encoder_registry: Some(encoder_registry),
+            decoder_registry: Some(decoder_registry),
+            aggregate_registry: Some(aggregate_registry),
+            stateful_registry: Some(stateful_registry),
             eventtime: None,
+            shared_stream: None,
         };
         let result = create_processor_from_plan_node(&physical_project, &context)
             .expect("processor creation failed");

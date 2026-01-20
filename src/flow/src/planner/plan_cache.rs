@@ -167,6 +167,9 @@ pub enum LogicalPlanNodeKindIR {
     Filter {
         predicate: Expr,
     },
+    Compute {
+        fields: Vec<ProjectFieldIR>,
+    },
     Project {
         fields: Vec<ProjectFieldIR>,
     },
@@ -210,6 +213,9 @@ pub enum PhysicalPlanNodeKindIR {
     },
     Filter {
         predicate: Expr,
+    },
+    Compute {
+        fields: Vec<ProjectFieldIR>,
     },
     Project {
         fields: Vec<ProjectFieldIR>,
@@ -358,6 +364,17 @@ fn build_logical_plan_node(
             let plan =
                 crate::planner::logical::Filter::new(predicate.clone(), children, node.index);
             Arc::new(LogicalPlan::Filter(plan))
+        }
+        LogicalPlanNodeKindIR::Compute { fields } => {
+            let fields = fields
+                .iter()
+                .map(|f| crate::planner::logical::compute::ComputeField {
+                    field_name: f.field_name.clone(),
+                    expr: f.expr.clone(),
+                })
+                .collect();
+            let plan = crate::planner::logical::Compute::new(fields, children, node.index);
+            Arc::new(LogicalPlan::Compute(plan))
         }
         LogicalPlanNodeKindIR::Project { fields } => {
             let fields = fields
@@ -686,6 +703,16 @@ fn build_logical_ir(
         LogicalPlan::Filter(plan) => LogicalPlanNodeKindIR::Filter {
             predicate: plan.predicate.clone(),
         },
+        LogicalPlan::Compute(plan) => LogicalPlanNodeKindIR::Compute {
+            fields: plan
+                .fields
+                .iter()
+                .map(|f| ProjectFieldIR {
+                    field_name: f.field_name.clone(),
+                    expr: f.expr.clone(),
+                })
+                .collect(),
+        },
         LogicalPlan::Project(plan) => LogicalPlanNodeKindIR::Project {
             fields: plan
                 .fields
@@ -735,6 +762,16 @@ fn build_physical_ir(
         },
         PhysicalPlan::Filter(plan) => PhysicalPlanNodeKindIR::Filter {
             predicate: plan.predicate.clone(),
+        },
+        PhysicalPlan::Compute(plan) => PhysicalPlanNodeKindIR::Compute {
+            fields: plan
+                .fields
+                .iter()
+                .map(|f| ProjectFieldIR {
+                    field_name: f.field_name.clone(),
+                    expr: f.original_expr.clone(),
+                })
+                .collect(),
         },
         PhysicalPlan::Project(plan) => PhysicalPlanNodeKindIR::Project {
             fields: plan

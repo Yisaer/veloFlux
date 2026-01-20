@@ -1,11 +1,13 @@
+use crate::catalog::StreamDecoderConfig;
 use crate::codec::RecordDecoder;
 use crate::connector::SourceConnector;
+use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
-use crate::processor::SamplerConfig;
-use crate::processor::{
-    ControlSignal, DataSourceProcessor, DecoderProcessor, InstantControlSignal, Processor,
-    ProcessorError, SamplerProcessor, StreamData,
+use crate::processor::processor_builder::{
+    create_processor_pipeline_for_shared_stream, PlanProcessor, SharedStreamPipelineOptions,
 };
+use crate::processor::SamplerConfig;
+use crate::processor::{ControlSignal, ProcessorPipeline, StreamData};
 use datatypes::Schema;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
@@ -15,6 +17,7 @@ use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
+use tokio::time::Duration;
 
 type ConnectorDecoderPair = (Box<dyn SourceConnector>, Arc<dyn RecordDecoder>);
 
@@ -246,6 +249,7 @@ pub enum SharedStreamConnectorSpec {
 pub struct SharedStreamConfig {
     pub stream_name: String,
     pub schema: Arc<Schema>,
+    pub decoder: StreamDecoderConfig,
     pub connector: Option<SharedStreamConnectorSpec>,
     pub channel_capacity: usize,
     pub sampler: Option<SamplerConfig>,
@@ -256,10 +260,20 @@ impl SharedStreamConfig {
         Self {
             stream_name: stream_name.into(),
             schema,
+            decoder: StreamDecoderConfig::json(),
             connector: None,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
             sampler: None,
         }
+    }
+
+    pub fn with_decoder(mut self, decoder: StreamDecoderConfig) -> Self {
+        self.decoder = decoder;
+        self
+    }
+
+    pub fn set_decoder(&mut self, decoder: StreamDecoderConfig) {
+        self.decoder = decoder;
     }
 
     pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
@@ -386,6 +400,7 @@ impl Drop for SharedStreamSubscription {
 struct SharedStreamInner {
     name: String,
     schema: Arc<Schema>,
+    decoder_config: StreamDecoderConfig,
     created_at: SystemTime,
     connector_id: String,
     connector_factory: Arc<dyn SharedStreamConnectorFactory>,
@@ -394,18 +409,14 @@ struct SharedStreamInner {
     decoding_columns: Arc<std::sync::RwLock<Vec<String>>>,
     data_sender: broadcast::Sender<StreamData>,
     control_sender: broadcast::Sender<ControlSignal>,
-    control_input: broadcast::Sender<ControlSignal>,
     handles: Mutex<SharedStreamHandles>,
     state: Mutex<SharedStreamState>,
 }
 
 /// Join handles that should be awaited when shutting down the stream.
 struct SharedStreamHandles {
-    datasource: Option<JoinHandle<Result<(), ProcessorError>>>,
-    decoder: Option<JoinHandle<Result<(), ProcessorError>>>,
-    sampler: Option<JoinHandle<Result<(), ProcessorError>>>,
+    pipeline: Option<ProcessorPipeline>,
     forward: Option<JoinHandle<()>>,
-    control_forward: Option<JoinHandle<()>>,
     data_anchor: Option<broadcast::Receiver<StreamData>>,
     control_anchor: Option<broadcast::Receiver<ControlSignal>>,
 }
@@ -423,6 +434,7 @@ impl SharedStreamInner {
         let SharedStreamConfig {
             stream_name,
             schema,
+            decoder,
             connector,
             channel_capacity,
             sampler,
@@ -442,7 +454,6 @@ impl SharedStreamInner {
         };
         let connector_id = connector_factory.connector_id();
 
-        let (control_input_tx, _control_input_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
         let initial_decoding_columns: Vec<String> = schema
             .column_schemas()
             .iter()
@@ -459,6 +470,7 @@ impl SharedStreamInner {
         Ok(Arc::new(Self {
             name: stream_name,
             schema,
+            decoder_config: decoder,
             created_at: SystemTime::now(),
             connector_id,
             connector_factory,
@@ -467,13 +479,9 @@ impl SharedStreamInner {
             decoding_columns: Arc::clone(&decoding_columns),
             data_sender,
             control_sender,
-            control_input: control_input_tx,
             handles: Mutex::new(SharedStreamHandles {
-                datasource: None,
-                decoder: None,
-                sampler: None,
+                pipeline: None,
                 forward: None,
-                control_forward: None,
                 data_anchor: Some(data_anchor),
                 control_anchor: Some(control_anchor),
             }),
@@ -504,25 +512,15 @@ impl SharedStreamInner {
     async fn start_runtime(self: &Arc<Self>) -> Result<(), SharedStreamError> {
         let (connector, decoder) = self.connector_factory.build()?;
 
-        let datasource_id = format!("shared:{}/PhysicalDataSource_0", self.name);
-        let decoder_id = format!("shared:{}/PhysicalDecoder_1", self.name);
-
-        let mut datasource = DataSourceProcessor::with_custom_id(
-            None,
-            datasource_id,
-            self.name.clone(),
-            Arc::clone(&self.schema),
-        );
-        datasource.add_connector(connector);
-
-        let datasource_data_rx = datasource
-            .subscribe_output()
-            .ok_or_else(|| SharedStreamError::Internal("datasource output unavailable".into()))?;
-        let mut control_rx = datasource.subscribe_control_output().ok_or_else(|| {
-            SharedStreamError::Internal("datasource control output unavailable".into())
-        })?;
-
-        datasource.add_control_input(self.control_input.subscribe());
+        {
+            let mut handles = self.handles.lock().await;
+            if handles.data_anchor.is_none() {
+                handles.data_anchor = Some(self.data_sender.subscribe());
+            }
+            if handles.control_anchor.is_none() {
+                handles.control_anchor = Some(self.control_sender.subscribe());
+            }
+        }
 
         {
             let applied = self.current_decoding_columns().await;
@@ -532,65 +530,48 @@ impl SharedStreamInner {
                 .expect("shared stream decoding columns lock poisoned") = applied;
         }
 
-        let mut decoder_processor = DecoderProcessor::with_custom_id(decoder_id, decoder)
-            .with_projection(Arc::clone(&self.decoding_columns));
-        decoder_processor.add_input(datasource_data_rx);
-        decoder_processor.add_control_input(self.control_input.subscribe());
-        let decoder_data_rx = decoder_processor
-            .subscribe_output()
-            .ok_or_else(|| SharedStreamError::Internal("decoder output unavailable".into()))?;
+        let physical_plan = create_physical_plan_for_shared_stream(
+            &self.name,
+            Arc::clone(&self.schema),
+            self.decoder_config.clone(),
+            self.sampler.as_ref().map(|cfg| cfg.interval),
+        );
 
-        let datasource_handle = datasource.start();
-        let decoder_handle = decoder_processor.start();
-
-        // Optionally insert SamplerProcessor if configured
-        let (mut data_rx, sampler_handle) = if let Some(ref sampler_config) = self.sampler {
-            let sampler_id = format!("shared:{}/PhysicalSampler_2", self.name);
-            let mut sampler = SamplerProcessor::new(sampler_id, sampler_config.clone());
-            sampler.add_input(decoder_data_rx);
-            sampler.add_control_input(self.control_input.subscribe());
-            let sampler_rx = sampler
-                .subscribe_output()
-                .ok_or_else(|| SharedStreamError::Internal("sampler output unavailable".into()))?;
-            let handle = sampler.start();
-            (sampler_rx, Some(handle))
-        } else {
-            (decoder_data_rx, None)
+        let options = SharedStreamPipelineOptions {
+            stream_name: self.name.clone(),
+            decoder,
+            projection: Arc::clone(&self.decoding_columns),
         };
+        let mut pipeline = create_processor_pipeline_for_shared_stream(physical_plan, options)
+            .map_err(|err| SharedStreamError::Internal(err.to_string()))?;
+        pipeline.set_pipeline_id(format!("shared:{}", self.name));
 
-        let name_for_data = self.name.clone();
-        let data_tx = self.data_sender.clone();
-        let forward = tokio::spawn(async move {
-            use tokio::sync::broadcast::error::RecvError;
-            loop {
-                match data_rx.recv().await {
-                    Ok(data) => {
-                        if crate::processor::base::send_with_backpressure(&data_tx, data)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    Err(RecvError::Lagged(skipped)) => {
-                        crate::processor::base::log_broadcast_lagged(
-                            &name_for_data,
-                            skipped,
-                            "shared stream datasource output",
-                        );
-                    }
-                    Err(RecvError::Closed) => break,
-                }
+        let mut attached = false;
+        for processor in &mut pipeline.middle_processors {
+            if let PlanProcessor::DataSource(ds) = processor {
+                ds.add_connector(connector);
+                attached = true;
+                break;
             }
-        });
+        }
+        if !attached {
+            return Err(SharedStreamError::Internal(
+                "shared stream pipeline missing datasource processor".into(),
+            ));
+        }
 
-        let name_for_control = self.name.clone();
+        let mut output_rx = pipeline.take_output().ok_or_else(|| {
+            SharedStreamError::Internal("shared stream pipeline output unavailable".into())
+        })?;
+
+        pipeline.start();
+
+        let data_tx = self.data_sender.clone();
         let control_tx = self.control_sender.clone();
-        let control_forward = tokio::spawn(async move {
-            use tokio::sync::broadcast::error::RecvError;
-            loop {
-                match control_rx.recv().await {
-                    Ok(signal) => {
+        let forward = tokio::spawn(async move {
+            while let Some(item) = output_rx.recv().await {
+                match item {
+                    StreamData::Control(signal) => {
                         if crate::processor::base::send_control_with_backpressure(
                             &control_tx,
                             signal,
@@ -601,30 +582,27 @@ impl SharedStreamInner {
                             break;
                         }
                     }
-                    Err(RecvError::Lagged(skipped)) => {
-                        crate::processor::base::log_broadcast_lagged(
-                            &name_for_control,
-                            skipped,
-                            "shared stream control output",
-                        );
+                    other => {
+                        if crate::processor::base::send_with_backpressure(&data_tx, other)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
-                    Err(RecvError::Closed) => break,
                 }
             }
         });
 
         let mut handles = self.handles.lock().await;
-        if handles.datasource.is_some() || handles.decoder.is_some() {
+        if handles.pipeline.is_some() {
             return Err(SharedStreamError::Internal(format!(
                 "shared stream {} runtime already started",
                 self.name
             )));
         }
-        handles.datasource = Some(datasource_handle);
-        handles.decoder = Some(decoder_handle);
-        handles.sampler = sampler_handle;
+        handles.pipeline = Some(pipeline);
         handles.forward = Some(forward);
-        handles.control_forward = Some(control_forward);
         drop(handles);
 
         let mut state = self.state.lock().await;
@@ -811,40 +789,25 @@ impl SharedStreamInner {
             .map(|col| col.name.clone())
             .collect();
 
-        let _ = self.control_input.send(ControlSignal::Instant(
-            InstantControlSignal::StreamQuickEnd { signal_id: 0 },
-        ));
+        let (mut pipeline, forward) = {
+            let mut handles = self.handles.lock().await;
+            (handles.pipeline.take(), handles.forward.take())
+        };
+
+        if let Some(pipeline) = &mut pipeline {
+            pipeline
+                .quick_close(Duration::from_secs(5))
+                .await
+                .map_err(|err| SharedStreamError::Internal(err.to_string()))?;
+        }
+
+        if let Some(handle) = forward {
+            let _ = handle.await;
+        }
 
         let mut handles = self.handles.lock().await;
-
-        if let Some(handle) = handles.forward.take() {
-            let _ = handle.await;
-        }
-        if let Some(handle) = handles.control_forward.take() {
-            let _ = handle.await;
-        }
         handles.data_anchor.take();
         handles.control_anchor.take();
-        if let Some(handle) = handles.decoder.take() {
-            match handle.await {
-                Ok(result) => result.map_err(|err| SharedStreamError::Internal(err.to_string()))?,
-                Err(join_err) => {
-                    return Err(SharedStreamError::Internal(format!(
-                        "decoder join error: {join_err}"
-                    )))
-                }
-            }
-        }
-        if let Some(handle) = handles.datasource.take() {
-            match handle.await {
-                Ok(result) => result.map_err(|err| SharedStreamError::Internal(err.to_string()))?,
-                Err(join_err) => {
-                    return Err(SharedStreamError::Internal(format!(
-                        "datasource join error: {join_err}"
-                    )))
-                }
-            }
-        }
         Ok(())
     }
 }

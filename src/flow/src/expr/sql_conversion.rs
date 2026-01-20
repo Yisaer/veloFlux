@@ -1,5 +1,6 @@
 use super::custom_func::CustomFuncRegistry;
 use super::func::{BinaryFunc, UnaryFunc};
+use super::internal_columns::is_internal_derived;
 use super::scalar::ScalarExpr;
 use datatypes::{BooleanType, ConcreteDatatype, Float64Type, Int64Type, Schema, StringType, Value};
 use sqlparser::ast::{
@@ -318,7 +319,7 @@ fn convert_identifier_to_column(
         return Ok(ScalarExpr::wildcard_all());
     }
 
-    if is_aggregate_placeholder(column_name) {
+    if is_internal_derived(column_name) {
         // Aggregation placeholders (e.g., col_1) are produced during aggregate rewrite
         // and do not belong to any source schema. Treat them as derived columns.
         return Ok(ScalarExpr::column_with_column_name(column_name.to_string()));
@@ -423,10 +424,6 @@ fn resolve_column_binding(
     } else {
         Err(ConversionError::ColumnNotFound(column_name.to_string()))
     }
-}
-
-fn is_aggregate_placeholder(name: &str) -> bool {
-    name.starts_with("col_") && name[4..].chars().all(|c| c.is_ascii_digit())
 }
 
 /// Convert JsonAccess (struct field access like a->b) to ScalarExpr
