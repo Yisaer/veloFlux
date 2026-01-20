@@ -914,6 +914,7 @@ fn find_binding_entry<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::processor::SamplerConfig;
 
     #[test]
     fn test_physical_plan_builder_creation() {
@@ -923,5 +924,55 @@ mod tests {
 
         assert_eq!(index1, 0);
         assert_eq!(index2, 1);
+    }
+
+    #[test]
+    fn test_physical_plan_builder_index_allocation_sequential() {
+        let mut builder = PhysicalPlanBuilder::new();
+        for i in 0..10 {
+            assert_eq!(builder.allocate_index(), i);
+        }
+    }
+
+    #[test]
+    fn test_sampler_config_default_strategy() {
+        let config = SamplerConfig::new(Duration::from_millis(100));
+        assert_eq!(config.interval, Duration::from_millis(100));
+        // Default strategy should be Latest
+        assert_eq!(config.strategy, crate::processor::SamplingStrategy::Latest);
+    }
+
+    #[test]
+    fn test_sampler_config_serialization_roundtrip() {
+        let config = SamplerConfig::new(Duration::from_secs(1));
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: SamplerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.interval, config.interval);
+        assert_eq!(parsed.strategy, config.strategy);
+    }
+
+    #[test]
+    fn test_physical_sampler_has_correct_interval() {
+        let interval = Duration::from_millis(500);
+        let sampler = PhysicalSampler::new(interval, vec![], 0);
+        assert_eq!(sampler.interval, interval);
+        assert_eq!(sampler.base.index(), 0);
+    }
+
+    #[test]
+    fn test_physical_sampler_with_children() {
+        let interval = Duration::from_millis(100);
+        // Create a dummy physical plan child
+        let dummy_ds = crate::planner::physical::PhysicalDataSource::new(
+            "test_stream".to_string(),
+            None,
+            Arc::new(datatypes::Schema::new(vec![])),
+            None,
+            0,
+        );
+        let child = Arc::new(PhysicalPlan::DataSource(dummy_ds));
+
+        let sampler = PhysicalSampler::new(interval, vec![child.clone()], 1);
+        assert_eq!(sampler.base.children().len(), 1);
     }
 }
