@@ -83,6 +83,7 @@ impl FlowInstance {
         match definition.props() {
             StreamProps::Mqtt(props) => {
                 let mut config = SharedStreamConfig::new(definition.id(), definition.schema());
+                config.set_decoder(definition.decoder().clone());
                 struct MqttSharedStreamConnectorFactory {
                     stream_id: String,
                     schema: Arc<datatypes::Schema>,

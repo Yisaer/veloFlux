@@ -18,6 +18,7 @@ use crate::planner::physical::{
     PhysicalResultCollect, PhysicalSharedStream, PhysicalSinkConnector, PhysicalStatefulFunction,
     StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
+use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
 use crate::PipelineRegistries;
 use std::sync::Arc;
@@ -634,26 +635,11 @@ fn create_physical_data_source_with_builder(
                         .map(|col| col.name.clone())
                         .collect()
                 });
-            let explain_ingest_plan = {
-                let ds = PhysicalDataSource::new(
-                    logical_ds.source_name.clone(),
-                    logical_ds.alias.clone(),
-                    Arc::clone(&schema),
-                    logical_ds.decode_projection.clone(),
-                    0,
-                );
-                let ds_plan = Arc::new(PhysicalPlan::DataSource(ds));
-                let decoder = PhysicalDecoder::new(
-                    logical_ds.source_name.clone(),
-                    logical_ds.decoder().clone(),
-                    Arc::clone(&schema),
-                    logical_ds.decode_projection.clone(),
-                    eventtime.clone(),
-                    vec![ds_plan],
-                    1,
-                );
-                Arc::new(PhysicalPlan::Decoder(decoder))
-            };
+            let explain_ingest_plan = create_physical_plan_for_shared_stream(
+                &logical_ds.source_name,
+                Arc::clone(&schema),
+                logical_ds.decoder().clone(),
+            );
             let physical_shared = PhysicalSharedStream::new(
                 logical_ds.source_name.clone(),
                 logical_ds.alias.clone(),
