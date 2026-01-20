@@ -603,9 +603,23 @@ fn create_physical_data_source_with_builder(
                 index,
             );
             let datasource_plan = Arc::new(PhysicalPlan::DataSource(physical_ds));
+            let sampler_plan = logical_ds.sampler().map(|sampler_config| {
+                let sampler_index = builder.allocate_index();
+                Arc::new(PhysicalPlan::Sampler(PhysicalSampler::new(
+                    sampler_config.interval,
+                    vec![Arc::clone(&datasource_plan)],
+                    sampler_index,
+                )))
+            });
+
             if decoder_kind == "none" {
-                return Ok(datasource_plan);
+                return Ok(sampler_plan.unwrap_or(datasource_plan));
             }
+
+            let decoder_children = sampler_plan
+                .as_ref()
+                .map(|plan| vec![Arc::clone(plan)])
+                .unwrap_or_else(|| vec![Arc::clone(&datasource_plan)]);
             let decoder_index = builder.allocate_index();
             let decoder = PhysicalDecoder::new(
                 logical_ds.source_name.clone(),
@@ -613,23 +627,10 @@ fn create_physical_data_source_with_builder(
                 schema,
                 logical_ds.decode_projection.clone(),
                 eventtime,
-                vec![datasource_plan],
+                decoder_children,
                 decoder_index,
             );
-            let decoder_plan = Arc::new(PhysicalPlan::Decoder(decoder));
-
-            // Insert sampler if configured on the stream
-            if let Some(sampler_config) = logical_ds.sampler() {
-                let sampler_index = builder.allocate_index();
-                let sampler = PhysicalSampler::new(
-                    sampler_config.interval,
-                    vec![decoder_plan],
-                    sampler_index,
-                );
-                Ok(Arc::new(PhysicalPlan::Sampler(sampler)))
-            } else {
-                Ok(decoder_plan)
-            }
+            Ok(Arc::new(PhysicalPlan::Decoder(decoder)))
         }
         SourceBindingKind::Shared => {
             if decoder_kind == "none" {
