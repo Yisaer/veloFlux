@@ -20,6 +20,12 @@ pub struct PipelineExplainOptions {
     pub eventtime_late_tolerance_ms: u128,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PipelineExplainConfig {
+    pub pipeline_options: Option<PipelineExplainOptions>,
+    pub shared_stream_decode_applied: HashMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExplainReport {
     pub root: ExplainNode,
@@ -86,76 +92,29 @@ pub struct PipelineExplain {
 }
 
 impl PipelineExplain {
-    pub fn new(logical_plan: Arc<LogicalPlan>, physical_plan: Arc<PhysicalPlan>) -> Self {
-        let logical = ExplainReport {
-            root: build_logical_node(&logical_plan),
-        };
-        let physical = ExplainReport {
-            root: build_physical_node(&physical_plan),
-        };
-        Self {
-            options: None,
-            logical,
-            physical,
-        }
-    }
-
-    pub fn new_with_shared_stream_decode_applied(
+    pub fn new(
         logical_plan: Arc<LogicalPlan>,
         physical_plan: Arc<PhysicalPlan>,
-        shared_stream_decode_applied: HashMap<String, Vec<String>>,
+        config: PipelineExplainConfig,
     ) -> Self {
         let logical = ExplainReport {
             root: build_logical_node(&logical_plan),
         };
-        let physical = ExplainReport {
-            root: build_physical_node_with_shared_stream_decode_applied(
+
+        let physical_root = if config.shared_stream_decode_applied.is_empty() {
+            build_physical_node(&physical_plan)
+        } else {
+            build_physical_node_with_shared_stream_decode_applied(
                 &physical_plan,
-                Some(&shared_stream_decode_applied),
-            ),
-        };
-        Self {
-            options: None,
-            logical,
-            physical,
-        }
-    }
-
-    pub fn new_with_pipeline_options(
-        options: PipelineExplainOptions,
-        logical_plan: Arc<LogicalPlan>,
-        physical_plan: Arc<PhysicalPlan>,
-    ) -> Self {
-        let logical = ExplainReport {
-            root: build_logical_node(&logical_plan),
+                Some(&config.shared_stream_decode_applied),
+            )
         };
         let physical = ExplainReport {
-            root: build_physical_node(&physical_plan),
+            root: physical_root,
         };
-        Self {
-            options: Some(options),
-            logical,
-            physical,
-        }
-    }
 
-    pub fn new_with_pipeline_options_and_shared_stream_decode_applied(
-        options: PipelineExplainOptions,
-        logical_plan: Arc<LogicalPlan>,
-        physical_plan: Arc<PhysicalPlan>,
-        shared_stream_decode_applied: HashMap<String, Vec<String>>,
-    ) -> Self {
-        let logical = ExplainReport {
-            root: build_logical_node(&logical_plan),
-        };
-        let physical = ExplainReport {
-            root: build_physical_node_with_shared_stream_decode_applied(
-                &physical_plan,
-                Some(&shared_stream_decode_applied),
-            ),
-        };
         Self {
-            options: Some(options),
+            options: config.pipeline_options,
             logical,
             physical,
         }

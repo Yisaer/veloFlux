@@ -17,8 +17,8 @@ use crate::processor::ProcessorStatsEntry;
 use crate::processor::{create_processor_pipeline, ProcessorPipelineDependencies};
 use crate::shared_stream::SharedStreamRegistry;
 use crate::{
-    explain_pipeline_with_options, optimize_physical_plan, PipelineExplain, PipelineRegistries,
-    PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
+    explain_pipeline_with_options, optimize_physical_plan, PipelineExplain, PipelineExplainConfig,
+    PipelineRegistries, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -483,10 +483,20 @@ fn build_pipeline_runtime_with_logical_ir(
     }
     let shared_stream_decode_applied =
         shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
-    let explain = PipelineExplain::new_with_shared_stream_decode_applied(
+    let explain = PipelineExplain::new(
         Arc::clone(&logical_plan),
         Arc::clone(&optimized_plan),
-        shared_stream_decode_applied,
+        PipelineExplainConfig {
+            pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
+                eventtime_enabled: definition.options().eventtime.enabled,
+                eventtime_late_tolerance_ms: definition
+                    .options()
+                    .eventtime
+                    .late_tolerance
+                    .as_millis(),
+            }),
+            shared_stream_decode_applied,
+        },
     );
     tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
 
@@ -595,14 +605,20 @@ fn build_pipeline_runtime_from_logical_ir(
     }
     let shared_stream_decode_applied =
         shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
-    let explain = PipelineExplain::new_with_pipeline_options_and_shared_stream_decode_applied(
-        crate::planner::explain::PipelineExplainOptions {
-            eventtime_enabled: definition.options().eventtime.enabled,
-            eventtime_late_tolerance_ms: definition.options().eventtime.late_tolerance.as_millis(),
-        },
+    let explain = PipelineExplain::new(
         Arc::clone(&logical_plan),
         Arc::clone(&optimized_plan),
-        shared_stream_decode_applied,
+        PipelineExplainConfig {
+            pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
+                eventtime_enabled: definition.options().eventtime.enabled,
+                eventtime_late_tolerance_ms: definition
+                    .options()
+                    .eventtime
+                    .late_tolerance
+                    .as_millis(),
+            }),
+            shared_stream_decode_applied,
+        },
     );
     tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
 

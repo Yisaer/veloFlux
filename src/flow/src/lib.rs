@@ -44,7 +44,7 @@ pub use pipeline::{
     SinkDefinition, SinkProps, SinkType,
 };
 pub use planner::create_physical_plan;
-pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain};
+pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};
 pub use planner::logical::{
     BaseLogicalPlan, DataSinkPlan, DataSource, Filter, LogicalPlan, Project,
 };
@@ -180,7 +180,11 @@ fn build_physical_plan_from_sql(
         registries.encoder_registry().as_ref(),
         registries.aggregate_registry(),
     );
-    let explain = PipelineExplain::new(Arc::clone(&logical_plan), Arc::clone(&optimized_plan));
+    let explain = PipelineExplain::new(
+        Arc::clone(&logical_plan),
+        Arc::clone(&optimized_plan),
+        PipelineExplainConfig::default(),
+    );
     tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
     Ok(optimized_plan)
 }
@@ -361,17 +365,17 @@ pub fn explain_pipeline_with_options(
     let shared_stream_decode_applied =
         shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
 
-    Ok(
-        PipelineExplain::new_with_pipeline_options_and_shared_stream_decode_applied(
-            crate::planner::explain::PipelineExplainOptions {
+    Ok(PipelineExplain::new(
+        logical_plan,
+        optimized_plan,
+        PipelineExplainConfig {
+            pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
                 eventtime_enabled: options.eventtime.enabled,
                 eventtime_late_tolerance_ms: options.eventtime.late_tolerance.as_millis(),
-            },
-            logical_plan,
-            optimized_plan,
+            }),
             shared_stream_decode_applied,
-        ),
-    )
+        },
+    ))
 }
 
 /// Convenience helper for tests and demos that just need a logging mock sink.
