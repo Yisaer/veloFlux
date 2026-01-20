@@ -2,6 +2,7 @@ use crate::catalog::EventtimeDefinition;
 use crate::catalog::StreamDecoderConfig;
 use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::logical::BaseLogicalPlan;
+use crate::processor::SamplerConfig;
 use datatypes::Schema;
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ pub struct DataSource {
     /// `ColumnRef::ByIndex` semantics stable.
     pub shared_required_schema: Option<Vec<String>>,
     pub eventtime: Option<EventtimeDefinition>,
+    pub sampler: Option<SamplerConfig>,
 }
 
 impl DataSource {
@@ -28,6 +30,7 @@ impl DataSource {
         index: i64,
         schema: Arc<Schema>,
         eventtime: Option<EventtimeDefinition>,
+        sampler: Option<SamplerConfig>,
     ) -> Self {
         let base = BaseLogicalPlan::new(vec![], index);
         Self {
@@ -39,6 +42,7 @@ impl DataSource {
             decode_projection: None,
             shared_required_schema: None,
             eventtime,
+            sampler,
         }
     }
 
@@ -60,5 +64,9 @@ impl DataSource {
 
     pub fn eventtime(&self) -> Option<&EventtimeDefinition> {
         self.eventtime.as_ref()
+    }
+
+    pub fn sampler(&self) -> Option<&SamplerConfig> {
+        self.sampler.as_ref()
     }
 }

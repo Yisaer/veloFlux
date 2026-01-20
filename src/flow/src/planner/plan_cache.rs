@@ -316,7 +316,8 @@ fn build_logical_plan_node(
                 decoder,
                 node.index,
                 schema,
-                None,
+                None, // eventtime
+                None, // sampler - plan cache doesn't preserve sampler config yet
             );
             Arc::new(LogicalPlan::DataSource(datasource))
         }

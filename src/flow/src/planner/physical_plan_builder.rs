@@ -13,8 +13,8 @@ use crate::planner::physical::{
     PhysicalAggregation, PhysicalBatch, PhysicalDataSink, PhysicalDataSource, PhysicalDecoder,
     PhysicalDecoderEventtimeSpec, PhysicalEncoder, PhysicalEventtimeWatermark, PhysicalFilter,
     PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect,
-    PhysicalSharedStream, PhysicalSinkConnector, PhysicalStatefulFunction, StatefulCall,
-    WatermarkConfig, WatermarkStrategy,
+    PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector, PhysicalStatefulFunction,
+    StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
 use crate::PipelineRegistries;
@@ -599,13 +599,26 @@ fn create_physical_data_source_with_builder(
             let decoder = PhysicalDecoder::new(
                 logical_ds.source_name.clone(),
                 logical_ds.decoder().clone(),
-                schema,
+                Arc::clone(&schema),
                 logical_ds.decode_projection.clone(),
                 eventtime,
                 vec![datasource_plan],
                 decoder_index,
             );
-            Ok(Arc::new(PhysicalPlan::Decoder(decoder)))
+            let decoder_plan = Arc::new(PhysicalPlan::Decoder(decoder));
+
+            // Insert sampler if configured on the stream
+            if let Some(sampler_config) = logical_ds.sampler() {
+                let sampler_index = builder.allocate_index();
+                let sampler = PhysicalSampler::new(
+                    sampler_config.interval,
+                    vec![decoder_plan],
+                    sampler_index,
+                );
+                Ok(Arc::new(PhysicalPlan::Sampler(sampler)))
+            } else {
+                Ok(decoder_plan)
+            }
         }
         SourceBindingKind::Shared => {
             if decoder_kind == "none" {
