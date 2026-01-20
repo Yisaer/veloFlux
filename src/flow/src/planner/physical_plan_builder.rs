@@ -599,7 +599,7 @@ fn create_physical_data_source_with_builder(
             let decoder = PhysicalDecoder::new(
                 logical_ds.source_name.clone(),
                 logical_ds.decoder().clone(),
-                Arc::clone(&schema),
+                schema,
                 logical_ds.decode_projection.clone(),
                 eventtime,
                 vec![datasource_plan],

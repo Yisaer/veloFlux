@@ -927,8 +927,8 @@ fn build_physical_node_with_prefix(
                 ));
             }
         }
-        PhysicalPlan::Sampler(throttler) => {
-            info.push(format!("interval={:?}", throttler.interval));
+        PhysicalPlan::Sampler(sampler) => {
+            info.push(format!("interval={:?}", sampler.interval));
         }
     }
 
