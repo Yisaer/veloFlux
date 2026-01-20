@@ -22,6 +22,7 @@ pub mod filter_processor;
 pub mod processor_builder;
 pub mod project_processor;
 pub mod result_collect_processor;
+pub mod sampler_processor;
 pub mod shared_stream_processor;
 pub mod sink_processor;
 pub mod sliding_window_processor;
@@ -50,6 +51,7 @@ pub use processor_builder::{
 };
 pub use project_processor::ProjectProcessor;
 pub use result_collect_processor::ResultCollectProcessor;
+pub use sampler_processor::{SamplerConfig, SamplerProcessor, SamplingStrategy};
 pub use shared_stream_processor::SharedStreamProcessor;
 pub use sink_processor::SinkProcessor;
 pub use sliding_window_processor::SlidingWindowProcessor;

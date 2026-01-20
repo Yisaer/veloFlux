@@ -14,9 +14,9 @@ use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
     ComputeProcessor, ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor,
     EncoderProcessor, FilterProcessor, Ingress, InstantControlSignal, Processor, ProcessorError,
-    ProjectProcessor, ResultCollectProcessor, SharedStreamProcessor, SinkProcessor,
-    SlidingWindowProcessor, StateWindowProcessor, StatefulFunctionProcessor, StreamData,
-    StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
+    ProjectProcessor, ResultCollectProcessor, SamplerProcessor, SharedStreamProcessor,
+    SinkProcessor, SlidingWindowProcessor, StateWindowProcessor, StatefulFunctionProcessor,
+    StreamData, StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
     WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
@@ -78,6 +78,8 @@ pub enum PlanProcessor {
     ResultCollect(ResultCollectProcessor),
     /// BarrierProcessor created from PhysicalBarrier
     Barrier(BarrierProcessor),
+    /// SamplerProcessor for rate limiting
+    Sampler(SamplerProcessor),
 }
 
 #[derive(Clone)]
@@ -213,6 +215,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.id(),
             PlanProcessor::ResultCollect(p) => p.id(),
             PlanProcessor::Barrier(p) => p.id(),
+            PlanProcessor::Sampler(p) => p.id(),
         }
     }
 
@@ -237,6 +240,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(_) => "sink",
             PlanProcessor::ResultCollect(_) => "result_collect",
             PlanProcessor::Barrier(_) => "barrier",
+            PlanProcessor::Sampler(_) => "sampler",
         }
     }
 
@@ -267,6 +271,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.set_stats(stats),
             PlanProcessor::ResultCollect(p) => p.set_stats(stats),
             PlanProcessor::Barrier(p) => p.set_stats(stats),
+            PlanProcessor::Sampler(p) => p.set_stats(stats),
         }
     }
 
@@ -292,6 +297,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.start(),
             PlanProcessor::ResultCollect(p) => p.start(),
             PlanProcessor::Barrier(p) => p.start(),
+            PlanProcessor::Sampler(p) => p.start(),
         }
     }
 
@@ -317,6 +323,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.subscribe_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_output(),
             PlanProcessor::Barrier(p) => p.subscribe_output(),
+            PlanProcessor::Sampler(p) => p.subscribe_output(),
         }
     }
 
@@ -342,6 +349,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.subscribe_control_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_control_output(),
             PlanProcessor::Barrier(p) => p.subscribe_control_output(),
+            PlanProcessor::Sampler(p) => p.subscribe_control_output(),
         }
     }
 
@@ -367,6 +375,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.add_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_input(receiver),
             PlanProcessor::Barrier(p) => p.add_input(receiver),
+            PlanProcessor::Sampler(p) => p.add_input(receiver),
         }
     }
 
@@ -392,6 +401,7 @@ impl PlanProcessor {
             PlanProcessor::Sink(p) => p.add_control_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_control_input(receiver),
             PlanProcessor::Barrier(p) => p.add_control_input(receiver),
+            PlanProcessor::Sampler(p) => p.add_control_input(receiver),
         }
     }
 }
@@ -966,6 +976,18 @@ fn create_processor_from_plan_node(
             let processor = BarrierProcessor::new(processor_id.clone(), expected_upstreams);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Barrier(processor),
+            ))
+        }
+        PhysicalPlan::Sampler(sampler) => {
+            let processor = SamplerProcessor::new(
+                plan_name.clone(),
+                crate::processor::SamplerConfig {
+                    interval: sampler.interval,
+                    strategy: sampler.strategy.clone(),
+                },
+            );
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::Sampler(processor),
             ))
         }
     }

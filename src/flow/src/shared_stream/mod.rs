@@ -6,6 +6,7 @@ use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
 use crate::processor::processor_builder::{
     create_processor_pipeline_for_shared_stream, PlanProcessor, SharedStreamPipelineOptions,
 };
+use crate::processor::SamplerConfig;
 use crate::processor::{ControlSignal, ProcessorPipeline, StreamData};
 use datatypes::Schema;
 use once_cell::sync::Lazy;
@@ -251,6 +252,7 @@ pub struct SharedStreamConfig {
     pub decoder: StreamDecoderConfig,
     pub connector: Option<SharedStreamConnectorSpec>,
     pub channel_capacity: usize,
+    pub sampler: Option<SamplerConfig>,
 }
 
 impl SharedStreamConfig {
@@ -261,6 +263,7 @@ impl SharedStreamConfig {
             decoder: StreamDecoderConfig::json(),
             connector: None,
             channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            sampler: None,
         }
     }
 
@@ -309,6 +312,15 @@ impl SharedStreamConfig {
 
     pub fn set_connector_factory(&mut self, factory: Arc<dyn SharedStreamConnectorFactory>) {
         self.connector = Some(SharedStreamConnectorSpec::Factory(factory));
+    }
+
+    pub fn with_sampler(mut self, sampler: SamplerConfig) -> Self {
+        self.sampler = Some(sampler);
+        self
+    }
+
+    pub fn set_sampler(&mut self, sampler: SamplerConfig) {
+        self.sampler = Some(sampler);
     }
 }
 
@@ -392,6 +404,7 @@ struct SharedStreamInner {
     created_at: SystemTime,
     connector_id: String,
     connector_factory: Arc<dyn SharedStreamConnectorFactory>,
+    sampler: Option<SamplerConfig>,
     runtime_lock: Mutex<()>,
     decoding_columns: Arc<std::sync::RwLock<Vec<String>>>,
     data_sender: broadcast::Sender<StreamData>,
@@ -424,6 +437,7 @@ impl SharedStreamInner {
             decoder,
             connector,
             channel_capacity,
+            sampler,
         } = config;
 
         let connector_factory: Arc<dyn SharedStreamConnectorFactory> = match connector {
@@ -460,6 +474,7 @@ impl SharedStreamInner {
             created_at: SystemTime::now(),
             connector_id,
             connector_factory,
+            sampler,
             runtime_lock: Mutex::new(()),
             decoding_columns: Arc::clone(&decoding_columns),
             data_sender,
@@ -519,6 +534,7 @@ impl SharedStreamInner {
             &self.name,
             Arc::clone(&self.schema),
             self.decoder_config.clone(),
+            self.sampler.clone(),
         );
 
         let options = SharedStreamPipelineOptions {

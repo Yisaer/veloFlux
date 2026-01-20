@@ -15,8 +15,8 @@ use crate::planner::physical::{
     PhysicalAggregation, PhysicalBatch, PhysicalCompute, PhysicalDataSink, PhysicalDataSource,
     PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEncoder, PhysicalEventtimeWatermark,
     PhysicalFilter, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
-    PhysicalResultCollect, PhysicalSharedStream, PhysicalSinkConnector, PhysicalStatefulFunction,
-    StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PhysicalResultCollect, PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector,
+    PhysicalStatefulFunction, StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
@@ -603,9 +603,24 @@ fn create_physical_data_source_with_builder(
                 index,
             );
             let datasource_plan = Arc::new(PhysicalPlan::DataSource(physical_ds));
+            let sampler_plan = logical_ds.sampler().map(|sampler_config| {
+                let sampler_index = builder.allocate_index();
+                Arc::new(PhysicalPlan::Sampler(PhysicalSampler::new(
+                    sampler_config.interval,
+                    sampler_config.strategy.clone(),
+                    vec![Arc::clone(&datasource_plan)],
+                    sampler_index,
+                )))
+            });
+
             if decoder_kind == "none" {
-                return Ok(datasource_plan);
+                return Ok(sampler_plan.unwrap_or(datasource_plan));
             }
+
+            let decoder_children = sampler_plan
+                .as_ref()
+                .map(|plan| vec![Arc::clone(plan)])
+                .unwrap_or_else(|| vec![Arc::clone(&datasource_plan)]);
             let decoder_index = builder.allocate_index();
             let decoder = PhysicalDecoder::new(
                 logical_ds.source_name.clone(),
@@ -613,7 +628,7 @@ fn create_physical_data_source_with_builder(
                 schema,
                 logical_ds.decode_projection.clone(),
                 eventtime,
-                vec![datasource_plan],
+                decoder_children,
                 decoder_index,
             );
             Ok(Arc::new(PhysicalPlan::Decoder(decoder)))
@@ -639,6 +654,7 @@ fn create_physical_data_source_with_builder(
                 &logical_ds.source_name,
                 Arc::clone(&schema),
                 logical_ds.decoder().clone(),
+                None,
             );
             let physical_shared = PhysicalSharedStream::new(
                 logical_ds.source_name.clone(),
@@ -935,6 +951,7 @@ fn find_binding_entry<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::processor::SamplerConfig;
 
     #[test]
     fn test_physical_plan_builder_creation() {
@@ -944,5 +961,65 @@ mod tests {
 
         assert_eq!(index1, 0);
         assert_eq!(index2, 1);
+    }
+
+    #[test]
+    fn test_physical_plan_builder_index_allocation_sequential() {
+        let mut builder = PhysicalPlanBuilder::new();
+        for i in 0..10 {
+            assert_eq!(builder.allocate_index(), i);
+        }
+    }
+
+    #[test]
+    fn test_sampler_config_default_strategy() {
+        let config = SamplerConfig::new(Duration::from_millis(100));
+        assert_eq!(config.interval, Duration::from_millis(100));
+        // Default strategy should be Latest
+        assert_eq!(config.strategy, crate::processor::SamplingStrategy::Latest);
+    }
+
+    #[test]
+    fn test_sampler_config_serialization_roundtrip() {
+        let config = SamplerConfig::new(Duration::from_secs(1));
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: SamplerConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.interval, config.interval);
+        assert_eq!(parsed.strategy, config.strategy);
+    }
+
+    #[test]
+    fn test_physical_sampler_has_correct_interval() {
+        let interval = Duration::from_millis(500);
+        let sampler = PhysicalSampler::new(
+            interval,
+            crate::processor::SamplingStrategy::Latest,
+            vec![],
+            0,
+        );
+        assert_eq!(sampler.interval, interval);
+        assert_eq!(sampler.base.index(), 0);
+    }
+
+    #[test]
+    fn test_physical_sampler_with_children() {
+        let interval = Duration::from_millis(100);
+        // Create a dummy physical plan child
+        let dummy_ds = crate::planner::physical::PhysicalDataSource::new(
+            "test_stream".to_string(),
+            None,
+            Arc::new(datatypes::Schema::new(vec![])),
+            None,
+            0,
+        );
+        let child = Arc::new(PhysicalPlan::DataSource(dummy_ds));
+
+        let sampler = PhysicalSampler::new(
+            interval,
+            crate::processor::SamplingStrategy::Latest,
+            vec![child.clone()],
+            1,
+        );
+        assert_eq!(sampler.base.children().len(), 1);
     }
 }

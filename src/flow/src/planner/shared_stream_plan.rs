@@ -1,7 +1,8 @@
 use crate::catalog::StreamDecoderConfig;
 use crate::planner::physical::{
-    PhysicalDataSource, PhysicalDecoder, PhysicalPlan, PhysicalResultCollect,
+    PhysicalDataSource, PhysicalDecoder, PhysicalPlan, PhysicalResultCollect, PhysicalSampler,
 };
+use crate::processor::SamplerConfig;
 use datatypes::Schema;
 use std::sync::Arc;
 
@@ -27,6 +28,7 @@ pub(crate) fn create_physical_plan_for_shared_stream(
     stream_name: &str,
     schema: Arc<Schema>,
     decoder: StreamDecoderConfig,
+    sampler: Option<SamplerConfig>,
 ) -> Arc<PhysicalPlan> {
     let mut index_counter = IndexCounter::new(0);
 
@@ -38,13 +40,27 @@ pub(crate) fn create_physical_plan_for_shared_stream(
         index_counter.allocate(),
     )));
 
+    let sampler_input = Arc::clone(&datasource_plan);
+    let sampler_plan = sampler.map(|config| {
+        Arc::new(PhysicalPlan::Sampler(PhysicalSampler::new(
+            config.interval,
+            config.strategy,
+            vec![sampler_input],
+            index_counter.allocate(),
+        )))
+    });
+
+    let decoder_children = sampler_plan
+        .as_ref()
+        .map(|plan| vec![Arc::clone(plan)])
+        .unwrap_or_else(|| vec![Arc::clone(&datasource_plan)]);
     let decoder_plan = Arc::new(PhysicalPlan::Decoder(PhysicalDecoder::new(
         stream_name.to_string(),
         decoder,
         Arc::clone(&schema),
         None,
         None,
-        vec![Arc::clone(&datasource_plan)],
+        decoder_children,
         index_counter.allocate(),
     )));
 

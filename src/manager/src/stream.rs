@@ -13,6 +13,7 @@ use flow::catalog::{
     StreamDecoderConfig,
 };
 use flow::connector::MemoryTopicKind;
+use flow::processor::SamplerConfig;
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,8 @@ pub struct CreateStreamRequest {
     pub decoder: DecoderConfigRequest,
     #[serde(default)]
     pub eventtime: Option<EventtimeConfigRequest>,
+    #[serde(default)]
+    pub sampler: Option<SamplerConfig>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -262,6 +265,8 @@ pub struct StreamDefinitionSpec {
     pub decoder: DecoderConfigRequest,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eventtime: Option<EventtimeConfigRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampler: Option<SamplerConfig>,
 }
 
 pub async fn create_stream_handler(
@@ -328,6 +333,10 @@ pub async fn create_stream_handler(
             cfg.column.clone(),
             cfg.eventtime_type.clone(),
         ));
+    }
+
+    if let Some(sampler) = &req.sampler {
+        definition = definition.with_sampler(sampler.clone());
     }
 
     match state.instance.create_stream(definition, req.shared).await {
@@ -452,6 +461,7 @@ pub async fn describe_stream_handler(
                 column: eventtime.column().to_string(),
                 eventtime_type: eventtime.eventtime_type().to_string(),
             }),
+        sampler: definition.sampler().cloned(),
     };
 
     (

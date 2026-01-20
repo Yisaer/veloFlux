@@ -5,6 +5,7 @@ use datatypes::{
 use flow::catalog::MockStreamProps;
 use flow::planner::logical::create_logical_plan;
 use flow::planner::sink::CustomSinkConnectorConfig;
+use flow::processor::SamplerConfig;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use flow::Catalog;
 use flow::EventtimeDefinition;
@@ -34,6 +35,19 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamProps::Mqtt(MqttStreamProps::default()),
         StreamDecoderConfig::json(),
     );
+
+    let stream_sampler_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "stream_sampler".to_string(),
+        "a".to_string(),
+        ConcreteDatatype::Int64(Int64Type),
+    )]));
+    let stream_sampler_def = StreamDefinition::new(
+        "stream_sampler",
+        Arc::clone(&stream_sampler_schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    )
+    .with_sampler(SamplerConfig::new(Duration::from_millis(100)));
 
     let user_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
         StructField::new("c".to_string(), ConcreteDatatype::Int64(Int64Type), false),
@@ -137,6 +151,7 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
 
     let mut stream_defs = HashMap::new();
     stream_defs.insert("stream".to_string(), Arc::new(stream_def));
+    stream_defs.insert("stream_sampler".to_string(), Arc::new(stream_sampler_def));
     stream_defs.insert("stream_2".to_string(), Arc::new(stream_2_def));
     stream_defs.insert("stream_enc".to_string(), Arc::new(stream_enc_def));
     stream_defs.insert("stream_ab".to_string(), Arc::new(stream_ab_def));
@@ -396,6 +411,12 @@ fn plan_explain_table_driven() {
             sql: "SELECT lag(a) FROM stream",
             options: PipelineOptions::default(),
             expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[lag(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[lag(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "select_with_sampler_inserts_sampler_before_decoder",
+            sql: "SELECT a FROM stream_sampler",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_sampler","decoder=json","schema=[a]","sampler.strategy=latest"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_sampler","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalSampler_1","info":["interval=100ms","strategy=latest"],"operator":"PhysicalSampler"}],"id":"PhysicalDecoder_2","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_3","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "stateful_where_before_project",

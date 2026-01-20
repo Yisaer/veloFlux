@@ -154,6 +154,9 @@ impl FlowInstance {
                 });
 
                 config.set_connector_factory(factory);
+                if let Some(sampler) = definition.sampler() {
+                    config.set_sampler(sampler.clone());
+                }
                 self.shared_stream_registry
                     .create_stream(config)
                     .await

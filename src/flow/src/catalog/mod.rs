@@ -1,3 +1,4 @@
+use crate::processor::SamplerConfig;
 use datatypes::Schema;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
@@ -119,6 +120,8 @@ pub struct StreamDefinition {
     props: StreamProps,
     decoder: StreamDecoderConfig,
     eventtime: Option<EventtimeDefinition>,
+    /// Optional sampler configuration for stream-level downsampling.
+    sampler: Option<SamplerConfig>,
 }
 
 /// Event-time configuration for a stream.
@@ -165,11 +168,17 @@ impl StreamDefinition {
             props,
             decoder,
             eventtime: None,
+            sampler: None,
         }
     }
 
     pub fn with_eventtime(mut self, eventtime: EventtimeDefinition) -> Self {
         self.eventtime = Some(eventtime);
+        self
+    }
+
+    pub fn with_sampler(mut self, sampler: SamplerConfig) -> Self {
+        self.sampler = Some(sampler);
         self
     }
 
@@ -195,6 +204,10 @@ impl StreamDefinition {
 
     pub fn eventtime(&self) -> Option<&EventtimeDefinition> {
         self.eventtime.as_ref()
+    }
+
+    pub fn sampler(&self) -> Option<&SamplerConfig> {
+        self.sampler.as_ref()
     }
 }
 
