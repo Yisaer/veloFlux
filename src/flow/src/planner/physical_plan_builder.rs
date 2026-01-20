@@ -607,6 +607,7 @@ fn create_physical_data_source_with_builder(
                 let sampler_index = builder.allocate_index();
                 Arc::new(PhysicalPlan::Sampler(PhysicalSampler::new(
                     sampler_config.interval,
+                    sampler_config.strategy.clone(),
                     vec![Arc::clone(&datasource_plan)],
                     sampler_index,
                 )))
@@ -990,7 +991,12 @@ mod tests {
     #[test]
     fn test_physical_sampler_has_correct_interval() {
         let interval = Duration::from_millis(500);
-        let sampler = PhysicalSampler::new(interval, vec![], 0);
+        let sampler = PhysicalSampler::new(
+            interval,
+            crate::processor::SamplingStrategy::Latest,
+            vec![],
+            0,
+        );
         assert_eq!(sampler.interval, interval);
         assert_eq!(sampler.base.index(), 0);
     }
@@ -1008,7 +1014,12 @@ mod tests {
         );
         let child = Arc::new(PhysicalPlan::DataSource(dummy_ds));
 
-        let sampler = PhysicalSampler::new(interval, vec![child.clone()], 1);
+        let sampler = PhysicalSampler::new(
+            interval,
+            crate::processor::SamplingStrategy::Latest,
+            vec![child.clone()],
+            1,
+        );
         assert_eq!(sampler.base.children().len(), 1);
     }
 }

@@ -416,7 +416,7 @@ fn plan_explain_table_driven() {
             name: "select_with_sampler_inserts_sampler_before_decoder",
             sql: "SELECT a FROM stream_sampler",
             options: PipelineOptions::default(),
-            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_sampler","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_sampler","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalSampler_1","info":["interval=100ms"],"operator":"PhysicalSampler"}],"id":"PhysicalDecoder_2","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_3","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_sampler","decoder=json","schema=[a]","sampler.strategy=latest"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_sampler","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalSampler_1","info":["interval=100ms","strategy=latest"],"operator":"PhysicalSampler"}],"id":"PhysicalDecoder_2","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_3","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "stateful_where_before_project",

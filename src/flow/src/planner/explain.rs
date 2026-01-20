@@ -224,6 +224,12 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                     ds.decode_projection(),
                 ));
             }
+            if let Some(sampler) = ds.sampler.as_ref() {
+                info.push(format!(
+                    "sampler.strategy={}",
+                    sampling_strategy_name(&sampler.strategy)
+                ));
+            }
         }
         LogicalPlan::StatefulFunction(stateful) => {
             let mut mappings = stateful
@@ -970,6 +976,10 @@ fn build_physical_node_with_prefix(
         }
         PhysicalPlan::Sampler(sampler) => {
             info.push(format!("interval={:?}", sampler.interval));
+            info.push(format!(
+                "strategy={}",
+                sampling_strategy_name(&sampler.strategy)
+            ));
         }
     }
 
@@ -1006,6 +1016,12 @@ fn build_physical_node_with_prefix(
         operator: plan.get_plan_type().to_string(),
         info,
         children,
+    }
+}
+
+fn sampling_strategy_name(strategy: &crate::processor::SamplingStrategy) -> &'static str {
+    match strategy {
+        crate::processor::SamplingStrategy::Latest => "latest",
     }
 }
 

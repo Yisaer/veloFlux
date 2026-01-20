@@ -2,9 +2,9 @@ use crate::catalog::StreamDecoderConfig;
 use crate::planner::physical::{
     PhysicalDataSource, PhysicalDecoder, PhysicalPlan, PhysicalResultCollect, PhysicalSampler,
 };
+use crate::processor::SamplerConfig;
 use datatypes::Schema;
 use std::sync::Arc;
-use std::time::Duration;
 
 struct IndexCounter {
     next_index: i64,
@@ -28,7 +28,7 @@ pub(crate) fn create_physical_plan_for_shared_stream(
     stream_name: &str,
     schema: Arc<Schema>,
     decoder: StreamDecoderConfig,
-    sampler: Option<Duration>,
+    sampler: Option<SamplerConfig>,
 ) -> Arc<PhysicalPlan> {
     let mut index_counter = IndexCounter::new(0);
 
@@ -41,9 +41,10 @@ pub(crate) fn create_physical_plan_for_shared_stream(
     )));
 
     let sampler_input = Arc::clone(&datasource_plan);
-    let sampler_plan = sampler.map(|interval| {
+    let sampler_plan = sampler.map(|config| {
         Arc::new(PhysicalPlan::Sampler(PhysicalSampler::new(
-            interval,
+            config.interval,
+            config.strategy,
             vec![sampler_input],
             index_counter.allocate(),
         )))

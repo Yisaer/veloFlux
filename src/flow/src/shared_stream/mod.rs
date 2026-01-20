@@ -534,7 +534,7 @@ impl SharedStreamInner {
             &self.name,
             Arc::clone(&self.schema),
             self.decoder_config.clone(),
-            self.sampler.as_ref().map(|cfg| cfg.interval),
+            self.sampler.clone(),
         );
 
         let options = SharedStreamPipelineOptions {

@@ -979,7 +979,13 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::Sampler(sampler) => {
-            let processor = SamplerProcessor::latest(plan_name.clone(), sampler.interval);
+            let processor = SamplerProcessor::new(
+                plan_name.clone(),
+                crate::processor::SamplerConfig {
+                    interval: sampler.interval,
+                    strategy: sampler.strategy.clone(),
+                },
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Sampler(processor),
             ))
