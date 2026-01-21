@@ -72,7 +72,7 @@ impl Message {
 /// Derived columns without specific source binding.
 #[derive(Debug, Clone)]
 pub struct AffiliateRow {
-    index: HashMap<Arc<String>, usize>,
+    index: HashMap<Arc<str>, usize>,
     values: Vec<Value>,
 }
 
@@ -81,7 +81,8 @@ impl AffiliateRow {
         let mut index = HashMap::with_capacity(entries.len());
         let mut values = Vec::with_capacity(entries.len());
         for (key, value) in entries {
-            index.insert(key.clone(), values.len());
+            // Store affiliate keys as `Arc<str>` so lookup by `&str` doesn't allocate.
+            index.insert(Arc::<str>::from(key.as_str()), values.len());
             values.push(value);
         }
         Self { index, values }
@@ -89,25 +90,24 @@ impl AffiliateRow {
 
     /// Insert or overwrite a derived column.
     pub fn insert(&mut self, key: Arc<String>, value: Value) {
-        if let Some(idx) = self.index.get(&key).copied() {
+        // Avoid allocating for the hot-path lookup (`HashMap<Arc<str>, _>::get(&str)`).
+        if let Some(idx) = self.index.get(key.as_str()).copied() {
             self.values[idx] = value;
         } else {
             let idx = self.values.len();
             self.values.push(value);
-            self.index.insert(key, idx);
+            self.index.insert(Arc::<str>::from(key.as_str()), idx);
         }
     }
 
-    pub fn entries(&self) -> impl Iterator<Item = (&Arc<String>, &Value)> {
+    pub fn entries(&self) -> impl Iterator<Item = (&Arc<str>, &Value)> {
         self.index
             .iter()
             .map(move |(key, idx)| (key, &self.values[*idx]))
     }
 
     pub fn value(&self, key: &str) -> Option<&Value> {
-        self.index
-            .get(&Arc::new(key.to_string()))
-            .and_then(|idx| self.values.get(*idx))
+        self.index.get(key).and_then(|idx| self.values.get(*idx))
     }
 }
 
@@ -169,7 +169,7 @@ impl Tuple {
         let mut out = Vec::new();
         if let Some(aff) = self.affiliate() {
             for (key, value) in aff.entries() {
-                out.push((("", key.as_str()), value));
+                out.push((("", key.as_ref()), value));
             }
         }
         for msg in self.messages.iter() {

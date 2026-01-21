@@ -16,6 +16,9 @@ fn test_float32_basic_functionality() {
 fn test_float32_type_casting() {
     let float32_type = Float32Type;
 
+    // Test casting from NULL
+    assert_eq!(float32_type.try_cast(Value::Null), Some(Value::Null));
+
     // Test casting from integer types
     assert_eq!(
         float32_type.try_cast(Value::Int8(42)),
@@ -48,67 +51,17 @@ fn test_float32_type_casting() {
         Some(Value::Float32(3000000000.0))
     );
 
-    // Test casting from boolean
-    assert_eq!(
-        float32_type.try_cast(Value::Bool(true)),
-        Some(Value::Float32(1.0))
-    );
-    assert_eq!(
-        float32_type.try_cast(Value::Bool(false)),
-        Some(Value::Float32(0.0))
-    );
-
     // Test casting from Float64
     assert_eq!(
         float32_type.try_cast(Value::Float64(3.15)),
         Some(Value::Float32(3.15))
     );
 
-    // Test casting from string
+    // Test casting from unsupported types
+    assert_eq!(float32_type.try_cast(Value::Bool(true)), None);
     assert_eq!(
         float32_type.try_cast(Value::String("123.45".to_string())),
-        Some(Value::Float32(123.45))
-    );
-    assert_eq!(
-        float32_type.try_cast(Value::String("invalid".to_string())),
         None
-    );
-
-    // Test casting from unsupported types
-    assert_eq!(
-        float32_type.try_cast(Value::String("hello".to_string())),
-        None
-    );
-}
-
-#[test]
-fn test_float32_precision_and_range() {
-    let float32_type = Float32Type;
-
-    // Test with fractional values
-    assert_eq!(
-        float32_type.try_cast(Value::String("123.456789".to_string())),
-        Some(Value::Float32(123.456789))
-    );
-
-    // Test with scientific notation
-    assert_eq!(
-        float32_type.try_cast(Value::String("1.23e-4".to_string())),
-        Some(Value::Float32(0.000123))
-    );
-    assert_eq!(
-        float32_type.try_cast(Value::String("1.23e4".to_string())),
-        Some(Value::Float32(12300.0))
-    );
-
-    // Test very small and very large numbers (within f32 range)
-    assert_eq!(
-        float32_type.try_cast(Value::String("1e-30".to_string())),
-        Some(Value::Float32(1e-30))
-    );
-    assert_eq!(
-        float32_type.try_cast(Value::String("1e30".to_string())),
-        Some(Value::Float32(1e30))
     );
 }
 
@@ -121,14 +74,6 @@ fn test_float32_edge_cases() {
         float32_type.try_cast(Value::Int8(0)),
         Some(Value::Float32(0.0))
     );
-    assert_eq!(
-        float32_type.try_cast(Value::String("0.0".to_string())),
-        Some(Value::Float32(0.0))
-    );
-    assert_eq!(
-        float32_type.try_cast(Value::String("-0.0".to_string())),
-        Some(Value::Float32(-0.0))
-    );
 
     // Test negative values
     assert_eq!(
@@ -136,7 +81,7 @@ fn test_float32_edge_cases() {
         Some(Value::Float32(-42.0))
     );
     assert_eq!(
-        float32_type.try_cast(Value::String("-123.45".to_string())),
+        float32_type.try_cast(Value::Float64(-123.45)),
         Some(Value::Float32(-123.45))
     );
 }

@@ -48,14 +48,32 @@ pub fn transform_aggregate_functions(
 
     // Process HAVING clause: extract aggregates and replace in one step
     if let Some(having_expr) = &mut select_stmt.having {
-        let (new_having, having_aggregates) =
-            extract_and_replace_aggregates(having_expr, allocator, aggregate_registry, &mut seen)?;
+        let (new_having, having_aggregates) = extract_and_replace_aggregates(
+            having_expr,
+            allocator,
+            aggregate_registry.clone(),
+            &mut seen,
+        )?;
 
         // Update the having expression
         *having_expr = new_having;
 
         // Add having aggregates to global collection
         for (replacement_name, original_expr) in having_aggregates {
+            all_aggregates.insert(replacement_name, original_expr);
+        }
+    }
+
+    // Process ORDER BY clause: extract aggregates and replace in one step
+    for item in &mut select_stmt.order_by {
+        let (new_expr, order_by_aggregates) = extract_and_replace_aggregates(
+            &item.expr,
+            allocator,
+            aggregate_registry.clone(),
+            &mut seen,
+        )?;
+        item.expr = new_expr;
+        for (replacement_name, original_expr) in order_by_aggregates {
             all_aggregates.insert(replacement_name, original_expr);
         }
     }

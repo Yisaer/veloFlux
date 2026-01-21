@@ -5,18 +5,19 @@ use crate::expr::sql_conversion::{
 };
 use crate::planner::logical::{
     aggregation::Aggregation as LogicalAggregation, compute::Compute as LogicalCompute,
-    DataSinkPlan, DataSource as LogicalDataSource, Filter as LogicalFilter, LogicalPlan,
-    LogicalWindow, LogicalWindowSpec, Project as LogicalProject,
-    StatefulFunctionPlan as LogicalStatefulFunction,
+    order::Order as LogicalOrder, DataSinkPlan, DataSource as LogicalDataSource,
+    Filter as LogicalFilter, LogicalPlan, LogicalWindow, LogicalWindowSpec,
+    Project as LogicalProject, StatefulFunctionPlan as LogicalStatefulFunction,
 };
 use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
     PhysicalAggregation, PhysicalBatch, PhysicalCompute, PhysicalDataSink, PhysicalDataSource,
     PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEncoder, PhysicalEventtimeWatermark,
-    PhysicalFilter, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
-    PhysicalResultCollect, PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector,
-    PhysicalStatefulFunction, StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PhysicalFilter, PhysicalOrder, PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark,
+    PhysicalProject, PhysicalResultCollect, PhysicalSampler, PhysicalSharedStream,
+    PhysicalSinkConnector, PhysicalStatefulFunction, StatefulCall, WatermarkConfig,
+    WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
@@ -188,6 +189,14 @@ fn create_physical_plan_with_builder_cached_with_options(
         )?,
         LogicalPlan::Compute(logical_compute) => create_physical_compute_with_builder_cached(
             logical_compute,
+            &logical_plan,
+            bindings,
+            registries,
+            options,
+            builder,
+        )?,
+        LogicalPlan::Order(logical_order) => create_physical_order_with_builder_cached(
+            logical_order,
             &logical_plan,
             bindings,
             registries,
@@ -713,6 +722,46 @@ fn create_physical_filter_with_builder_cached(
         index,
     );
     Ok(Arc::new(PhysicalPlan::Filter(physical_filter)))
+}
+
+fn create_physical_order_with_builder_cached(
+    logical_order: &LogicalOrder,
+    logical_plan: &Arc<LogicalPlan>,
+    bindings: &SchemaBinding,
+    registries: &PipelineRegistries,
+    options: &PhysicalPlanBuildOptions,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    let mut physical_children = Vec::new();
+    for child in logical_plan.children() {
+        let physical_child = create_physical_plan_with_builder_cached_with_options(
+            child.clone(),
+            bindings,
+            registries,
+            options,
+            builder,
+        )?;
+        physical_children.push(physical_child);
+    }
+
+    let mut keys = Vec::with_capacity(logical_order.items.len());
+    for item in &logical_order.items {
+        let compiled_expr = convert_expr_to_scalar_with_bindings_and_custom_registry(
+            &item.expr,
+            bindings,
+            registries.custom_func_registry().as_ref(),
+        )
+        .map_err(|e| format!("Failed to convert ORDER BY expression to scalar: {}", e))?;
+        keys.push(PhysicalOrderKey {
+            original_expr: item.expr.clone(),
+            compiled_expr,
+            asc: item.asc,
+        });
+    }
+
+    let index = builder.allocate_index();
+    let physical_order = PhysicalOrder::new(keys, physical_children, index);
+    Ok(Arc::new(PhysicalPlan::Order(physical_order)))
 }
 
 /// Create a PhysicalCompute from a LogicalCompute using centralized index management with caching

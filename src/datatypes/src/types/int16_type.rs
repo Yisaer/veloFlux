@@ -5,6 +5,13 @@ use crate::value::Value;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Int16Type;
 
+fn try_cast_f64_to_i16(v: f64) -> Option<i16> {
+    if !v.is_finite() || v.fract() != 0.0 || v < i16::MIN as f64 || v > i16::MAX as f64 {
+        return None;
+    }
+    Some(v as i16)
+}
+
 impl DataType for Int16Type {
     fn name(&self) -> String {
         "Int16".to_string()
@@ -16,6 +23,7 @@ impl DataType for Int16Type {
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
+            Value::Null => Some(Value::Null),
             Value::Int8(v) => Some(Value::Int16(v as i16)),
             Value::Int16(v) => Some(Value::Int16(v)),
             Value::Int32(v) => {
@@ -54,15 +62,8 @@ impl DataType for Int16Type {
                     None
                 }
             }
-            Value::Float64(v) => {
-                if v >= i16::MIN as f64 && v <= i16::MAX as f64 && v.fract() == 0.0 {
-                    Some(Value::Int16(v as i16))
-                } else {
-                    None
-                }
-            }
-            Value::Bool(v) => Some(Value::Int16(if v { 1 } else { 0 })),
-            Value::String(s) => s.parse::<i16>().ok().map(Value::Int16),
+            Value::Float32(v) => try_cast_f64_to_i16(v as f64).map(Value::Int16),
+            Value::Float64(v) => try_cast_f64_to_i16(v).map(Value::Int16),
             _ => None,
         }
     }

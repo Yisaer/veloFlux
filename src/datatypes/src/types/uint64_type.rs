@@ -5,6 +5,13 @@ use crate::value::Value;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Uint64Type;
 
+fn try_cast_f64_to_u64(v: f64) -> Option<u64> {
+    if !v.is_finite() || v.fract() != 0.0 || v < 0.0 || v > u64::MAX as f64 {
+        return None;
+    }
+    Some(v as u64)
+}
+
 impl DataType for Uint64Type {
     fn name(&self) -> String {
         "Uint64".to_string()
@@ -16,6 +23,7 @@ impl DataType for Uint64Type {
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
+            Value::Null => Some(Value::Null),
             Value::Int8(v) => {
                 if v >= 0 {
                     Some(Value::Uint64(v as u64))
@@ -48,15 +56,8 @@ impl DataType for Uint64Type {
             Value::Uint16(v) => Some(Value::Uint64(v as u64)),
             Value::Uint32(v) => Some(Value::Uint64(v as u64)),
             Value::Uint64(v) => Some(Value::Uint64(v)),
-            Value::Float64(v) => {
-                if v >= 0.0 && v <= u64::MAX as f64 && v.fract() == 0.0 {
-                    Some(Value::Uint64(v as u64))
-                } else {
-                    None
-                }
-            }
-            Value::Bool(v) => Some(Value::Uint64(if v { 1 } else { 0 })),
-            Value::String(s) => s.parse::<u64>().ok().map(Value::Uint64),
+            Value::Float32(v) => try_cast_f64_to_u64(v as f64).map(Value::Uint64),
+            Value::Float64(v) => try_cast_f64_to_u64(v).map(Value::Uint64),
             _ => None,
         }
     }

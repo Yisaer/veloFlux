@@ -5,6 +5,13 @@ use crate::value::Value;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Uint16Type;
 
+fn try_cast_f64_to_u16(v: f64) -> Option<u16> {
+    if !v.is_finite() || v.fract() != 0.0 || v < 0.0 || v > u16::MAX as f64 {
+        return None;
+    }
+    Some(v as u16)
+}
+
 impl DataType for Uint16Type {
     fn name(&self) -> String {
         "Uint16".to_string()
@@ -16,6 +23,7 @@ impl DataType for Uint16Type {
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
+            Value::Null => Some(Value::Null),
             Value::Int8(v) => {
                 if v >= 0 {
                     Some(Value::Uint16(v as u16))
@@ -60,15 +68,8 @@ impl DataType for Uint16Type {
                     None
                 }
             }
-            Value::Float64(v) => {
-                if v >= 0.0 && v <= u16::MAX as f64 && v.fract() == 0.0 {
-                    Some(Value::Uint16(v as u16))
-                } else {
-                    None
-                }
-            }
-            Value::Bool(v) => Some(Value::Uint16(if v { 1 } else { 0 })),
-            Value::String(s) => s.parse::<u16>().ok().map(Value::Uint16),
+            Value::Float32(v) => try_cast_f64_to_u16(v as f64).map(Value::Uint16),
+            Value::Float64(v) => try_cast_f64_to_u16(v).map(Value::Uint16),
             _ => None,
         }
     }

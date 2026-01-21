@@ -157,6 +157,9 @@ pub enum LogicalPlanNodeKindIR {
     StatefulFunction {
         calls: Vec<StatefulExprIR>,
     },
+    Order {
+        keys: Vec<OrderKeyIR>,
+    },
     Window {
         window: WindowIR,
     },
@@ -186,6 +189,12 @@ pub enum LogicalPlanNodeKindIR {
 pub struct StatefulExprIR {
     pub output_name: String,
     pub expr: Expr,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OrderKeyIR {
+    pub expr: Expr,
+    pub asc: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -338,6 +347,17 @@ fn build_logical_plan_node(
                 node.index,
             );
             Arc::new(LogicalPlan::StatefulFunction(plan))
+        }
+        LogicalPlanNodeKindIR::Order { keys } => {
+            let items = keys
+                .iter()
+                .map(|key| crate::planner::logical::OrderItem {
+                    expr: key.expr.clone(),
+                    asc: key.asc,
+                })
+                .collect();
+            let plan = crate::planner::logical::Order::new(items, children, node.index);
+            Arc::new(LogicalPlan::Order(plan))
         }
         LogicalPlanNodeKindIR::Window { window } => {
             let spec = window_ir_to_spec(window)?;
@@ -683,6 +703,16 @@ fn build_logical_ir(
                 .collect();
             LogicalPlanNodeKindIR::StatefulFunction { calls }
         }
+        LogicalPlan::Order(plan) => LogicalPlanNodeKindIR::Order {
+            keys: plan
+                .items
+                .iter()
+                .map(|item| OrderKeyIR {
+                    expr: item.expr.clone(),
+                    asc: item.asc,
+                })
+                .collect(),
+        },
         LogicalPlan::Window(plan) => LogicalPlanNodeKindIR::Window {
             window: window_spec_to_ir(&plan.spec),
         },

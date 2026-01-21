@@ -34,6 +34,7 @@ impl DataType for ListType {
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
+            Value::Null => Some(Value::Null),
             Value::List(v) => {
                 // Check if the datatype matches
                 if v.datatype() == self.item_type.as_ref() {

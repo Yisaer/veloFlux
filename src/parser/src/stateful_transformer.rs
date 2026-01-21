@@ -33,6 +33,16 @@ pub fn transform_stateful_functions(
         )?;
     }
 
+    for item in &mut select_stmt.order_by {
+        item.expr = rewrite_expr_stateful(
+            &item.expr,
+            &stateful_registry,
+            allocator,
+            &mut seen,
+            &mut mappings,
+        )?;
+    }
+
     select_stmt.stateful_mappings = mappings.clone();
     Ok((select_stmt, mappings))
 }

@@ -5,6 +5,13 @@ use crate::value::Value;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Int8Type;
 
+fn try_cast_f64_to_i8(v: f64) -> Option<i8> {
+    if !v.is_finite() || v.fract() != 0.0 || v < i8::MIN as f64 || v > i8::MAX as f64 {
+        return None;
+    }
+    Some(v as i8)
+}
+
 impl DataType for Int8Type {
     fn name(&self) -> String {
         "Int8".to_string()
@@ -16,6 +23,7 @@ impl DataType for Int8Type {
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
+            Value::Null => Some(Value::Null),
             Value::Int8(v) => Some(Value::Int8(v)),
             Value::Int16(v) => {
                 if v >= i8::MIN as i16 && v <= i8::MAX as i16 {
@@ -66,15 +74,8 @@ impl DataType for Int8Type {
                     None
                 }
             }
-            Value::Float64(v) => {
-                if v >= i8::MIN as f64 && v <= i8::MAX as f64 && v.fract() == 0.0 {
-                    Some(Value::Int8(v as i8))
-                } else {
-                    None
-                }
-            }
-            Value::Bool(v) => Some(Value::Int8(if v { 1 } else { 0 })),
-            Value::String(s) => s.parse::<i8>().ok().map(Value::Int8),
+            Value::Float32(v) => try_cast_f64_to_i8(v as f64).map(Value::Int8),
+            Value::Float64(v) => try_cast_f64_to_i8(v).map(Value::Int8),
             _ => None,
         }
     }

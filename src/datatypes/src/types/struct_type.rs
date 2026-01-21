@@ -79,9 +79,12 @@ impl DataType for StructType {
         Value::Struct(StructValue::new(items, self.clone()))
     }
 
-    fn try_cast(&self, _from: Value) -> Option<Value> {
-        // Struct casting is not supported
-        None
+    fn try_cast(&self, from: Value) -> Option<Value> {
+        match from {
+            Value::Null => Some(Value::Null),
+            // Struct casting is not supported.
+            _ => None,
+        }
     }
 }
 

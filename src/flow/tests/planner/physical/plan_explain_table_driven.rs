@@ -413,6 +413,18 @@ fn plan_explain_table_driven() {
             expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[lag(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[lag(a)]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
+            name: "order_by_single_key",
+            sql: "SELECT a FROM stream ORDER BY a",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Order_1","info":["keys=[a ASC]"],"operator":"Order"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalOrder_2","info":["keys=[a ASC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_3","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "order_by_implicit_aggregate_key",
+            sql: "SELECT sum(a) FROM stream_ab ORDER BY sum(b)",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Aggregation_1","info":["aggregates=[sum(a) -> col_1; sum(b) -> col_2]"],"operator":"Aggregation"}],"id":"Order_2","info":["keys=[col_2 ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalAggregation_2","info":["calls=[sum(a) -> col_1; sum(b) -> col_2]"],"operator":"PhysicalAggregation"}],"id":"PhysicalOrder_3","info":["keys=[col_2 ASC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_4","info":["fields=[sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
             name: "select_with_sampler_inserts_sampler_before_decoder",
             sql: "SELECT a FROM stream_sampler",
             options: PipelineOptions::default(),

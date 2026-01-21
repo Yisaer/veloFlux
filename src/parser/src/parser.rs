@@ -5,7 +5,7 @@ use crate::aggregate_registry::{AggregateRegistry, default_aggregate_registry};
 use crate::aggregate_transformer::transform_aggregate_functions;
 use crate::col_placeholder_allocator::ColPlaceholderAllocator;
 use crate::dialect::StreamDialect;
-use crate::select_stmt::{SelectField, SelectStmt};
+use crate::select_stmt::{OrderByItem, SelectField, SelectStmt};
 use crate::stateful_registry::{StatefulRegistry, default_stateful_registry};
 use crate::stateful_transformer::transform_stateful_functions;
 use crate::visitor::TableInfoVisitor;
@@ -93,10 +93,23 @@ impl StreamSqlParser {
 
     /// Extract select fields from a query
     fn extract_from_query(&self, query: &Query) -> Result<SelectStmt, String> {
-        match &*query.body {
-            SetExpr::Select(select) => self.extract_from_select(select),
-            _ => Err("Expected a simple SELECT query".to_string()),
+        let mut select_stmt = match &*query.body {
+            SetExpr::Select(select) => self.extract_from_select(select)?,
+            _ => return Err("Expected a simple SELECT query".to_string()),
+        };
+
+        let mut order_by_items = Vec::with_capacity(query.order_by.len());
+        for item in &query.order_by {
+            if item.nulls_first.is_some() {
+                return Err("NULLS FIRST/LAST in ORDER BY is not supported yet".to_string());
+            }
+            order_by_items.push(OrderByItem {
+                expr: item.expr.clone(),
+                asc: item.asc.unwrap_or(true),
+            });
         }
+        select_stmt.order_by = order_by_items;
+        Ok(select_stmt)
     }
 
     /// Extract select fields from a SELECT statement
@@ -266,6 +279,71 @@ mod tests {
 
         let select_stmt = result.unwrap();
         assert_eq!(select_stmt.select_fields.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_order_by_basic() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT a FROM t ORDER BY b DESC, c");
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.order_by.len(), 2);
+        assert_eq!(select_stmt.order_by[0].expr.to_string(), "b");
+        assert_eq!(select_stmt.order_by[0].asc, false);
+        assert_eq!(select_stmt.order_by[1].expr.to_string(), "c");
+        assert_eq!(select_stmt.order_by[1].asc, true);
+    }
+
+    #[test]
+    fn test_parse_order_by_nulls_first_rejected() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT a FROM t ORDER BY b NULLS FIRST");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("NULLS FIRST/LAST in ORDER BY is not supported yet")
+        );
+    }
+
+    #[test]
+    fn test_parse_order_by_aggregate_rewrite() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT a FROM t ORDER BY sum(b)");
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.order_by.len(), 1);
+
+        // Aggregate is rewritten to a placeholder column.
+        assert_eq!(select_stmt.order_by[0].expr.to_string(), "col_1");
+        assert_eq!(select_stmt.aggregate_mappings.len(), 1);
+        assert_eq!(
+            select_stmt
+                .aggregate_mappings
+                .get("col_1")
+                .unwrap()
+                .to_string(),
+            "sum(b)"
+        );
+    }
+
+    #[test]
+    fn test_parse_order_by_stateful_rewrite() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT a FROM t ORDER BY lag(a)");
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(select_stmt.order_by.len(), 1);
+        assert_eq!(select_stmt.order_by[0].expr.to_string(), "col_1");
+        assert_eq!(select_stmt.stateful_mappings.len(), 1);
+        assert_eq!(
+            select_stmt
+                .stateful_mappings
+                .get("col_1")
+                .unwrap()
+                .to_string(),
+            "lag(a)"
+        );
     }
 }
 

@@ -223,7 +223,7 @@ fn tuple_to_json_maybe_by_index_projection(
     let mut json_row = JsonMap::with_capacity(by_index_projection.columns().len());
     if let Some(affiliate) = tuple.affiliate() {
         for (key, value) in affiliate.entries() {
-            json_row.insert(key.as_str().to_string(), value_to_json(value));
+            json_row.insert(key.as_ref().to_string(), value_to_json(value));
         }
     }
 
