@@ -2,8 +2,10 @@
 //!
 //! Semantics: sorting is applied within each incoming Collection (no global ordering across batches).
 
+use crate::expr::scalar::ColumnRef;
 use crate::expr::value_compare;
-use crate::model::{Collection, RecordBatch};
+use crate::expr::ScalarExpr;
+use crate::model::{Collection, RecordBatch, Tuple};
 use crate::planner::physical::{PhysicalOrder, PhysicalOrderKey, PhysicalPlan};
 use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
@@ -84,19 +86,17 @@ impl OrderProcessor {
         Ok(if key.asc { ord } else { ord.reverse() })
     }
 
-    fn compare_row_keys(
+    fn compare_rows(
         keys: &[PhysicalOrderKey],
-        left: &[Value],
-        right: &[Value],
+        accessors: &[KeyAccessor],
+        rows: &[Tuple],
+        left_idx: usize,
+        right_idx: usize,
     ) -> Result<Ordering, String> {
-        for (idx, key) in keys.iter().enumerate() {
-            let lv = left
-                .get(idx)
-                .ok_or_else(|| "ORDER BY key arity mismatch".to_string())?;
-            let rv = right
-                .get(idx)
-                .ok_or_else(|| "ORDER BY key arity mismatch".to_string())?;
-            let ord = Self::compare_key_values(key, lv, rv)?;
+        for (key, accessor) in keys.iter().zip(accessors.iter()) {
+            let left = accessor.value(rows, left_idx)?;
+            let right = accessor.value(rows, right_idx)?;
+            let ord = Self::compare_key_values(key, left, right)?;
             if ord != Ordering::Equal {
                 return Ok(ord);
             }
@@ -104,11 +104,53 @@ impl OrderProcessor {
         Ok(Ordering::Equal)
     }
 
+    fn compare_tuples(
+        keys: &[PhysicalOrderKey],
+        accessors: &[KeyAccessor],
+        left: &Tuple,
+        right: &Tuple,
+    ) -> Result<Ordering, String> {
+        for (key, accessor) in keys.iter().zip(accessors.iter()) {
+            let left_val = accessor.value_from_tuple(left)?;
+            let right_val = accessor.value_from_tuple(right)?;
+            let ord = Self::compare_key_values(key, left_val, right_val)?;
+            if ord != Ordering::Equal {
+                return Ok(ord);
+            }
+        }
+        Ok(Ordering::Equal)
+    }
+
+    fn reorder_rows_in_place(rows: &mut [Tuple], sorted_indices: &[usize]) {
+        let n = rows.len();
+        debug_assert_eq!(n, sorted_indices.len(), "row arity mismatch");
+
+        let mut pos_to_source: Vec<usize> = (0..n).collect();
+        let mut source_to_pos: Vec<usize> = (0..n).collect();
+
+        for target_pos in 0..n {
+            let desired_source = sorted_indices[target_pos];
+            let current_pos = source_to_pos[desired_source];
+            if current_pos == target_pos {
+                continue;
+            }
+
+            rows.swap(target_pos, current_pos);
+
+            let source_at_target = pos_to_source[target_pos];
+            let source_at_current = pos_to_source[current_pos];
+            pos_to_source.swap(target_pos, current_pos);
+
+            source_to_pos[source_at_target] = current_pos;
+            source_to_pos[source_at_current] = target_pos;
+        }
+    }
+
     fn apply_order(
         physical_order: &PhysicalOrder,
         collection: Box<dyn Collection>,
     ) -> Result<Box<dyn Collection>, ProcessorError> {
-        let rows = collection.into_rows().map_err(|e| {
+        let mut rows = collection.into_rows().map_err(|e| {
             ProcessorError::ProcessingError(format!("Failed to materialize rows: {}", e))
         })?;
 
@@ -118,27 +160,41 @@ impl OrderProcessor {
             })?));
         }
 
-        let mut keyed = Vec::with_capacity(rows.len());
-        for tuple in rows {
-            let mut key_values = Vec::with_capacity(physical_order.keys.len());
-            for key in &physical_order.keys {
-                let value = key.compiled_expr.eval_with_tuple(&tuple).map_err(|e| {
-                    ProcessorError::ProcessingError(format!(
-                        "Failed to evaluate ORDER BY key '{}': {}",
-                        key.original_expr, e
-                    ))
-                })?;
-                key_values.push(value);
+        let accessors = build_accessors(&physical_order.keys, &rows)?;
+
+        // If all keys can be borrowed from tuples without pre-computation, sort rows in place.
+        if accessors.iter().all(KeyAccessor::is_borrowed) {
+            let err: RefCell<Option<String>> = RefCell::new(None);
+            rows.sort_unstable_by(|left, right| {
+                if err.borrow().is_some() {
+                    return Ordering::Equal;
+                }
+                match Self::compare_tuples(&physical_order.keys, &accessors, left, right) {
+                    Ok(ord) => ord,
+                    Err(e) => {
+                        *err.borrow_mut() = Some(e);
+                        Ordering::Equal
+                    }
+                }
+            });
+
+            if let Some(e) = err.into_inner() {
+                return Err(ProcessorError::ProcessingError(e));
             }
-            keyed.push((key_values, tuple));
+
+            let batch = RecordBatch::new(rows)
+                .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+            return Ok(Box::new(batch));
         }
 
+        // Otherwise, sort indices to keep computed key columns aligned with the original row order.
+        let mut indices: Vec<usize> = (0..rows.len()).collect();
         let err: RefCell<Option<String>> = RefCell::new(None);
-        keyed.sort_by(|(left_keys, _), (right_keys, _)| {
+        indices.sort_unstable_by(|&left_idx, &right_idx| {
             if err.borrow().is_some() {
                 return Ordering::Equal;
             }
-            match Self::compare_row_keys(&physical_order.keys, left_keys, right_keys) {
+            match Self::compare_rows(&physical_order.keys, &accessors, &rows, left_idx, right_idx) {
                 Ok(ord) => ord,
                 Err(e) => {
                     *err.borrow_mut() = Some(e);
@@ -151,11 +207,115 @@ impl OrderProcessor {
             return Err(ProcessorError::ProcessingError(e));
         }
 
-        let sorted_rows = keyed.into_iter().map(|(_, tuple)| tuple).collect();
-        let batch = RecordBatch::new(sorted_rows)
-            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+        Self::reorder_rows_in_place(rows.as_mut_slice(), &indices);
+
+        let batch =
+            RecordBatch::new(rows).map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
         Ok(Box::new(batch))
     }
+}
+
+enum KeyAccessor {
+    BorrowedByIndex {
+        source_name: String,
+        column_index: usize,
+    },
+    BorrowedByName {
+        column_name: String,
+    },
+    Computed {
+        values: Vec<Value>,
+    },
+}
+
+impl KeyAccessor {
+    fn is_borrowed(&self) -> bool {
+        matches!(
+            self,
+            Self::BorrowedByIndex { .. } | Self::BorrowedByName { .. }
+        )
+    }
+
+    fn value<'a>(&'a self, rows: &'a [Tuple], row_idx: usize) -> Result<&'a Value, String> {
+        match self {
+            Self::BorrowedByIndex {
+                source_name,
+                column_index,
+            } => rows
+                .get(row_idx)
+                .and_then(|tuple| tuple.value_by_index(source_name, *column_index))
+                .ok_or_else(|| {
+                    format!(
+                        "ORDER BY column not found: {}#{}",
+                        source_name, column_index
+                    )
+                }),
+            Self::BorrowedByName { column_name } => rows
+                .get(row_idx)
+                .and_then(|tuple| tuple.value_by_name("", column_name))
+                .ok_or_else(|| format!("ORDER BY column not found: {}", column_name)),
+            Self::Computed { values } => values
+                .get(row_idx)
+                .ok_or_else(|| "ORDER BY row index out of bounds".to_string()),
+        }
+    }
+
+    fn value_from_tuple<'a>(&'a self, tuple: &'a Tuple) -> Result<&'a Value, String> {
+        match self {
+            Self::BorrowedByIndex {
+                source_name,
+                column_index,
+            } => tuple
+                .value_by_index(source_name, *column_index)
+                .ok_or_else(|| {
+                    format!(
+                        "ORDER BY column not found: {}#{}",
+                        source_name, column_index
+                    )
+                }),
+            Self::BorrowedByName { column_name } => tuple
+                .value_by_name("", column_name)
+                .ok_or_else(|| format!("ORDER BY column not found: {}", column_name)),
+            Self::Computed { .. } => Err("computed key accessor requires row index".to_string()),
+        }
+    }
+}
+
+fn build_accessors(
+    keys: &[PhysicalOrderKey],
+    rows: &[Tuple],
+) -> Result<Vec<KeyAccessor>, ProcessorError> {
+    let mut accessors = Vec::with_capacity(keys.len());
+    for key in keys {
+        match &key.compiled_expr {
+            ScalarExpr::Column(ColumnRef::ByIndex {
+                source_name,
+                column_index,
+            }) => accessors.push(KeyAccessor::BorrowedByIndex {
+                source_name: source_name.clone(),
+                column_index: *column_index,
+            }),
+            ScalarExpr::Column(ColumnRef::ByName { column_name }) => {
+                accessors.push(KeyAccessor::BorrowedByName {
+                    column_name: column_name.clone(),
+                })
+            }
+            _ => {
+                let mut values = Vec::with_capacity(rows.len());
+                for tuple in rows {
+                    let value = key.compiled_expr.eval_with_tuple(tuple).map_err(|e| {
+                        ProcessorError::ProcessingError(format!(
+                            "Failed to evaluate ORDER BY key '{}': {}",
+                            key.original_expr, e
+                        ))
+                    })?;
+                    values.push(value);
+                }
+                accessors.push(KeyAccessor::Computed { values });
+            }
+        }
+    }
+    Ok(accessors)
 }
 
 impl Processor for OrderProcessor {
