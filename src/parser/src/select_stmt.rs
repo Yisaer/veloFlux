@@ -3,6 +3,15 @@ use std::collections::HashMap;
 
 use crate::window::Window;
 
+/// Represents an ORDER BY item.
+#[derive(Debug, Clone)]
+pub struct OrderByItem {
+    /// The expression to sort by.
+    pub expr: Expr,
+    /// Whether the ordering is ascending (default true).
+    pub asc: bool,
+}
+
 /// Represents information about a data source (table)
 #[derive(Debug, Clone)]
 pub struct SourceInfo {
@@ -21,6 +30,8 @@ pub struct SelectStmt {
     pub where_condition: Option<Expr>,
     /// Optional HAVING clause expression
     pub having: Option<Expr>,
+    /// ORDER BY items, if any
+    pub order_by: Vec<OrderByItem>,
     /// GROUP BY expressions, if any
     pub group_by_exprs: Vec<Expr>,
     /// Optional stream window declared in GROUP BY
@@ -51,6 +62,7 @@ impl SelectStmt {
             select_fields: Vec::new(),
             where_condition: None,
             having: None,
+            order_by: Vec::new(),
             group_by_exprs: Vec::new(),
             window: None,
             aggregate_mappings: HashMap::new(),
@@ -65,6 +77,7 @@ impl SelectStmt {
             select_fields,
             where_condition: None,
             having: None,
+            order_by: Vec::new(),
             group_by_exprs: Vec::new(),
             window: None,
             aggregate_mappings: HashMap::new(),
@@ -83,6 +96,7 @@ impl SelectStmt {
             select_fields,
             where_condition,
             having,
+            order_by: Vec::new(),
             group_by_exprs: Vec::new(),
             window: None,
             aggregate_mappings: HashMap::new(),
