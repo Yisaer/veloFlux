@@ -159,14 +159,33 @@ The `sampler` property enables stream-level downsampling. All pipelines consumin
 - `interval: string` (required) – Duration between emissions (e.g., `"1s"`, `"100ms"`, `"5m"`)
 - `strategy: object` (required) – Sampling strategy:
   - `{ "type": "latest" }` – Emits the most recent value received during each interval
+  - `{ "type": "packer", "merger": { "type": "<merger_type>", "props": {...} } }` – Accumulates and merges payloads using a registered Merger
 
-Example:
+**Latest Strategy Example:**
 ```json
 "sampler": {
   "interval": "10s",
   "strategy": { "type": "latest" }
 }
 ```
+
+**Packer Strategy Example:**
+```json
+"sampler": {
+  "interval": "1s",
+  "strategy": {
+    "type": "packer",
+    "props": {
+      "merger": {
+        "type": "can_merger",
+        "props": { "schema": "/etc/can.dbc" }
+      }
+    }
+  }
+}
+```
+
+> **Note**: The `packer` strategy requires a Merger registered in the runtime. `can_merger` is a placeholder example; check your specific VeloFlux distribution for available mergers.
 
 ### Schema JSON format (`schema.type == "json"`)
 

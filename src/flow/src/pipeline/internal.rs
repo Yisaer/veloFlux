@@ -518,15 +518,7 @@ fn build_pipeline_runtime_with_logical_ir(
 
     let mut pipeline = create_processor_pipeline(
         optimized_plan,
-        ProcessorPipelineDependencies::new(
-            mqtt_client_manager.clone(),
-            registries.connector_registry(),
-            registries.encoder_registry(),
-            registries.decoder_registry(),
-            registries.aggregate_registry(),
-            registries.stateful_registry(),
-            eventtime,
-        ),
+        ProcessorPipelineDependencies::new(mqtt_client_manager.clone(), registries, eventtime),
     )
     .map_err(|err| err.to_string())?;
     pipeline.set_pipeline_id(definition.id().to_string());
@@ -640,15 +632,7 @@ fn build_pipeline_runtime_from_logical_ir(
 
     let mut pipeline = create_processor_pipeline(
         optimized_plan,
-        ProcessorPipelineDependencies::new(
-            mqtt_client_manager.clone(),
-            registries.connector_registry(),
-            registries.encoder_registry(),
-            registries.decoder_registry(),
-            registries.aggregate_registry(),
-            registries.stateful_registry(),
-            eventtime,
-        ),
+        ProcessorPipelineDependencies::new(mqtt_client_manager.clone(), registries, eventtime),
     )
     .map_err(|err| err.to_string())?;
 

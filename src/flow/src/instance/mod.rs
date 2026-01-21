@@ -1,6 +1,6 @@
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::catalog::{Catalog, CatalogError, StreamDefinition};
-use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry};
+use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry, MergerRegistry};
 use crate::connector::{
     ConnectorError, ConnectorRegistry, MqttClientManager, SharedMqttClientConfig,
 };
@@ -36,6 +36,7 @@ pub struct FlowInstance {
     stateful_registry: Arc<StatefulFunctionRegistry>,
     custom_func_registry: Arc<CustomFuncRegistry>,
     eventtime_type_registry: Arc<EventtimeTypeRegistry>,
+    merger_registry: Arc<MergerRegistry>,
 }
 
 impl FlowInstance {
@@ -50,7 +51,9 @@ impl FlowInstance {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let custom_func_registry = CustomFuncRegistry::with_builtins();
+
         let eventtime_type_registry = EventtimeTypeRegistry::with_builtin_types();
+        let merger_registry = Arc::new(MergerRegistry::new());
         let registries = PipelineRegistries::new(
             Arc::clone(&connector_registry),
             Arc::clone(&encoder_registry),
@@ -59,6 +62,7 @@ impl FlowInstance {
             Arc::clone(&stateful_registry),
             Arc::clone(&custom_func_registry),
             Arc::clone(&eventtime_type_registry),
+            Arc::clone(&merger_registry),
         );
         let pipeline_manager = Arc::new(PipelineManager::new(
             Arc::clone(&catalog),
@@ -79,7 +83,12 @@ impl FlowInstance {
             stateful_registry,
             custom_func_registry,
             eventtime_type_registry,
+            merger_registry,
         }
+    }
+
+    pub fn merger_registry(&self) -> Arc<MergerRegistry> {
+        Arc::clone(&self.merger_registry)
     }
 }
 

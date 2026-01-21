@@ -67,6 +67,7 @@ impl FlowInstance {
             Arc::clone(&self.stateful_registry),
             Arc::clone(&self.custom_func_registry),
             Arc::clone(&self.eventtime_type_registry),
+            Arc::clone(&self.merger_registry),
         )
     }
 }

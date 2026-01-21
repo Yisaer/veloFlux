@@ -1045,6 +1045,7 @@ fn build_physical_node_with_prefix(
 fn sampling_strategy_name(strategy: &crate::processor::SamplingStrategy) -> &'static str {
     match strategy {
         crate::processor::SamplingStrategy::Latest => "latest",
+        crate::processor::SamplingStrategy::Packer { .. } => "packer",
     }
 }
 

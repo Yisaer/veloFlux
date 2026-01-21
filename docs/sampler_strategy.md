@@ -68,20 +68,46 @@ The `latest` strategy is a lossy downsampling method ideal for telemetry where i
 
 **Result**: For a 200Hz input and 1s interval, the pipeline processes 1 message per second (the 200th, 400th, etc.), discarding 199 messages *without decoding them*.
 
-## Future Strategies
+### Packer Strategy
 
-### Packer Strategy (GBF Merger)
+The `packer` strategy accumulates multiple raw payloads and merges them using a registered **Merger** (e.g., `CanMerger` for CAN data). On each interval tick, the merged result is emitted as a single payload.
 
-The `packer` strategy is planned for a future phase to support high-density data scenarios. It accumulates multiple raw payloads and merges them into a single "super-payload" (e.g., using CAN ID merging rules).
+**Use Case**: High-density CAN bus data where multiple signals (distinct CAN IDs) arrive rapidly. The Packer merges them into one consolidated frame, reducing downstream processing while preserving all distinct signals.
 
-- **Benefit**: Reduces message rate while preserving data from distinct signals (e.g., distinct CAN IDs) by merging them into one packed frame.
-- **Requirement**: The stream decoder must support unpacking or handling the merged format.
+**Configuration Example**:
+```json
+{
+  "sampler": {
+    "interval": "1s",
+    "strategy": {
+      "type": "packer",
+      "merger": {
+        "type": "can_merger",
+        "props": { "schema": "/path/to/schema.dbc" }
+      }
+    }
+  }
+}
+```
+
+**Algorithm:**
+1.  Accept incoming `StreamData::Bytes`.
+2.  Pass bytes to the registered `Merger::merge()` method.
+3.  At the end of the interval, call `Merger::trigger()` to emit the merged payload.
+4.  The merged bytes are passed to the downstream Decoder.
+
+**Requirements:**
+- The `merger.type` must be registered in the `MergerRegistry` provided by the binary.
+- *Note*: `can_merger` in the example above is hypothetical. Users must ensure the specified merger type is available in their VeloFlux distribution.
+- The stream decoder must be compatible with the merged output format.
 
 ## Implementation checklist
 
-- Extend `StreamDefinition` with `sampler.interval` and `sampler.strategy`.
-- Implement `PhysicalSampler` node in physical planner.
-- Ensure `PhysicalSampler` wraps `PhysicalSource` and is wrapped by `PhysicalDecoder` (bytes-first).
-- Implement `SamplerProcessor` with `latest` strategy logic.
-- Verify shutdown handling (emit buffered value).
-- Verify with integration tests (stats: 5-in/1-out).
+- [x] Extend `StreamDefinition` with `sampler.interval` and `sampler.strategy`.
+- [x] Implement `PhysicalSampler` node in physical planner.
+- [x] Ensure `PhysicalSampler` wraps `PhysicalSource` and is wrapped by `PhysicalDecoder` (bytes-first).
+- [x] Implement `SamplerProcessor` with `latest` strategy logic.
+- [x] Implement `SamplerProcessor` with `packer` strategy logic.
+- [x] Verify shutdown handling (emit buffered value).
+- [x] Verify with integration tests (stats: 5-in/1-out for latest, merger tests for packer).
+

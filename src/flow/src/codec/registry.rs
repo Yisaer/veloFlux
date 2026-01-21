@@ -189,3 +189,52 @@ impl EncoderRegistry {
         );
     }
 }
+
+use super::Merger;
+use serde_json::{Map, Value};
+
+type MergerFactory =
+    Arc<dyn Fn(&Map<String, Value>) -> Result<Box<dyn Merger>, CodecError> + Send + Sync>;
+
+/// Registry mapping merger identifiers to factories.
+pub struct MergerRegistry {
+    factories: RwLock<HashMap<String, MergerFactory>>,
+}
+
+impl MergerRegistry {
+    pub fn new() -> Self {
+        Self {
+            factories: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn register<F>(&self, name: impl Into<String>, factory: F)
+    where
+        F: Fn(&Map<String, Value>) -> Result<Box<dyn Merger>, CodecError> + Send + Sync + 'static,
+    {
+        let mut map = self.factories.write().expect("lock poisoned");
+        map.insert(name.into(), Arc::new(factory));
+    }
+
+    pub fn instantiate(
+        &self,
+        name: &str,
+        props: &Map<String, Value>,
+    ) -> Result<Box<dyn Merger>, CodecError> {
+        let map = self.factories.read().expect("lock poisoned");
+        if let Some(factory) = map.get(name) {
+            factory(props)
+        } else {
+            Err(CodecError::Other(format!(
+                "merger '{}' not registered",
+                name
+            )))
+        }
+    }
+}
+
+impl Default for MergerRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}

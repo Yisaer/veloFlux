@@ -4,7 +4,7 @@
 //! connecting ControlSourceProcessor outputs to leaf nodes (nodes without children).
 
 use crate::aggregation::AggregateFunctionRegistry;
-use crate::codec::{DecoderRegistry, EncoderRegistry, RecordDecoder};
+use crate::codec::{DecoderRegistry, EncoderRegistry, MergerRegistry, RecordDecoder};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
@@ -21,6 +21,7 @@ use crate::processor::{
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::stateful::StatefulFunctionRegistry;
+use crate::PipelineRegistries;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
@@ -92,27 +93,26 @@ pub struct ProcessorPipelineDependencies {
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     stateful_registry: Arc<StatefulFunctionRegistry>,
+
     eventtime: Option<EventtimePipelineContext>,
+    merger_registry: Arc<MergerRegistry>,
 }
 
 impl ProcessorPipelineDependencies {
     pub fn new(
         mqtt_clients: MqttClientManager,
-        connector_registry: Arc<ConnectorRegistry>,
-        encoder_registry: Arc<EncoderRegistry>,
-        decoder_registry: Arc<DecoderRegistry>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-        stateful_registry: Arc<StatefulFunctionRegistry>,
+        registries: &PipelineRegistries,
         eventtime: Option<EventtimePipelineContext>,
     ) -> Self {
         Self {
             mqtt_clients,
-            connector_registry,
-            encoder_registry,
-            decoder_registry,
-            aggregate_registry,
-            stateful_registry,
+            connector_registry: registries.connector_registry(),
+            encoder_registry: registries.encoder_registry(),
+            decoder_registry: registries.decoder_registry(),
+            aggregate_registry: registries.aggregate_registry(),
+            stateful_registry: registries.stateful_registry(),
             eventtime,
+            merger_registry: registries.merger_registry(),
         }
     }
 }
@@ -126,6 +126,7 @@ struct ProcessorBuilderContext {
     aggregate_registry: Option<Arc<AggregateFunctionRegistry>>,
     stateful_registry: Option<Arc<StatefulFunctionRegistry>>,
     eventtime: Option<EventtimePipelineContext>,
+    merger_registry: Option<Arc<MergerRegistry>>,
     shared_stream: Option<SharedStreamPipelineOptions>,
 }
 
@@ -182,6 +183,15 @@ impl ProcessorBuilderContext {
                 ProcessorError::InvalidConfiguration(
                     "stateful function registry unavailable".into(),
                 )
+            })
+    }
+
+    fn merger_registry(&self) -> Result<Arc<MergerRegistry>, ProcessorError> {
+        self.merger_registry
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration("merger registry unavailable".into())
             })
     }
 
@@ -995,13 +1005,19 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::Sampler(sampler) => {
-            let processor = SamplerProcessor::new(
+            let mut processor = SamplerProcessor::new(
                 plan_name.clone(),
                 crate::processor::SamplerConfig {
                     interval: sampler.interval,
                     strategy: sampler.strategy.clone(),
                 },
             );
+            if let crate::processor::SamplingStrategy::Packer { .. } = &sampler.strategy {
+                let registry = context.merger_registry()?;
+                processor.set_merger_registry(registry);
+            } else if let Ok(registry) = context.merger_registry() {
+                processor.set_merger_registry(registry);
+            }
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Sampler(processor),
             ))
@@ -1345,6 +1361,7 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
             aggregate_registry: None,
             stateful_registry: None,
             eventtime: None,
+            merger_registry: None,
             shared_stream: Some(options),
         },
     )
@@ -1364,6 +1381,7 @@ pub fn create_processor_pipeline(
             aggregate_registry: Some(dependencies.aggregate_registry),
             stateful_registry: Some(dependencies.stateful_registry),
             eventtime: dependencies.eventtime,
+            merger_registry: Some(dependencies.merger_registry),
             shared_stream: None,
         },
     )
@@ -1433,6 +1451,7 @@ mod tests {
             aggregate_registry: Some(aggregate_registry),
             stateful_registry: Some(stateful_registry),
             eventtime: None,
+            merger_registry: None,
             shared_stream: None,
         };
         let result = create_processor_from_plan_node(&physical_project, &context)

@@ -14,11 +14,19 @@ use crate::processor::base::{
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::{interval, MissedTickBehavior};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+use crate::codec::{Merger, MergerRegistry};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackerProps {
+    pub merger: MergerConfig,
+}
 
 /// Sampling strategy for the SamplerProcessor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -27,7 +35,22 @@ pub enum SamplingStrategy {
     /// Keep only the latest value, discard intermediate values (lossy).
     #[default]
     Latest,
-    // Future: Merge { merger: String } - merge using custom logic
+    /// Accumulate values and pack using a Merger.
+    Packer {
+        /// Packer properties.
+        props: PackerProps,
+    },
+}
+
+/// Configuration for a merger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergerConfig {
+    /// Type of merger (e.g., "gbf").
+    #[serde(rename = "type")]
+    pub merger_type: String,
+    /// Merger-specific properties.
+    #[serde(default)]
+    pub props: JsonMap<String, JsonValue>,
 }
 
 /// Configuration for the SamplerProcessor.
@@ -59,6 +82,7 @@ impl SamplerConfig {
 ///
 /// Currently supports:
 /// - Latest: Emits the most recent value at fixed intervals
+/// - Packer: Accumulates values and emits packed binary
 pub struct SamplerProcessor {
     id: String,
     inputs: Vec<broadcast::Receiver<StreamData>>,
@@ -67,6 +91,7 @@ pub struct SamplerProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     config: SamplerConfig,
     stats: Arc<ProcessorStats>,
+    merger_registry: Option<Arc<MergerRegistry>>,
 }
 
 impl SamplerProcessor {
@@ -81,6 +106,7 @@ impl SamplerProcessor {
             control_output,
             config,
             stats: Arc::new(ProcessorStats::default()),
+            merger_registry: None,
         }
     }
 
@@ -91,6 +117,10 @@ impl SamplerProcessor {
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         self.stats = stats;
+    }
+
+    pub fn set_merger_registry(&mut self, registry: Arc<MergerRegistry>) {
+        self.merger_registry = Some(registry);
     }
 }
 
@@ -118,11 +148,13 @@ impl Processor for SamplerProcessor {
             "sampler processor starting"
         );
 
+        let merger_registry = self.merger_registry.clone();
+
         tokio::spawn(async move {
             let mut ticker = interval(emit_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-            let mut strategy_state = StrategyState::new(strategy);
+            let mut strategy_state = StrategyState::new(strategy, merger_registry);
             let mut control_active = control_active;
 
             loop {
@@ -174,7 +206,10 @@ impl Processor for SamplerProcessor {
                                 }
 
                                 // Sample data based on selected strategy (lossy).
-                                strategy_state.on_sampled_data(data);
+                                if let Err(e) = strategy_state.on_sampled_data(data) {
+                                    tracing::error!(processor_id = %processor_id, error = ?e, "strategy sampling error");
+                                    return Err(e);
+                                }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
                                 log_broadcast_lagged(&processor_id, n, "data");
@@ -212,31 +247,59 @@ impl Processor for SamplerProcessor {
 
 enum StrategyState {
     Latest { latest: Option<StreamData> },
+    Packer { merger: Box<dyn Merger> },
 }
 
 impl StrategyState {
-    fn new(strategy: SamplingStrategy) -> Self {
+    fn new(strategy: SamplingStrategy, registry: Option<Arc<MergerRegistry>>) -> Self {
         match strategy {
             SamplingStrategy::Latest => StrategyState::Latest { latest: None },
+            SamplingStrategy::Packer { props } => {
+                let registry = registry.expect("Packer strategy requires MergerRegistry");
+                let merger_instance = registry
+                    .instantiate(&props.merger.merger_type, &props.merger.props)
+                    .expect("Failed to instantiate merger");
+                StrategyState::Packer {
+                    merger: merger_instance,
+                }
+            }
         }
     }
 
-    fn on_sampled_data(&mut self, data: StreamData) {
+    fn on_sampled_data(&mut self, data: StreamData) -> Result<(), ProcessorError> {
         match self {
-            StrategyState::Latest { latest } => *latest = Some(data),
+            StrategyState::Latest { latest } => {
+                *latest = Some(data);
+                Ok(())
+            }
+            StrategyState::Packer { merger } => match data {
+                StreamData::Bytes(bytes) => merger
+                    .merge(&bytes)
+                    .map_err(|e| ProcessorError::ProcessingError(e.to_string())),
+                _ => {
+                    tracing::warn!("Packer received non-bytes data: variant mismatch");
+                    Ok(())
+                }
+            },
         }
     }
 
     fn on_tick(&mut self) -> Option<StreamData> {
         match self {
             StrategyState::Latest { latest } => latest.take(),
+            StrategyState::Packer { merger } => match merger.trigger() {
+                Ok(Some(bytes)) if !bytes.is_empty() => Some(StreamData::bytes(bytes)),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::error!(error = ?e, "merger trigger error");
+                    None
+                }
+            },
         }
     }
 
     fn flush(&mut self) -> Option<StreamData> {
-        match self {
-            StrategyState::Latest { latest } => latest.take(),
-        }
+        self.on_tick()
     }
 }
 
@@ -310,6 +373,33 @@ mod tests {
             assert_eq!(*value.as_ref(), Value::Int64(3));
         } else {
             panic!("Expected Collection data");
+        }
+    }
+
+    #[test]
+    fn test_sampler_config_deserialization_packer() {
+        let json = serde_json::json!({
+            "interval": "1s",
+            "strategy": {
+                "type": "packer",
+                "props": {
+                    "merger": {
+                        "type": "can_merger",
+                        "props": {
+                            "schema": "/etc/can.dbc"
+                        }
+                    }
+                }
+            }
+        });
+
+        let config: SamplerConfig = serde_json::from_value(json).expect("deserialize config");
+        match config.strategy {
+            SamplingStrategy::Packer { props } => {
+                assert_eq!(props.merger.merger_type, "can_merger");
+                assert_eq!(props.merger.props["schema"], "/etc/can.dbc");
+            }
+            _ => panic!("Expected Packer strategy"),
         }
     }
 }

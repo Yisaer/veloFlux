@@ -20,7 +20,7 @@ pub use catalog::{
 };
 pub use codec::{
     CodecError, CollectionEncoder, CollectionEncoderStream, DecoderRegistry, EncodeError,
-    EncoderRegistry, JsonDecoder, JsonEncoder, RecordDecoder,
+    EncoderRegistry, JsonDecoder, JsonEncoder, Merger, MergerRegistry, RecordDecoder,
 };
 pub use datatypes::{
     BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type, Int32Type,
@@ -86,9 +86,11 @@ pub struct PipelineRegistries {
     stateful_registry: Arc<StatefulFunctionRegistry>,
     custom_func_registry: Arc<CustomFuncRegistry>,
     eventtime_type_registry: Arc<EventtimeTypeRegistry>,
+    merger_registry: Arc<MergerRegistry>,
 }
 
 impl PipelineRegistries {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         connector_registry: Arc<ConnectorRegistry>,
         encoder_registry: Arc<EncoderRegistry>,
@@ -97,6 +99,7 @@ impl PipelineRegistries {
         stateful_registry: Arc<StatefulFunctionRegistry>,
         custom_func_registry: Arc<CustomFuncRegistry>,
         eventtime_type_registry: Arc<EventtimeTypeRegistry>,
+        merger_registry: Arc<MergerRegistry>,
     ) -> Self {
         Self {
             connector_registry,
@@ -106,6 +109,7 @@ impl PipelineRegistries {
             stateful_registry,
             custom_func_registry,
             eventtime_type_registry,
+            merger_registry,
         }
     }
 
@@ -118,6 +122,7 @@ impl PipelineRegistries {
             StatefulFunctionRegistry::with_builtins(),
             CustomFuncRegistry::with_builtins(),
             EventtimeTypeRegistry::with_builtin_types(),
+            Arc::new(MergerRegistry::new()),
         )
     }
 
@@ -139,6 +144,10 @@ impl PipelineRegistries {
 
     pub fn stateful_registry(&self) -> Arc<StatefulFunctionRegistry> {
         Arc::clone(&self.stateful_registry)
+    }
+
+    pub fn merger_registry(&self) -> Arc<MergerRegistry> {
+        Arc::clone(&self.merger_registry)
     }
 
     pub fn custom_func_registry(&self) -> Arc<CustomFuncRegistry> {
@@ -271,15 +280,7 @@ pub fn create_pipeline(
         build_physical_plan_from_sql(sql, sinks, catalog, shared_stream_registry, registries)?;
     let pipeline = create_processor_pipeline(
         physical_plan,
-        ProcessorPipelineDependencies::new(
-            mqtt_client_manager,
-            registries.connector_registry(),
-            registries.encoder_registry(),
-            registries.decoder_registry(),
-            registries.aggregate_registry(),
-            registries.stateful_registry(),
-            None,
-        ),
+        ProcessorPipelineDependencies::new(mqtt_client_manager, registries, None),
     )?;
     Ok(pipeline)
 }
