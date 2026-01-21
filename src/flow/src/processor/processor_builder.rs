@@ -779,6 +779,9 @@ fn create_processor_from_plan_node(
                 PlanProcessor::Compute(processor),
             ))
         }
+        PhysicalPlan::Order(_order) => Err(ProcessorError::InvalidConfiguration(
+            "ORDER BY is planned but OrderProcessor is not implemented yet".to_string(),
+        )),
         PhysicalPlan::Project(project) => {
             let processor = ProjectProcessor::new(processor_id.clone(), Arc::new(project.clone()));
             Ok(ProcessorBuildOutput::with_processor(

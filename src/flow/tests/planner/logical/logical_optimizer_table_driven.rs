@@ -276,6 +276,21 @@ fn create_logical_plan_table_driven() {
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}"##,
         },
         Case {
+            name: "test_create_logical_plan_with_order_by_single_key",
+            sql: "SELECT a FROM users ORDER BY b",
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Order_1","info":["keys=[b ASC]"],"operator":"Order"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "test_create_logical_plan_with_filter_then_order_by_multi_key",
+            sql: "SELECT a FROM users WHERE a > 10 ORDER BY b DESC, c",
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Order_2","info":["keys=[b DESC; c ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "test_create_logical_plan_with_order_by_stateful_key",
+            sql: "SELECT a FROM users ORDER BY lag(a)",
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Order_2","info":["keys=[col_1 ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}"##,
+        },
+        Case {
             name: "test_create_logical_plan_with_filter",
             sql: "SELECT a, b FROM users WHERE a > 10",
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a; b]"],"operator":"Project"}"##,

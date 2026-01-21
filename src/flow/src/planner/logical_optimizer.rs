@@ -323,6 +323,17 @@ fn apply_cse_with_cache(
             new.base.children = new_children;
             Arc::new(LogicalPlan::Compute(new))
         }
+        LogicalPlan::Order(order) => {
+            let new_children = order
+                .base
+                .children
+                .iter()
+                .map(|c| apply_cse_with_cache(c.clone(), ctx, cache))
+                .collect::<Vec<_>>();
+            let mut new = order.clone();
+            new.base.children = new_children;
+            Arc::new(LogicalPlan::Order(new))
+        }
         LogicalPlan::Project(project) => {
             // Project is the anchor: attempt to CSE within this project and (optionally) its
             // adjacent filter.
@@ -1167,6 +1178,11 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                     self.collect_expr_ast(&field.expr);
                 }
             }
+            LogicalPlan::Order(order) => {
+                for item in &order.items {
+                    self.collect_expr_ast(&item.expr);
+                }
+            }
             LogicalPlan::Project(project) => {
                 for field in &project.fields {
                     self.collect_expr_ast(&field.expr);
@@ -1542,6 +1558,11 @@ impl<'a> StructFieldUsageCollector<'a> {
                     self.collect_expr_ast(&field.expr);
                 }
             }
+            LogicalPlan::Order(order) => {
+                for item in &order.items {
+                    self.collect_expr_ast(&item.expr);
+                }
+            }
             LogicalPlan::Project(project) => {
                 for field in &project.fields {
                     self.collect_expr_ast(&field.expr);
@@ -1809,6 +1830,11 @@ impl<'a> ListElementUsageCollector<'a> {
             LogicalPlan::Compute(compute) => {
                 for field in &compute.fields {
                     self.collect_expr_ast(&field.expr);
+                }
+            }
+            LogicalPlan::Order(order) => {
+                for item in &order.items {
+                    self.collect_expr_ast(&item.expr);
                 }
             }
             LogicalPlan::Project(project) => {
@@ -2312,6 +2338,11 @@ fn clone_with_children(plan: &LogicalPlan, children: Vec<Arc<LogicalPlan>>) -> A
             let mut new = compute.clone();
             new.base.children = children;
             Arc::new(LogicalPlan::Compute(new))
+        }
+        LogicalPlan::Order(order) => {
+            let mut new = order.clone();
+            new.base.children = children;
+            Arc::new(LogicalPlan::Order(new))
         }
         LogicalPlan::Project(project) => {
             let mut new = project.clone();

@@ -12,6 +12,7 @@ pub mod physical_decoder;
 pub mod physical_encoder;
 pub mod physical_eventtime_watermark;
 pub mod physical_filter;
+pub mod physical_order;
 pub mod physical_process_time_watermark;
 pub mod physical_project;
 pub mod physical_result_collect;
@@ -36,6 +37,7 @@ pub use physical_decoder::PhysicalDecoderEventtimeSpec;
 pub use physical_encoder::PhysicalEncoder;
 pub use physical_eventtime_watermark::PhysicalEventtimeWatermark;
 pub use physical_filter::PhysicalFilter;
+pub use physical_order::{PhysicalOrder, PhysicalOrderKey};
 pub use physical_process_time_watermark::PhysicalProcessTimeWatermark;
 pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_result_collect::PhysicalResultCollect;
@@ -58,6 +60,7 @@ pub enum PhysicalPlan {
     StatefulFunction(PhysicalStatefulFunction),
     Filter(PhysicalFilter),
     Compute(PhysicalCompute),
+    Order(PhysicalOrder),
     Project(PhysicalProject),
     Aggregation(PhysicalAggregation),
     SharedStream(PhysicalSharedStream),
@@ -91,6 +94,7 @@ impl PhysicalPlan {
             PhysicalPlan::StatefulFunction(plan) => plan.base.children(),
             PhysicalPlan::Filter(plan) => plan.base.children(),
             PhysicalPlan::Compute(plan) => plan.base.children(),
+            PhysicalPlan::Order(plan) => plan.base.children(),
             PhysicalPlan::Project(plan) => plan.base.children(),
             PhysicalPlan::Aggregation(plan) => plan.base.children(),
             PhysicalPlan::SharedStream(plan) => plan.base.children(),
@@ -120,6 +124,7 @@ impl PhysicalPlan {
             PhysicalPlan::StatefulFunction(_) => "PhysicalStatefulFunction",
             PhysicalPlan::Filter(_) => "PhysicalFilter",
             PhysicalPlan::Compute(_) => "PhysicalCompute",
+            PhysicalPlan::Order(_) => "PhysicalOrder",
             PhysicalPlan::Project(_) => "PhysicalProject",
             PhysicalPlan::Aggregation(_) => "PhysicalAggregation",
             PhysicalPlan::SharedStream(_) => "PhysicalSharedStream",
@@ -149,6 +154,7 @@ impl PhysicalPlan {
             PhysicalPlan::StatefulFunction(plan) => plan.base.index(),
             PhysicalPlan::Filter(plan) => plan.base.index(),
             PhysicalPlan::Compute(plan) => plan.base.index(),
+            PhysicalPlan::Order(plan) => plan.base.index(),
             PhysicalPlan::Project(plan) => plan.base.index(),
             PhysicalPlan::Aggregation(plan) => plan.base.index(),
             PhysicalPlan::SharedStream(plan) => plan.base.index(),
@@ -197,6 +203,7 @@ impl PhysicalPlan {
             PhysicalPlan::StatefulFunction(plan) => &mut plan.base.children,
             PhysicalPlan::Filter(plan) => &mut plan.base.children,
             PhysicalPlan::Compute(plan) => &mut plan.base.children,
+            PhysicalPlan::Order(plan) => &mut plan.base.children,
             PhysicalPlan::Project(plan) => &mut plan.base.children,
             PhysicalPlan::Aggregation(plan) => &mut plan.base.children,
             PhysicalPlan::SharedStream(plan) => &mut plan.base.children,

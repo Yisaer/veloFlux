@@ -10,6 +10,7 @@ pub mod aggregation;
 pub mod compute;
 pub mod datasource;
 pub mod filter;
+pub mod order;
 pub mod project;
 pub mod sink;
 pub mod stateful_function;
@@ -21,6 +22,7 @@ pub use aggregation::Aggregation;
 pub use compute::Compute;
 pub use datasource::DataSource;
 pub use filter::Filter;
+pub use order::{Order, OrderItem};
 pub use project::Project;
 pub use sink::DataSinkPlan;
 pub use stateful_function::StatefulFunctionPlan;
@@ -54,6 +56,7 @@ pub enum LogicalPlan {
     Filter(Filter),
     Aggregation(Aggregation),
     Compute(Compute),
+    Order(Order),
     Project(Project),
     DataSink(DataSinkPlan),
     Tail(TailPlan),
@@ -68,6 +71,7 @@ impl LogicalPlan {
             LogicalPlan::Filter(plan) => plan.base.children(),
             LogicalPlan::Aggregation(plan) => plan.base.children(),
             LogicalPlan::Compute(plan) => plan.base.children(),
+            LogicalPlan::Order(plan) => plan.base.children(),
             LogicalPlan::Project(plan) => plan.base.children(),
             LogicalPlan::DataSink(plan) => plan.base.children(),
             LogicalPlan::Tail(plan) => plan.base.children(),
@@ -82,6 +86,7 @@ impl LogicalPlan {
             LogicalPlan::Filter(_) => "Filter",
             LogicalPlan::Aggregation(_) => "Aggregation",
             LogicalPlan::Compute(_) => "Compute",
+            LogicalPlan::Order(_) => "Order",
             LogicalPlan::Project(_) => "Project",
             LogicalPlan::DataSink(_) => "DataSink",
             LogicalPlan::Tail(_) => "Tail",
@@ -96,6 +101,7 @@ impl LogicalPlan {
             LogicalPlan::Filter(plan) => plan.base.index(),
             LogicalPlan::Aggregation(plan) => plan.base.index(),
             LogicalPlan::Compute(plan) => plan.base.index(),
+            LogicalPlan::Order(plan) => plan.base.index(),
             LogicalPlan::Project(plan) => plan.base.index(),
             LogicalPlan::DataSink(plan) => plan.base.index(),
             LogicalPlan::Tail(plan) => plan.base.index(),
@@ -133,6 +139,7 @@ impl LogicalPlan {
 /// - Aggregation (from SelectStmt::aggregate_mappings, if present) - takes Window or DataSources as children
 /// - Filter (from SelectStmt::having, if present) - takes Aggregation as children
 /// - Filter (from SelectStmt::where_condition, if present) - takes HAVING/Aggregation/Window/DataSources as children
+/// - Order (from SelectStmt::order_by, if present) - takes Filter/HAVING/Aggregation/Window/DataSources as children
 /// - Project (from SelectStmt::select_fields) - takes Filter, Aggregation, Window, or DataSources as children
 ///
 /// # Arguments
@@ -154,6 +161,7 @@ pub fn create_logical_plan(
     validate_select_alias_names(&select_stmt, stream_defs)?;
     resolve_select_aliases(&mut select_stmt)?;
     validate_aggregation_projection(&select_stmt)?;
+    validate_order_by_constraints(&select_stmt)?;
     validate_expression_types(&select_stmt, stream_defs)?;
 
     let start_index = 0i64;
@@ -234,7 +242,22 @@ pub fn create_logical_plan(
         current_index += 1;
     }
 
-    // 7. Create Project from select_fields
+    // 7. Create Order from order_by (if present)
+    if !select_stmt.order_by.is_empty() {
+        let items = select_stmt
+            .order_by
+            .iter()
+            .map(|item| OrderItem {
+                expr: item.expr.clone(),
+                asc: item.asc,
+            })
+            .collect();
+        let order = Order::new(items, current_plans, current_index);
+        current_plans = vec![Arc::new(LogicalPlan::Order(order))];
+        current_index += 1;
+    }
+
+    // 8. Create Project from select_fields
     let mut project_fields = Vec::new();
     for select_field in select_stmt.select_fields.iter() {
         let field_name = select_field
@@ -351,6 +374,9 @@ fn validate_expression_types(
     for expr in &select_stmt.group_by_exprs {
         validate_expr_against_sources(expr, &sources)?;
     }
+    for item in &select_stmt.order_by {
+        validate_expr_against_sources(&item.expr, &sources)?;
+    }
 
     Ok(())
 }
@@ -444,6 +470,12 @@ fn resolve_select_aliases(select_stmt: &mut SelectStmt) -> Result<(), String> {
                 }
             }
             Window::Tumbling { .. } | Window::Count { .. } | Window::Sliding { .. } => {}
+        }
+    }
+
+    for item in &select_stmt.order_by {
+        if expr_references_any_alias(&item.expr, &all_aliases) {
+            return Err("aliases in ORDER BY are not supported yet".to_string());
         }
     }
 
@@ -1132,6 +1164,133 @@ fn validate_aggregation_projection(select_stmt: &SelectStmt) -> Result<(), Strin
     }
 
     Ok(())
+}
+
+fn validate_order_by_constraints(select_stmt: &SelectStmt) -> Result<(), String> {
+    if select_stmt.order_by.is_empty() {
+        return Ok(());
+    }
+
+    // For non-aggregation queries, ORDER BY can reference any scalar expressions.
+    // Unsupported expressions will be rejected later during physical compilation.
+    if select_stmt.aggregate_mappings.is_empty() {
+        return Ok(());
+    }
+
+    let group_by_exprs: std::collections::HashSet<String> = select_stmt
+        .group_by_exprs
+        .iter()
+        .map(|expr| expr.to_string())
+        .collect();
+
+    for item in &select_stmt.order_by {
+        if group_by_exprs.contains(&item.expr.to_string()) {
+            continue;
+        }
+
+        if !expr_contains_aggregate_placeholder(&item.expr) {
+            return Err(format!(
+                "ORDER BY expression '{}' must be an aggregate or appear in GROUP BY",
+                item.expr
+            ));
+        }
+
+        let referenced_columns = collect_non_placeholder_column_refs(&item.expr);
+        for column in referenced_columns {
+            if !group_by_exprs.contains(&column) {
+                return Err(format!(
+                    "ORDER BY expression '{}' references column '{}' which must appear in GROUP BY",
+                    item.expr, column
+                ));
+            }
+        }
+
+        if expr_references_any_stateful_placeholder(&item.expr, &select_stmt.stateful_mappings) {
+            return Err(
+                "ORDER BY must not reference stateful functions when aggregation is present"
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn expr_references_any_stateful_placeholder(
+    expr: &sqlparser::ast::Expr,
+    stateful_mappings: &std::collections::HashMap<String, sqlparser::ast::Expr>,
+) -> bool {
+    use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr};
+
+    match expr {
+        Expr::Identifier(ident) => stateful_mappings.contains_key(ident.value.as_str()),
+        Expr::CompoundIdentifier(_) => false,
+        Expr::BinaryOp { left, right, .. } => {
+            expr_references_any_stateful_placeholder(left, stateful_mappings)
+                || expr_references_any_stateful_placeholder(right, stateful_mappings)
+        }
+        Expr::UnaryOp { expr, .. } => {
+            expr_references_any_stateful_placeholder(expr, stateful_mappings)
+        }
+        Expr::Nested(expr) => expr_references_any_stateful_placeholder(expr, stateful_mappings),
+        Expr::Cast { expr, .. } => {
+            expr_references_any_stateful_placeholder(expr, stateful_mappings)
+        }
+        Expr::Between {
+            expr, low, high, ..
+        } => {
+            expr_references_any_stateful_placeholder(expr, stateful_mappings)
+                || expr_references_any_stateful_placeholder(low, stateful_mappings)
+                || expr_references_any_stateful_placeholder(high, stateful_mappings)
+        }
+        Expr::InList { expr, list, .. } => {
+            expr_references_any_stateful_placeholder(expr, stateful_mappings)
+                || list
+                    .iter()
+                    .any(|item| expr_references_any_stateful_placeholder(item, stateful_mappings))
+        }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            operand.as_ref().is_some_and(|expr| {
+                expr_references_any_stateful_placeholder(expr, stateful_mappings)
+            }) || conditions
+                .iter()
+                .any(|expr| expr_references_any_stateful_placeholder(expr, stateful_mappings))
+                || results
+                    .iter()
+                    .any(|expr| expr_references_any_stateful_placeholder(expr, stateful_mappings))
+                || else_result.as_ref().is_some_and(|expr| {
+                    expr_references_any_stateful_placeholder(expr, stateful_mappings)
+                })
+        }
+        Expr::Function(func) => func.args.iter().any(|arg| match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
+                expr_references_any_stateful_placeholder(expr, stateful_mappings)
+            }
+            FunctionArg::Named { arg, .. } => {
+                if let FunctionArgExpr::Expr(expr) = arg {
+                    return expr_references_any_stateful_placeholder(expr, stateful_mappings);
+                }
+                false
+            }
+            _ => false,
+        }),
+        Expr::JsonAccess { left, right, .. } => {
+            expr_references_any_stateful_placeholder(left, stateful_mappings)
+                || expr_references_any_stateful_placeholder(right, stateful_mappings)
+        }
+        Expr::MapAccess { column, keys } => {
+            expr_references_any_stateful_placeholder(column, stateful_mappings)
+                || keys
+                    .iter()
+                    .any(|expr| expr_references_any_stateful_placeholder(expr, stateful_mappings))
+        }
+        _ => false,
+    }
 }
 
 fn collect_non_placeholder_column_refs(expr: &sqlparser::ast::Expr) -> Vec<String> {

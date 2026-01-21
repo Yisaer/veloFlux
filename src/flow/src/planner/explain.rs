@@ -244,11 +244,12 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             info.push(format!("predicate={}", filter.predicate));
         }
         LogicalPlan::Aggregation(agg) => {
-            let mappings = agg
+            let mut mappings = agg
                 .aggregate_mappings
                 .iter()
                 .map(|(out, expr)| format!("{} -> {}", expr, out))
                 .collect::<Vec<_>>();
+            mappings.sort();
             info.push(format!("aggregates=[{}]", mappings.join("; ")));
             if !agg.group_by_exprs.is_empty() {
                 let group_exprs = agg
@@ -267,6 +268,14 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 .map(|f| format!("{} = {}", f.field_name, f.expr))
                 .collect::<Vec<_>>();
             info.push(format!("temps=[{}]", temps.join("; ")));
+        }
+        LogicalPlan::Order(order) => {
+            let keys = order
+                .items
+                .iter()
+                .map(|item| format!("{} {}", item.expr, if item.asc { "ASC" } else { "DESC" }))
+                .collect::<Vec<_>>();
+            info.push(format!("keys=[{}]", keys.join("; ")));
         }
         LogicalPlan::Project(project) => {
             // Preserve legacy explain behavior: Project prints the output field list only.
@@ -656,6 +665,20 @@ fn build_physical_node_with_prefix(
                 .collect::<Vec<_>>();
             info.push(format!("temps=[{}]", temps.join("; ")));
         }
+        PhysicalPlan::Order(order) => {
+            let keys = order
+                .keys
+                .iter()
+                .map(|key| {
+                    format!(
+                        "{} {}",
+                        key.original_expr,
+                        if key.asc { "ASC" } else { "DESC" }
+                    )
+                })
+                .collect::<Vec<_>>();
+            info.push(format!("keys=[{}]", keys.join("; ")));
+        }
         PhysicalPlan::Project(project) => {
             // Preserve legacy explain behavior: PhysicalProject prints the output field list only.
             // (Identity projections like `a` remain `fields=[a]`, not `a = a`.)
@@ -1026,11 +1049,12 @@ fn sampling_strategy_name(strategy: &crate::processor::SamplingStrategy) -> &'st
 }
 
 fn format_aggregation_calls(mappings: &std::collections::HashMap<String, Expr>) -> String {
-    mappings
+    let mut out = mappings
         .iter()
         .map(|(out, expr)| format!("{} -> {}", expr, out))
-        .collect::<Vec<_>>()
-        .join("; ")
+        .collect::<Vec<_>>();
+    out.sort();
+    out.join("; ")
 }
 
 #[cfg(test)]
