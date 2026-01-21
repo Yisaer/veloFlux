@@ -387,6 +387,51 @@ async fn pipeline_table_driven_queries() {
             expected_columns: 0,
             column_checks: vec![],
         },
+        TestCase {
+            name: "aggregation_group_by_window_and_expr_order_by",
+            sql: "SELECT sum(a) + 1, b + 1 FROM stream GROUP BY countwindow(4), b + 1 ORDER BY b + 1 ASC",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                    ],
+                ),
+                (
+                    "c".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                    ],
+                ),
+            ],
+            expected_rows: 2,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "sum(a) + 1".to_string(),
+                    expected_values: vec![Value::Int64(3), Value::Int64(3)],
+                },
+                ColumnCheck {
+                    expected_name: "b + 1".to_string(),
+                    expected_values: vec![Value::Int64(2), Value::Int64(3)],
+                },
+            ],
+        },
     ];
 
     for test_case in test_cases {
