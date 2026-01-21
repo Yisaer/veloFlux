@@ -71,6 +71,10 @@ We keep only **applied** projection information in shared stream info:
 
 We intentionally do not expose “desired/target” projection in the public info; the info must reflect the decoder’s real applied state.
 
+Internally, the shared stream also caches a compiled `DecodeProjection` for the currently applied
+`decoding_columns`. This is not part of the public info, but is used to avoid rebuilding projection
+state on the decoder hot path.
+
 ## Consumer Registration and Union Computation
 
 The registry maintains:
@@ -96,6 +100,18 @@ The shared stream ingest loop:
 4. Emits decoded tuples with full-index semantics:
    - for undecoded columns, returns `NULL`
 
+Hot path optimization:
+
+- The shared stream maintains a cached `Arc<DecodeProjection>` corresponding to the applied
+  `decoding_columns`.
+- When `decoding_columns` changes, the shared stream rebuilds the projection once and bumps
+  `DecodeProjection.version`.
+- `DecoderProcessor` reads the cached `Arc<DecodeProjection>` and passes `Some(&DecodeProjection)`
+  into `RecordDecoder::decode_with_projection(...)`, avoiding per-message cloning/rebuilding of
+  projection structures.
+- Decoder implementations that need to cache projection-dependent state can use
+  `DecodeProjection.version()` to detect changes and refresh their caches.
+
 Decoder-specific notes:
 
 - JSON decoder can skip building `Value` for unused keys by extracting only the needed keys.
@@ -103,13 +119,13 @@ Decoder-specific notes:
 
 ## Pipeline Startup “Readiness” Without Explicit Ack
 
-We avoid explicit ack/versioning by using a simple polling loop against the **applied** state:
+We avoid explicit ack by using a simple polling loop against the **applied** state:
 
 1. Pipeline obtains `required_columns` for the shared stream from its logical plan metadata (`shared_required_schema`).
 2. Pipeline registers `required_columns` in the shared stream registry.
 3. Before starting to process incoming tuples, pipeline loops:
    - read shared stream info (`decoding_columns`)
-   - wait until `required_columns ⊆ decoding_columns`
+    - wait until `required_columns ⊆ decoding_columns`
    - `sleep` briefly and retry, with a timeout
 
 This guarantees the decoder applied the projection needed by the pipeline.
