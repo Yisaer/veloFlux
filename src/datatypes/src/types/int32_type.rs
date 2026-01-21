@@ -5,6 +5,13 @@ use crate::value::Value;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Int32Type;
 
+fn try_cast_f64_to_i32(v: f64) -> Option<i32> {
+    if !v.is_finite() || v.fract() != 0.0 || v < i32::MIN as f64 || v > i32::MAX as f64 {
+        return None;
+    }
+    Some(v as i32)
+}
+
 impl DataType for Int32Type {
     fn name(&self) -> String {
         "Int32".to_string()
@@ -16,6 +23,7 @@ impl DataType for Int32Type {
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
+            Value::Null => Some(Value::Null),
             Value::Int8(v) => Some(Value::Int32(v as i32)),
             Value::Int16(v) => Some(Value::Int32(v as i32)),
             Value::Int32(v) => Some(Value::Int32(v)),
@@ -42,15 +50,8 @@ impl DataType for Int32Type {
                     None
                 }
             }
-            Value::Float64(v) => {
-                if v >= i32::MIN as f64 && v <= i32::MAX as f64 && v.fract() == 0.0 {
-                    Some(Value::Int32(v as i32))
-                } else {
-                    None
-                }
-            }
-            Value::Bool(v) => Some(Value::Int32(if v { 1 } else { 0 })),
-            Value::String(s) => s.parse::<i32>().ok().map(Value::Int32),
+            Value::Float32(v) => try_cast_f64_to_i32(v as f64).map(Value::Int32),
+            Value::Float64(v) => try_cast_f64_to_i32(v).map(Value::Int32),
             _ => None,
         }
     }

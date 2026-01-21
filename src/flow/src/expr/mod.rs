@@ -4,6 +4,7 @@ pub mod func;
 pub mod internal_columns;
 pub mod scalar;
 pub mod sql_conversion;
+pub(crate) mod value_compare;
 
 pub use context::EvalContext;
 pub use custom_func::ConcatFunc;

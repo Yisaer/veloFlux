@@ -16,10 +16,17 @@ impl DataType for Float64Type {
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
+            Value::Null => Some(Value::Null),
+            Value::Float32(v) => Some(Value::Float64(v as f64)),
             Value::Float64(v) => Some(Value::Float64(v)),
+            Value::Int8(v) => Some(Value::Float64(v as f64)),
+            Value::Int16(v) => Some(Value::Float64(v as f64)),
+            Value::Int32(v) => Some(Value::Float64(v as f64)),
             Value::Int64(v) => Some(Value::Float64(v as f64)),
-            Value::Bool(v) => Some(Value::Float64(if v { 1.0 } else { 0.0 })),
-            Value::String(s) => s.parse::<f64>().ok().map(Value::Float64),
+            Value::Uint8(v) => Some(Value::Float64(v as f64)),
+            Value::Uint16(v) => Some(Value::Float64(v as f64)),
+            Value::Uint32(v) => Some(Value::Float64(v as f64)),
+            Value::Uint64(v) => Some(Value::Float64(v as f64)),
             _ => None,
         }
     }

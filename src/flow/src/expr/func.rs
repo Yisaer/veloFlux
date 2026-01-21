@@ -1,6 +1,4 @@
-use datatypes::{
-    ConcreteDatatype, DataType, Float32Type, Float64Type, Int64Type, StringType, Value,
-};
+use datatypes::{ConcreteDatatype, DataType, Float64Type, Int64Type, Value};
 
 /// Unary function that takes one argument
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -250,15 +248,6 @@ impl BinaryFunc {
         })
     }
 
-    /// Try to cast a value to Float32
-    fn try_cast_to_float32(value: &Value) -> Option<f32> {
-        let float32_type = Float32Type;
-        float32_type.try_cast(value.clone()).and_then(|v| match v {
-            Value::Float32(f) => Some(f),
-            _ => None,
-        })
-    }
-
     /// Try to cast a value to Float64
     fn try_cast_to_float64(value: &Value) -> Option<f64> {
         let float64_type = Float64Type;
@@ -268,74 +257,8 @@ impl BinaryFunc {
         })
     }
 
-    /// Try to cast a value to String
-    fn try_cast_to_string(value: &Value) -> Option<String> {
-        let string_type = StringType;
-        string_type.try_cast(value.clone()).and_then(|v| match v {
-            Value::String(s) => Some(s),
-            _ => None,
-        })
-    }
-
-    /// Compare two values by trying to cast them to comparable types
     fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
-        // Null values are not comparable
-        if left.is_null() || right.is_null() {
-            return None;
-        }
-
-        // If types match, compare directly
-        match (left, right) {
-            (Value::Null, _) | (_, Value::Null) => None,
-            (Value::Int8(a), Value::Int8(b)) => Some(a.cmp(b)),
-            (Value::Int16(a), Value::Int16(b)) => Some(a.cmp(b)),
-            (Value::Int32(a), Value::Int32(b)) => Some(a.cmp(b)),
-            (Value::Int64(a), Value::Int64(b)) => Some(a.cmp(b)),
-            (Value::Float32(a), Value::Float32(b)) => a.partial_cmp(b),
-            (Value::Float64(a), Value::Float64(b)) => a.partial_cmp(b),
-            (Value::Uint8(a), Value::Uint8(b)) => Some(a.cmp(b)),
-            (Value::Uint16(a), Value::Uint16(b)) => Some(a.cmp(b)),
-            (Value::Uint32(a), Value::Uint32(b)) => Some(a.cmp(b)),
-            (Value::Uint64(a), Value::Uint64(b)) => Some(a.cmp(b)),
-            (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
-            (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
-            // If types don't match, try to cast to a common type
-            _ => {
-                // Try Int64 first
-                if let (Some(a), Some(b)) = (
-                    Self::try_cast_to_int64(left),
-                    Self::try_cast_to_int64(right),
-                ) {
-                    return Some(a.cmp(&b));
-                }
-
-                // Try Float32
-                if let (Some(a), Some(b)) = (
-                    Self::try_cast_to_float32(left),
-                    Self::try_cast_to_float32(right),
-                ) {
-                    return a.partial_cmp(&b);
-                }
-
-                // Try Float64
-                if let (Some(a), Some(b)) = (
-                    Self::try_cast_to_float64(left),
-                    Self::try_cast_to_float64(right),
-                ) {
-                    return a.partial_cmp(&b);
-                }
-
-                // Try String
-                if let (Some(a), Some(b)) = (
-                    Self::try_cast_to_string(left),
-                    Self::try_cast_to_string(right),
-                ) {
-                    return Some(a.cmp(&b));
-                }
-
-                None
-            }
-        }
+        super::value_compare::compare_values(left, right)
     }
 
     /// Try to cast both values to a numeric type for arithmetic operations

@@ -16,17 +16,8 @@ impl DataType for BooleanType {
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
+            Value::Null => Some(Value::Null),
             Value::Bool(v) => Some(Value::Bool(v)),
-            Value::Int64(v) => Some(Value::Bool(v != 0)),
-            Value::Float64(v) => Some(Value::Bool(v != 0.0)),
-            Value::String(s) => {
-                let s_lower = s.to_lowercase();
-                match s_lower.as_str() {
-                    "true" | "1" | "yes" | "on" => Some(Value::Bool(true)),
-                    "false" | "0" | "no" | "off" => Some(Value::Bool(false)),
-                    _ => None,
-                }
-            }
             _ => None,
         }
     }

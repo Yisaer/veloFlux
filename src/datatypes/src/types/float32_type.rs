@@ -16,6 +16,7 @@ impl DataType for Float32Type {
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
+            Value::Null => Some(Value::Null),
             Value::Float32(v) => Some(Value::Float32(v)),
             Value::Float64(v) => Some(Value::Float32(v as f32)),
             Value::Int8(v) => Some(Value::Float32(v as f32)),
@@ -26,8 +27,6 @@ impl DataType for Float32Type {
             Value::Uint16(v) => Some(Value::Float32(v as f32)),
             Value::Uint32(v) => Some(Value::Float32(v as f32)),
             Value::Uint64(v) => Some(Value::Float32(v as f32)),
-            Value::Bool(v) => Some(Value::Float32(if v { 1.0 } else { 0.0 })),
-            Value::String(s) => s.parse::<f32>().ok().map(Value::Float32),
             _ => None,
         }
     }
