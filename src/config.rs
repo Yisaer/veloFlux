@@ -272,7 +272,7 @@ metrics:
             LoggingOutput::Stdout => {}
             LoggingOutput::File => panic!("expected default logging.output=stdout"),
         }
-        assert_eq!(cfg.logging.include_source, true);
+        assert!(cfg.logging.include_source);
         match cfg.logging.level {
             LogLevel::Info => {}
             _ => panic!("expected default logging.level=info"),
@@ -306,7 +306,7 @@ logging:
             LogLevel::Warn => {}
             _ => panic!("expected level=warn"),
         }
-        assert_eq!(cfg.logging.include_source, false);
+        assert!(!cfg.logging.include_source);
         assert_eq!(cfg.logging.file.dir, "./tmp/logs");
         assert_eq!(cfg.logging.file.file_name, "app.log");
         assert_eq!(cfg.logging.file.rotation.keep_days, 3);

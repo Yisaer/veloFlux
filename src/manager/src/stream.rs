@@ -9,8 +9,8 @@ use axum::{
 };
 use flow::DecoderRegistry;
 use flow::catalog::{
-    CatalogError, EventtimeDefinition, HistoryStreamProps, MemoryStreamProps, MqttStreamProps,
-    StreamDecoderConfig,
+    CatalogError, EventtimeDefinition, HistoryStreamProps, MemoryStreamProps, MockStreamProps,
+    MqttStreamProps, StreamDecoderConfig,
 };
 use flow::connector::MemoryTopicKind;
 use flow::processor::SamplerConfig;
@@ -708,6 +708,7 @@ pub(crate) fn build_stream_props(
                 .ok_or_else(|| "memory stream requires topic".to_string())?;
             Ok(StreamProps::Memory(MemoryStreamProps::new(topic)))
         }
+        "mock" => Ok(StreamProps::Mock(MockStreamProps::default())),
         other => Err(format!("unsupported stream type: {other}")),
     }
 }
