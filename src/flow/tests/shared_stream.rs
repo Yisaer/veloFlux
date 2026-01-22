@@ -151,5 +151,3 @@ async fn shared_stream_two_pipelines_project_different_columns() {
         .await
         .expect("drop shared stream");
 }
-
-// NOTE: The lifecycle stress scenario is covered by HTTP-driven regression tests under `tests/`.
