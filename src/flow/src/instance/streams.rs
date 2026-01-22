@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::catalog::{CatalogError, StreamDefinition, StreamProps};
+use crate::connector::MockSourceConnector;
 use crate::shared_stream::{SharedStreamConfig, SharedStreamError, SharedStreamInfo};
 
 use super::{FlowInstance, FlowInstanceError, StreamRuntimeInfo};
@@ -162,9 +163,70 @@ impl FlowInstance {
                     .await
                     .map_err(FlowInstanceError::from)
             }
-            StreamProps::Mock(_) => Err(FlowInstanceError::Invalid(
-                "mock stream props cannot be used to create shared streams".to_string(),
-            )),
+            StreamProps::Mock(_) => {
+                let mut config = SharedStreamConfig::new(definition.id(), definition.schema());
+                config.set_decoder(definition.decoder().clone());
+
+                struct MockSharedStreamConnectorFactory {
+                    stream_id: String,
+                    schema: Arc<datatypes::Schema>,
+                    decoder: crate::catalog::StreamDecoderConfig,
+                    decoder_registry: Arc<crate::codec::DecoderRegistry>,
+                    // Keep the sender alive so the mock connector stream doesn't immediately EOF.
+                    _handle: std::sync::Mutex<Option<crate::connector::MockSourceHandle>>,
+                }
+
+                impl crate::shared_stream::SharedStreamConnectorFactory for MockSharedStreamConnectorFactory {
+                    fn connector_id(&self) -> String {
+                        format!("{}_shared_source_connector", self.stream_id)
+                    }
+
+                    fn build(
+                        &self,
+                    ) -> Result<
+                        (
+                            Box<dyn crate::connector::SourceConnector>,
+                            Arc<dyn crate::codec::RecordDecoder>,
+                        ),
+                        crate::shared_stream::SharedStreamError,
+                    > {
+                        let (connector, handle) = MockSourceConnector::new(self.connector_id());
+                        let mut guard = self._handle.lock().map_err(|_| {
+                            crate::shared_stream::SharedStreamError::Internal(
+                                "mock shared stream connector factory lock poisoned".to_string(),
+                            )
+                        })?;
+                        *guard = Some(handle);
+
+                        let decoder = self.decoder_registry.instantiate(
+                            &self.decoder,
+                            &self.stream_id,
+                            Arc::clone(&self.schema),
+                        );
+                        let decoder = decoder.map_err(|err| {
+                            crate::shared_stream::SharedStreamError::Internal(err.to_string())
+                        })?;
+                        Ok((Box::new(connector), decoder))
+                    }
+                }
+
+                let factory = Arc::new(MockSharedStreamConnectorFactory {
+                    stream_id: definition.id().to_string(),
+                    schema: definition.schema(),
+                    decoder: definition.decoder().clone(),
+                    decoder_registry: Arc::clone(&self.decoder_registry),
+                    _handle: std::sync::Mutex::new(None),
+                });
+
+                config.set_connector_factory(factory);
+                if let Some(sampler) = definition.sampler() {
+                    config.set_sampler(sampler.clone());
+                }
+                self.shared_stream_registry
+                    .create_stream(config)
+                    .await
+                    .map_err(FlowInstanceError::from)
+            }
             StreamProps::History(_) => Err(FlowInstanceError::Invalid(
                 "history stream props cannot be used to create shared streams".to_string(),
             )),

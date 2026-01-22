@@ -16,14 +16,8 @@ pub use stream::{SchemaParser, register_schema, schema_registry};
 
 pub(crate) static MQTT_QOS: u8 = 0;
 
-pub async fn start_server(
-    addr: String,
-    instance: flow::FlowInstance,
-    storage: StorageManager,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = AppState::new(instance, storage);
-
-    let app = Router::new()
+fn build_app(state: AppState) -> Router {
+    Router::new()
         .route(
             "/pipelines",
             post(pipeline::create_pipeline_handler).get(pipeline::list_pipelines),
@@ -73,11 +67,27 @@ pub async fn start_server(
             post(memory_topic::create_memory_topic_handler)
                 .get(memory_topic::list_memory_topics_handler),
         )
-        .with_state(state);
+        .with_state(state)
+}
 
+pub async fn start_server_with_listener(
+    listener: TcpListener,
+    instance: flow::FlowInstance,
+    storage: StorageManager,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let state = AppState::new(instance, storage);
+    let app = build_app(state);
+    axum::serve(listener, app.into_make_service()).await?;
+    Ok(())
+}
+
+pub async fn start_server(
+    addr: String,
+    instance: flow::FlowInstance,
+    storage: StorageManager,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = addr.parse()?;
     tracing::info!(manager_addr = %addr, "manager listening");
     let listener = TcpListener::bind(addr).await?;
-    axum::serve(listener, app.into_make_service()).await?;
-    Ok(())
+    start_server_with_listener(listener, instance, storage).await
 }
