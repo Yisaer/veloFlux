@@ -30,7 +30,7 @@ pub struct DecoderProcessor {
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
     decoder: Arc<dyn RecordDecoder>,
-    projection: Option<Arc<std::sync::RwLock<Vec<String>>>>,
+    shared_decode_projection: Option<Arc<std::sync::RwLock<Arc<DecodeProjection>>>>,
     decode_projection: Option<DecodeProjection>,
     eventtime: Option<EventtimeDecodeConfig>,
     stats: Arc<ProcessorStats>,
@@ -52,15 +52,18 @@ impl DecoderProcessor {
             output,
             control_output,
             decoder,
-            projection: None,
+            shared_decode_projection: None,
             decode_projection: None,
             eventtime: None,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
 
-    pub fn with_projection(mut self, projection: Arc<std::sync::RwLock<Vec<String>>>) -> Self {
-        self.projection = Some(projection);
+    pub fn with_shared_decode_projection(
+        mut self,
+        projection: Arc<std::sync::RwLock<Arc<DecodeProjection>>>,
+    ) -> Self {
+        self.shared_decode_projection = Some(projection);
         self
     }
 
@@ -88,7 +91,7 @@ impl Processor for DecoderProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let decoder = Arc::clone(&self.decoder);
-        let projection = self.projection.clone();
+        let shared_decode_projection = self.shared_decode_projection.clone();
         let decode_projection = self.decode_projection.clone();
         let eventtime = self.eventtime.clone();
         let processor_id = self.id.clone();
@@ -127,14 +130,17 @@ impl Processor for DecoderProcessor {
                                 if let StreamData::Bytes(payload) = &data {
                                     let decoded = if let Some(proj) = decode_projection.as_ref() {
                                         decoder.decode_with_projection(payload.as_ref(), Some(proj))
-                                    } else if let Some(lock) = &projection {
-                                        let cols = lock
-                                            .read()
-                                            .expect("decoder projection lock poisoned")
-                                            .clone();
-                                        let projection =
-                                            DecodeProjection::from_top_level_columns(&cols);
-                                        decoder.decode_with_projection(payload.as_ref(), Some(&projection))
+                                    } else if let Some(lock) = &shared_decode_projection {
+                                        let projection = {
+                                            let guard = lock
+                                                .read()
+                                                .expect("shared decode projection lock poisoned");
+                                            Arc::clone(&*guard)
+                                        };
+                                        decoder.decode_with_projection(
+                                            payload.as_ref(),
+                                            Some(projection.as_ref()),
+                                        )
                                     } else {
                                         decoder.decode(payload.as_ref())
                                     };

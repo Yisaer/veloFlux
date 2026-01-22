@@ -1,6 +1,7 @@
 use crate::catalog::StreamDecoderConfig;
 use crate::codec::RecordDecoder;
 use crate::connector::SourceConnector;
+use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
 use crate::processor::processor_builder::{
@@ -407,6 +408,7 @@ struct SharedStreamInner {
     sampler: Option<SamplerConfig>,
     runtime_lock: Mutex<()>,
     decoding_columns: Arc<std::sync::RwLock<Vec<String>>>,
+    decode_projection: Arc<std::sync::RwLock<Arc<DecodeProjection>>>,
     data_sender: broadcast::Sender<StreamData>,
     control_sender: broadcast::Sender<ControlSignal>,
     handles: Mutex<SharedStreamHandles>,
@@ -460,6 +462,15 @@ impl SharedStreamInner {
             .map(|col| col.name.clone())
             .collect();
         let decoding_columns = Arc::new(std::sync::RwLock::new(initial_decoding_columns));
+        let decode_projection = Arc::new(std::sync::RwLock::new(Arc::new(
+            DecodeProjection::from_top_level_columns_with_version(
+                decoding_columns
+                    .read()
+                    .expect("shared stream decoding columns lock poisoned")
+                    .as_slice(),
+                1,
+            ),
+        )));
 
         let (data_sender, _) = broadcast::channel(channel_capacity);
         let (control_sender, _) = broadcast::channel(channel_capacity);
@@ -477,6 +488,7 @@ impl SharedStreamInner {
             sampler,
             runtime_lock: Mutex::new(()),
             decoding_columns: Arc::clone(&decoding_columns),
+            decode_projection: Arc::clone(&decode_projection),
             data_sender,
             control_sender,
             handles: Mutex::new(SharedStreamHandles {
@@ -496,6 +508,31 @@ impl SharedStreamInner {
 
     fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Atomically update the shared stream decoding columns and its cached decode projection.
+    ///
+    /// This avoids rebuilding the projection on the decoder hot path. The projection version is
+    /// bumped only when the applied decoding columns actually change.
+    fn set_applied_decoding_columns(&self, applied: Vec<String>) {
+        let mut cols_guard = self
+            .decoding_columns
+            .write()
+            .expect("shared stream decoding columns lock poisoned");
+        if *cols_guard == applied {
+            return;
+        }
+        *cols_guard = applied.clone();
+
+        let mut proj_guard = self
+            .decode_projection
+            .write()
+            .expect("shared stream decode projection lock poisoned");
+        let next_version = proj_guard.version().saturating_add(1);
+        *proj_guard = Arc::new(DecodeProjection::from_top_level_columns_with_version(
+            &applied,
+            next_version,
+        ));
     }
 
     async fn ensure_started(self: &Arc<Self>) -> Result<(), SharedStreamError> {
@@ -524,10 +561,7 @@ impl SharedStreamInner {
 
         {
             let applied = self.current_decoding_columns().await;
-            *self
-                .decoding_columns
-                .write()
-                .expect("shared stream decoding columns lock poisoned") = applied;
+            self.set_applied_decoding_columns(applied);
         }
 
         let physical_plan = create_physical_plan_for_shared_stream(
@@ -540,7 +574,7 @@ impl SharedStreamInner {
         let options = SharedStreamPipelineOptions {
             stream_name: self.name.clone(),
             decoder,
-            projection: Arc::clone(&self.decoding_columns),
+            decode_projection: Arc::clone(&self.decode_projection),
         };
         let mut pipeline = create_processor_pipeline_for_shared_stream(physical_plan, options)
             .map_err(|err| SharedStreamError::Internal(err.to_string()))?;
@@ -713,10 +747,7 @@ impl SharedStreamInner {
         } else {
             union.clone()
         };
-        *self
-            .decoding_columns
-            .write()
-            .expect("shared stream decoding columns lock poisoned") = applied;
+        self.set_applied_decoding_columns(applied);
         Ok(union)
     }
 
@@ -754,10 +785,7 @@ impl SharedStreamInner {
         } else {
             union
         };
-        *self
-            .decoding_columns
-            .write()
-            .expect("shared stream decoding columns lock poisoned") = applied;
+        self.set_applied_decoding_columns(applied);
 
         let should_stop = state.subscribers.is_empty();
         drop(state);
@@ -779,15 +807,13 @@ impl SharedStreamInner {
             state.consumer_required_columns.clear();
             state.status = SharedStreamStatus::Stopped;
         }
-        *self
-            .decoding_columns
-            .write()
-            .expect("shared stream decoding columns lock poisoned") = self
-            .schema
-            .column_schemas()
-            .iter()
-            .map(|col| col.name.clone())
-            .collect();
+        self.set_applied_decoding_columns(
+            self.schema
+                .column_schemas()
+                .iter()
+                .map(|col| col.name.clone())
+                .collect(),
+        );
 
         let (mut pipeline, forward) = {
             let mut handles = self.handles.lock().await;

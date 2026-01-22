@@ -6,6 +6,7 @@
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::codec::{DecoderRegistry, EncoderRegistry, MergerRegistry, RecordDecoder};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
+use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
 use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
@@ -33,7 +34,7 @@ use uuid::Uuid;
 pub(crate) struct SharedStreamPipelineOptions {
     pub stream_name: String,
     pub decoder: Arc<dyn RecordDecoder>,
-    pub projection: Arc<std::sync::RwLock<Vec<String>>>,
+    pub decode_projection: Arc<std::sync::RwLock<Arc<DecodeProjection>>>,
 }
 
 /// Enum for all processor types created from PhysicalPlan
@@ -743,7 +744,7 @@ fn create_processor_from_plan_node(
             let mut processor = match context.shared_stream() {
                 Some(opts) if opts.stream_name == decoder_plan.source_name() => {
                     DecoderProcessor::new(processor_id.clone(), Arc::clone(&opts.decoder))
-                        .with_projection(Arc::clone(&opts.projection))
+                        .with_shared_decode_projection(Arc::clone(&opts.decode_projection))
                 }
                 _ => {
                     let decoder = context

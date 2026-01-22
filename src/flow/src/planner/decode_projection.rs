@@ -76,12 +76,19 @@ impl ProjectionNode {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeProjection {
+    version: u64,
     columns: BTreeMap<String, ProjectionNode>,
 }
 
 impl DecodeProjection {
+    /// Monotonic version of the projection. Used by decoders to detect projection changes and
+    /// refresh any cached decode state.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     pub fn columns(&self) -> &BTreeMap<String, ProjectionNode> {
         &self.columns
     }
@@ -94,12 +101,13 @@ impl DecodeProjection {
         self.columns.insert(name.to_string(), ProjectionNode::All);
     }
 
-    /// Build a decode projection that includes the given top-level columns.
-    ///
-    /// This is useful for "column projection" use-cases where decoding should only materialize a
-    /// subset of schema columns; unspecified columns can then be treated as NULL by decoders.
-    pub fn from_top_level_columns(columns: &[String]) -> Self {
-        let mut projection = Self::default();
+    /// Build a decode projection that includes the given top-level columns with an explicit
+    /// projection version.
+    pub fn from_top_level_columns_with_version(columns: &[String], version: u64) -> Self {
+        let mut projection = Self {
+            version,
+            columns: BTreeMap::new(),
+        };
         for column in columns {
             projection.mark_column_all(column);
         }
@@ -168,6 +176,15 @@ impl DecodeProjection {
                 }
                 Self::mark_segments_used_in_node(element, rest);
             }
+        }
+    }
+}
+
+impl Default for DecodeProjection {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            columns: BTreeMap::new(),
         }
     }
 }
