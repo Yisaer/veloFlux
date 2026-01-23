@@ -5,12 +5,14 @@ use datatypes::{
 use flow::planner::logical::create_logical_plan;
 use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
+use flow::catalog::MemoryStreamProps;
 use flow::{
     ExplainReport, MqttStreamProps, NopSinkConfig, PipelineSink, PipelineSinkConnector,
     SinkConnectorConfig, SinkEncoderConfig, StreamDecoderConfig, StreamDefinition, StreamProps,
 };
 use parser::parse_sql;
 use serde_json::json;
+use serde_json::Map as JsonMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -151,6 +153,25 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamDecoderConfig::json(),
     );
 
+    let memory_collect_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "memory_collect".to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "memory_collect".to_string(),
+            "b".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+    let memory_collect_def = StreamDefinition::new(
+        "memory_collect",
+        Arc::clone(&memory_collect_schema),
+        StreamProps::Memory(MemoryStreamProps::new("demo_memory_collect")),
+        StreamDecoderConfig::new("none", JsonMap::new()),
+    );
+
     let mut stream_defs = HashMap::new();
     stream_defs.insert("users".to_string(), Arc::new(users_def));
     stream_defs.insert("stream_prune".to_string(), Arc::new(stream_prune_def));
@@ -158,6 +179,7 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs.insert("stream_struct".to_string(), Arc::new(stream_struct_def));
     stream_defs.insert("stream_3".to_string(), Arc::new(stream_3_def));
     stream_defs.insert("stream".to_string(), Arc::new(stream_def));
+    stream_defs.insert("memory_collect".to_string(), Arc::new(memory_collect_def));
     stream_defs
 }
 
@@ -173,11 +195,18 @@ fn bindings_for_select(
                 let def = stream_defs
                     .get(&source.name)
                     .unwrap_or_else(|| panic!("missing stream definition: {}", source.name));
+                let kind = if def.stream_type() == flow::StreamType::Memory
+                    && def.decoder().kind() == "none"
+                {
+                    SourceBindingKind::MemoryCollection
+                } else {
+                    SourceBindingKind::Regular
+                };
                 SchemaBindingEntry {
                     source_name: source.name.clone(),
                     alias: source.alias.clone(),
                     schema: def.schema(),
-                    kind: SourceBindingKind::Regular,
+                    kind,
                 }
             })
             .collect(),
@@ -232,6 +261,11 @@ fn logical_optimizer_table_driven() {
             name: "logical_optimizer_prunes_datasource_schema",
             sql: "SELECT a FROM stream_prune",
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_prune","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "logical_optimizer_keeps_full_schema_for_memory_collection_source",
+            sql: "SELECT a FROM memory_collect",
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=memory_collect","decoder=none","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}"##,
         },
         Case {
             name: "logical_optimizer_keeps_window_partition_columns",

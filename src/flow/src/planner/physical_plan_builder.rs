@@ -624,7 +624,19 @@ fn create_physical_data_source_with_builder(
             });
 
             if decoder_kind == "none" {
-                return Ok(sampler_plan.unwrap_or(datasource_plan));
+                let leaf = sampler_plan.unwrap_or(datasource_plan);
+                if matches!(entry.kind, SourceBindingKind::MemoryCollection) {
+                    let normalize_index = builder.allocate_index();
+                    let normalize =
+                        crate::planner::physical::PhysicalCollectionLayoutNormalize::new(
+                            Arc::clone(&schema),
+                            Arc::<str>::from(logical_ds.source_name.as_str()),
+                            vec![Arc::clone(&leaf)],
+                            normalize_index,
+                        );
+                    return Ok(Arc::new(PhysicalPlan::CollectionLayoutNormalize(normalize)));
+                }
+                return Ok(leaf);
             }
 
             let decoder_children = sampler_plan

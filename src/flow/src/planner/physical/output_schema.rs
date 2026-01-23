@@ -58,6 +58,9 @@ impl PhysicalPlan {
             PhysicalPlan::SharedStream(plan) => {
                 Ok(output_from_datatype_schema(plan.schema().as_ref()))
             }
+            PhysicalPlan::CollectionLayoutNormalize(plan) => {
+                Ok(output_from_datatype_schema(plan.schema.as_ref()))
+            }
 
             PhysicalPlan::Filter(_)
             | PhysicalPlan::Order(_)

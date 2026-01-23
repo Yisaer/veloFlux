@@ -3,6 +3,7 @@ use datatypes::{
     StructType,
 };
 use flow::catalog::MockStreamProps;
+use flow::catalog::MemoryStreamProps;
 use flow::connector::{MemorySinkConfig, MemoryTopicKind};
 use flow::planner::logical::create_logical_plan;
 use flow::planner::sink::CustomSinkConnectorConfig;
@@ -150,6 +151,25 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamDecoderConfig::json(),
     );
 
+    let memory_collect_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "memory_collect".to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "memory_collect".to_string(),
+            "b".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+    let memory_collect_def = StreamDefinition::new(
+        "memory_collect",
+        Arc::clone(&memory_collect_schema),
+        StreamProps::Memory(MemoryStreamProps::new("demo_memory_collect")),
+        StreamDecoderConfig::new("none", JsonMap::new()),
+    );
+
     let mut stream_defs = HashMap::new();
     stream_defs.insert("stream".to_string(), Arc::new(stream_def));
     stream_defs.insert("stream_sampler".to_string(), Arc::new(stream_sampler_def));
@@ -158,6 +178,7 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs.insert("stream_ab".to_string(), Arc::new(stream_ab_def));
     stream_defs.insert("stream_3".to_string(), Arc::new(stream_3_def));
     stream_defs.insert("stream_4".to_string(), Arc::new(stream_4_def));
+    stream_defs.insert("memory_collect".to_string(), Arc::new(memory_collect_def));
 
     stream_defs
 }
@@ -205,11 +226,18 @@ fn bindings_for_select(
                 let def = stream_defs
                     .get(&source.name)
                     .unwrap_or_else(|| panic!("missing stream definition: {}", source.name));
+                let kind = if def.stream_type() == flow::StreamType::Memory
+                    && def.decoder().kind() == "none"
+                {
+                    SourceBindingKind::MemoryCollection
+                } else {
+                    SourceBindingKind::Regular
+                };
                 SchemaBindingEntry {
                     source_name: source.name.clone(),
                     alias: source.alias.clone(),
                     schema: def.schema(),
-                    kind: SourceBindingKind::Regular,
+                    kind,
                 }
             })
             .collect(),
@@ -449,6 +477,12 @@ fn plan_explain_table_driven() {
             sql: "SELECT a FROM stream_sampler",
             options: PipelineOptions::default(),
             expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_sampler","decoder=json","schema=[a]","sampler.strategy=latest"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_sampler","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalSampler_1","info":["interval=100ms","strategy=latest"],"operator":"PhysicalSampler"}],"id":"PhysicalDecoder_2","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_3","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "memory_collection_source_inserts_layout_normalize",
+            sql: "SELECT a FROM memory_collect",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=memory_collect","decoder=none","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=memory_collect","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalCollectionLayoutNormalize_1","info":["source=memory_collect","schema=[a, b]"],"operator":"PhysicalCollectionLayoutNormalize"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "stateful_where_before_project",

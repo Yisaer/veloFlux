@@ -644,6 +644,10 @@ fn build_physical_node_with_prefix(
             }
             info.push(format!("schema=[{}]", ds.required_columns().join(", ")));
         }
+        PhysicalPlan::CollectionLayoutNormalize(normalize) => {
+            info.push(format!("source={}", normalize.output_source_name()));
+            info.push(format_schema(normalize.schema().as_ref()));
+        }
         PhysicalPlan::StatefulFunction(stateful) => {
             let mut calls = stateful
                 .calls

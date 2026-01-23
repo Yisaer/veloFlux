@@ -6,6 +6,7 @@ pub mod output_schema;
 pub mod physical_aggregation;
 pub mod physical_barrier;
 pub mod physical_batch;
+pub mod physical_collection_layout_normalize;
 pub mod physical_compute;
 pub mod physical_data_sink;
 pub mod physical_data_source;
@@ -30,6 +31,7 @@ pub use by_index_projection::{ByIndexProjection, ByIndexProjectionColumn};
 pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
 pub use physical_barrier::PhysicalBarrier;
 pub use physical_batch::PhysicalBatch;
+pub use physical_collection_layout_normalize::PhysicalCollectionLayoutNormalize;
 pub use physical_compute::{PhysicalCompute, PhysicalComputeField};
 pub use physical_data_sink::{PhysicalDataSink, PhysicalSinkConnector};
 pub use physical_data_source::PhysicalDataSource;
@@ -58,6 +60,7 @@ pub use physical_window::{
 pub enum PhysicalPlan {
     DataSource(PhysicalDataSource),
     Decoder(PhysicalDecoder),
+    CollectionLayoutNormalize(PhysicalCollectionLayoutNormalize),
     StatefulFunction(PhysicalStatefulFunction),
     Filter(PhysicalFilter),
     Compute(PhysicalCompute),
@@ -92,6 +95,7 @@ impl PhysicalPlan {
         match self {
             PhysicalPlan::DataSource(plan) => plan.base.children(),
             PhysicalPlan::Decoder(plan) => plan.base.children(),
+            PhysicalPlan::CollectionLayoutNormalize(plan) => plan.base.children(),
             PhysicalPlan::StatefulFunction(plan) => plan.base.children(),
             PhysicalPlan::Filter(plan) => plan.base.children(),
             PhysicalPlan::Compute(plan) => plan.base.children(),
@@ -122,6 +126,7 @@ impl PhysicalPlan {
         match self {
             PhysicalPlan::DataSource(_) => "PhysicalDataSource",
             PhysicalPlan::Decoder(_) => "PhysicalDecoder",
+            PhysicalPlan::CollectionLayoutNormalize(_) => "PhysicalCollectionLayoutNormalize",
             PhysicalPlan::StatefulFunction(_) => "PhysicalStatefulFunction",
             PhysicalPlan::Filter(_) => "PhysicalFilter",
             PhysicalPlan::Compute(_) => "PhysicalCompute",
@@ -152,6 +157,7 @@ impl PhysicalPlan {
         match self {
             PhysicalPlan::DataSource(plan) => plan.base.index(),
             PhysicalPlan::Decoder(plan) => plan.base.index(),
+            PhysicalPlan::CollectionLayoutNormalize(plan) => plan.base.index(),
             PhysicalPlan::StatefulFunction(plan) => plan.base.index(),
             PhysicalPlan::Filter(plan) => plan.base.index(),
             PhysicalPlan::Compute(plan) => plan.base.index(),
@@ -201,6 +207,7 @@ impl PhysicalPlan {
         match self {
             PhysicalPlan::DataSource(plan) => &mut plan.base.children,
             PhysicalPlan::Decoder(plan) => &mut plan.base.children,
+            PhysicalPlan::CollectionLayoutNormalize(plan) => &mut plan.base.children,
             PhysicalPlan::StatefulFunction(plan) => &mut plan.base.children,
             PhysicalPlan::Filter(plan) => &mut plan.base.children,
             PhysicalPlan::Compute(plan) => &mut plan.base.children,
