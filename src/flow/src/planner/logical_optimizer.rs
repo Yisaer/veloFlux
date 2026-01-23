@@ -1395,6 +1395,7 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
             let should_keep_full = matches!(
                 entry.kind,
                 crate::expr::sql_conversion::SourceBindingKind::Shared
+                    | crate::expr::sql_conversion::SourceBindingKind::MemoryCollection
             ) || self.prune_disabled.contains(&entry.source_name)
                 || !self.used_columns.contains_key(&entry.source_name);
 
@@ -1778,6 +1779,7 @@ impl<'a> StructFieldUsageCollector<'a> {
             let should_keep_full = matches!(
                 entry.kind,
                 crate::expr::sql_conversion::SourceBindingKind::Shared
+                    | crate::expr::sql_conversion::SourceBindingKind::MemoryCollection
             ) || self.prune_disabled.contains(&entry.source_name)
                 || !self.used_columns.contains_key(&entry.source_name);
 
@@ -2043,6 +2045,7 @@ impl<'a> ListElementUsageCollector<'a> {
             let should_keep_full = matches!(
                 entry.kind,
                 crate::expr::sql_conversion::SourceBindingKind::Shared
+                    | crate::expr::sql_conversion::SourceBindingKind::MemoryCollection
             ) || self.prune_disabled.contains(&entry.source_name);
 
             if should_keep_full {
@@ -2266,7 +2269,12 @@ fn apply_pruned_with_cache(
                 .find(|entry| entry.source_name == ds.source_name)
                 .map(|entry| Arc::clone(&entry.schema))
                 .unwrap_or_else(|| ds.schema());
-            let decode_projection = decode_projections.get(&ds.source_name).cloned();
+            // decoder.type="none" means there is no decode stage; any decode projection must be ignored.
+            let decode_projection = if ds.decoder().kind() == "none" {
+                None
+            } else {
+                decode_projections.get(&ds.source_name).cloned()
+            };
             let shared_required_schema = shared_required_schemas
                 .get(&ds.source_name)
                 .cloned()

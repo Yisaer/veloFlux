@@ -436,6 +436,10 @@ fn build_pipeline_runtime_with_logical_ir(
         let kind =
             if futures::executor::block_on(shared_stream_registry.is_registered(&source.name)) {
                 SourceBindingKind::Shared
+            } else if definition.stream_type() == crate::catalog::StreamType::Memory
+                && definition.decoder().kind() == "none"
+            {
+                SourceBindingKind::MemoryCollection
             } else {
                 SourceBindingKind::Regular
             };
@@ -552,6 +556,10 @@ fn build_pipeline_runtime_from_logical_ir(
         let schema = definition.schema();
         let kind = if futures::executor::block_on(shared_stream_registry.is_registered(&stream)) {
             SourceBindingKind::Shared
+        } else if definition.stream_type() == crate::catalog::StreamType::Memory
+            && definition.decoder().kind() == "none"
+        {
+            SourceBindingKind::MemoryCollection
         } else {
             SourceBindingKind::Regular
         };

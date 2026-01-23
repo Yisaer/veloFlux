@@ -604,7 +604,7 @@ fn create_physical_data_source_with_builder(
         None
     };
     match entry.kind {
-        SourceBindingKind::Regular => {
+        SourceBindingKind::Regular | SourceBindingKind::MemoryCollection => {
             let physical_ds = PhysicalDataSource::new(
                 logical_ds.source_name.clone(),
                 logical_ds.alias.clone(),
