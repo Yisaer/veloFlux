@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 pub mod base_physical;
 pub mod by_index_projection;
+pub mod output_schema;
 pub mod physical_aggregation;
 pub mod physical_barrier;
 pub mod physical_batch;

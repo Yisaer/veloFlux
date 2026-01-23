@@ -1,12 +1,16 @@
 //! Table-driven tests for pipeline creation helpers.
 
 use datatypes::Value;
+use flow::connector::MemoryTopicKind;
 use flow::model::batch_from_columns_simple;
 use flow::pipeline::MemorySinkProps;
 use flow::pipeline::PipelineDefinition;
 use flow::planner::plan_cache::PlanCacheInputs;
+use flow::Collection;
 use flow::FlowInstance;
+use flow::SinkEncoderConfig;
 use flow::{PipelineStopMode, SinkDefinition, SinkProps, SinkType};
+use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use tokio::time::Duration;
 
@@ -15,6 +19,7 @@ use super::common::{
     build_expected_json, declare_memory_input_output_topics, install_memory_stream_schema,
     make_memory_topics, memory_registry, normalize_json, publish_input_collection, recv_next_json,
 };
+use super::common::{declare_memory_input_output_topics_with_output_kind, recv_next_collection};
 
 struct TestCase {
     name: &'static str,
@@ -96,6 +101,144 @@ async fn run_test_case(test_case: TestCase) {
         "Wrong output JSON for test: {}",
         test_case.name
     );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to stop pipeline for test: {}", test_case.name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", test_case.name));
+}
+
+struct CollectionSinkTestCase {
+    name: &'static str,
+    sql: &'static str,
+    input_data: Vec<(String, Vec<Value>)>, // (column_name, values)
+    expected_rows: usize,
+    expected_message_count: usize,
+    expected_affiliate_none: bool,
+    expected_columns: Vec<ColumnCheck>, // order matters
+}
+
+async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
+    println!("Running test: {}", test_case.name);
+
+    let instance = FlowInstance::new();
+    let registry = memory_registry();
+    let (input_topic, output_topic) =
+        make_memory_topics("pipeline_table_driven_collection_sinks", test_case.name);
+    declare_memory_input_output_topics_with_output_kind(
+        &registry,
+        &input_topic,
+        &output_topic,
+        MemoryTopicKind::Collection,
+    );
+    install_memory_stream_schema(&instance, &input_topic, &test_case.input_data).await;
+
+    let mut output = registry
+        .open_subscribe_collection(&output_topic)
+        .expect("subscribe output collection");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        test_case.sql,
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )
+        .with_encoder(SinkEncoderConfig::new("none", JsonMap::new()))],
+    );
+    instance
+        .create_pipeline_with_plan_cache(
+            pipeline,
+            PlanCacheInputs {
+                pipeline_raw_json: String::new(),
+                streams_raw_json: Vec::new(),
+                snapshot: None,
+            },
+        )
+        .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", test_case.name));
+
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", test_case.name));
+
+    let columns = test_case
+        .input_data
+        .clone()
+        .into_iter()
+        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .collect();
+
+    let test_batch = batch_from_columns_simple(columns)
+        .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", test_case.name));
+
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(
+        &registry,
+        &input_topic,
+        Box::new(test_batch),
+        timeout_duration,
+    )
+    .await;
+
+    let got = recv_next_collection(&mut output, timeout_duration).await;
+    assert_eq!(
+        got.num_rows(),
+        test_case.expected_rows,
+        "row count mismatch (test: {})",
+        test_case.name
+    );
+
+    for (row_idx, tuple) in got.rows().iter().enumerate() {
+        if test_case.expected_affiliate_none {
+            assert!(tuple.affiliate().is_none(), "affiliate should be empty");
+        }
+
+        assert_eq!(
+            tuple.messages().len(),
+            test_case.expected_message_count,
+            "message count mismatch"
+        );
+
+        let msg = &tuple.messages()[0];
+        assert_eq!(
+            msg.source(),
+            output_topic.as_str(),
+            "message source should be memory topic"
+        );
+
+        let entries: Vec<(&str, datatypes::Value)> =
+            msg.entries().map(|(k, v)| (k, v.clone())).collect();
+        let keys: Vec<&str> = entries.iter().map(|(k, _)| *k).collect();
+        let expected_keys: Vec<&str> = test_case
+            .expected_columns
+            .iter()
+            .map(|c| c.expected_name.as_str())
+            .collect();
+        assert_eq!(keys, expected_keys, "column order mismatch");
+
+        assert_eq!(
+            entries.len(),
+            test_case.expected_columns.len(),
+            "unexpected column count"
+        );
+
+        for (col_idx, check) in test_case.expected_columns.iter().enumerate() {
+            let got_name = entries[col_idx].0;
+            assert_eq!(
+                got_name,
+                check.expected_name.as_str(),
+                "column name mismatch"
+            );
+            let expected_value = check.expected_values[row_idx].clone();
+            assert_eq!(entries[col_idx].1, expected_value, "value mismatch");
+        }
+    }
 
     instance
         .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
@@ -436,5 +579,44 @@ async fn pipeline_table_driven_queries() {
 
     for test_case in test_cases {
         run_test_case(test_case).await;
+    }
+}
+
+#[tokio::test]
+async fn pipeline_table_driven_collection_sinks() {
+    let test_cases = vec![CollectionSinkTestCase {
+        name: "select_star_with_alias_materializes_single_message",
+        sql: "SELECT *, a AS x FROM stream",
+        input_data: vec![
+            (
+                "a".to_string(),
+                vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+            ),
+            (
+                "b".to_string(),
+                vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
+            ),
+        ],
+        expected_rows: 3,
+        expected_message_count: 1,
+        expected_affiliate_none: true,
+        expected_columns: vec![
+            ColumnCheck {
+                expected_name: "a".to_string(),
+                expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+            },
+            ColumnCheck {
+                expected_name: "b".to_string(),
+                expected_values: vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
+            },
+            ColumnCheck {
+                expected_name: "x".to_string(),
+                expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+            },
+        ],
+    }];
+
+    for test_case in test_cases {
+        run_collection_sink_test_case(test_case).await;
     }
 }

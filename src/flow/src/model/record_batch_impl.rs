@@ -136,14 +136,19 @@ fn apply_projection_for_tuple(
                         ))
                     })?;
                 let message = &tuple.messages()[message_index];
-                let (col_name, value) = message.entry_by_index(*column_index).ok_or_else(|| {
+                let (_, value) = message.entry_by_index(*column_index).ok_or_else(|| {
                     CollectionError::Other(format!(
                         "Failed to evaluate expression for field '{}': Column not found: {}#{}",
                         field.field_name, source_name, column_index
                     ))
                 })?;
 
-                partial_messages.push(message_index, col_name.clone(), value.clone())?;
+                // Preserve SQL output column naming (including aliases) in the materialized tuple.
+                partial_messages.push(
+                    message_index,
+                    Arc::clone(&field.field_name),
+                    value.clone(),
+                )?;
             }
             _ => {
                 let value = field
@@ -156,7 +161,8 @@ fn apply_projection_for_tuple(
                         ))
                     })?;
 
-                projected_tuple.add_affiliate_column(Arc::new(field.field_name.clone()), value);
+                projected_tuple
+                    .add_affiliate_column(Arc::new(field.field_name.as_ref().to_string()), value);
             }
         }
     }

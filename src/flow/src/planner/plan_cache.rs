@@ -808,7 +808,7 @@ fn build_physical_ir(
                 .fields
                 .iter()
                 .map(|f| ProjectFieldIR {
-                    field_name: f.field_name.clone(),
+                    field_name: f.field_name.as_ref().to_string(),
                     expr: f.original_expr.clone(),
                 })
                 .collect(),

@@ -29,8 +29,8 @@ impl ProjectExecMode {
                     .fields
                     .iter()
                     .map(|field| AffiliateExpr {
-                        output_name: Arc::new(field.field_name.clone()),
-                        field_name: field.field_name.clone(),
+                        output_name: Arc::new(field.field_name.as_ref().to_string()),
+                        field_name: field.field_name.as_ref().to_string(),
                         expr: field.compiled_expr.clone(),
                     })
                     .collect(),

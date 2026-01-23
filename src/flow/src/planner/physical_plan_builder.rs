@@ -22,6 +22,7 @@ use crate::planner::physical::{
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
 use crate::PipelineRegistries;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -828,7 +829,7 @@ fn create_physical_project_with_builder_cached(
     let mut physical_fields = Vec::new();
     for logical_field in &logical_project.fields {
         let physical_field = PhysicalProjectField::from_logical(
-            logical_field.field_name.clone(),
+            logical_field.field_name.as_str(),
             logical_field.expr.clone(),
             bindings,
             registries.custom_func_registry().as_ref(),
@@ -936,12 +937,30 @@ fn add_regular_encoder_with_builder(
         connector.encoder.kind(),
         crate::planner::sink::SinkEncoderKind::None
     ) {
+        let mut connector_config = connector.connector.clone();
+
+        if let crate::planner::sink::SinkConnectorConfig::Memory(cfg) = &mut connector_config {
+            match cfg.kind {
+                crate::connector::MemoryTopicKind::Bytes => {
+                    return Err(format!(
+                        "memory sink `{}` with encoder.type=none must publish to a collection topic",
+                        sink.sink_id
+                    ));
+                }
+                crate::connector::MemoryTopicKind::Collection => {
+                    let output_schema = encoder_input.output_schema()?;
+                    validate_unique_output_columns(sink.sink_id.as_str(), &output_schema)?;
+                    *cfg = cfg.clone().with_collection_output_schema(output_schema);
+                }
+            }
+        }
+
         Ok((
             encoder_input,
             PhysicalSinkConnector::new(
                 sink.sink_id.clone(),
                 sink.forward_to_result,
-                connector.connector.clone(),
+                connector_config,
                 None,
             ),
         ))
@@ -970,6 +989,23 @@ fn add_regular_encoder_with_builder(
             ),
         ))
     }
+}
+
+fn validate_unique_output_columns(
+    sink_id: &str,
+    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+) -> Result<(), String> {
+    let mut seen = HashSet::<String>::new();
+    for col in output_schema.columns.iter() {
+        let key = col.name.as_ref().to_string();
+        if !seen.insert(key.clone()) {
+            return Err(format!(
+                "memory collection sink `{}` cannot materialize duplicate output column `{}`",
+                sink_id, key
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn find_binding_entry<'a>(

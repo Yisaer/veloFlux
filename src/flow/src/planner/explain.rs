@@ -685,7 +685,7 @@ fn build_physical_node_with_prefix(
             let fields = project
                 .fields
                 .iter()
-                .map(|f| f.field_name.clone())
+                .map(|f| f.field_name.as_ref())
                 .collect::<Vec<_>>();
             info.push(format!("fields=[{}]", fields.join("; ")));
             if project.passthrough_messages {
@@ -776,6 +776,29 @@ fn build_physical_node_with_prefix(
         PhysicalPlan::DataSink(sink) => {
             info.push(format!("sink_id={}", sink.connector.sink_id));
             info.push(format!("connector={}", sink.connector.connector.kind()));
+            if let crate::planner::sink::SinkConnectorConfig::Memory(cfg) =
+                &sink.connector.connector
+            {
+                info.push(format!("topic={}", cfg.topic));
+                info.push(format!("kind={}", cfg.kind));
+                if cfg.kind == crate::connector::MemoryTopicKind::Collection {
+                    if let Some(output) = &cfg.collection_output_schema {
+                        let cols = output
+                            .columns
+                            .iter()
+                            .map(|col| match &col.getter {
+                                crate::planner::physical::output_schema::OutputValueGetter::MessageByName { source_name, .. } => {
+                                    format!("{}@{}", col.name.as_ref(), source_name.as_ref())
+                                }
+                                crate::planner::physical::output_schema::OutputValueGetter::Affiliate { .. } => {
+                                    format!("{}@affiliate", col.name.as_ref())
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        info.push(format!("collection_layout=[{}]", cols.join("; ")));
+                    }
+                }
+            }
         }
         PhysicalPlan::Encoder(encoder) => {
             info.push(format!("sink_id={}", encoder.sink_id));

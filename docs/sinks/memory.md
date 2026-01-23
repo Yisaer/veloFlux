@@ -52,6 +52,32 @@ The sink uses `encoder.type` to decide which topic kind it publishes:
 
 The manager validates that the topic exists and that its declared kind matches the encoder mode.
 
+## Collection Layout Normalization (encoder.type = "none")
+
+When publishing to a `collection` topic, the sink normalizes each input row (`Tuple`) into a
+stable layout, so downstream pipelines can rely on a consistent column name + order.
+
+Behavior:
+
+- The output row is rewritten to **1 Message + 0 affiliate**:
+  - Message `source` is set to the memory topic name.
+  - Message column **names and order** follow the pipeline's planned output schema (the `SELECT`
+    field order after wildcard expansion and aliasing).
+- The sink does **not** evaluate expressions. It only copies values already materialized by
+  upstream processors:
+  - `ColumnRef::ByIndex` outputs (including `a AS x`) are fetched from upstream messages by name.
+  - Derived columns (for example `a + 1 AS x`) are fetched from affiliate columns.
+- Missing columns:
+  - If a required column is not found in either messages or affiliate, the sink fills `NULL` and
+    logs a warning (once per publish call with the missing column list).
+- Duplicate output column names are rejected at planning time for `collection` topics.
+
+Implementation note:
+
+- For performance, the sink resolves column getters once using the first observed tuple layout and
+  then reads values by index for subsequent rows. Columns that cannot be resolved are treated as
+  permanently missing for that sink instance.
+
 ## Drop / Lag Behavior (Subscribers)
 
 The implementation uses a bounded broadcast buffer (`capacity`). If subscribers cannot keep up,
@@ -93,4 +119,3 @@ POST /pipelines
   ]
 }
 ```
-

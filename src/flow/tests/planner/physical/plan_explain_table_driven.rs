@@ -3,6 +3,7 @@ use datatypes::{
     StructType,
 };
 use flow::catalog::MockStreamProps;
+use flow::connector::{MemorySinkConfig, MemoryTopicKind};
 use flow::planner::logical::create_logical_plan;
 use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::processor::SamplerConfig;
@@ -342,22 +343,41 @@ fn plan_explain_with_sinks_table_driven() {
         expected: &'static str,
     }
 
-    let cases = vec![Case {
-        name: "select_star_with_kuksa_sink",
-        sql: "SELECT * FROM stream",
-        sinks: vec![PipelineSink::new(
-            "test_sink",
-            PipelineSinkConnector::new(
-                "test_connector",
-                SinkConnectorConfig::Custom(CustomSinkConnectorConfig {
-                    kind: "kuksa".to_string(),
-                    settings: json!({}),
-                }),
-                SinkEncoderConfig::new("none", serde_json::Map::new()),
-            ),
-        )],
-        expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=kuksa","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[*]"],"operator":"PhysicalProject"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=kuksa"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_4","info":[],"operator":"PhysicalResultCollect"}}"##,
-    }];
+    let cases = vec![
+        Case {
+            name: "select_star_with_kuksa_sink",
+            sql: "SELECT * FROM stream",
+            sinks: vec![PipelineSink::new(
+                "test_sink",
+                PipelineSinkConnector::new(
+                    "test_connector",
+                    SinkConnectorConfig::Custom(CustomSinkConnectorConfig {
+                        kind: "kuksa".to_string(),
+                        settings: json!({}),
+                    }),
+                    SinkEncoderConfig::new("none", serde_json::Map::new()),
+                ),
+            )],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=kuksa","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[*]"],"operator":"PhysicalProject"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=kuksa"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_4","info":[],"operator":"PhysicalResultCollect"}}"##,
+        },
+        Case {
+            name: "memory_collection_sink_includes_layout",
+            sql: "SELECT *, a AS x FROM stream_ab",
+            sinks: vec![PipelineSink::new(
+                "test_sink",
+                PipelineSinkConnector::new(
+                    "test_connector",
+                    SinkConnectorConfig::Memory(MemorySinkConfig::new(
+                        "test_sink",
+                        "demo_collection",
+                        MemoryTopicKind::Collection,
+                    )),
+                    SinkEncoderConfig::new("none", serde_json::Map::new()),
+                ),
+            )],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*; x]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=memory","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[*; x]"],"operator":"PhysicalProject"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=memory","topic=demo_collection","kind=collection","collection_layout=[a@stream_ab; b@stream_ab; x@stream_ab]"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_4","info":[],"operator":"PhysicalResultCollect"}}"##,
+        },
+    ];
 
     for case in cases {
         let got = explain_json(case.sql, case.sinks);

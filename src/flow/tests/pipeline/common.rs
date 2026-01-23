@@ -63,6 +63,24 @@ pub fn declare_memory_input_output_topics(
         .expect("declare output memory topic");
 }
 
+pub fn declare_memory_input_output_topics_with_output_kind(
+    registry: &MemoryPubSubRegistry,
+    input_topic: &str,
+    output_topic: &str,
+    output_kind: MemoryTopicKind,
+) {
+    registry
+        .declare_topic(
+            input_topic,
+            MemoryTopicKind::Collection,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input memory topic");
+    registry
+        .declare_topic(output_topic, output_kind, DEFAULT_MEMORY_PUBSUB_CAPACITY)
+        .expect("declare output memory topic");
+}
+
 pub async fn install_memory_stream_schema(
     instance: &FlowInstance,
     input_topic: &str,
@@ -118,6 +136,28 @@ pub async fn recv_next_json(
             Ok(MemoryData::Collection(_)) => {
                 panic!("unexpected collection payload on bytes topic")
             }
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => panic!("pipeline output topic closed"),
+        }
+    }
+}
+
+pub async fn recv_next_collection(
+    output: &mut tokio::sync::broadcast::Receiver<MemoryData>,
+    timeout_duration: Duration,
+) -> SharedCollection {
+    use tokio::sync::broadcast::error::RecvError;
+
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let item = timeout(remaining, output.recv())
+            .await
+            .expect("timeout waiting for pipeline output");
+
+        match item {
+            Ok(MemoryData::Collection(payload)) => return payload,
+            Ok(MemoryData::Bytes(_)) => panic!("unexpected bytes payload on collection topic"),
             Err(RecvError::Lagged(_)) => continue,
             Err(RecvError::Closed) => panic!("pipeline output topic closed"),
         }
