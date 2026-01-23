@@ -11,6 +11,7 @@ use pipeline::AppState;
 use std::net::SocketAddr;
 use storage::StorageManager;
 use tokio::net::TcpListener;
+use tower_http::cors::CorsLayer;
 
 pub use stream::{SchemaParser, register_schema, schema_registry};
 
@@ -73,6 +74,7 @@ pub async fn start_server(
             post(memory_topic::create_memory_topic_handler)
                 .get(memory_topic::list_memory_topics_handler),
         )
+        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr: SocketAddr = addr.parse()?;
