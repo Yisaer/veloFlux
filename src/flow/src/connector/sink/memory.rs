@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use datatypes::Value;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -137,7 +138,15 @@ pub struct MemoryCollectionSinkConnector {
     publisher: Option<crate::connector::MemoryPublisher>,
     output_schema: Option<OutputSchema>,
     keys: Option<Arc<[Arc<str>]>>,
+    resolved: Option<Arc<[ResolvedGetter]>>,
     message_source: Arc<str>,
+}
+
+#[derive(Debug, Clone)]
+enum ResolvedGetter {
+    MessageByIndex { msg_idx: usize, key_idx: usize },
+    Affiliate { column_name: Arc<str> },
+    Missing { column_name: Arc<str> },
 }
 
 impl MemoryCollectionSinkConnector {
@@ -155,6 +164,7 @@ impl MemoryCollectionSinkConnector {
             publisher: None,
             output_schema: config.collection_output_schema,
             keys: None,
+            resolved: None,
         }
     }
 
@@ -187,6 +197,19 @@ impl MemoryCollectionSinkConnector {
         }
 
         Ok(Arc::clone(self.keys.as_ref().expect("initialized above")))
+    }
+
+    fn ensure_resolved(
+        &mut self,
+        output_schema: &OutputSchema,
+        sample: &Tuple,
+    ) -> Result<Arc<[ResolvedGetter]>, SinkConnectorError> {
+        if self.resolved.is_none() {
+            self.resolved = Some(Arc::from(resolve_getters(output_schema, sample)));
+        }
+        Ok(Arc::clone(
+            self.resolved.as_ref().expect("initialized above"),
+        ))
     }
 
     fn get_output_schema(&self) -> Result<OutputSchema, SinkConnectorError> {
@@ -225,27 +248,31 @@ impl SinkConnector for MemoryCollectionSinkConnector {
     ) -> Result<(), SinkConnectorError> {
         let output_schema = self.get_output_schema()?;
         let keys = self.ensure_keys(&output_schema)?;
+        let sample = collection.rows().first();
+        let resolved = match sample {
+            Some(tuple) => Some(self.ensure_resolved(&output_schema, tuple)?),
+            None => None,
+        };
 
         let mut missing = BTreeSet::<String>::new();
         let mut rows = Vec::with_capacity(collection.num_rows());
         for tuple in collection.rows() {
             let mut values = Vec::with_capacity(output_schema.columns.len());
-            for col in output_schema.columns.iter() {
-                let value: Option<Arc<Value>> = match &col.getter {
-                    OutputValueGetter::Affiliate { column_name } => tuple
-                        .affiliate()
-                        .and_then(|aff| aff.value(column_name.as_ref()))
-                        .map(|v| Arc::new(v.clone())),
-                    OutputValueGetter::MessageByName {
-                        source_name,
-                        column_name,
-                    } => message_value_by_name(tuple, source_name.as_ref(), column_name.as_ref()),
+            for (idx, col) in output_schema.columns.iter().enumerate() {
+                let resolved_item = resolved.as_ref().and_then(|resolved| resolved.get(idx));
+                let (value, missing_name) = match resolved_item {
+                    Some(ResolvedGetter::Missing { column_name }) => (None, column_name.as_ref()),
+                    Some(other) => (
+                        resolved_value(tuple, other).or_else(|| fallback_value(tuple, col)),
+                        col.name.as_ref(),
+                    ),
+                    None => (fallback_value(tuple, col), col.name.as_ref()),
                 };
 
-                values.push(value.unwrap_or_else(|| {
-                    missing.insert(format!("{} (getter={:?})", col.name.as_ref(), col.getter));
-                    Arc::new(Value::Null)
-                }));
+                if value.is_none() {
+                    missing.insert(missing_name.to_string());
+                }
+                values.push(value.unwrap_or_else(|| Arc::new(Value::Null)));
             }
 
             let msg = Arc::new(Message::new_shared_keys(
@@ -333,6 +360,68 @@ fn message_value_by_name(tuple: &Tuple, source: &str, column: &str) -> Option<Ar
         }
     }
     None
+}
+
+fn resolve_getters(output_schema: &OutputSchema, tuple: &Tuple) -> Vec<ResolvedGetter> {
+    let mut by_source = HashMap::<&str, HashMap<&str, (usize, usize)>>::new();
+    for (msg_idx, msg) in tuple.messages().iter().enumerate() {
+        let entry = by_source.entry(msg.source()).or_default();
+        for (key_idx, (key, _)) in msg.entries().enumerate() {
+            entry.entry(key).or_insert((msg_idx, key_idx));
+        }
+    }
+
+    output_schema
+        .columns
+        .iter()
+        .map(|col| match &col.getter {
+            OutputValueGetter::Affiliate { column_name } => ResolvedGetter::Affiliate {
+                column_name: Arc::clone(column_name),
+            },
+            OutputValueGetter::MessageByName {
+                source_name,
+                column_name,
+            } => by_source
+                .get(source_name.as_ref())
+                .and_then(|m| m.get(column_name.as_ref()).copied())
+                .map(|(msg_idx, key_idx)| ResolvedGetter::MessageByIndex { msg_idx, key_idx })
+                // NOTE: this is treated as permanently missing for this sink instance.
+                .unwrap_or_else(|| ResolvedGetter::Missing {
+                    column_name: Arc::clone(&col.name),
+                }),
+        })
+        .collect()
+}
+
+fn resolved_value(tuple: &Tuple, resolved: &ResolvedGetter) -> Option<Arc<Value>> {
+    match resolved {
+        ResolvedGetter::MessageByIndex { msg_idx, key_idx } => tuple
+            .messages()
+            .get(*msg_idx)
+            .and_then(|msg| msg.entry_by_index(*key_idx))
+            .map(|(_, value)| Arc::clone(value)),
+        ResolvedGetter::Affiliate { column_name } => tuple
+            .affiliate()
+            .and_then(|aff| aff.value(column_name.as_ref()))
+            .map(|v| Arc::new(v.clone())),
+        ResolvedGetter::Missing { .. } => None,
+    }
+}
+
+fn fallback_value(
+    tuple: &Tuple,
+    col: &crate::planner::physical::output_schema::OutputColumn,
+) -> Option<Arc<Value>> {
+    match &col.getter {
+        OutputValueGetter::Affiliate { column_name } => tuple
+            .affiliate()
+            .and_then(|aff| aff.value(column_name.as_ref()))
+            .map(|v| Arc::new(v.clone())),
+        OutputValueGetter::MessageByName {
+            source_name,
+            column_name,
+        } => message_value_by_name(tuple, source_name.as_ref(), column_name.as_ref()),
+    }
 }
 
 #[cfg(test)]
