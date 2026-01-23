@@ -828,7 +828,7 @@ fn create_physical_project_with_builder_cached(
     let mut physical_fields = Vec::new();
     for logical_field in &logical_project.fields {
         let physical_field = PhysicalProjectField::from_logical(
-            logical_field.field_name.clone(),
+            logical_field.field_name.as_str(),
             logical_field.expr.clone(),
             bindings,
             registries.custom_func_registry().as_ref(),

@@ -10,7 +10,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct PhysicalProjectField {
     /// Output field name
-    pub field_name: String,
+    pub field_name: Arc<str>,
     /// Original SQL expression from parser (for reference and debugging)
     pub original_expr: Expr,
     /// Compiled expression for execution
@@ -34,9 +34,13 @@ pub struct PhysicalProject {
 
 impl PhysicalProjectField {
     /// Create a new PhysicalProjectField with both original and compiled expressions
-    pub fn new(field_name: String, original_expr: Expr, compiled_expr: ScalarExpr) -> Self {
+    pub fn new(
+        field_name: impl Into<Arc<str>>,
+        original_expr: Expr,
+        compiled_expr: ScalarExpr,
+    ) -> Self {
         Self {
-            field_name,
+            field_name: field_name.into(),
             original_expr,
             compiled_expr,
         }
@@ -44,7 +48,7 @@ impl PhysicalProjectField {
 
     /// Create from a logical ProjectField by compiling the expression
     pub fn from_logical(
-        field_name: String,
+        field_name: impl Into<Arc<str>>,
         original_expr: Expr,
         bindings: &crate::expr::sql_conversion::SchemaBinding,
         custom_func_registry: &CustomFuncRegistry,
@@ -59,7 +63,7 @@ impl PhysicalProjectField {
             .map_err(|e| format!("Failed to compile expression: {}", e))?;
 
         Ok(Self {
-            field_name,
+            field_name: field_name.into(),
             original_expr,
             compiled_expr,
         })

@@ -421,7 +421,7 @@ fn by_index_projection_column_from_field(
     Some(ByIndexProjectionColumn::new(
         source_name.as_str(),
         *column_index,
-        field.field_name.as_str(),
+        Arc::clone(&field.field_name),
     ))
 }
 

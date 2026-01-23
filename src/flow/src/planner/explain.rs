@@ -685,7 +685,7 @@ fn build_physical_node_with_prefix(
             let fields = project
                 .fields
                 .iter()
-                .map(|f| f.field_name.clone())
+                .map(|f| f.field_name.as_ref())
                 .collect::<Vec<_>>();
             info.push(format!("fields=[{}]", fields.join("; ")));
             if project.passthrough_messages {
