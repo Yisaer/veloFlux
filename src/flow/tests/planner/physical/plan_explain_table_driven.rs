@@ -405,6 +405,23 @@ fn plan_explain_with_sinks_table_driven() {
             )],
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*; x]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=memory","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[*; x]"],"operator":"PhysicalProject"}],"id":"PhysicalMemoryCollectionMaterialize_4","info":[],"operator":"PhysicalMemoryCollectionMaterialize"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=memory","topic=demo_collection","kind=collection"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
+        Case {
+            name: "memory_bytes_sink_does_not_insert_materialize",
+            sql: "SELECT a + 1 FROM stream",
+            sinks: vec![PipelineSink::new(
+                "test_sink",
+                PipelineSinkConnector::new(
+                    "test_connector",
+                    SinkConnectorConfig::Memory(MemorySinkConfig::new(
+                        "test_sink",
+                        "demo_bytes",
+                        MemoryTopicKind::Bytes,
+                    )),
+                    SinkEncoderConfig::json(),
+                ),
+            )],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a + 1]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=memory","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a + 1]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=memory","topic=demo_bytes","kind=bytes"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+        },
     ];
 
     for case in cases {
