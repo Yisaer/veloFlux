@@ -2,8 +2,8 @@ use datatypes::{
     ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
     StructType,
 };
-use flow::catalog::MockStreamProps;
 use flow::catalog::MemoryStreamProps;
+use flow::catalog::MockStreamProps;
 use flow::connector::{MemorySinkConfig, MemoryTopicKind};
 use flow::planner::logical::create_logical_plan;
 use flow::planner::sink::CustomSinkConnectorConfig;

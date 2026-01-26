@@ -2,10 +2,10 @@ use datatypes::{
     ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
     StructType,
 };
+use flow::catalog::MemoryStreamProps;
 use flow::planner::logical::create_logical_plan;
 use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
-use flow::catalog::MemoryStreamProps;
 use flow::{
     ExplainReport, MqttStreamProps, NopSinkConfig, PipelineSink, PipelineSinkConnector,
     SinkConnectorConfig, SinkEncoderConfig, StreamDecoderConfig, StreamDefinition, StreamProps,

@@ -55,6 +55,27 @@ The memory topic kind and stream decoder determine what the source expects:
   - The source ingests `Collection` from the topic.
   - The stream must be created with `decoder.type = "none"`.
   - The physical plan does **not** insert a decoder node.
+  - The logical optimizer preserves the stream **full schema** (no schema pruning) to keep
+    `ColumnRef::ByIndex(source_name, idx)` semantics stable.
+  - The physical plan inserts a **layout normalization** node right after the datasource:
+    `PhysicalCollectionLayoutNormalize`.
+
+### Collection Layout Normalization (decoder.type = "none")
+
+For collection topics, the memory pub/sub layer does not enforce a schema contract: an upstream
+publisher may send tuples with different message `source` values or different column ordering.
+Downstream physical execution relies on `ColumnRef::ByIndex`, which assumes:
+
+- the tuple contains a message whose `source` matches the stream binding name (e.g. `stream`)
+- the message values are ordered according to the stream full schema
+
+To guarantee correctness, `PhysicalCollectionLayoutNormalize` rewrites each incoming tuple into a
+stable shape:
+
+- Output tuple shape: **`1 message + 0 affiliate`**
+- Output message `source`: the stream binding name (the datasource name used in SQL)
+- Output keys and ordering: **exactly the stream full schema column order**
+- Missing columns: filled with **`NULL`** (a warning is logged)
 
 ## Drop / Lag Behavior
 
@@ -104,4 +125,3 @@ POST /streams
   "props": { "topic": "demo_collection" }
 }
 ```
-
