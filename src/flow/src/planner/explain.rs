@@ -648,6 +648,9 @@ fn build_physical_node_with_prefix(
             info.push(format!("source={}", normalize.output_source_name()));
             info.push(format_schema(normalize.schema().as_ref()));
         }
+        PhysicalPlan::MemoryCollectionMaterialize(_) => {
+            // Intentionally keep this node opaque in EXPLAIN (no column layout dumped).
+        }
         PhysicalPlan::StatefulFunction(stateful) => {
             let mut calls = stateful
                 .calls

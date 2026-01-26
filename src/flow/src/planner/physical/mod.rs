@@ -14,6 +14,7 @@ pub mod physical_decoder;
 pub mod physical_encoder;
 pub mod physical_eventtime_watermark;
 pub mod physical_filter;
+pub mod physical_memory_collection_materialize;
 pub mod physical_order;
 pub mod physical_process_time_watermark;
 pub mod physical_project;
@@ -40,6 +41,7 @@ pub use physical_decoder::PhysicalDecoderEventtimeSpec;
 pub use physical_encoder::PhysicalEncoder;
 pub use physical_eventtime_watermark::PhysicalEventtimeWatermark;
 pub use physical_filter::PhysicalFilter;
+pub use physical_memory_collection_materialize::PhysicalMemoryCollectionMaterialize;
 pub use physical_order::{PhysicalOrder, PhysicalOrderKey};
 pub use physical_process_time_watermark::PhysicalProcessTimeWatermark;
 pub use physical_project::{PhysicalProject, PhysicalProjectField};
@@ -61,6 +63,7 @@ pub enum PhysicalPlan {
     DataSource(PhysicalDataSource),
     Decoder(PhysicalDecoder),
     CollectionLayoutNormalize(PhysicalCollectionLayoutNormalize),
+    MemoryCollectionMaterialize(PhysicalMemoryCollectionMaterialize),
     StatefulFunction(PhysicalStatefulFunction),
     Filter(PhysicalFilter),
     Compute(PhysicalCompute),
@@ -96,6 +99,7 @@ impl PhysicalPlan {
             PhysicalPlan::DataSource(plan) => plan.base.children(),
             PhysicalPlan::Decoder(plan) => plan.base.children(),
             PhysicalPlan::CollectionLayoutNormalize(plan) => plan.base.children(),
+            PhysicalPlan::MemoryCollectionMaterialize(plan) => plan.base.children(),
             PhysicalPlan::StatefulFunction(plan) => plan.base.children(),
             PhysicalPlan::Filter(plan) => plan.base.children(),
             PhysicalPlan::Compute(plan) => plan.base.children(),
@@ -127,6 +131,7 @@ impl PhysicalPlan {
             PhysicalPlan::DataSource(_) => "PhysicalDataSource",
             PhysicalPlan::Decoder(_) => "PhysicalDecoder",
             PhysicalPlan::CollectionLayoutNormalize(_) => "PhysicalCollectionLayoutNormalize",
+            PhysicalPlan::MemoryCollectionMaterialize(_) => "PhysicalMemoryCollectionMaterialize",
             PhysicalPlan::StatefulFunction(_) => "PhysicalStatefulFunction",
             PhysicalPlan::Filter(_) => "PhysicalFilter",
             PhysicalPlan::Compute(_) => "PhysicalCompute",
@@ -158,6 +163,7 @@ impl PhysicalPlan {
             PhysicalPlan::DataSource(plan) => plan.base.index(),
             PhysicalPlan::Decoder(plan) => plan.base.index(),
             PhysicalPlan::CollectionLayoutNormalize(plan) => plan.base.index(),
+            PhysicalPlan::MemoryCollectionMaterialize(plan) => plan.base.index(),
             PhysicalPlan::StatefulFunction(plan) => plan.base.index(),
             PhysicalPlan::Filter(plan) => plan.base.index(),
             PhysicalPlan::Compute(plan) => plan.base.index(),
@@ -208,6 +214,7 @@ impl PhysicalPlan {
             PhysicalPlan::DataSource(plan) => &mut plan.base.children,
             PhysicalPlan::Decoder(plan) => &mut plan.base.children,
             PhysicalPlan::CollectionLayoutNormalize(plan) => &mut plan.base.children,
+            PhysicalPlan::MemoryCollectionMaterialize(plan) => &mut plan.base.children,
             PhysicalPlan::StatefulFunction(plan) => &mut plan.base.children,
             PhysicalPlan::Filter(plan) => &mut plan.base.children,
             PhysicalPlan::Compute(plan) => &mut plan.base.children,

@@ -14,10 +14,10 @@ use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
     PhysicalAggregation, PhysicalBatch, PhysicalCompute, PhysicalDataSink, PhysicalDataSource,
     PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEncoder, PhysicalEventtimeWatermark,
-    PhysicalFilter, PhysicalOrder, PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark,
-    PhysicalProject, PhysicalResultCollect, PhysicalSampler, PhysicalSharedStream,
-    PhysicalSinkConnector, PhysicalStatefulFunction, StatefulCall, WatermarkConfig,
-    WatermarkStrategy,
+    PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder, PhysicalOrderKey,
+    PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect,
+    PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector, PhysicalStatefulFunction,
+    StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
@@ -45,6 +45,7 @@ impl Default for PhysicalPlanBuildOptions {
 pub struct PhysicalPlanBuilder {
     next_index: i64,
     node_cache: std::collections::HashMap<i64, Arc<PhysicalPlan>>,
+    memory_collection_materialize_cache: std::collections::HashMap<i64, Arc<PhysicalPlan>>,
 }
 
 impl PhysicalPlanBuilder {
@@ -52,6 +53,7 @@ impl PhysicalPlanBuilder {
         Self {
             next_index: 0,
             node_cache: std::collections::HashMap::new(),
+            memory_collection_materialize_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -59,6 +61,7 @@ impl PhysicalPlanBuilder {
         Self {
             next_index: start_index,
             node_cache: std::collections::HashMap::new(),
+            memory_collection_materialize_cache: std::collections::HashMap::new(),
         }
     }
 
@@ -74,6 +77,25 @@ impl PhysicalPlanBuilder {
 
     pub fn get_cached_node(&self, logical_index: i64) -> Option<Arc<PhysicalPlan>> {
         self.node_cache.get(&logical_index).cloned()
+    }
+
+    pub fn get_or_create_memory_collection_materialize(
+        &mut self,
+        child: Arc<PhysicalPlan>,
+        output_schema: crate::planner::physical::output_schema::OutputSchema,
+    ) -> Arc<PhysicalPlan> {
+        let key = child.get_plan_index();
+        if let Some(cached) = self.memory_collection_materialize_cache.get(&key) {
+            return Arc::clone(cached);
+        }
+
+        let index = self.allocate_index();
+        let plan = Arc::new(PhysicalPlan::MemoryCollectionMaterialize(
+            PhysicalMemoryCollectionMaterialize::new(output_schema, child, index),
+        ));
+        self.memory_collection_materialize_cache
+            .insert(key, Arc::clone(&plan));
+        plan
     }
 }
 
@@ -949,9 +971,10 @@ fn add_regular_encoder_with_builder(
         connector.encoder.kind(),
         crate::planner::sink::SinkEncoderKind::None
     ) {
-        let mut connector_config = connector.connector.clone();
+        let connector_config = connector.connector.clone();
+        let mut sink_input = encoder_input;
 
-        if let crate::planner::sink::SinkConnectorConfig::Memory(cfg) = &mut connector_config {
+        if let crate::planner::sink::SinkConnectorConfig::Memory(cfg) = &connector_config {
             match cfg.kind {
                 crate::connector::MemoryTopicKind::Bytes => {
                     return Err(format!(
@@ -960,15 +983,16 @@ fn add_regular_encoder_with_builder(
                     ));
                 }
                 crate::connector::MemoryTopicKind::Collection => {
-                    let output_schema = encoder_input.output_schema()?;
+                    let output_schema = sink_input.output_schema()?;
                     validate_unique_output_columns(sink.sink_id.as_str(), &output_schema)?;
-                    *cfg = cfg.clone().with_collection_output_schema(output_schema);
+                    sink_input = builder
+                        .get_or_create_memory_collection_materialize(sink_input, output_schema);
                 }
             }
         }
 
         Ok((
-            encoder_input,
+            sink_input,
             PhysicalSinkConnector::new(
                 sink.sink_id.clone(),
                 sink.forward_to_result,

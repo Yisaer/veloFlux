@@ -52,15 +52,17 @@ The sink uses `encoder.type` to decide which topic kind it publishes:
 
 The manager validates that the topic exists and that its declared kind matches the encoder mode.
 
-## Collection Layout Normalization (encoder.type = "none")
+## Collection Materialization (encoder.type = "none")
 
-When publishing to a `collection` topic, the sink normalizes each input row (`Tuple`) into a
-stable layout, so downstream pipelines can rely on a consistent column name + order.
+When publishing to a `collection` topic, the physical plan inserts a dedicated node
+`PhysicalMemoryCollectionMaterialize` right before the sink. This node reshapes each input row
+(`Tuple`) into a stable layout, so downstream pipelines can rely on a consistent column name + order.
 
 Behavior:
 
 - The output row is rewritten to **1 Message + 0 affiliate**:
-  - Message `source` is set to the memory topic name.
+  - Message `source` is left empty (`""`). Downstream memory sources normalize the source name to
+    the stream binding (SQL datasource name).
   - Message column **names and order** follow the pipeline's planned output schema (the `SELECT`
     field order after wildcard expansion and aliasing).
 - The sink does **not** evaluate expressions. It only copies values already materialized by
@@ -74,9 +76,9 @@ Behavior:
 
 Implementation note:
 
-- For performance, the sink resolves column getters once using the first observed tuple layout and
-  then reads values by index for subsequent rows. Columns that cannot be resolved are treated as
-  permanently missing for that sink instance.
+- For performance, `PhysicalMemoryCollectionMaterialize` resolves column getters once using the first
+  observed tuple layout and then reads values by index for subsequent rows. Columns that cannot be
+  resolved are treated as permanently missing for that processor instance.
 
 ## Drop / Lag Behavior (Subscribers)
 
