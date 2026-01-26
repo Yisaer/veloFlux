@@ -134,3 +134,126 @@ impl AggregateAccumulator for SumAccumulator {
         self.acc.clone().unwrap_or(Value::Null)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datatypes::{Float64Type, Int64Type, StringType};
+
+    #[test]
+    fn sum_function_name() {
+        let sum = SumFunction::new();
+        assert_eq!(sum.name(), "sum");
+    }
+
+    #[test]
+    fn sum_function_supports_incremental() {
+        let sum = SumFunction::new();
+        assert!(sum.supports_incremental());
+    }
+
+    #[test]
+    fn sum_function_return_type_int64() {
+        let sum = SumFunction::new();
+        let result = sum.return_type(&[ConcreteDatatype::Int64(Int64Type)]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sum_function_return_type_float64() {
+        let sum = SumFunction::new();
+        let result = sum.return_type(&[ConcreteDatatype::Float64(Float64Type)]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn sum_function_return_type_error_no_args() {
+        let sum = SumFunction::new();
+        let result = sum.return_type(&[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exactly one argument"));
+    }
+
+    #[test]
+    fn sum_function_return_type_error_non_numeric() {
+        let sum = SumFunction::new();
+        let result = sum.return_type(&[ConcreteDatatype::String(StringType)]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not support"));
+    }
+
+    #[test]
+    fn sum_accumulator_sum_integers() {
+        let sum = SumFunction::new();
+        let mut acc = sum.create_accumulator();
+
+        acc.update(&[Value::Int64(10)]).unwrap();
+        acc.update(&[Value::Int64(20)]).unwrap();
+        acc.update(&[Value::Int64(30)]).unwrap();
+
+        assert_eq!(acc.finalize(), Value::Int64(60));
+    }
+
+    #[test]
+    fn sum_accumulator_sum_floats() {
+        let sum = SumFunction::new();
+        let mut acc = sum.create_accumulator();
+
+        acc.update(&[Value::Float64(1.5)]).unwrap();
+        acc.update(&[Value::Float64(2.5)]).unwrap();
+
+        assert_eq!(acc.finalize(), Value::Float64(4.0));
+    }
+
+    #[test]
+    fn sum_accumulator_ignores_nulls() {
+        let sum = SumFunction::new();
+        let mut acc = sum.create_accumulator();
+
+        acc.update(&[Value::Int64(10)]).unwrap();
+        acc.update(&[Value::Null]).unwrap();
+        acc.update(&[Value::Int64(20)]).unwrap();
+
+        assert_eq!(acc.finalize(), Value::Int64(30));
+    }
+
+    #[test]
+    fn sum_accumulator_all_nulls_returns_null() {
+        let sum = SumFunction::new();
+        let mut acc = sum.create_accumulator();
+
+        acc.update(&[Value::Null]).unwrap();
+        acc.update(&[Value::Null]).unwrap();
+
+        assert_eq!(acc.finalize(), Value::Null);
+    }
+
+    #[test]
+    fn sum_accumulator_empty_returns_null() {
+        let sum = SumFunction::new();
+        let acc = sum.create_accumulator();
+        assert_eq!(acc.finalize(), Value::Null);
+    }
+
+    #[test]
+    fn sum_accumulator_update_no_args_error() {
+        let sum = SumFunction::new();
+        let mut acc = sum.create_accumulator();
+        let result = acc.update(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn sum_function_def_returns_valid_def() {
+        let def = sum_function_def();
+        assert_eq!(def.name, "sum");
+        assert_eq!(def.kind, FunctionKind::Aggregate);
+        assert!(def.aggregate.is_some());
+    }
+
+    #[test]
+    fn sum_function_default() {
+        let sum = SumFunction::default();
+        assert_eq!(sum.name(), "sum");
+    }
+}

@@ -926,6 +926,413 @@ mod tests {
             );
         }
     }
+
+    // ========== UnaryFunc Tests ==========
+
+    #[test]
+    fn unary_not_on_bool() {
+        use super::UnaryFunc;
+        assert_eq!(
+            UnaryFunc::Not.eval_unary(Value::Bool(true)).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            UnaryFunc::Not.eval_unary(Value::Bool(false)).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn unary_not_type_error() {
+        use super::UnaryFunc;
+        let result = UnaryFunc::Not.eval_unary(Value::Int64(1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unary_neg_integers() {
+        use super::UnaryFunc;
+        assert_eq!(
+            UnaryFunc::Neg.eval_unary(Value::Int64(42)).unwrap(),
+            Value::Int64(-42)
+        );
+        assert_eq!(
+            UnaryFunc::Neg.eval_unary(Value::Int32(10)).unwrap(),
+            Value::Int32(-10)
+        );
+        assert_eq!(
+            UnaryFunc::Neg.eval_unary(Value::Int16(5)).unwrap(),
+            Value::Int16(-5)
+        );
+        assert_eq!(
+            UnaryFunc::Neg.eval_unary(Value::Int8(3)).unwrap(),
+            Value::Int8(-3)
+        );
+    }
+
+    #[test]
+    fn unary_neg_floats() {
+        use super::UnaryFunc;
+        assert_eq!(
+            UnaryFunc::Neg.eval_unary(Value::Float64(3.14)).unwrap(),
+            Value::Float64(-3.14)
+        );
+        assert_eq!(
+            UnaryFunc::Neg.eval_unary(Value::Float32(2.5)).unwrap(),
+            Value::Float32(-2.5)
+        );
+    }
+
+    #[test]
+    fn unary_neg_null() {
+        use super::UnaryFunc;
+        assert_eq!(UnaryFunc::Neg.eval_unary(Value::Null).unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn unary_neg_type_error() {
+        use super::UnaryFunc;
+        let result = UnaryFunc::Neg.eval_unary(Value::String("hello".to_string()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn unary_is_null() {
+        use super::UnaryFunc;
+        assert_eq!(
+            UnaryFunc::IsNull.eval_unary(Value::Null).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            UnaryFunc::IsNull.eval_unary(Value::Int64(1)).unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn unary_is_true_is_false() {
+        use super::UnaryFunc;
+        assert_eq!(
+            UnaryFunc::IsTrue.eval_unary(Value::Bool(true)).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            UnaryFunc::IsTrue.eval_unary(Value::Bool(false)).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            UnaryFunc::IsFalse.eval_unary(Value::Bool(true)).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            UnaryFunc::IsFalse.eval_unary(Value::Bool(false)).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn unary_is_true_type_error() {
+        use super::UnaryFunc;
+        assert!(UnaryFunc::IsTrue.eval_unary(Value::Int64(1)).is_err());
+        assert!(UnaryFunc::IsFalse.eval_unary(Value::Int64(0)).is_err());
+    }
+
+    #[test]
+    fn unary_cast_int64() {
+        use super::UnaryFunc;
+        use datatypes::{ConcreteDatatype, Int64Type};
+        let cast = UnaryFunc::Cast(ConcreteDatatype::Int64(Int64Type));
+        // Same type cast should work
+        assert_eq!(cast.eval_unary(Value::Int64(42)).unwrap(), Value::Int64(42));
+    }
+
+    #[test]
+    fn unary_cast_float64() {
+        use super::UnaryFunc;
+        use datatypes::{ConcreteDatatype, Float64Type};
+        let cast = UnaryFunc::Cast(ConcreteDatatype::Float64(Float64Type));
+        assert_eq!(
+            cast.eval_unary(Value::Int64(42)).unwrap(),
+            Value::Float64(42.0)
+        );
+    }
+
+    #[test]
+    fn unary_cast_string() {
+        use super::UnaryFunc;
+        use datatypes::{ConcreteDatatype, StringType};
+        let cast = UnaryFunc::Cast(ConcreteDatatype::String(StringType));
+        // Same type cast should work
+        assert_eq!(
+            cast.eval_unary(Value::String("hello".to_string())).unwrap(),
+            Value::String("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn unary_cast_fails_incompatible() {
+        use super::UnaryFunc;
+        use datatypes::{ConcreteDatatype, StringType};
+        let cast = UnaryFunc::Cast(ConcreteDatatype::String(StringType));
+        // Incompatible cast should fail
+        let result = cast.eval_unary(Value::Int64(123));
+        assert!(result.is_err());
+    }
+
+    // ========== BinaryFunc Arithmetic Tests ==========
+
+    #[test]
+    fn binary_add_integers() {
+        assert_eq!(
+            BinaryFunc::Add
+                .eval_binary(Value::Int64(10), Value::Int64(5))
+                .unwrap(),
+            Value::Int64(15)
+        );
+        assert_eq!(
+            BinaryFunc::Add
+                .eval_binary(Value::Int32(10), Value::Int32(5))
+                .unwrap(),
+            Value::Int32(15)
+        );
+    }
+
+    #[test]
+    fn binary_add_floats() {
+        assert_eq!(
+            BinaryFunc::Add
+                .eval_binary(Value::Float64(1.5), Value::Float64(2.5))
+                .unwrap(),
+            Value::Float64(4.0)
+        );
+    }
+
+    #[test]
+    fn binary_add_strings() {
+        assert_eq!(
+            BinaryFunc::Add
+                .eval_binary(
+                    Value::String("hello".to_string()),
+                    Value::String(" world".to_string())
+                )
+                .unwrap(),
+            Value::String("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn binary_sub_integers() {
+        assert_eq!(
+            BinaryFunc::Sub
+                .eval_binary(Value::Int64(10), Value::Int64(3))
+                .unwrap(),
+            Value::Int64(7)
+        );
+    }
+
+    #[test]
+    fn binary_mul_integers() {
+        assert_eq!(
+            BinaryFunc::Mul
+                .eval_binary(Value::Int64(6), Value::Int64(7))
+                .unwrap(),
+            Value::Int64(42)
+        );
+    }
+
+    #[test]
+    fn binary_div_integers() {
+        assert_eq!(
+            BinaryFunc::Div
+                .eval_binary(Value::Int64(10), Value::Int64(4))
+                .unwrap(),
+            Value::Float64(2.5)
+        );
+    }
+
+    #[test]
+    fn binary_div_by_zero_error() {
+        let result = BinaryFunc::Div.eval_binary(Value::Int64(10), Value::Int64(0));
+        assert!(matches!(result, Err(super::EvalError::DivisionByZero)));
+    }
+
+    #[test]
+    fn binary_mod_integers() {
+        assert_eq!(
+            BinaryFunc::Mod
+                .eval_binary(Value::Int64(10), Value::Int64(3))
+                .unwrap(),
+            Value::Int64(1)
+        );
+    }
+
+    #[test]
+    fn binary_mod_by_zero_error() {
+        let result = BinaryFunc::Mod.eval_binary(Value::Int64(10), Value::Int64(0));
+        assert!(matches!(result, Err(super::EvalError::DivisionByZero)));
+    }
+
+    // ========== BinaryFunc Comparison Tests ==========
+
+    #[test]
+    fn binary_comparisons_int64() {
+        assert_eq!(
+            BinaryFunc::Lt
+                .eval_binary(Value::Int64(5), Value::Int64(10))
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            BinaryFunc::Lte
+                .eval_binary(Value::Int64(5), Value::Int64(5))
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            BinaryFunc::Gt
+                .eval_binary(Value::Int64(10), Value::Int64(5))
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            BinaryFunc::Gte
+                .eval_binary(Value::Int64(10), Value::Int64(10))
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn binary_equality_int64() {
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::Int64(42), Value::Int64(42))
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            BinaryFunc::Eq
+                .eval_binary(Value::Int64(42), Value::Int64(43))
+                .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            BinaryFunc::NotEq
+                .eval_binary(Value::Int64(42), Value::Int64(43))
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    // ========== BinaryFunc Logical Tests ==========
+
+    #[test]
+    fn binary_and_or() {
+        assert_eq!(
+            BinaryFunc::And
+                .eval_binary(Value::Bool(true), Value::Bool(true))
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            BinaryFunc::And
+                .eval_binary(Value::Bool(true), Value::Bool(false))
+                .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            BinaryFunc::Or
+                .eval_binary(Value::Bool(false), Value::Bool(true))
+                .unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            BinaryFunc::Or
+                .eval_binary(Value::Bool(false), Value::Bool(false))
+                .unwrap(),
+            Value::Bool(false)
+        );
+    }
+
+    #[test]
+    fn binary_and_or_with_null() {
+        assert_eq!(
+            BinaryFunc::And
+                .eval_binary(Value::Null, Value::Bool(true))
+                .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            BinaryFunc::Or
+                .eval_binary(Value::Null, Value::Bool(true))
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn binary_and_or_type_error() {
+        let result = BinaryFunc::And.eval_binary(Value::Int64(1), Value::Bool(true));
+        assert!(result.is_err());
+        let result = BinaryFunc::Or.eval_binary(Value::Bool(true), Value::Int64(1));
+        assert!(result.is_err());
+    }
+
+    // ========== EvalError Display Tests ==========
+
+    #[test]
+    fn eval_error_display() {
+        use super::EvalError;
+        let err = EvalError::TypeMismatch {
+            expected: "Bool".to_string(),
+            actual: "Int64".to_string(),
+        };
+        assert!(err.to_string().contains("Type mismatch"));
+
+        let err = EvalError::CastFailed {
+            from: "String".to_string(),
+            to: "Int64".to_string(),
+        };
+        assert!(err.to_string().contains("cast"));
+
+        let err = EvalError::DivisionByZero;
+        assert!(err.to_string().contains("Division by zero"));
+
+        let err = EvalError::IndexOutOfBounds {
+            index: 5,
+            length: 3,
+        };
+        assert!(err.to_string().contains("out of bounds"));
+
+        let err = EvalError::FieldNotFound {
+            field_name: "foo".to_string(),
+            struct_type: "Bar".to_string(),
+        };
+        assert!(err.to_string().contains("not found"));
+
+        let err = EvalError::InvalidIndexType {
+            expected: "Int64".to_string(),
+            actual: "String".to_string(),
+        };
+        assert!(err.to_string().contains("Invalid index type"));
+
+        let err = EvalError::ListIndexOutOfBounds {
+            index: 10,
+            list_length: 5,
+        };
+        assert!(err.to_string().contains("List index"));
+
+        let err = EvalError::NotImplemented {
+            feature: "test".to_string(),
+        };
+        assert!(err.to_string().contains("not implemented"));
+
+        let err = EvalError::ColumnNotFound {
+            source: "src".to_string(),
+            column: "col".to_string(),
+        };
+        assert!(err.to_string().contains("Column not found"));
+    }
 }
 
 /// Error type for expression evaluation

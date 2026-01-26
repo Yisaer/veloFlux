@@ -56,3 +56,69 @@ impl AggregateFunction for LastRowFunction {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datatypes::Int64Type;
+
+    #[test]
+    fn last_row_function_name() {
+        let func = LastRowFunction::new();
+        assert_eq!(func.name(), "last_row");
+    }
+
+    #[test]
+    fn last_row_function_default() {
+        let func = LastRowFunction::default();
+        assert_eq!(func.name(), "last_row");
+    }
+
+    #[test]
+    fn last_row_function_supports_incremental() {
+        let func = LastRowFunction::new();
+        assert!(func.supports_incremental());
+    }
+
+    #[test]
+    fn last_row_function_return_type_valid() {
+        let func = LastRowFunction::new();
+        let result = func.return_type(&[ConcreteDatatype::Int64(Int64Type)]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn last_row_function_return_type_no_args() {
+        let func = LastRowFunction::new();
+        let result = func.return_type(&[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exactly 1 argument"));
+    }
+
+    #[test]
+    fn last_row_accumulator_returns_last() {
+        let func = LastRowFunction::new();
+        let mut acc = func.create_accumulator();
+
+        acc.update(&[Value::Int64(1)]).unwrap();
+        acc.update(&[Value::Int64(2)]).unwrap();
+        acc.update(&[Value::Int64(3)]).unwrap();
+
+        assert_eq!(acc.finalize(), Value::Int64(3));
+    }
+
+    #[test]
+    fn last_row_accumulator_empty_returns_null() {
+        let func = LastRowFunction::new();
+        let acc = func.create_accumulator();
+        assert_eq!(acc.finalize(), Value::Null);
+    }
+
+    #[test]
+    fn last_row_accumulator_no_args_error() {
+        let func = LastRowFunction::new();
+        let mut acc = func.create_accumulator();
+        let result = acc.update(&[]);
+        assert!(result.is_err());
+    }
+}
