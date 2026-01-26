@@ -27,6 +27,10 @@ pub struct SchemaBindingEntry {
 pub enum SourceBindingKind {
     Regular,
     Shared,
+    /// A memory stream consumed in collection mode (decoder.type = "none").
+    ///
+    /// This kind must preserve the full schema to keep `ColumnRef::ByIndex` semantics stable.
+    MemoryCollection,
 }
 
 impl SchemaBinding {
@@ -68,6 +72,10 @@ impl SchemaBindingEntry {
 
     pub fn is_shared(&self) -> bool {
         matches!(self.kind, SourceBindingKind::Shared)
+    }
+
+    pub fn is_memory_collection(&self) -> bool {
+        matches!(self.kind, SourceBindingKind::MemoryCollection)
     }
 }
 

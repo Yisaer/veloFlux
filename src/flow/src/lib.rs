@@ -214,6 +214,11 @@ fn build_schema_binding(
         let kind =
             if futures::executor::block_on(shared_stream_registry.is_registered(&source.name)) {
                 SourceBindingKind::Shared
+            } else if definition.stream_type() == crate::catalog::StreamType::Memory
+                && definition.decoder().kind() == "none"
+            {
+                // Memory collection sources must preserve the full schema for ByIndex correctness.
+                SourceBindingKind::MemoryCollection
             } else {
                 SourceBindingKind::Regular
             };
