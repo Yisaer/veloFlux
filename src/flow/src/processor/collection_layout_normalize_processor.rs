@@ -9,7 +9,7 @@ use crate::processor::base::{
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
 use futures::stream::StreamExt;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -18,20 +18,12 @@ pub struct CollectionLayoutNormalizeProcessor {
     id: String,
     output_source_name: Arc<str>,
     keys: Arc<[Arc<str>]>,
-    resolved: Option<Vec<ResolvedGetter>>,
 
     inputs: Vec<broadcast::Receiver<StreamData>>,
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
     stats: Arc<ProcessorStats>,
-}
-
-#[derive(Debug, Clone)]
-enum ResolvedGetter {
-    MessageByIndex { msg_idx: usize, key_idx: usize },
-    Affiliate { column_name: Arc<str> },
-    Missing,
 }
 
 impl CollectionLayoutNormalizeProcessor {
@@ -50,7 +42,6 @@ impl CollectionLayoutNormalizeProcessor {
             id: id.into(),
             output_source_name: Arc::<str>::from(spec.output_source_name()),
             keys: Arc::from(keys),
-            resolved: None,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -73,75 +64,13 @@ impl CollectionLayoutNormalizeProcessor {
     }
 }
 
-fn resolve_getters(keys: &[Arc<str>], sample: &Tuple) -> Vec<ResolvedGetter> {
-    let mut by_name = std::collections::HashMap::<&str, (usize, usize)>::new();
-    for (msg_idx, msg) in sample.messages().iter().enumerate() {
-        for (key_idx, (key, _)) in msg.entries().enumerate() {
-            by_name.entry(key).or_insert((msg_idx, key_idx));
+fn value_by_name_with_index(msg: &Message, expected: &str) -> Option<(usize, Arc<Value>)> {
+    let mut idx = 0;
+    while let Some((key, value)) = msg.entry_by_index(idx) {
+        if key.as_ref() == expected {
+            return Some((idx, Arc::clone(value)));
         }
-    }
-
-    keys.iter()
-        .map(|col| {
-            let name = col.as_ref();
-            if let Some((msg_idx, key_idx)) = by_name.get(name).copied() {
-                return ResolvedGetter::MessageByIndex { msg_idx, key_idx };
-            }
-            if sample.affiliate().and_then(|aff| aff.value(name)).is_some() {
-                return ResolvedGetter::Affiliate {
-                    column_name: Arc::clone(col),
-                };
-            }
-            ResolvedGetter::Missing
-        })
-        .collect()
-}
-
-fn resolved_value(tuple: &Tuple, getter: &ResolvedGetter, expected: &str) -> Option<Arc<Value>> {
-    match getter {
-        ResolvedGetter::MessageByIndex { msg_idx, key_idx } => tuple
-            .messages()
-            .get(*msg_idx)
-            .and_then(|msg| msg.entry_by_index(*key_idx))
-            .and_then(|(key, value)| {
-                if key.as_ref() == expected {
-                    Some(Arc::clone(value))
-                } else {
-                    None
-                }
-            }),
-        ResolvedGetter::Affiliate { column_name } => tuple
-            .affiliate()
-            .and_then(|aff| aff.value(column_name.as_ref()))
-            .map(|v| Arc::new(v.clone())),
-        ResolvedGetter::Missing => None,
-    }
-}
-
-fn fallback_value(tuple: &Tuple, expected: &str) -> Option<(Arc<Value>, ResolvedGetter)> {
-    for (msg_idx, msg) in tuple.messages().iter().enumerate() {
-        if let Some((_, value)) = msg.entry_by_name(expected) {
-            if let Some((key_idx, _)) = msg.entries().enumerate().find(|(_, (k, _))| *k == expected)
-            {
-                return Some((
-                    Arc::clone(value),
-                    ResolvedGetter::MessageByIndex { msg_idx, key_idx },
-                ));
-            }
-            return Some((Arc::clone(value), ResolvedGetter::Missing));
-        }
-    }
-    if let Some(value) = tuple
-        .affiliate()
-        .and_then(|aff| aff.value(expected))
-        .cloned()
-    {
-        return Some((
-            Arc::new(value),
-            ResolvedGetter::Affiliate {
-                column_name: Arc::<str>::from(expected),
-            },
-        ));
+        idx += 1;
     }
     None
 }
@@ -150,34 +79,76 @@ fn normalize_collection(
     schema_keys: &[Arc<str>],
     output_source_name: &Arc<str>,
     shared_keys: &Arc<[Arc<str>]>,
-    resolved: &mut Option<Vec<ResolvedGetter>>,
     input: &dyn Collection,
     processor_id: &str,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
-    if resolved.is_none() {
-        if let Some(sample) = input.rows().first() {
-            *resolved = Some(resolve_getters(schema_keys, sample));
+    if input.is_empty() {
+        let batch = RecordBatch::new(Vec::new()).map_err(|err| {
+            ProcessorError::ProcessingError(format!("invalid record batch: {err}"))
+        })?;
+        return Ok(Box::new(batch));
+    }
+
+    let mut key_indices = vec![None; schema_keys.len()];
+    let mut saw_non_single_message = false;
+    let mut saw_empty_messages = false;
+
+    let mut schema_pos = HashMap::<&str, usize>::with_capacity(schema_keys.len());
+    for (idx, key) in schema_keys.iter().enumerate() {
+        schema_pos.insert(key.as_ref(), idx);
+    }
+
+    if let Some(sample) = input.rows().first() {
+        if sample.messages().len() != 1 {
+            saw_non_single_message = true;
+        }
+        if let Some(msg) = sample.messages().first() {
+            for (idx, (key, _)) in msg.entries().enumerate() {
+                if let Some(pos) = schema_pos.get(key).copied() {
+                    key_indices[pos] = Some(idx);
+                }
+            }
+        } else {
+            saw_empty_messages = true;
         }
     }
 
     let mut missing = BTreeSet::<String>::new();
     let mut rows = Vec::with_capacity(input.num_rows());
+    let null = Arc::new(Value::Null);
     for tuple in input.rows() {
+        if tuple.messages().len() != 1 {
+            saw_non_single_message = true;
+        }
+        let input_msg = tuple.messages().first();
+        if input_msg.is_none() {
+            saw_empty_messages = true;
+        }
+
         let mut values = Vec::with_capacity(schema_keys.len());
         for (idx, col_name) in schema_keys.iter().enumerate() {
             let expected = col_name.as_ref();
-            let resolved_item = resolved.as_mut().and_then(|r| r.get(idx).cloned());
 
-            let mut value = resolved_item
-                .as_ref()
-                .and_then(|g| resolved_value(tuple, g, expected));
+            let mut value = input_msg.and_then(|msg| {
+                if let Some(key_idx) = key_indices.get(idx).and_then(|v| *v) {
+                    msg.entry_by_index(key_idx).and_then(|(key, value)| {
+                        if key.as_ref() == expected {
+                            Some(Arc::clone(value))
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            });
 
             if value.is_none() {
-                if let Some((found, new_getter)) = fallback_value(tuple, expected) {
-                    value = Some(found);
-                    if let Some(resolved_vec) = resolved.as_mut() {
-                        if let Some(slot) = resolved_vec.get_mut(idx) {
-                            *slot = new_getter;
+                if let Some(msg) = input_msg {
+                    if let Some((found_idx, found)) = value_by_name_with_index(msg, expected) {
+                        value = Some(found);
+                        if let Some(slot) = key_indices.get_mut(idx) {
+                            *slot = Some(found_idx);
                         }
                     }
                 }
@@ -186,7 +157,7 @@ fn normalize_collection(
             if value.is_none() {
                 missing.insert(expected.to_string());
             }
-            values.push(value.unwrap_or_else(|| Arc::new(Value::Null)));
+            values.push(value.unwrap_or_else(|| Arc::clone(&null)));
         }
 
         let msg = Arc::new(Message::new_shared_keys(
@@ -202,6 +173,18 @@ fn normalize_collection(
             processor_id = %processor_id,
             missing_columns = ?missing,
             "collection layout normalize filled NULL for missing columns"
+        );
+    }
+    if saw_non_single_message {
+        tracing::warn!(
+            processor_id = %processor_id,
+            "collection layout normalize expected single-message tuples; extra messages are ignored"
+        );
+    }
+    if saw_empty_messages {
+        tracing::warn!(
+            processor_id = %processor_id,
+            "collection layout normalize received tuples without messages"
         );
     }
 
@@ -229,7 +212,6 @@ impl Processor for CollectionLayoutNormalizeProcessor {
         let schema_keys: Vec<Arc<str>> = self.keys.iter().cloned().collect();
         let output_source_name = Arc::clone(&self.output_source_name);
         let shared_keys = Arc::clone(&self.keys);
-        let mut resolved = self.resolved.take();
         let stats = Arc::clone(&self.stats);
 
         tracing::info!(processor_id = %id, "collection layout normalize starting");
@@ -269,7 +251,6 @@ impl Processor for CollectionLayoutNormalizeProcessor {
                                             &schema_keys,
                                             &output_source_name,
                                             &shared_keys,
-                                            &mut resolved,
                                             collection.as_ref(),
                                             &id,
                                         ) {
@@ -297,13 +278,7 @@ impl Processor for CollectionLayoutNormalizeProcessor {
                                         }
                                     }
                                     other => {
-                                        let is_terminal = other.is_terminal();
                                         send_with_backpressure(&output, other).await?;
-                                        if is_terminal {
-                                            tracing::info!(processor_id = %id, "received StreamEnd (data)");
-                                            tracing::info!(processor_id = %id, "stopped");
-                                            return Ok(());
-                                        }
                                     }
                                 }
                             }
