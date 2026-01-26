@@ -31,6 +31,10 @@ pub fn parse_rotated_filename(file_name: &str, expected_stem: &str) -> Option<Ro
     if !file_name.ends_with(suffix) {
         return None;
     }
+    // Check that file_name is long enough to contain prefix + suffix + at least some content
+    if file_name.len() <= prefix.len() + suffix.len() {
+        return None;
+    }
     let middle = &file_name[prefix.len()..file_name.len() - suffix.len()];
     let (ts_raw, seq_raw) = middle.rsplit_once('.')?;
     if seq_raw.len() != 3 || !seq_raw.chars().all(|c| c.is_ascii_digit()) {
@@ -67,5 +71,24 @@ mod tests {
         let ts = OffsetDateTime::from_unix_timestamp(1_735_048_200).unwrap();
         let name = format_rotated_filename("app", ts, 1);
         assert!(parse_rotated_filename(&name, "other").is_none());
+    }
+
+    #[test]
+    fn rejects_short_file_name() {
+        // test.log matches stem "test" but is too short for rotated format
+        assert!(parse_rotated_filename("test.log", "test").is_none());
+    }
+
+    #[test]
+    fn rejects_non_rotated_main_file() {
+        // app.log is the main log file, not a rotated one
+        assert!(parse_rotated_filename("app.log", "app").is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_seq_format() {
+        // Invalid sequence number (not 3 digits)
+        assert!(parse_rotated_filename("app.2024-12-24T00-00-00UTC.1.log", "app").is_none());
+        assert!(parse_rotated_filename("app.2024-12-24T00-00-00UTC.ab1.log", "app").is_none());
     }
 }

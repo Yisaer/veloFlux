@@ -3317,6 +3317,7 @@ dependencies = [
  "storage",
  "sysinfo",
  "telemetry",
+ "tempfile",
  "tikv-jemalloc-ctl",
  "tikv-jemallocator",
  "time",
