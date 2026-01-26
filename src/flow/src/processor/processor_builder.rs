@@ -15,11 +15,11 @@ use crate::processor::{
     AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
     CollectionLayoutNormalizeProcessor, ComputeProcessor, ControlSignal, ControlSourceProcessor,
     DataSourceProcessor, DecoderProcessor, EncoderProcessor, FilterProcessor, Ingress,
-    InstantControlSignal, OrderProcessor, Processor, ProcessorError, ProjectProcessor,
-    ResultCollectProcessor, SamplerProcessor, SharedStreamProcessor, SinkProcessor,
-    SlidingWindowProcessor, StateWindowProcessor, StatefulFunctionProcessor, StreamData,
-    StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
-    WatermarkProcessor,
+    InstantControlSignal, MemoryCollectionMaterializeProcessor, OrderProcessor, Processor,
+    ProcessorError, ProjectProcessor, ResultCollectProcessor, SamplerProcessor,
+    SharedStreamProcessor, SinkProcessor, SlidingWindowProcessor, StateWindowProcessor,
+    StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
+    StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::stateful::StatefulFunctionRegistry;
@@ -51,6 +51,8 @@ pub enum PlanProcessor {
     Decoder(DecoderProcessor),
     /// CollectionLayoutNormalizeProcessor inserted for collection sources that must preserve full schema.
     CollectionLayoutNormalize(CollectionLayoutNormalizeProcessor),
+    /// MemoryCollectionMaterializeProcessor inserted before memory collection sinks.
+    MemoryCollectionMaterialize(MemoryCollectionMaterializeProcessor),
     /// SharedStreamProcessor created from PhysicalSharedStream
     SharedSource(SharedStreamProcessor),
     /// ComputeProcessor created from PhysicalCompute
@@ -216,6 +218,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.id(),
             PlanProcessor::Decoder(p) => p.id(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.id(),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.id(),
             PlanProcessor::SharedSource(p) => p.id(),
             PlanProcessor::Compute(p) => p.id(),
             PlanProcessor::Order(p) => p.id(),
@@ -243,6 +246,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(_) => "datasource",
             PlanProcessor::Decoder(_) => "decoder",
             PlanProcessor::CollectionLayoutNormalize(_) => "collection_layout_normalize",
+            PlanProcessor::MemoryCollectionMaterialize(_) => "memory_collection_materialize",
             PlanProcessor::SharedSource(_) => "shared_source",
             PlanProcessor::Compute(_) => "compute",
             PlanProcessor::Order(_) => "order",
@@ -276,6 +280,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.set_stats(stats),
             PlanProcessor::Decoder(p) => p.set_stats(stats),
             PlanProcessor::CollectionLayoutNormalize(p) => p.set_stats(stats),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.set_stats(stats),
             PlanProcessor::SharedSource(p) => p.set_stats(stats),
             PlanProcessor::Compute(p) => p.set_stats(stats),
             PlanProcessor::Order(p) => p.set_stats(stats),
@@ -304,6 +309,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.start(),
             PlanProcessor::Decoder(p) => p.start(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.start(),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.start(),
             PlanProcessor::SharedSource(p) => p.start(),
             PlanProcessor::Compute(p) => p.start(),
             PlanProcessor::Order(p) => p.start(),
@@ -332,6 +338,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.subscribe_output(),
             PlanProcessor::Decoder(p) => p.subscribe_output(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.subscribe_output(),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.subscribe_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_output(),
             PlanProcessor::Compute(p) => p.subscribe_output(),
             PlanProcessor::Order(p) => p.subscribe_output(),
@@ -360,6 +367,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.subscribe_control_output(),
             PlanProcessor::Decoder(p) => p.subscribe_control_output(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.subscribe_control_output(),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.subscribe_control_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_control_output(),
             PlanProcessor::Compute(p) => p.subscribe_control_output(),
             PlanProcessor::Order(p) => p.subscribe_control_output(),
@@ -388,6 +396,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.add_input(receiver),
             PlanProcessor::Decoder(p) => p.add_input(receiver),
             PlanProcessor::CollectionLayoutNormalize(p) => p.add_input(receiver),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.add_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_input(receiver),
             PlanProcessor::Compute(p) => p.add_input(receiver),
             PlanProcessor::Order(p) => p.add_input(receiver),
@@ -416,6 +425,7 @@ impl PlanProcessor {
             PlanProcessor::DataSource(p) => p.add_control_input(receiver),
             PlanProcessor::Decoder(p) => p.add_control_input(receiver),
             PlanProcessor::CollectionLayoutNormalize(p) => p.add_control_input(receiver),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.add_control_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_control_input(receiver),
             PlanProcessor::Compute(p) => p.add_control_input(receiver),
             PlanProcessor::Order(p) => p.add_control_input(receiver),
@@ -809,6 +819,20 @@ fn create_processor_from_plan_node(
             })?;
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::CollectionLayoutNormalize(processor),
+            ))
+        }
+        PhysicalPlan::MemoryCollectionMaterialize(_) => {
+            let processor = MemoryCollectionMaterializeProcessor::from_physical_plan(
+                processor_id.clone(),
+                Arc::clone(plan),
+            )
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration(
+                    "failed to build MemoryCollectionMaterializeProcessor".into(),
+                )
+            })?;
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::MemoryCollectionMaterialize(processor),
             ))
         }
         PhysicalPlan::SharedStream(shared) => {

@@ -278,12 +278,10 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             info.push(format!("keys=[{}]", keys.join("; ")));
         }
         LogicalPlan::Project(project) => {
-            // Preserve legacy explain behavior: Project prints the output field list only.
-            // (Identity projections like `a` remain `fields=[a]`, not `a = a`.)
             let fields = project
                 .fields
                 .iter()
-                .map(|f| f.field_name.clone())
+                .map(|f| format_project_field(&f.expr, &f.field_name))
                 .collect::<Vec<_>>();
             info.push(format!("fields=[{}]", fields.join("; ")));
         }
@@ -585,6 +583,35 @@ fn format_struct_field_projection_with_decode_projection(
     }
 }
 
+fn format_project_field(expr: &Expr, field_name: &str) -> String {
+    // Keep legacy formatting for internal "mapping" display strings like `stream_struct.b -> c`.
+    if field_name.contains("->") {
+        return field_name.to_string();
+    }
+
+    let expr_str = expr.to_string();
+    if expr_str == field_name {
+        expr_str
+    } else {
+        // Only show `expr as alias` when the output name is a simple identifier.
+        // For derived/system-generated names like `sum(a)` or `lag(a)`, keep the legacy
+        // behavior and print the field name only.
+        let mut chars = field_name.chars();
+        let is_simple_identifier = match chars.next() {
+            Some(c) if c.is_ascii_alphabetic() || c == '_' => {
+                chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+            }
+            _ => false,
+        };
+
+        if is_simple_identifier {
+            format!("{expr_str} as {field_name}")
+        } else {
+            field_name.to_string()
+        }
+    }
+}
+
 fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
     build_physical_node_with_shared_stream_decode_applied(plan, None)
 }
@@ -648,6 +675,9 @@ fn build_physical_node_with_prefix(
             info.push(format!("source={}", normalize.output_source_name()));
             info.push(format_schema(normalize.schema().as_ref()));
         }
+        PhysicalPlan::MemoryCollectionMaterialize(_) => {
+            // Intentionally keep this node opaque in EXPLAIN (no column layout dumped).
+        }
         PhysicalPlan::StatefulFunction(stateful) => {
             let mut calls = stateful
                 .calls
@@ -684,12 +714,10 @@ fn build_physical_node_with_prefix(
             info.push(format!("keys=[{}]", keys.join("; ")));
         }
         PhysicalPlan::Project(project) => {
-            // Preserve legacy explain behavior: PhysicalProject prints the output field list only.
-            // (Identity projections like `a` remain `fields=[a]`, not `a = a`.)
             let fields = project
                 .fields
                 .iter()
-                .map(|f| f.field_name.as_ref())
+                .map(|f| format_project_field(&f.original_expr, f.field_name.as_ref()))
                 .collect::<Vec<_>>();
             info.push(format!("fields=[{}]", fields.join("; ")));
             if project.passthrough_messages {

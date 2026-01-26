@@ -328,8 +328,8 @@ async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
         let msg = &tuple.messages()[0];
         assert_eq!(
             msg.source(),
-            output_topic.as_str(),
-            "message source should be memory topic"
+            "",
+            "message source should be empty (downstream memory source normalizes it)"
         );
 
         let entries: Vec<(&str, datatypes::Value)> =

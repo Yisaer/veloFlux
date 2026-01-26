@@ -61,6 +61,7 @@ impl PhysicalPlan {
             PhysicalPlan::CollectionLayoutNormalize(plan) => {
                 Ok(output_from_datatype_schema(plan.schema.as_ref()))
             }
+            PhysicalPlan::MemoryCollectionMaterialize(plan) => Ok(plan.output_schema.clone()),
 
             PhysicalPlan::Filter(_)
             | PhysicalPlan::Order(_)

@@ -20,6 +20,7 @@ pub mod decoder_processor;
 pub mod encoder_processor;
 pub mod eventtime;
 pub mod filter_processor;
+pub mod memory_collection_materialize_processor;
 pub mod order_processor;
 pub mod processor_builder;
 pub mod project_processor;
@@ -49,6 +50,7 @@ pub use decoder_processor::DecoderProcessor;
 pub use encoder_processor::EncoderProcessor;
 pub use eventtime::EventtimePipelineContext;
 pub use filter_processor::FilterProcessor;
+pub use memory_collection_materialize_processor::MemoryCollectionMaterializeProcessor;
 pub use order_processor::OrderProcessor;
 pub use processor_builder::{
     create_processor_pipeline, ProcessorPipeline, ProcessorPipelineDependencies,

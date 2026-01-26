@@ -597,6 +597,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::CollectionLayoutNormalize(new))
         }
+        PhysicalPlan::MemoryCollectionMaterialize(materialize) => {
+            let mut new = materialize.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::MemoryCollectionMaterialize(new))
+        }
         PhysicalPlan::StatefulFunction(stateful) => {
             let mut new = stateful.clone();
             new.base.children = children;
