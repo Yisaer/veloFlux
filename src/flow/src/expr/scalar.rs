@@ -402,3 +402,198 @@ impl PartialEq for ScalarExpr {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datatypes::Int64Type;
+
+    #[test]
+    fn scalar_literal_creation() {
+        let lit = ScalarExpr::literal(Value::Int64(42), ConcreteDatatype::Int64(Int64Type));
+        assert!(lit.is_literal());
+        assert_eq!(lit.as_literal(), Some(&Value::Int64(42)));
+    }
+
+    #[test]
+    fn scalar_column_by_name() {
+        let col = ScalarExpr::column_with_column_name("my_col");
+        assert!(col.is_column());
+        assert_eq!(col.as_column(), Some(("", "my_col")));
+    }
+
+    #[test]
+    fn scalar_column_by_index() {
+        let col = ScalarExpr::column_with_index("src", "col", Some(0)).unwrap();
+        assert!(col.is_column());
+        assert_eq!(col.as_column(), Some(("src", "")));
+    }
+
+    #[test]
+    fn scalar_column_by_index_error() {
+        let result = ScalarExpr::column_with_index("src", "col", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scalar_wildcard_all() {
+        let wc = ScalarExpr::wildcard_all();
+        assert!(!wc.is_column());
+        assert!(!wc.is_literal());
+    }
+
+    #[test]
+    fn scalar_wildcard_for() {
+        let wc = ScalarExpr::wildcard_for("source");
+        match wc {
+            ScalarExpr::Wildcard { source_name } => {
+                assert_eq!(source_name, Some("source".to_string()))
+            }
+            _ => panic!("expected wildcard"),
+        }
+    }
+
+    #[test]
+    fn scalar_call_unary() {
+        let lit = ScalarExpr::literal(Value::Int64(42), ConcreteDatatype::Int64(Int64Type));
+        let neg = lit.call_unary(UnaryFunc::Neg);
+        assert!(!neg.is_literal());
+        match neg {
+            ScalarExpr::CallUnary { func, .. } => assert_eq!(func, UnaryFunc::Neg),
+            _ => panic!("expected CallUnary"),
+        }
+    }
+
+    #[test]
+    fn scalar_call_binary() {
+        let lit1 = ScalarExpr::literal(Value::Int64(10), ConcreteDatatype::Int64(Int64Type));
+        let lit2 = ScalarExpr::literal(Value::Int64(20), ConcreteDatatype::Int64(Int64Type));
+        let add = lit1.call_binary(lit2, BinaryFunc::Add);
+        match add {
+            ScalarExpr::CallBinary { func, .. } => assert_eq!(func, BinaryFunc::Add),
+            _ => panic!("expected CallBinary"),
+        }
+    }
+
+    #[test]
+    fn scalar_field_access() {
+        let lit = ScalarExpr::literal(Value::Null, ConcreteDatatype::Int64(Int64Type));
+        let fa = ScalarExpr::field_access(lit, "field_name");
+        match fa {
+            ScalarExpr::FieldAccess { field_name, .. } => assert_eq!(field_name, "field_name"),
+            _ => panic!("expected FieldAccess"),
+        }
+    }
+
+    #[test]
+    fn scalar_list_index() {
+        let list_lit = ScalarExpr::literal(Value::Null, ConcreteDatatype::Int64(Int64Type));
+        let idx_lit = ScalarExpr::literal(Value::Int64(0), ConcreteDatatype::Int64(Int64Type));
+        let li = ScalarExpr::list_index(list_lit, idx_lit);
+        match li {
+            ScalarExpr::ListIndex { .. } => {}
+            _ => panic!("expected ListIndex"),
+        }
+    }
+
+    #[test]
+    fn scalar_debug_format() {
+        let lit = ScalarExpr::literal(Value::Int64(42), ConcreteDatatype::Int64(Int64Type));
+        let debug_str = format!("{:?}", lit);
+        assert!(debug_str.contains("Literal"));
+
+        let col = ScalarExpr::column_with_column_name("test");
+        let debug_str = format!("{:?}", col);
+        assert!(debug_str.contains("Column"));
+
+        let wc = ScalarExpr::wildcard_all();
+        let debug_str = format!("{:?}", wc);
+        assert!(debug_str.contains("Wildcard"));
+    }
+
+    #[test]
+    fn scalar_partial_eq_literals() {
+        let lit1 = ScalarExpr::literal(Value::Int64(42), ConcreteDatatype::Int64(Int64Type));
+        let lit2 = ScalarExpr::literal(Value::Int64(42), ConcreteDatatype::Int64(Int64Type));
+        let lit3 = ScalarExpr::literal(Value::Int64(43), ConcreteDatatype::Int64(Int64Type));
+        assert_eq!(lit1, lit2);
+        assert_ne!(lit1, lit3);
+    }
+
+    #[test]
+    fn scalar_partial_eq_columns() {
+        let col1 = ScalarExpr::column_with_column_name("a");
+        let col2 = ScalarExpr::column_with_column_name("a");
+        let col3 = ScalarExpr::column_with_column_name("b");
+        assert_eq!(col1, col2);
+        assert_ne!(col1, col3);
+    }
+
+    #[test]
+    fn scalar_partial_eq_wildcards() {
+        let wc1 = ScalarExpr::wildcard_all();
+        let wc2 = ScalarExpr::wildcard_all();
+        let wc3 = ScalarExpr::wildcard_for("src");
+        assert_eq!(wc1, wc2);
+        assert_ne!(wc1, wc3);
+    }
+
+    #[test]
+    fn scalar_partial_eq_call_unary() {
+        let lit = ScalarExpr::literal(Value::Int64(1), ConcreteDatatype::Int64(Int64Type));
+        let neg1 = lit.clone().call_unary(UnaryFunc::Neg);
+        let neg2 = lit.clone().call_unary(UnaryFunc::Neg);
+        let not = lit.call_unary(UnaryFunc::Not);
+        assert_eq!(neg1, neg2);
+        assert_ne!(neg1, not);
+    }
+
+    #[test]
+    fn scalar_partial_eq_call_binary() {
+        let lit1 = ScalarExpr::literal(Value::Int64(1), ConcreteDatatype::Int64(Int64Type));
+        let lit2 = ScalarExpr::literal(Value::Int64(2), ConcreteDatatype::Int64(Int64Type));
+        let add1 = lit1.clone().call_binary(lit2.clone(), BinaryFunc::Add);
+        let add2 = lit1.clone().call_binary(lit2.clone(), BinaryFunc::Add);
+        let sub = lit1.call_binary(lit2, BinaryFunc::Sub);
+        assert_eq!(add1, add2);
+        assert_ne!(add1, sub);
+    }
+
+    #[test]
+    fn scalar_partial_eq_field_access() {
+        let lit = ScalarExpr::literal(Value::Null, ConcreteDatatype::Int64(Int64Type));
+        let fa1 = ScalarExpr::field_access(lit.clone(), "a");
+        let fa2 = ScalarExpr::field_access(lit.clone(), "a");
+        let fa3 = ScalarExpr::field_access(lit, "b");
+        assert_eq!(fa1, fa2);
+        assert_ne!(fa1, fa3);
+    }
+
+    #[test]
+    fn scalar_partial_eq_list_index() {
+        let list = ScalarExpr::literal(Value::Null, ConcreteDatatype::Int64(Int64Type));
+        let idx1 = ScalarExpr::literal(Value::Int64(0), ConcreteDatatype::Int64(Int64Type));
+        let idx2 = ScalarExpr::literal(Value::Int64(1), ConcreteDatatype::Int64(Int64Type));
+        let li1 = ScalarExpr::list_index(list.clone(), idx1.clone());
+        let li2 = ScalarExpr::list_index(list.clone(), idx1);
+        let li3 = ScalarExpr::list_index(list, idx2);
+        assert_eq!(li1, li2);
+        assert_ne!(li1, li3);
+    }
+
+    #[test]
+    fn scalar_partial_eq_different_types() {
+        let lit = ScalarExpr::literal(Value::Int64(42), ConcreteDatatype::Int64(Int64Type));
+        let col = ScalarExpr::column_with_column_name("a");
+        assert_ne!(lit, col);
+    }
+
+    #[test]
+    fn scalar_is_not_column_or_literal() {
+        let wc = ScalarExpr::wildcard_all();
+        assert!(!wc.is_column());
+        assert!(!wc.is_literal());
+        assert!(wc.as_column().is_none());
+        assert!(wc.as_literal().is_none());
+    }
+}

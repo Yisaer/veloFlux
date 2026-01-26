@@ -74,3 +74,127 @@ pub fn compare_values(left: &Value, right: &Value) -> Option<Ordering> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compare_same_int_types() {
+        assert_eq!(
+            compare_values(&Value::Int64(5), &Value::Int64(10)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(&Value::Int64(10), &Value::Int64(5)),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            compare_values(&Value::Int64(5), &Value::Int64(5)),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(
+            compare_values(&Value::Int32(5), &Value::Int32(10)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(&Value::Int16(5), &Value::Int16(10)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(&Value::Int8(5), &Value::Int8(10)),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn compare_same_uint_types() {
+        assert_eq!(
+            compare_values(&Value::Uint64(5), &Value::Uint64(10)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(&Value::Uint32(5), &Value::Uint32(10)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(&Value::Uint16(5), &Value::Uint16(10)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(&Value::Uint8(5), &Value::Uint8(10)),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn compare_same_float_types() {
+        assert_eq!(
+            compare_values(&Value::Float64(1.5), &Value::Float64(2.5)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(&Value::Float32(1.5), &Value::Float32(2.5)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(&Value::Float64(2.5), &Value::Float64(2.5)),
+            Some(Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn compare_strings() {
+        assert_eq!(
+            compare_values(
+                &Value::String("apple".to_string()),
+                &Value::String("banana".to_string())
+            ),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(
+                &Value::String("zebra".to_string()),
+                &Value::String("apple".to_string())
+            ),
+            Some(Ordering::Greater)
+        );
+    }
+
+    #[test]
+    fn compare_bools() {
+        assert_eq!(
+            compare_values(&Value::Bool(false), &Value::Bool(true)),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            compare_values(&Value::Bool(true), &Value::Bool(true)),
+            Some(Ordering::Equal)
+        );
+    }
+
+    #[test]
+    fn compare_null_returns_none() {
+        assert_eq!(compare_values(&Value::Null, &Value::Int64(5)), None);
+        assert_eq!(compare_values(&Value::Int64(5), &Value::Null), None);
+        assert_eq!(compare_values(&Value::Null, &Value::Null), None);
+    }
+
+    #[test]
+    fn compare_cross_type_int_to_int64() {
+        // Int32 vs Int64 should be cast to Int64
+        assert_eq!(
+            compare_values(&Value::Int32(5), &Value::Int64(10)),
+            Some(Ordering::Less)
+        );
+    }
+
+    #[test]
+    fn compare_cross_type_int_to_float64() {
+        // Int64 vs Float64 should be cast to Float64
+        assert_eq!(
+            compare_values(&Value::Int64(5), &Value::Float64(5.5)),
+            Some(Ordering::Less)
+        );
+    }
+}

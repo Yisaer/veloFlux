@@ -52,3 +52,89 @@ impl AggregateAccumulator for NdvAccumulator {
         Value::Int64(i64::try_from(self.distinct_values.len()).unwrap_or(i64::MAX))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ndv_function_name() {
+        let func = NdvFunction::new();
+        assert_eq!(func.name(), "ndv");
+    }
+
+    #[test]
+    fn ndv_function_default() {
+        let func = NdvFunction::default();
+        assert_eq!(func.name(), "ndv");
+    }
+
+    #[test]
+    fn ndv_function_return_type_valid() {
+        let func = NdvFunction::new();
+        let result = func.return_type(&[ConcreteDatatype::Int64(Int64Type)]);
+        assert!(result.is_ok());
+        // NDV always returns Int64
+        assert!(matches!(result.unwrap(), ConcreteDatatype::Int64(_)));
+    }
+
+    #[test]
+    fn ndv_function_return_type_no_args() {
+        let func = NdvFunction::new();
+        let result = func.return_type(&[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("exactly one argument"));
+    }
+
+    #[test]
+    fn ndv_accumulator_counts_distinct() {
+        let func = NdvFunction::new();
+        let mut acc = func.create_accumulator();
+
+        acc.update(&[Value::Int64(1)]).unwrap();
+        acc.update(&[Value::Int64(2)]).unwrap();
+        acc.update(&[Value::Int64(1)]).unwrap(); // duplicate
+        acc.update(&[Value::Int64(3)]).unwrap();
+
+        assert_eq!(acc.finalize(), Value::Int64(3)); // 3 distinct values
+    }
+
+    #[test]
+    fn ndv_accumulator_ignores_nulls() {
+        let func = NdvFunction::new();
+        let mut acc = func.create_accumulator();
+
+        acc.update(&[Value::Int64(1)]).unwrap();
+        acc.update(&[Value::Null]).unwrap();
+        acc.update(&[Value::Int64(2)]).unwrap();
+
+        assert_eq!(acc.finalize(), Value::Int64(2)); // nulls not counted
+    }
+
+    #[test]
+    fn ndv_accumulator_empty_returns_zero() {
+        let func = NdvFunction::new();
+        let acc = func.create_accumulator();
+        assert_eq!(acc.finalize(), Value::Int64(0));
+    }
+
+    #[test]
+    fn ndv_accumulator_no_args_error() {
+        let func = NdvFunction::new();
+        let mut acc = func.create_accumulator();
+        let result = acc.update(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn ndv_accumulator_strings() {
+        let func = NdvFunction::new();
+        let mut acc = func.create_accumulator();
+
+        acc.update(&[Value::String("a".to_string())]).unwrap();
+        acc.update(&[Value::String("b".to_string())]).unwrap();
+        acc.update(&[Value::String("a".to_string())]).unwrap(); // duplicate
+
+        assert_eq!(acc.finalize(), Value::Int64(2)); // 2 distinct values
+    }
+}
