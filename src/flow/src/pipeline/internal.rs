@@ -485,24 +485,28 @@ fn build_pipeline_runtime_with_logical_ir(
     if definition.options().eventtime.enabled {
         validate_eventtime_enabled(&stream_definitions, registries)?;
     }
-    let shared_stream_decode_applied =
-        shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
-    let explain = PipelineExplain::new(
-        Arc::clone(&logical_plan),
-        Arc::clone(&optimized_plan),
-        PipelineExplainConfig {
-            pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
-                eventtime_enabled: definition.options().eventtime.enabled,
-                eventtime_late_tolerance_ms: definition
-                    .options()
-                    .eventtime
-                    .late_tolerance
-                    .as_millis(),
-            }),
-            shared_stream_decode_applied,
-        },
-    );
-    tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
+    // Pipeline explain is exposed via REST; avoid generating/logging it in release builds.
+    #[cfg(debug_assertions)]
+    {
+        let shared_stream_decode_applied =
+            shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
+        let explain = PipelineExplain::new(
+            Arc::clone(&logical_plan),
+            Arc::clone(&optimized_plan),
+            PipelineExplainConfig {
+                pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
+                    eventtime_enabled: definition.options().eventtime.enabled,
+                    eventtime_late_tolerance_ms: definition
+                        .options()
+                        .eventtime
+                        .late_tolerance
+                        .as_millis(),
+                }),
+                shared_stream_decode_applied,
+            },
+        );
+        tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
+    }
 
     let eventtime = if definition.options().eventtime.enabled {
         let mut per_source = HashMap::new();
