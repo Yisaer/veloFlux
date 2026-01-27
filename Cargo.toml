@@ -53,10 +53,6 @@ path = "src/main.rs"
 name = "flow_sql_assert"
 path = "tests/sql_assert/flow_sql_assert.rs"
 
-[[bin]]
-name = "perf_daily"
-path = "tests/perf_daily/perf_daily.rs"
-
 
 [profile.release-thin]
 inherits = "release"

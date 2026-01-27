@@ -1,0 +1,103 @@
+name: Perf Daily Wide MQTT
+
+on:
+  push:
+    branches: ["**"]
+  pull_request: {}
+  schedule:
+    # 07:00 (UTC+8) == 23:00 UTC (previous day)
+    - cron: "0 23 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  perf-daily:
+    name: Wide MQTT Perf
+    runs-on: ubuntu-latest
+    services:
+      emqx:
+        image: emqx/emqx:5.6.1
+        ports:
+          - 1883:1883
+        env:
+          EMQX_ALLOW_ANONYMOUS: "true"
+          EMQX_LISTENER__TCP__DEFAULT__BIND: "0.0.0.0:1883"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build veloflux (release)
+        run: make release
+
+      - name: Start veloflux
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/perf_daily_ci
+          target/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/data > tmp/perf_daily_ci/veloflux.log 2>&1 &
+          echo $! > tmp/perf_daily_ci/veloflux.pid
+
+      - name: Run perf scenario
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_ci/out
+          PERF_DURATION_SECS: ${{ github.event_name == 'schedule' && '300' || '60' }}
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 scripts/perf_daily.py \
+            --force \
+            --base-url http://127.0.0.1:8080 \
+            --metrics-url http://127.0.0.1:9898/metrics \
+            --broker-url tcp://127.0.0.1:1883 \
+            --topic /perf/daily \
+            --qos 0 \
+            --columns 15000 \
+            --cases 10 \
+            --str-len 16 \
+            --duration-secs "${PERF_DURATION_SECS}" \
+            --scrape-interval-ms 5000 \
+            --out-dir "${PERF_OUT_DIR}" \
+            run
+
+      - name: Render report (summary + html)
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_ci/out
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 scripts/perf_daily_report.py \
+            --result-json "${PERF_OUT_DIR}/result.json" \
+            --openmetrics "${PERF_OUT_DIR}/metrics.openmetrics" \
+            --out-html "${PERF_OUT_DIR}/report.html" \
+            --summary-path "${GITHUB_STEP_SUMMARY}" \
+            --title "Perf Daily Wide MQTT (${{ github.sha }})"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-daily-wide-mqtt-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            tmp/perf_daily_ci/out/result.json
+            tmp/perf_daily_ci/out/metrics.openmetrics
+            tmp/perf_daily_ci/out/report.html
+            tmp/perf_daily_ci/veloflux.log
+
+      - name: Stop veloflux
+        if: always()
+        run: |
+          set +e
+          if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
+            kill "$(cat tmp/perf_daily_ci/veloflux.pid)" 2>/dev/null || true
+          fi
