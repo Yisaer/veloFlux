@@ -50,7 +50,7 @@ jobs:
       - name: Run perf scenario
         env:
           PERF_OUT_DIR: tmp/perf_daily_ci/out
-          PERF_DURATION_SECS: ${{ github.event_name == 'schedule' && '300' || '60' }}
+          PERF_DURATION_SECS: "300"
         run: |
           set -euo pipefail
           PYTHONPYCACHEPREFIX=tmp/pycache \
