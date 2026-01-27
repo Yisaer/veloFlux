@@ -63,7 +63,7 @@ jobs:
             --str-len 16 \
             --duration-secs "${PERF_DURATION_SECS}" \
             --rate 50 \
-            --scrape-interval-ms 5000 \
+            --scrape-interval-ms 15000 \
             --out-dir "${PERF_OUT_DIR}" \
             run
 

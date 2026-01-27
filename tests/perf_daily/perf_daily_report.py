@@ -27,10 +27,12 @@ TRACKED_METRICS = (
     "heap_in_allocator_bytes",
 )
 
+# We render in GitHub Actions Job Summary; prefer dark theme and high-contrast lines.
+MERMAID_THEME = "dark"
 MERMAID_PALETTE = (
-    "#2f6fdb",  # series 1
-    "#d73a49",  # series 2
-    "#28a745",  # series 3
+    "#4ea1ff",  # series 1 (blue)
+    "#ff6b6b",  # series 2 (red)
+    "#37d67a",  # series 3 (green)
 )
 
 _SAMPLE_RE = re.compile(
@@ -113,11 +115,11 @@ def mermaid_xychart(
     # GitHub Actions job summary doesn't show a legend for xychart-beta; to make it
     # less ambiguous, force a deterministic palette so we can document mapping.
     init = (
-        "%%{init: {\"theme\":\"base\",\"themeVariables\":{"
+        f"%%{{init: {{\"theme\":\"{MERMAID_THEME}\",\"themeVariables\":{{"
         f"\"cScale0\":\"{MERMAID_PALETTE[0]}\","
         f"\"cScale1\":\"{MERMAID_PALETTE[1]}\","
         f"\"cScale2\":\"{MERMAID_PALETTE[2]}\""
-        "}}}%%\n"
+        "}}}}}}%%\n"
     )
     x_axis = ", ".join(str(x) for x in xs)
     y_axis = f'  y-axis "{y_label}"'
@@ -215,9 +217,9 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
         lines.append("### Memory (Grafana-like)")
         lines.append(mermaid_xychart("memory/heap", "t (s)", "MiB", xs_mem, chart_series, y_min=y0, y_max=y1))
         lines.append(
-            f"Legend: ■({MERMAID_PALETTE[0]})=memory_usage_bytes (rss), "
-            f"■({MERMAID_PALETTE[1]})=heap_in_use_bytes, "
-            f"■({MERMAID_PALETTE[2]})=heap_in_allocator_bytes"
+            f"Legend: [{MERMAID_PALETTE[0]}]=memory_usage_bytes (rss), "
+            f"[{MERMAID_PALETTE[1]}]=heap_in_use_bytes, "
+            f"[{MERMAID_PALETTE[2]}]=heap_in_allocator_bytes"
         )
         lines.append("")
     return "\n".join(lines) + "\n"

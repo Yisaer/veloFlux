@@ -436,7 +436,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rate", type=int, default=50, help="Messages per second (default: 50)")
 
     p.add_argument("--metrics-url", default=DEFAULT_METRICS_URL)
-    p.add_argument("--scrape-interval-ms", type=int, default=5000)
+    p.add_argument("--scrape-interval-ms", type=int, default=15000)
     p.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     p.add_argument("--no-metrics", action="store_true")
 
