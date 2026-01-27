@@ -115,18 +115,22 @@ def mermaid_xychart(
     #
     # GitHub Actions job summary doesn't show a legend for xychart-beta; to make it
     # less ambiguous, force a deterministic palette so we can document mapping.
-    init = (
-        f"%%{{init: {{\"theme\":\"{MERMAID_THEME}\",\"themeVariables\":{{"
-        f"\"cScale0\":\"{MERMAID_PALETTE[0]}\","
-        f"\"cScale1\":\"{MERMAID_PALETTE[1]}\","
-        f"\"cScale2\":\"{MERMAID_PALETTE[2]}\""
-        "}}}}}}%%\n"
-    )
+    init_cfg = {
+        "theme": MERMAID_THEME,
+        "themeVariables": {
+            "cScale0": MERMAID_PALETTE[0],
+            "cScale1": MERMAID_PALETTE[1],
+            "cScale2": MERMAID_PALETTE[2],
+        },
+    }
+    init = f"%%{{init: {json.dumps(init_cfg, separators=(',', ':'))} }}%%\n"
+    # Mermaid's xychart-beta uses double quotes in syntax; avoid raw `"` in user strings.
+    safe_title = title.replace('"', "'")
     x_axis = ", ".join(str(x) for x in xs)
     y_axis = f'  y-axis "{y_label}"'
     if y_min is not None and y_max is not None:
         y_axis = f'  y-axis "{y_label}" {y_min:.3f} --> {y_max:.3f}'
-    lines = [f'xychart-beta', f'  title "{title}"', f'  x-axis "{x_label}" [{x_axis}]', y_axis]
+    lines = [f'xychart-beta', f'  title "{safe_title}"', f'  x-axis "{x_label}" [{x_axis}]', y_axis]
     for name, ys in series:
         y_vals = ", ".join(f"{y:.3f}" if isinstance(y, float) else str(y) for y in ys)
         lines.append(f'  line "{name}" [{y_vals}]')
@@ -226,7 +230,7 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
             lines.append("### Datasource Records In Rate (Grafana-like)")
             lines.append(
                 mermaid_xychart(
-                    "processor_records_in_total{kind=\"datasource\"} rate",
+                    "processor_records_in_total kind=datasource rate",
                     "t (s)",
                     "records/s",
                     xs_r,
