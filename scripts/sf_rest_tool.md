@@ -144,6 +144,7 @@ curl -sS -X POST http://127.0.0.1:8080/pipelines/demo_pipeline/start
 
 ## Troubleshooting
 
+- Argument order: the tool accepts both `sf_rest_tool.py --base-url ... provision` and `sf_rest_tool.py provision --base-url ...`.
 - `HTTP 404` on delete: the tool treats “not found” as OK during cleanup/recreate.
 - Connection errors/timeouts: check `--base-url` and increase `--timeout-secs` if needed.
 - MQTT data not flowing: verify broker reachability from veloFlux, and that `topic`/`qos` match your publisher.
