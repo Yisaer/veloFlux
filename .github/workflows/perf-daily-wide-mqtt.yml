@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           PYTHONPYCACHEPREFIX=tmp/pycache \
-          python3 scripts/perf_daily.py \
+          python3 tests/perf_daily/perf_daily.py \
             --force \
             --base-url http://127.0.0.1:8080 \
             --metrics-url http://127.0.0.1:9898/metrics \
@@ -65,6 +65,7 @@ jobs:
             --cases 10 \
             --str-len 16 \
             --duration-secs "${PERF_DURATION_SECS}" \
+            --rate 50 \
             --scrape-interval-ms 5000 \
             --out-dir "${PERF_OUT_DIR}" \
             run
@@ -75,9 +76,8 @@ jobs:
         run: |
           set -euo pipefail
           PYTHONPYCACHEPREFIX=tmp/pycache \
-          python3 scripts/perf_daily_report.py \
+          python3 tests/perf_daily/perf_daily_report.py \
             --result-json "${PERF_OUT_DIR}/result.json" \
-            --openmetrics "${PERF_OUT_DIR}/metrics.openmetrics" \
             --out-html "${PERF_OUT_DIR}/report.html" \
             --summary-path "${GITHUB_STEP_SUMMARY}" \
             --title "Perf Daily Wide MQTT (${{ github.sha }})"

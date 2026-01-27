@@ -27,6 +27,13 @@ class TcpBroker:
     port: int
 
 
+@dataclass(frozen=True)
+class PublishResult:
+    sent: int
+    start_ts_ms: int
+    end_ts_ms: int
+
+
 def parse_tcp_broker_url(broker_url: str) -> TcpBroker:
     broker_url = broker_url.strip()
     if not broker_url.startswith("tcp://"):
@@ -108,14 +115,19 @@ def publish_qos0(
     topic: str,
     payloads: Iterable[bytes],
     publish_count: int = 0,
-    publish_interval_ms: int = 0,
+    duration_secs: int = 0,
+    rate_per_sec: int = 0,
     client_id: Optional[str] = None,
     connect_timeout_secs: float = 10.0,
     keepalive_secs: int = 60,
-    duration_secs: int = 0,
-) -> None:
+) -> int:
+    """
+    Publish QoS0 messages for either a fixed count or a fixed duration.
+
+    Returns the number of messages sent.
+    """
     if publish_count <= 0 and duration_secs <= 0:
-        return
+        return 0
     payload_list = list(payloads)
     if not payload_list:
         raise MqttError("payloads is empty")
@@ -125,6 +137,7 @@ def publish_qos0(
         client_id = f"perf-daily-{os.getpid()}"
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sent = 0
     try:
         sock.settimeout(connect_timeout_secs)
         sock.connect((broker.host, broker.port))
@@ -132,36 +145,106 @@ def publish_qos0(
         sock.sendall(_build_connect_packet(client_id, keepalive_secs=keepalive_secs))
         _read_connack(sock)
 
-        interval = max(0.0, publish_interval_ms / 1000.0)
         start = time.time()
         i = 0
         while True:
-            if duration_secs > 0 and (time.time() - start) >= duration_secs:
+            now = time.time()
+            if duration_secs > 0 and (now - start) >= duration_secs:
                 break
             if duration_secs <= 0 and i >= publish_count:
                 break
+
             payload = payload_list[i % len(payload_list)]
             sock.sendall(_build_publish_packet(topic, payload))
+            sent += 1
             i += 1
-            if interval:
-                time.sleep(interval)
+
+            if rate_per_sec > 0:
+                # Basic pacing: next send at start + i/rate.
+                target = start + (i / float(rate_per_sec))
+                delay = target - time.time()
+                if delay > 0:
+                    time.sleep(delay)
     finally:
         try:
             sock.close()
         except Exception:
             pass
 
-
-def _demo() -> int:
-    # Quick local smoke when needed.
-    publish_qos0(
-        broker_url="tcp://127.0.0.1:1883",
-        topic="/perf/daily",
-        payloads=[b'{"a1":"x"}'],
-        publish_count=1,
-    )
-    return 0
+    return sent
 
 
-if __name__ == "__main__":
-    raise SystemExit(_demo())
+def publish_qos0_with_timing(
+    broker_url: str,
+    topic: str,
+    payloads: Iterable[bytes],
+    publish_count: int = 0,
+    duration_secs: int = 0,
+    rate_per_sec: int = 0,
+    client_id: Optional[str] = None,
+    connect_timeout_secs: float = 10.0,
+    keepalive_secs: int = 60,
+) -> PublishResult:
+    """
+    Publish QoS0 messages and also return the "load window" timestamps.
+
+    start_ts_ms/end_ts_ms are recorded around the actual send loop, so they are a
+    better alignment boundary for metrics than the surrounding orchestration.
+    """
+    if publish_count <= 0 and duration_secs <= 0:
+        now = int(time.time() * 1000)
+        return PublishResult(sent=0, start_ts_ms=now, end_ts_ms=now)
+
+    payload_list = list(payloads)
+    if not payload_list:
+        raise MqttError("payloads is empty")
+
+    broker = parse_tcp_broker_url(broker_url)
+    if client_id is None:
+        client_id = f"perf-daily-{os.getpid()}"
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sent = 0
+    start_ms = 0
+    end_ms = 0
+    try:
+        sock.settimeout(connect_timeout_secs)
+        sock.connect((broker.host, broker.port))
+        sock.settimeout(None)
+        sock.sendall(_build_connect_packet(client_id, keepalive_secs=keepalive_secs))
+        _read_connack(sock)
+
+        # Alignment boundary: starts when we enter the send loop.
+        start_ms = int(time.time() * 1000)
+        start = time.time()
+        i = 0
+        while True:
+            now = time.time()
+            if duration_secs > 0 and (now - start) >= duration_secs:
+                break
+            if duration_secs <= 0 and i >= publish_count:
+                break
+
+            payload = payload_list[i % len(payload_list)]
+            sock.sendall(_build_publish_packet(topic, payload))
+            sent += 1
+            i += 1
+
+            if rate_per_sec > 0:
+                # Basic pacing: next send at start + i/rate.
+                target = start + (i / float(rate_per_sec))
+                delay = target - time.time()
+                if delay > 0:
+                    time.sleep(delay)
+        end_ms = int(time.time() * 1000)
+    finally:
+        if end_ms == 0:
+            end_ms = int(time.time() * 1000)
+        if start_ms == 0:
+            start_ms = end_ms
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    return PublishResult(sent=sent, start_ts_ms=start_ms, end_ts_ms=end_ms)
