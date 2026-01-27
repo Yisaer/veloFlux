@@ -2,7 +2,7 @@ name: Perf Daily Wide MQTT
 
 on:
   push:
-    branches: ["**"]
+    branches: [ main, master ]
   pull_request: {}
   schedule:
     # 07:00 (UTC+8) == 23:00 UTC (previous day)

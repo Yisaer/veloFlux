@@ -93,116 +93,6 @@ def filter_window(series: Dict[str, List[Sample]], start_ms: int, end_ms: int) -
     return out
 
 
-def sparkline(values: List[float], width: int = 60) -> str:
-    chars = " .:-=+*#%@"
-    if not values:
-        return "(no data)"
-    if len(values) > width:
-        step = len(values) / float(width)
-        values = [values[int(i * step)] for i in range(width)]
-    vmin = min(values)
-    vmax = max(values)
-    if vmax <= vmin:
-        mid = len(chars) // 2
-        return chars[mid] * len(values)
-    out = []
-    for v in values:
-        t = (v - vmin) / (vmax - vmin)
-        idx = int(round(t * (len(chars) - 1)))
-        idx = max(0, min(len(chars) - 1, idx))
-        out.append(chars[idx])
-    return "".join(out)
-
-
-def ascii_xy_plot(
-    title: str,
-    x_label: str,
-    y_label: str,
-    xs: List[int],
-    ys: List[float],
-    width: int = 72,
-    height: int = 12,
-) -> str:
-    if not xs or not ys or len(xs) != len(ys):
-        return f"{title}\n(no data)\n"
-
-    xmin, xmax = min(xs), max(xs)
-    ymin, ymax = min(ys), max(ys)
-    if xmax <= xmin:
-        xmax = xmin + 1
-    if ymax <= ymin:
-        ymax = ymin + 1.0
-
-    width = max(20, min(width, 120))
-    height = max(6, min(height, 24))
-
-    grid = [[" " for _ in range(width)] for _ in range(height)]
-
-    def col_for(x: int) -> int:
-        return int(round((x - xmin) / float(xmax - xmin) * (width - 1)))
-
-    def row_for(y: float) -> int:
-        t = (y - ymin) / float(ymax - ymin)
-        t = max(0.0, min(1.0, t))
-        # y grows up; row grows down.
-        return int(round((1.0 - t) * (height - 1)))
-
-    for x, y in zip(xs, ys):
-        c = max(0, min(width - 1, col_for(x)))
-        r = max(0, min(height - 1, row_for(y)))
-        grid[r][c] = "*"
-
-    # Add axes: y-axis at left, x-axis at bottom.
-    for r in range(height):
-        if grid[r][0] == " ":
-            grid[r][0] = "|"
-    for c in range(width):
-        if grid[height - 1][c] == " ":
-            grid[height - 1][c] = "-"
-    grid[height - 1][0] = "+"
-
-    # Label a few ticks.
-    y_ticks_raw = [(0, ymax), (height // 2, (ymin + ymax) / 2.0), (height - 1, ymin)]
-    x_ticks_raw = [(0, xmin), (width // 2, int(round((xmin + xmax) / 2.0))), (width - 1, xmax)]
-
-    # Drop duplicated ticks (can happen for very short windows).
-    y_ticks: List[Tuple[int, float]] = []
-    seen_y: set[int] = set()
-    for r, v in y_ticks_raw:
-        if r in seen_y:
-            continue
-        y_ticks.append((r, v))
-        seen_y.add(r)
-
-    x_ticks: List[Tuple[int, int]] = []
-    seen_x: set[int] = set()
-    for c, v in x_ticks_raw:
-        if c in seen_x:
-            continue
-        x_ticks.append((c, v))
-        seen_x.add(c)
-
-    y_label_width = max(len(f"{v:.1f}") for _, v in y_ticks)
-    out_lines: List[str] = [f"{title} [{y_label}]"]
-    for r in range(height):
-        tick = next((v for rr, v in y_ticks if rr == r), None)
-        if tick is None:
-            prefix = " " * y_label_width
-        else:
-            prefix = f"{tick:.1f}".rjust(y_label_width)
-        out_lines.append(prefix + " " + "".join(grid[r]))
-
-    # x-axis labels line
-    axis = [" " for _ in range(width)]
-    for c, v in x_ticks:
-        s = str(v)
-        start = max(0, min(width - len(s), c - len(s) // 2))
-        for i, ch in enumerate(s):
-            axis[start + i] = ch
-    out_lines.append(" " * (y_label_width + 1) + "".join(axis) + f"  {x_label}")
-    return "\n".join(out_lines) + "\n"
-
-
 def mermaid_xychart(
     title: str,
     x_label: str,
@@ -307,25 +197,11 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
         y0, y1 = _pad_range(min(all_vals), max(all_vals))
         lines.append("### Memory (Grafana-like)")
         lines.append(mermaid_xychart("memory/heap", "t (s)", "MiB", xs_mem, chart_series, y_min=y0, y_max=y1))
-
-    # ASCII charts are guaranteed to render even if Mermaid xychart isn't supported.
-    lines.append("### Metrics (ASCII charts)")
-    lines.append("```")
-    for name in TRACKED_METRICS:
-        items = series.get(name, [])
-        if not items:
-            lines.append(f"{name}\n(no data)\n")
-            continue
-        xs_i, ys_i = _bin_by_second(items, start_ms=start_ms_eff)
-        if name == "cpu_usage":
-            ys_plot = ys_i
-            unit = "%"
-        else:
-            ys_plot = [_to_mib(v) for v in ys_i]
-            unit = "MiB"
-        lines.append(ascii_xy_plot(name, "t (s)", unit, xs_i, ys_plot, width=72, height=12).rstrip())
+        # Mermaid xychart-beta doesn't render a legend; spell it out explicitly.
+        lines.append(
+            "Legend: memory_rss_mib=memory_usage_bytes, heap_in_use_mib=heap_in_use_bytes, heap_in_allocator_mib=heap_in_allocator_bytes"
+        )
         lines.append("")
-    lines.append("```")
     return "\n".join(lines) + "\n"
 
 
