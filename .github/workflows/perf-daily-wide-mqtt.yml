@@ -41,10 +41,10 @@ jobs:
           target/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/data > tmp/perf_daily_ci/veloflux.log 2>&1 &
           echo $! > tmp/perf_daily_ci/veloflux.pid
 
-      - name: Run perf scenario
+      - name: Run perf scenario (explicit columns)
         env:
-          PERF_OUT_DIR: tmp/perf_daily_ci/out
-          PERF_DURATION_SECS: "300"
+          PERF_OUT_DIR: tmp/perf_daily_ci/out_explicit
+          PERF_DURATION_SECS: "120"
         run: |
           set -euo pipefail
           PYTHONPYCACHEPREFIX=tmp/pycache \
@@ -56,6 +56,8 @@ jobs:
             --topic /perf/daily \
             --qos 1 \
             --columns 15000 \
+            --sql-mode explicit \
+            --pipeline-id perf_daily_pipeline_explicit \
             --cases 20 \
             --str-len 10 \
             --duration-secs "${PERF_DURATION_SECS}" \
@@ -64,9 +66,9 @@ jobs:
             --out-dir "${PERF_OUT_DIR}" \
             run
 
-      - name: Render report (summary + html)
+      - name: Render report (explicit columns)
         env:
-          PERF_OUT_DIR: tmp/perf_daily_ci/out
+          PERF_OUT_DIR: tmp/perf_daily_ci/out_explicit
         run: |
           set -euo pipefail
           PYTHONPYCACHEPREFIX=tmp/pycache \
@@ -74,7 +76,59 @@ jobs:
             --result-json "${PERF_OUT_DIR}/result.json" \
             --out-html "${PERF_OUT_DIR}/report.html" \
             --summary-path "${GITHUB_STEP_SUMMARY}" \
-            --title "Perf Daily Wide MQTT (${{ github.sha }})"
+            --title "Perf Daily Wide MQTT - explicit (2m) (${{ github.sha }})"
+
+      - name: Stop veloflux (after explicit)
+        if: always()
+        run: |
+          set +e
+          if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
+            kill "$(cat tmp/perf_daily_ci/veloflux.pid)" 2>/dev/null || true
+          fi
+
+      - name: Start veloflux (for select *)
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/perf_daily_ci
+          target/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/data > tmp/perf_daily_ci/veloflux.log 2>&1 &
+          echo $! > tmp/perf_daily_ci/veloflux.pid
+
+      - name: Run perf scenario (select *)
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_ci/out_star
+          PERF_DURATION_SECS: "120"
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily.py \
+            --force \
+            --base-url http://127.0.0.1:8080 \
+            --metrics-url http://127.0.0.1:9898/metrics \
+            --broker-url tcp://127.0.0.1:1883 \
+            --topic /perf/daily \
+            --qos 1 \
+            --columns 15000 \
+            --sql-mode star \
+            --pipeline-id perf_daily_pipeline_star \
+            --cases 20 \
+            --str-len 10 \
+            --duration-secs "${PERF_DURATION_SECS}" \
+            --rate 50 \
+            --scrape-interval-ms 15000 \
+            --out-dir "${PERF_OUT_DIR}" \
+            run
+
+      - name: Render report (select *)
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_ci/out_star
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily_report.py \
+            --result-json "${PERF_OUT_DIR}/result.json" \
+            --out-html "${PERF_OUT_DIR}/report.html" \
+            --summary-path "${GITHUB_STEP_SUMMARY}" \
+            --title "Perf Daily Wide MQTT - select * (2m) (${{ github.sha }})"
 
       - name: Upload artifacts
         if: always()
@@ -83,9 +137,12 @@ jobs:
           name: perf-daily-wide-mqtt-${{ github.run_id }}
           if-no-files-found: ignore
           path: |
-            tmp/perf_daily_ci/out/result.json
-            tmp/perf_daily_ci/out/metrics.openmetrics
-            tmp/perf_daily_ci/out/report.html
+            tmp/perf_daily_ci/out_explicit/result.json
+            tmp/perf_daily_ci/out_explicit/metrics.openmetrics
+            tmp/perf_daily_ci/out_explicit/report.html
+            tmp/perf_daily_ci/out_star/result.json
+            tmp/perf_daily_ci/out_star/metrics.openmetrics
+            tmp/perf_daily_ci/out_star/report.html
             tmp/perf_daily_ci/veloflux.log
 
       - name: Stop veloflux

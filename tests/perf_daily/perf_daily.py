@@ -124,6 +124,14 @@ def build_select_sql(stream_name: str, column_count: int) -> str:
     return f"select {','.join(cols)} from {stream_name}"
 
 
+def build_select_sql_by_mode(stream_name: str, column_count: int, sql_mode: str) -> str:
+    if sql_mode == "star":
+        return f"select * from {stream_name}"
+    if sql_mode == "explicit":
+        return build_select_sql(stream_name, column_count)
+    raise PerfDailyError(f"unknown --sql-mode: {sql_mode}")
+
+
 def create_stream_body(
     stream_name: str,
     column_count: int,
@@ -204,9 +212,10 @@ def provision(
     force: bool,
     no_start: bool,
     dry_run: bool,
+    sql_mode: str,
 ) -> None:
     client = Client(base_url, timeout_secs)
-    sql = build_select_sql(stream_name, columns)
+    sql = build_select_sql_by_mode(stream_name, columns, sql_mode=sql_mode)
     stream_req = create_stream_body(stream_name, columns, broker_url, topic, qos)
     pipeline_req = create_pipeline_body(pipeline_id, sql)
 
@@ -425,6 +434,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stream-name", default=DEFAULT_STREAM_NAME)
     p.add_argument("--pipeline-id", default=DEFAULT_PIPELINE_ID)
     p.add_argument("--columns", type=int, default=15000)
+    p.add_argument("--sql-mode", choices=("explicit", "star"), default="explicit")
 
     p.add_argument("--broker-url", default="tcp://127.0.0.1:1883")
     p.add_argument("--topic", default="/perf/daily")
@@ -484,6 +494,7 @@ def main(argv: List[str]) -> int:
             force=args.force,
             no_start=args.no_start,
             dry_run=args.dry_run,
+            sql_mode=args.sql_mode,
         )
 
     if args.command in ("publish", "run"):
@@ -551,6 +562,7 @@ def main(argv: List[str]) -> int:
                     "stream_name": args.stream_name,
                     "pipeline_id": args.pipeline_id,
                     "columns": args.columns,
+                    "sql_mode": args.sql_mode,
                     "broker_url": args.broker_url,
                     "topic": args.topic,
                     "qos": args.qos,

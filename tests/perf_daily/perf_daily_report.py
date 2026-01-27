@@ -167,14 +167,17 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
     end_ms_eff = end_ms or (max(all_ts) if all_ts else 0)
 
     lines: List[str] = []
-    lines.append("## perf_daily")
+    lines.append(f"## {result.get('_title', 'perf_daily')}")
     lines.append(f"- result.json: `{result.get('_result_path', '')}`".rstrip())
     lines.append(f"- openmetrics: `{openmetrics_path}`")
     eff_s = f"{eff:.2f}" if isinstance(eff, (int, float)) else "n/a"
     sent_s = str(sent) if sent is not None else "n/a"
     payload_s = str(payload_bytes) if payload_bytes is not None else "n/a"
     lines.append(
-        f"- workload: columns={cfg.get('columns','n/a')} str_len={cfg.get('str_len','n/a')} cases={cfg.get('cases','n/a')} rate={cfg.get('rate','n/a')} msg/s duration={cfg.get('duration_secs','n/a')}s payload_bytes={payload_s} sent={sent_s} effective_rate={eff_s} msg/s"
+        f"- workload: sql_mode={cfg.get('sql_mode','n/a')} pipeline_id={cfg.get('pipeline_id','n/a')} "
+        f"columns={cfg.get('columns','n/a')} str_len={cfg.get('str_len','n/a')} cases={cfg.get('cases','n/a')} "
+        f"rate={cfg.get('rate','n/a')} msg/s duration={cfg.get('duration_secs','n/a')}s "
+        f"payload_bytes={payload_s} sent={sent_s} effective_rate={eff_s} msg/s"
     )
     if start_ms_eff and end_ms_eff:
         lines.append(f"- window: {_format_ts_ms(start_ms_eff)} .. {_format_ts_ms(end_ms_eff)}")
@@ -323,6 +326,7 @@ def main(argv: List[str]) -> int:
 
     result = _read_json(args.result_json)
     result["_result_path"] = args.result_json
+    result["_title"] = args.title
     openmetrics_path = args.openmetrics or result.get("metrics", {}).get("openmetrics_path")
     if not openmetrics_path:
         raise SystemExit("error: missing openmetrics path")
