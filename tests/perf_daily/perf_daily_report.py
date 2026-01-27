@@ -27,6 +27,12 @@ TRACKED_METRICS = (
     "heap_in_allocator_bytes",
 )
 
+MERMAID_PALETTE = (
+    "#2f6fdb",  # series 1
+    "#d73a49",  # series 2
+    "#28a745",  # series 3
+)
+
 _SAMPLE_RE = re.compile(
     r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([-+]?(?:\d+\.?\d*|\d*\.?\d+)(?:[eE][-+]?\d+)?)(?:\s+(\d+))?$"
 )
@@ -103,6 +109,16 @@ def mermaid_xychart(
     y_max: Optional[float] = None,
 ) -> str:
     # Mermaid xychart-beta expects x-axis labels and y-series values (same length).
+    #
+    # GitHub Actions job summary doesn't show a legend for xychart-beta; to make it
+    # less ambiguous, force a deterministic palette so we can document mapping.
+    init = (
+        "%%{init: {\"theme\":\"base\",\"themeVariables\":{"
+        f"\"cScale0\":\"{MERMAID_PALETTE[0]}\","
+        f"\"cScale1\":\"{MERMAID_PALETTE[1]}\","
+        f"\"cScale2\":\"{MERMAID_PALETTE[2]}\""
+        "}}}%%\n"
+    )
     x_axis = ", ".join(str(x) for x in xs)
     y_axis = f'  y-axis "{y_label}"'
     if y_min is not None and y_max is not None:
@@ -111,7 +127,7 @@ def mermaid_xychart(
     for name, ys in series:
         y_vals = ", ".join(f"{y:.3f}" if isinstance(y, float) else str(y) for y in ys)
         lines.append(f'  line "{name}" [{y_vals}]')
-    return "```mermaid\n" + "\n".join(lines) + "\n```\n"
+    return "```mermaid\n" + init + "\n".join(lines) + "\n```\n"
 
 
 def _bin_by_second(items: List[Sample], start_ms: int) -> Tuple[List[int], List[float]]:
@@ -178,6 +194,7 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
     if mem_items:
         xs_mem, mem_raw = _bin_by_second(mem_items, start_ms=start_ms_eff)
         mem_vals = [_to_mib(v) for v in mem_raw]
+
         chart_series: List[Tuple[str, List[float]]] = [("memory_rss_mib", mem_vals)]
         all_vals = mem_vals[:]
 
@@ -197,9 +214,10 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
         y0, y1 = _pad_range(min(all_vals), max(all_vals))
         lines.append("### Memory (Grafana-like)")
         lines.append(mermaid_xychart("memory/heap", "t (s)", "MiB", xs_mem, chart_series, y_min=y0, y_max=y1))
-        # Mermaid xychart-beta doesn't render a legend; spell it out explicitly.
         lines.append(
-            "Legend: memory_rss_mib=memory_usage_bytes, heap_in_use_mib=heap_in_use_bytes, heap_in_allocator_mib=heap_in_allocator_bytes"
+            f"Legend: ■({MERMAID_PALETTE[0]})=memory_usage_bytes (rss), "
+            f"■({MERMAID_PALETTE[1]})=heap_in_use_bytes, "
+            f"■({MERMAID_PALETTE[2]})=heap_in_allocator_bytes"
         )
         lines.append("")
     return "\n".join(lines) + "\n"
