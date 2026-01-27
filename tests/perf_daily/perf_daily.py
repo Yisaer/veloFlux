@@ -226,8 +226,9 @@ def provision(
         return
 
     if force:
+        # Do NOT delete the stream: multiple pipelines (cases) share the same stream,
+        # and manager will reject deleting a referenced stream (HTTP 409).
         _ignore_not_found(lambda: client.request_text("DELETE", f"/pipelines/{urllib.parse.quote(pipeline_id)}"))
-        _ignore_not_found(lambda: client.request_text("DELETE", f"/streams/{urllib.parse.quote(stream_name)}"))
 
     try:
         client.request_json("POST", "/streams", stream_req)
