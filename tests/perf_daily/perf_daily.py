@@ -115,6 +115,24 @@ class Client:
             raise ApiError(method, path, 0, str(e)) from None
 
 
+def delete_all_pipelines(client: "Client") -> None:
+    """
+    Delete all pipelines in manager storage.
+
+    This keeps perf cases isolated (no leftover pipelines affecting metrics) and
+    makes it safe to reuse the same stream across cases.
+    """
+    items = client.request_json("GET", "/pipelines", None) or []
+    ids: List[str] = []
+    for it in items:
+        if isinstance(it, dict) and isinstance(it.get("id"), str):
+            ids.append(it["id"])
+    if ids:
+        print(f"force: deleting {len(ids)} pipeline(s): {', '.join(ids)}", file=sys.stderr)
+    for pid in ids:
+        _ignore_not_found(lambda pid=pid: client.request_text("DELETE", f"/pipelines/{urllib.parse.quote(pid)}"))
+
+
 def build_columns(count: int) -> List[Dict[str, str]]:
     return [{"name": f"a{i}", "data_type": "string"} for i in range(1, count + 1)]
 
@@ -226,9 +244,11 @@ def provision(
         return
 
     if force:
-        # Do NOT delete the stream: multiple pipelines (cases) share the same stream,
-        # and manager will reject deleting a referenced stream (HTTP 409).
-        _ignore_not_found(lambda: client.request_text("DELETE", f"/pipelines/{urllib.parse.quote(pipeline_id)}"))
+        # Do NOT delete the stream: multiple cases share the same stream, and manager
+        # will reject deleting a referenced stream (HTTP 409).
+        #
+        # Instead, delete all pipelines before creating the requested case pipeline.
+        delete_all_pipelines(client)
 
     try:
         client.request_json("POST", "/streams", stream_req)
