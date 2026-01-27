@@ -15,7 +15,7 @@ import urllib.request
 import urllib.error
 from typing import Any, Dict, List, Optional
 
-from mqtt_qos0_pub import MqttError, parse_tcp_broker_url, publish_qos0_with_timing
+from mqtt_qos0_pub import MqttError, parse_tcp_broker_url, publish_qos1_with_timing
 
 
 class PerfDailyError(RuntimeError):
@@ -428,10 +428,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--broker-url", default="tcp://127.0.0.1:1883")
     p.add_argument("--topic", default="/perf/daily")
-    p.add_argument("--qos", type=int, default=0)
+    p.add_argument("--qos", type=int, default=1)
 
-    p.add_argument("--cases", type=int, default=10)
-    p.add_argument("--str-len", type=int, default=16)
+    p.add_argument("--cases", type=int, default=20)
+    p.add_argument("--str-len", type=int, default=10)
     p.add_argument("--duration-secs", type=int, default=300)
     p.add_argument("--rate", type=int, default=50, help="Messages per second (default: 50)")
 
@@ -464,8 +464,8 @@ def main(argv: List[str]) -> int:
         raise PerfDailyError("--duration-secs must be >= 0")
     if args.rate < 0:
         raise PerfDailyError("--rate must be >= 0")
-    if args.qos != 0:
-        raise PerfDailyError("--qos must be 0 for publish (QoS0 only)")
+    if args.qos != 1:
+        raise PerfDailyError("--qos must be 1 for publish (QoS1 only)")
 
     wait_for_manager(args.base_url, timeout_secs=args.timeout_secs, wait_secs=60.0)
     broker = parse_tcp_broker_url(args.broker_url)
@@ -514,7 +514,7 @@ def main(argv: List[str]) -> int:
 
         pub = None
         try:
-            pub = publish_qos0_with_timing(
+            pub = publish_qos1_with_timing(
                 broker_url=args.broker_url,
                 topic=args.topic,
                 payloads=payloads,

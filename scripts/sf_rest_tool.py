@@ -191,31 +191,68 @@ def cmd_recreate_pipeline(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    def add_common_args(parser: argparse.ArgumentParser) -> None:
+        # Define args on both the top-level parser and each subcommand parser so the
+        # tool works with either of these styles:
+        #   sf_rest_tool.py --base-url ... provision
+        #   sf_rest_tool.py provision --base-url ...
+        #
+        # Use SUPPRESS defaults to avoid one parser overwriting values set by the other
+        # when options are provided before vs. after the subcommand.
+        parser.add_argument("--base-url", default=argparse.SUPPRESS)
+        parser.add_argument("--stream-name", default=argparse.SUPPRESS)
+        parser.add_argument("--pipeline-id", default=argparse.SUPPRESS)
+        parser.add_argument("--columns", type=int, default=argparse.SUPPRESS)
+        parser.add_argument("--broker-url", default=argparse.SUPPRESS)
+        parser.add_argument("--topic", default=argparse.SUPPRESS)
+        parser.add_argument("--qos", type=int, default=argparse.SUPPRESS)
+        parser.add_argument("--timeout-secs", type=float, default=argparse.SUPPRESS)
+        parser.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
+        parser.add_argument("--force", action="store_true", default=argparse.SUPPRESS)
+        parser.add_argument("--no-start", action="store_true", default=argparse.SUPPRESS)
+
+    common = argparse.ArgumentParser(add_help=False)
+    add_common_args(common)
+
     p = argparse.ArgumentParser(
         description="SynapseFlow REST helper: create/start/delete a 15k-column MQTT stream and a nop-sink pipeline.",
+        parents=[common],
     )
-    p.add_argument("--base-url", default="http://127.0.0.1:8080")
-    p.add_argument("--stream-name", default="stream")
-    p.add_argument("--pipeline-id", default="test")
-    p.add_argument("--columns", type=int, default=15000)
-    p.add_argument("--broker-url", default="tcp://127.0.0.1:1883")
-    p.add_argument("--topic", default="/yisa/data")
-    p.add_argument("--qos", type=int, default=0)
-    p.add_argument("--timeout-secs", type=float, default=60.0)
-    p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--force", action="store_true")
-    p.add_argument("--no-start", action="store_true")
 
     sub = p.add_subparsers(dest="command", required=True)
-    sub.add_parser("provision")
-    sub.add_parser("cleanup")
-    sub.add_parser("recreate-pipeline")
+    sub.add_parser("provision", parents=[common])
+    sub.add_parser("cleanup", parents=[common])
+    sub.add_parser("recreate-pipeline", parents=[common])
     return p
 
 
 def main(argv: List[str]) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # Apply defaults after parse so options can be placed before or after the subcommand.
+    if not hasattr(args, "base_url"):
+        args.base_url = "http://127.0.0.1:8080"
+    if not hasattr(args, "stream_name"):
+        args.stream_name = "stream"
+    if not hasattr(args, "pipeline_id"):
+        args.pipeline_id = "test"
+    if not hasattr(args, "columns"):
+        args.columns = 15000
+    if not hasattr(args, "broker_url"):
+        args.broker_url = "tcp://127.0.0.1:1883"
+    if not hasattr(args, "topic"):
+        args.topic = "/yisa/data"
+    if not hasattr(args, "qos"):
+        args.qos = 0
+    if not hasattr(args, "timeout_secs"):
+        args.timeout_secs = 60.0
+    if not hasattr(args, "dry_run"):
+        args.dry_run = False
+    if not hasattr(args, "force"):
+        args.force = False
+    if not hasattr(args, "no_start"):
+        args.no_start = False
 
     if args.columns <= 0:
         raise ApiError("--columns must be > 0")

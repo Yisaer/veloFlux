@@ -1,0 +1,153 @@
+name: Daily (SQL Assert + Perf)
+
+on:
+  schedule:
+    # 07:00 (UTC+8) == 23:00 UTC (previous day)
+    - cron: "0 23 * * *"
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Which daily task to run"
+        type: choice
+        options:
+          - all
+          - sql-assert
+          - perf-daily
+        default: all
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  daily:
+    name: Daily
+    runs-on: ubuntu-latest
+    env:
+      # schedule: always run "all"; workflow_dispatch: run selected task.
+      DAILY_TASK: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.task || 'all' }}
+    services:
+      emqx:
+        image: emqx/emqx:5.6.1
+        ports:
+          - 1883:1883
+        env:
+          EMQX_ALLOW_ANONYMOUS: "true"
+          EMQX_LISTENER__TCP__DEFAULT__BIND: "0.0.0.0:1883"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'sql-assert' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tests/sql_assert/sql_gen/go.mod
+          cache: false
+
+      - name: Cache Go build
+        if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'sql-assert' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: ${{ runner.os }}-go-${{ hashFiles('tests/sql_assert/sql_gen/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - name: Generate SQL
+        if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'sql-assert' }}
+        working-directory: tests/sql_assert/sql_gen
+        run: go run . --config ../config-test.toml
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Build once, then reuse the release binaries for both daily tasks.
+      - name: Build (release)
+        run: make release
+
+      - name: Run Flow SQL Assert (release binary)
+        if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'sql-assert' }}
+        run: target/release/flow_sql_assert --config tests/sql_assert/config-test.toml
+
+      - name: Upload SQL assert debug artifacts (on failure)
+        if: ${{ failure() && (env.DAILY_TASK == 'all' || env.DAILY_TASK == 'sql-assert') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-sql-assert-artifacts-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            tests/sql_assert/config-test.toml
+            tests/sql_assert/sqls.txt
+
+      - name: Start veloflux
+        if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily' }}
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/perf_daily_ci
+          target/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/data > tmp/perf_daily_ci/veloflux.log 2>&1 &
+          echo $! > tmp/perf_daily_ci/veloflux.pid
+
+      - name: Run perf scenario
+        if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily' }}
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_ci/out
+          PERF_DURATION_SECS: "300"
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily.py \
+            --force \
+            --base-url http://127.0.0.1:8080 \
+            --metrics-url http://127.0.0.1:9898/metrics \
+            --broker-url tcp://127.0.0.1:1883 \
+            --topic /perf/daily \
+            --qos 1 \
+            --columns 15000 \
+            --cases 20 \
+            --str-len 10 \
+            --duration-secs "${PERF_DURATION_SECS}" \
+            --rate 50 \
+            --scrape-interval-ms 15000 \
+            --out-dir "${PERF_OUT_DIR}" \
+            run
+
+      - name: Render perf report (summary + html)
+        if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily' }}
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_ci/out
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily_report.py \
+            --result-json "${PERF_OUT_DIR}/result.json" \
+            --out-html "${PERF_OUT_DIR}/report.html" \
+            --summary-path "${GITHUB_STEP_SUMMARY}" \
+            --title "Daily Perf Wide MQTT (${{ github.sha }})"
+
+      - name: Upload perf artifacts
+        if: ${{ always() && (env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-daily-wide-mqtt-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            tmp/perf_daily_ci/out/result.json
+            tmp/perf_daily_ci/out/metrics.openmetrics
+            tmp/perf_daily_ci/out/report.html
+            tmp/perf_daily_ci/veloflux.log
+
+      - name: Stop veloflux
+        if: ${{ always() && (env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily') }}
+        run: |
+          set +e
+          if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
+            kill "$(cat tmp/perf_daily_ci/veloflux.pid)" 2>/dev/null || true
+          fi

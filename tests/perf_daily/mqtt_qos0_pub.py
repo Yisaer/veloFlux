@@ -14,7 +14,7 @@ import socket
 import struct
 import time
 from dataclasses import dataclass
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Optional
 
 
 class MqttError(RuntimeError):
@@ -108,6 +108,52 @@ def _build_publish_packet(topic: str, payload: bytes) -> bytes:
     vh = _encode_utf8(topic)
     remaining = _encode_remaining_length(len(vh) + len(payload))
     return b"\x30" + remaining + vh + payload
+
+
+def _read_remaining_length(sock: socket.socket) -> int:
+    multiplier = 1
+    value = 0
+    for _ in range(4):
+        b = _read_exact(sock, 1)[0]
+        value += (b & 127) * multiplier
+        if (b & 128) == 0:
+            return value
+        multiplier *= 128
+    raise MqttError("malformed Remaining Length")
+
+
+def _read_control_packet(sock: socket.socket) -> tuple[int, bytes]:
+    fixed1 = _read_exact(sock, 1)[0]
+    rem = _read_remaining_length(sock)
+    payload = _read_exact(sock, rem) if rem else b""
+    return fixed1, payload
+
+
+def _read_puback(sock: socket.socket, packet_id: int, timeout_secs: float) -> None:
+    prev = sock.gettimeout()
+    try:
+        sock.settimeout(timeout_secs)
+        while True:
+            fixed1, payload = _read_control_packet(sock)
+            # PUBACK fixed header: 0x40, remaining length 0x02, payload: packet id.
+            if fixed1 != 0x40:
+                continue
+            if len(payload) != 2:
+                continue
+            got = struct.unpack("!H", payload)[0]
+            if got == packet_id:
+                return
+    except socket.timeout as e:
+        raise MqttError(f"PUBACK timeout after {timeout_secs}s") from e
+    finally:
+        sock.settimeout(prev)
+
+
+def _build_publish_packet_qos1(topic: str, payload: bytes, packet_id: int) -> bytes:
+    # QoS1, retain=false, dup=false -> fixed header 0x32.
+    vh = _encode_utf8(topic) + struct.pack("!H", packet_id)
+    remaining = _encode_remaining_length(len(vh) + len(payload))
+    return b"\x32" + remaining + vh + payload
 
 
 def publish_qos0(
@@ -232,6 +278,86 @@ def publish_qos0_with_timing(
 
             if rate_per_sec > 0:
                 # Basic pacing: next send at start + i/rate.
+                target = start + (i / float(rate_per_sec))
+                delay = target - time.time()
+                if delay > 0:
+                    time.sleep(delay)
+        end_ms = int(time.time() * 1000)
+    finally:
+        if end_ms == 0:
+            end_ms = int(time.time() * 1000)
+        if start_ms == 0:
+            start_ms = end_ms
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    return PublishResult(sent=sent, start_ts_ms=start_ms, end_ts_ms=end_ms)
+
+
+def publish_qos1_with_timing(
+    broker_url: str,
+    topic: str,
+    payloads: Iterable[bytes],
+    publish_count: int = 0,
+    duration_secs: int = 0,
+    rate_per_sec: int = 0,
+    client_id: Optional[str] = None,
+    connect_timeout_secs: float = 10.0,
+    keepalive_secs: int = 60,
+    puback_timeout_secs: float = 5.0,
+) -> PublishResult:
+    """
+    Publish MQTT v3.1.1 QoS1 messages (blocking on PUBACK for each message).
+
+    This matches the semantics of "publish(...).Wait()" style clients: a message
+    is counted as sent only after the broker ACKs it.
+    """
+    if publish_count <= 0 and duration_secs <= 0:
+        now = int(time.time() * 1000)
+        return PublishResult(sent=0, start_ts_ms=now, end_ts_ms=now)
+
+    payload_list = list(payloads)
+    if not payload_list:
+        raise MqttError("payloads is empty")
+
+    broker = parse_tcp_broker_url(broker_url)
+    if client_id is None:
+        client_id = f"perf-daily-{os.getpid()}"
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sent = 0
+    start_ms = 0
+    end_ms = 0
+    try:
+        sock.settimeout(connect_timeout_secs)
+        sock.connect((broker.host, broker.port))
+        sock.settimeout(None)
+        sock.sendall(_build_connect_packet(client_id, keepalive_secs=keepalive_secs))
+        _read_connack(sock)
+
+        start_ms = int(time.time() * 1000)
+        start = time.time()
+        i = 0
+        packet_id = 1
+        while True:
+            now = time.time()
+            if duration_secs > 0 and (now - start) >= duration_secs:
+                break
+            if duration_secs <= 0 and i >= publish_count:
+                break
+
+            payload = payload_list[i % len(payload_list)]
+            sock.sendall(_build_publish_packet_qos1(topic, payload, packet_id=packet_id))
+            _read_puback(sock, packet_id=packet_id, timeout_secs=puback_timeout_secs)
+            sent += 1
+            i += 1
+            packet_id += 1
+            if packet_id > 0xFFFF:
+                packet_id = 1
+
+            if rate_per_sec > 0:
                 target = start + (i / float(rate_per_sec))
                 delay = target - time.time()
                 if delay > 0:

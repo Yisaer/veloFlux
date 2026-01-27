@@ -1,9 +1,9 @@
 name: Perf Daily Wide MQTT
 
 on:
-  schedule:
-    # 07:00 (UTC+8) == 23:00 UTC (previous day)
-    - cron: "0 23 * * *"
+  pull_request: {}
+  push:
+    branches: [ main, master ]
   workflow_dispatch: {}
 
 concurrency:
@@ -57,10 +57,10 @@ jobs:
             --metrics-url http://127.0.0.1:9898/metrics \
             --broker-url tcp://127.0.0.1:1883 \
             --topic /perf/daily \
-            --qos 0 \
+            --qos 1 \
             --columns 15000 \
-            --cases 10 \
-            --str-len 16 \
+            --cases 20 \
+            --str-len 10 \
             --duration-secs "${PERF_DURATION_SECS}" \
             --rate 50 \
             --scrape-interval-ms 15000 \

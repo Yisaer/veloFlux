@@ -1,9 +1,6 @@
 name: Daily SQL Assert
 
 on:
-  schedule:
-    # 07:00 (UTC+8) == 23:00 UTC (previous day)
-    - cron: "0 23 * * *"
   workflow_dispatch: {}
 
 concurrency:
