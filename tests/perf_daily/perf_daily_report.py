@@ -25,6 +25,7 @@ TRACKED_METRICS = (
     "memory_usage_bytes",
     "heap_in_use_bytes",
     "heap_in_allocator_bytes",
+    "processor_records_in_total",
 )
 
 # We render in GitHub Actions Job Summary; prefer dark theme and high-contrast lines.
@@ -154,6 +155,29 @@ def _pad_range(vmin: float, vmax: float) -> Tuple[float, float]:
     return max(0.0, vmin - pad), vmax + pad
 
 
+def _compute_rate(samples: List[Sample], start_ms: int) -> Tuple[List[int], List[float]]:
+    """
+    Convert a counter series into per-second rate using adjacent deltas.
+    Returns (xs_secs, rates) aligned to the *later* sample timestamp.
+    """
+    if len(samples) < 2:
+        return [], []
+    xs: List[int] = []
+    rs: List[float] = []
+    prev_ts, prev_v = samples[0]
+    for ts, v in samples[1:]:
+        dt = (ts - prev_ts) / 1000.0
+        dv = v - prev_v
+        prev_ts, prev_v = ts, v
+        if dt <= 0:
+            continue
+        if dv < 0:
+            continue
+        xs.append(int((ts - start_ms) // 1000))
+        rs.append(dv / dt)
+    return xs, rs
+
+
 def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openmetrics_path: str) -> str:
     cfg = result.get("config", {})
     sent = result.get("sent_messages")
@@ -192,6 +216,25 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
         y0, y1 = _pad_range(min(cpu_vals), max(cpu_vals))
         lines.append("### CPU (Grafana-like)")
         lines.append(mermaid_xychart("cpu_usage", "t (s)", "%", xs, [("cpu_usage", cpu_vals)], y_min=y0, y_max=y1))
+
+    # Ingress throughput: datasource records_in rate.
+    ds_in = series.get("processor_records_in_total", [])
+    if ds_in:
+        xs_r, rs = _compute_rate(ds_in, start_ms=start_ms_eff)
+        if xs_r and rs:
+            y0, y1 = _pad_range(min(rs), max(rs))
+            lines.append("### Datasource Records In Rate (Grafana-like)")
+            lines.append(
+                mermaid_xychart(
+                    "processor_records_in_total{kind=\"datasource\"} rate",
+                    "t (s)",
+                    "records/s",
+                    xs_r,
+                    [("records_in_per_s", rs)],
+                    y_min=y0,
+                    y_max=y1,
+                )
+            )
 
     mem_items = series.get("memory_usage_bytes", [])
     heap_items = series.get("heap_in_use_bytes", [])

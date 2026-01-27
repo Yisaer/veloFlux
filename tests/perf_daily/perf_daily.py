@@ -33,6 +33,7 @@ TRACKED_METRICS = (
     "memory_usage_bytes",
     "heap_in_use_bytes",
     "heap_in_allocator_bytes",
+    "processor_records_in_total",
 )
 
 _SAMPLE_RE = re.compile(
@@ -306,6 +307,11 @@ def _ensure_instance_label(labels: Optional[str], instance: str) -> str:
     return f'{{instance="{instance}",{inner}}}'
 
 
+def _labels_have_kv(labels: str, key: str, value: str) -> bool:
+    # Simple substring check is sufficient for Prometheus label format in our dumps.
+    return f'{key}="{value}"' in labels
+
+
 def extract_openmetrics_block(text: str, ts_ms: int, instance: str, include_meta: bool) -> str:
     out_lines: List[str] = []
     for line in text.splitlines():
@@ -323,6 +329,9 @@ def extract_openmetrics_block(text: str, ts_ms: int, instance: str, include_meta
         if name not in TRACKED_METRICS:
             continue
         labels = _ensure_instance_label(m.group(2), instance=instance)
+        # Only keep datasource input counter; this is the closest approximation of "ingress throughput".
+        if name == "processor_records_in_total" and not _labels_have_kv(labels, "kind", "datasource"):
+            continue
         value = m.group(3)
         out_lines.append(f"{name}{labels} {value} {ts_ms}")
     return "\n".join(out_lines) + ("\n" if out_lines else "")

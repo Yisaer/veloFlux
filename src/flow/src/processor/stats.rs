@@ -9,7 +9,7 @@ static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "processor_records_in_total",
         "Rows received by processors",
-        &["pipeline_id", "processor_id", "kind"]
+        &["pipeline_id", "kind"]
     )
     .expect("create processor records_in counter vec")
 });
@@ -18,7 +18,7 @@ static PROCESSOR_RECORDS_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "processor_records_out_total",
         "Rows emitted by processors",
-        &["pipeline_id", "processor_id", "kind"]
+        &["pipeline_id", "kind"]
     )
     .expect("create processor records_out counter vec")
 });
@@ -27,7 +27,7 @@ static PROCESSOR_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
         "processor_errors_total",
         "Errors observed by processors",
-        &["pipeline_id", "processor_id", "kind"]
+        &["pipeline_id", "kind"]
     )
     .expect("create processor errors counter vec")
 });
@@ -217,11 +217,7 @@ impl ProcessorStats {
         self.records_in.fetch_add(rows, Ordering::Relaxed);
         if let Some(pipeline_id) = self.pipeline_id.get() {
             PROCESSOR_RECORDS_IN_TOTAL
-                .with_label_values(&[
-                    pipeline_id.as_ref(),
-                    self.processor_id.as_ref(),
-                    self.kind.as_ref(),
-                ])
+                .with_label_values(&[pipeline_id.as_ref(), self.kind.as_ref()])
                 .inc_by(rows);
         }
     }
@@ -230,11 +226,7 @@ impl ProcessorStats {
         self.records_out.fetch_add(rows, Ordering::Relaxed);
         if let Some(pipeline_id) = self.pipeline_id.get() {
             PROCESSOR_RECORDS_OUT_TOTAL
-                .with_label_values(&[
-                    pipeline_id.as_ref(),
-                    self.processor_id.as_ref(),
-                    self.kind.as_ref(),
-                ])
+                .with_label_values(&[pipeline_id.as_ref(), self.kind.as_ref()])
                 .inc_by(rows);
         }
     }
@@ -247,11 +239,7 @@ impl ProcessorStats {
         self.error_count.fetch_add(count, Ordering::Relaxed);
         if let Some(pipeline_id) = self.pipeline_id.get() {
             PROCESSOR_ERRORS_TOTAL
-                .with_label_values(&[
-                    pipeline_id.as_ref(),
-                    self.processor_id.as_ref(),
-                    self.kind.as_ref(),
-                ])
+                .with_label_values(&[pipeline_id.as_ref(), self.kind.as_ref()])
                 .inc_by(count);
         }
         let message: String = message.into();
