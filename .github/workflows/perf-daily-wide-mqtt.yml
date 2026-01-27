@@ -1,9 +1,9 @@
 name: Perf Daily Wide MQTT
 
 on:
-  schedule:
-    # 07:00 (UTC+8) == 23:00 UTC (previous day)
-    - cron: "0 23 * * *"
+  pull_request: {}
+  push:
+    branches: [ main, master ]
   workflow_dispatch: {}
 
 concurrency:
