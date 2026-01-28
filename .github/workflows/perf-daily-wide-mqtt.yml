@@ -32,20 +32,14 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build veloflux (release)
+      - name: Build veloflux (system allocator)
         run: |
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci/bin
-
-          # Default build uses `allocator-jemalloc`.
-          make release
-          cp target/release/veloflux tmp/perf_daily_ci/bin/veloflux-jemalloc
-
-          # System allocator build (RSS-only comparison).
           cargo build --release --no-default-features --features metrics,allocator-system
           cp target/release/veloflux tmp/perf_daily_ci/bin/veloflux-system
 
-      - name: Run perf variants (jemalloc / jemalloc+params / system)
+      - name: Run perf scenario (system allocator + THP disabled + GLIBC_TUNABLES)
         env:
           PERF_DURATION_SECS: "120"
         run: |
@@ -57,16 +51,14 @@ jobs:
             local data_dir="$2"
             local log_path="$3"
             local pid_path="$4"
-            local jemalloc_conf="${5:-}"
 
             mkdir -p "$(dirname "$log_path")"
             rm -f "$pid_path"
 
-            if [ -n "$jemalloc_conf" ]; then
-              _RJEM_MALLOC_CONF="$jemalloc_conf" "$bin" --config etc/config.example.yaml --data-dir "$data_dir" > "$log_path" 2>&1 &
-            else
-              "$bin" --config etc/config.example.yaml --data-dir "$data_dir" > "$log_path" 2>&1 &
-            fi
+            # Tighten RSS behavior for system allocator builds.
+            GLIBC_TUNABLES="glibc.malloc.arena_max=2:glibc.malloc.tcache_count=0:glibc.malloc.trim_threshold=524288" \
+            VELOFLUX_DISABLE_THP=1 \
+            "$bin" --config etc/config.example.yaml --data-dir "$data_dir" > "$log_path" 2>&1 &
 
             echo $! > "$pid_path"
           }
@@ -154,7 +146,6 @@ jobs:
           run_variant() {
             local variant="$1"
             local bin="$2"
-            local jemalloc_conf="${3:-}"
 
             local base="tmp/perf_daily_ci/${variant}"
             local data_dir="${base}/data"
@@ -163,23 +154,21 @@ jobs:
             local mem_path="${base}/memdump.txt"
 
             # Explicit columns
-            start_veloflux "$bin" "$data_dir" "$log_path" "$pid_path" "$jemalloc_conf"
+            start_veloflux "$bin" "$data_dir" "$log_path" "$pid_path"
             dump_mem "$(cat "$pid_path")" "$variant" "pre-explicit" "$mem_path"
             run_case "$variant" "explicit" "${base}/out_explicit" "perf_daily_${variant}_pipeline_explicit" "Perf Daily Wide MQTT - ${variant} - explicit (2m) (${{ github.sha }})" "$log_path"
             dump_mem "$(cat "$pid_path")" "$variant" "post-explicit" "$mem_path"
             stop_veloflux "$pid_path"
 
             # Select *
-            start_veloflux "$bin" "$data_dir" "$log_path" "$pid_path" "$jemalloc_conf"
+            start_veloflux "$bin" "$data_dir" "$log_path" "$pid_path"
             dump_mem "$(cat "$pid_path")" "$variant" "pre-star" "$mem_path"
             run_case "$variant" "star" "${base}/out_star" "perf_daily_${variant}_pipeline_star" "Perf Daily Wide MQTT - ${variant} - select * (2m) (${{ github.sha }})" "$log_path"
             dump_mem "$(cat "$pid_path")" "$variant" "post-star" "$mem_path"
             stop_veloflux "$pid_path"
           }
 
-          run_variant "jemalloc" "tmp/perf_daily_ci/bin/veloflux-jemalloc" ""
-          run_variant "jemalloc-tight-rss" "tmp/perf_daily_ci/bin/veloflux-jemalloc" "background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
-          run_variant "system" "tmp/perf_daily_ci/bin/veloflux-system" ""
+          run_variant "system" "tmp/perf_daily_ci/bin/veloflux-system"
 
       - name: Upload artifacts
         if: always()
