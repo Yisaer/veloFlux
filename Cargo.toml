@@ -38,9 +38,11 @@ storage = { path = "src/storage" }
 build_info = { path = "src/build_info" }
 
 [features]
-default = ["metrics", "profiling"]
+default = ["metrics", "profiling", "allocator-jemalloc"]
 metrics = ["dep:prometheus_exporter", "dep:sysinfo", "telemetry"]
-profiling = ["dep:pprof", "dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
+profiling = ["dep:pprof"]
+allocator-jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
+allocator-system = []
 
 [dev-dependencies]
 tempfile = "3"
