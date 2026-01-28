@@ -57,7 +57,6 @@ jobs:
 
             # Tighten RSS behavior for system allocator builds.
             GLIBC_TUNABLES="glibc.malloc.arena_max=2:glibc.malloc.tcache_count=0:glibc.malloc.trim_threshold=524288" \
-            VELOFLUX_DISABLE_THP=1 \
             "$bin" --config etc/config.example.yaml --data-dir "$data_dir" > "$log_path" 2>&1 &
 
             echo $! > "$pid_path"
