@@ -1,10 +1,6 @@
 use flow::FlowInstance;
 use manager::storage_bridge;
 #[cfg(feature = "profiling")]
-use std::ffi::CString;
-#[cfg(feature = "profiling")]
-use std::fs;
-#[cfg(feature = "profiling")]
 use std::io::{Read, Write};
 #[cfg(any(feature = "metrics", feature = "profiling"))]
 use std::net::SocketAddr;
@@ -12,7 +8,11 @@ use std::net::SocketAddr;
 use std::net::{TcpListener, TcpStream};
 #[cfg(any(feature = "metrics", feature = "profiling"))]
 use std::process;
-#[cfg(feature = "profiling")]
+#[cfg(all(
+    feature = "profiling",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
 use std::sync::Mutex;
 #[cfg(feature = "profiling")]
 use std::thread;
@@ -29,9 +29,17 @@ use telemetry::{
     spawn_tokio_metrics_collector, CPU_USAGE_GAUGE, HEAP_IN_ALLOCATOR_GAUGE, HEAP_IN_USE_GAUGE,
     MEMORY_USAGE_GAUGE,
 };
-#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+#[cfg(all(
+    feature = "profiling",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
 use tikv_jemalloc_ctl::raw;
-#[cfg(all(feature = "metrics", not(target_env = "msvc")))]
+#[cfg(all(
+    feature = "metrics",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
 use tikv_jemalloc_ctl::{epoch, stats};
 #[cfg(feature = "metrics")]
 use tokio::time::{sleep, Duration};
@@ -49,7 +57,11 @@ pub const DEFAULT_MANAGER_ADDR: &str = "0.0.0.0:8080";
 #[cfg(feature = "metrics")]
 const DEFAULT_METRICS_POLL_INTERVAL_SECS: u64 = 5;
 
-#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+#[cfg(all(
+    feature = "profiling",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
 static PPROF_ENDPOINT_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Options for initializing the server runtime.
@@ -167,17 +179,17 @@ pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error +
     Ok(())
 }
 
-#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+#[cfg(all(feature = "allocator-jemalloc", not(target_env = "msvc")))]
 fn log_allocator() {
     tracing::info!("global allocator: jemalloc");
 }
 
-#[cfg(all(feature = "profiling", target_env = "msvc"))]
+#[cfg(all(feature = "allocator-jemalloc", target_env = "msvc"))]
 fn log_allocator() {
-    tracing::info!("profiling enabled but using system allocator on MSVC");
+    tracing::info!("allocator-jemalloc enabled but using system allocator on MSVC");
 }
 
-#[cfg(not(feature = "profiling"))]
+#[cfg(not(feature = "allocator-jemalloc"))]
 fn log_allocator() {
     tracing::info!("global allocator: system default");
 }
@@ -307,9 +319,8 @@ fn generate_profile(duration: u64, frequency_hz: i32) -> Result<Vec<u8>, String>
     })
 }
 
-#[cfg(feature = "profiling")]
+#[cfg(all(feature = "profiling", feature = "allocator-jemalloc", not(target_env = "msvc")))]
 fn capture_heap_profile() -> Result<Vec<u8>, String> {
-    #[cfg(all(feature = "profiling", not(target_env = "msvc")))]
     let _lock = PPROF_ENDPOINT_MUTEX
         .lock()
         .map_err(|_| "pprof endpoint lock poisoned".to_string())?;
@@ -317,7 +328,7 @@ fn capture_heap_profile() -> Result<Vec<u8>, String> {
     // Ensure profiling is active; if jemalloc lacks profiling support, return a clear error.
     if let Err(err) = unsafe { raw::write(b"prof.active\0", true) } {
         return Err(format!(
-            "jemalloc heap profiling not enabled（need _RJEM_MALLOC_CONF='prof:true,prof_active:true' with tikv-jemallocator profiling）。error: {}",
+            "jemalloc heap profiling not enabled (need _RJEM_MALLOC_CONF='prof:true,prof_active:true' with tikv-jemallocator profiling). error: {}",
             err
         ));
     }
@@ -330,6 +341,15 @@ fn capture_heap_profile() -> Result<Vec<u8>, String> {
     let body = fs::read(&filename).map_err(|err| err.to_string())?;
     let _ = fs::remove_file(&filename);
     Ok(body)
+}
+
+#[cfg(all(
+    feature = "profiling",
+    any(not(feature = "allocator-jemalloc"), target_env = "msvc")
+))]
+fn capture_heap_profile() -> Result<Vec<u8>, String> {
+    Err("jemalloc heap profiling requires feature `allocator-jemalloc` and a non-MSVC build"
+        .to_string())
 }
 
 #[cfg(feature = "profiling")]
@@ -405,29 +425,33 @@ fn parse_i32_param(query: Option<&str>, key: &str) -> Option<i32> {
         .and_then(|value| value.parse::<i32>().ok())
 }
 
-#[cfg(feature = "profiling")]
+#[cfg(all(feature = "profiling", feature = "allocator-jemalloc", not(target_env = "msvc")))]
 fn ensure_jemalloc_profiling() {
     // Best-effort: try to activate runtime profiling. If jemalloc was built
     // without profiling, mallctl will return an error and heap endpoint will
     // later surface a clearer message.
-    #[cfg(all(feature = "profiling", not(target_env = "msvc")))]
-    {
-        let _ = unsafe { raw::write(b"prof.active\0", true) };
-    }
+    let _ = unsafe { raw::write(b"prof.active\0", true) };
 }
 
-#[cfg(not(feature = "profiling"))]
+#[cfg(any(
+    not(feature = "profiling"),
+    not(feature = "allocator-jemalloc"),
+    target_env = "msvc"
+))]
 fn ensure_jemalloc_profiling() {}
 
-#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+#[cfg(all(feature = "profiling", feature = "allocator-jemalloc", not(target_env = "msvc")))]
 fn disable_heap_profiling_for_current_thread() {
     let _ = unsafe { raw::write(b"prof.thread_active\0", false) };
 }
 
-#[cfg(any(not(feature = "profiling"), target_env = "msvc"))]
+#[cfg(all(
+    feature = "profiling",
+    any(not(feature = "allocator-jemalloc"), target_env = "msvc")
+))]
 fn disable_heap_profiling_for_current_thread() {}
 
-#[cfg(all(feature = "profiling", not(target_env = "msvc")))]
+#[cfg(all(feature = "profiling", feature = "allocator-jemalloc", not(target_env = "msvc")))]
 fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let _lock = PPROF_ENDPOINT_MUTEX
         .lock()
@@ -456,7 +480,10 @@ fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> 
     result
 }
 
-#[cfg(any(not(feature = "profiling"), target_env = "msvc"))]
+#[cfg(all(
+    feature = "profiling",
+    any(not(feature = "allocator-jemalloc"), target_env = "msvc")
+))]
 fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     f()
 }
@@ -509,7 +536,11 @@ async fn init_metrics_exporter(
     Ok(())
 }
 
-#[cfg(all(feature = "metrics", not(target_env = "msvc")))]
+#[cfg(all(
+    feature = "metrics",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
 fn update_heap_metrics() {
     if epoch::advance().is_err() {
         return;
@@ -520,7 +551,10 @@ fn update_heap_metrics() {
     HEAP_IN_ALLOCATOR_GAUGE.set(clamp_usize_to_i64(resident));
 }
 
-#[cfg(all(feature = "metrics", target_env = "msvc"))]
+#[cfg(all(
+    feature = "metrics",
+    any(not(feature = "allocator-jemalloc"), target_env = "msvc")
+))]
 fn update_heap_metrics() {
     HEAP_IN_USE_GAUGE.set(0);
     HEAP_IN_ALLOCATOR_GAUGE.set(0);
@@ -530,7 +564,7 @@ fn update_heap_metrics() {
 #[allow(dead_code)]
 fn update_heap_metrics() {}
 
-#[cfg(feature = "metrics")]
+#[cfg(all(feature = "metrics", feature = "allocator-jemalloc"))]
 fn clamp_usize_to_i64(value: usize) -> i64 {
     if value > i64::MAX as usize {
         i64::MAX
@@ -538,8 +572,15 @@ fn clamp_usize_to_i64(value: usize) -> i64 {
         value as i64
     }
 }
-
-#[cfg(not(feature = "metrics"))]
-fn clamp_usize_to_i64(value: usize) -> i64 {
-    value as i64
-}
+#[cfg(all(
+    feature = "profiling",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
+use std::ffi::CString;
+#[cfg(all(
+    feature = "profiling",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
+use std::fs;
