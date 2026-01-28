@@ -690,7 +690,17 @@ pub async fn collect_pipeline_stats_handler(
 
     let timeout = Duration::from_millis(query.timeout_ms);
     match state.instance.collect_pipeline_stats(&id, timeout).await {
-        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
+        Ok(stats) => {
+            // Filter out internal pipeline nodes that are not meaningful for API consumers.
+            let stats = stats
+                .into_iter()
+                .filter(|entry| {
+                    entry.processor_id != "control_source"
+                        && !entry.processor_id.starts_with("PhysicalResultCollect_")
+                })
+                .collect::<Vec<_>>();
+            (StatusCode::OK, Json(stats)).into_response()
+        }
         Err(PipelineError::NotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
         }

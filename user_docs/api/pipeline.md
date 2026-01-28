@@ -123,6 +123,7 @@ Response:
 `GET /pipelines/:id/stats?timeout_ms=5000`
 
 Collects processor-level stats snapshots from the running pipeline.
+Internal bookkeeping processors (e.g. `control_source`, `result collect`) are excluded.
 
 Query parameters:
 
