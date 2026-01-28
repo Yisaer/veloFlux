@@ -75,9 +75,45 @@ jobs:
             local pid_path="$1"
             set +e
             if [ -f "$pid_path" ]; then
-              kill "$(cat "$pid_path")" 2>/dev/null || true
+              local pid
+              pid="$(cat "$pid_path")"
+              kill "$pid" 2>/dev/null || true
+
+              # Ensure the process exits (ports/file locks released) before the next case starts.
+              for _ in $(seq 1 60); do
+                if ! kill -0 "$pid" 2>/dev/null; then
+                  break
+                fi
+                sleep 1
+              done
+
+              if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null || true
+              fi
+              rm -f "$pid_path"
             fi
             set -e
+          }
+
+          dump_mem() {
+            local pid="$1"
+            local variant="$2"
+            local phase="$3"
+            local out_path="$4"
+
+            mkdir -p "$(dirname "$out_path")"
+            {
+              echo "==== memdump variant=${variant} phase=${phase} pid=${pid} ===="
+              ps -o pid,rss,vsz,cmd -p "$pid" 2>/dev/null || true
+              if [ -r "/proc/${pid}/smaps_rollup" ]; then
+                cat "/proc/${pid}/smaps_rollup" || true
+              elif command -v pmap >/dev/null 2>&1; then
+                pmap -x "$pid" || true
+              else
+                echo "memdump: /proc/<pid>/smaps_rollup not readable and pmap not available"
+              fi
+              echo
+            } | tee -a "$out_path"
           }
 
           run_case() {
@@ -86,6 +122,7 @@ jobs:
             local out_dir="$3"
             local pipeline_id="$4"
             local title="$5"
+            local log_path="$6"
 
             PYTHONPYCACHEPREFIX=tmp/pycache \
             python3 tests/perf_daily/perf_daily.py \
@@ -104,7 +141,7 @@ jobs:
               --rate 50 \
               --scrape-interval-ms 15000 \
               --out-dir "$out_dir" \
-              run
+              run || { echo "veloflux log (last 200 lines):"; tail -n 200 "$log_path" || true; exit 1; }
 
             PYTHONPYCACHEPREFIX=tmp/pycache \
             python3 tests/perf_daily/perf_daily_report.py \
@@ -123,15 +160,20 @@ jobs:
             local data_dir="${base}/data"
             local log_path="${base}/veloflux.log"
             local pid_path="${base}/veloflux.pid"
+            local mem_path="${base}/memdump.txt"
 
             # Explicit columns
             start_veloflux "$bin" "$data_dir" "$log_path" "$pid_path" "$jemalloc_conf"
-            run_case "$variant" "explicit" "${base}/out_explicit" "perf_daily_${variant}_pipeline_explicit" "Perf Daily Wide MQTT - ${variant} - explicit (2m) (${{ github.sha }})"
+            dump_mem "$(cat "$pid_path")" "$variant" "pre-explicit" "$mem_path"
+            run_case "$variant" "explicit" "${base}/out_explicit" "perf_daily_${variant}_pipeline_explicit" "Perf Daily Wide MQTT - ${variant} - explicit (2m) (${{ github.sha }})" "$log_path"
+            dump_mem "$(cat "$pid_path")" "$variant" "post-explicit" "$mem_path"
             stop_veloflux "$pid_path"
 
             # Select *
             start_veloflux "$bin" "$data_dir" "$log_path" "$pid_path" "$jemalloc_conf"
-            run_case "$variant" "star" "${base}/out_star" "perf_daily_${variant}_pipeline_star" "Perf Daily Wide MQTT - ${variant} - select * (2m) (${{ github.sha }})"
+            dump_mem "$(cat "$pid_path")" "$variant" "pre-star" "$mem_path"
+            run_case "$variant" "star" "${base}/out_star" "perf_daily_${variant}_pipeline_star" "Perf Daily Wide MQTT - ${variant} - select * (2m) (${{ github.sha }})" "$log_path"
+            dump_mem "$(cat "$pid_path")" "$variant" "post-star" "$mem_path"
             stop_veloflux "$pid_path"
           }
 
@@ -150,3 +192,4 @@ jobs:
             tmp/perf_daily_ci/**/metrics.openmetrics
             tmp/perf_daily_ci/**/report.html
             tmp/perf_daily_ci/**/veloflux.log
+            tmp/perf_daily_ci/**/memdump.txt
