@@ -319,7 +319,11 @@ fn generate_profile(duration: u64, frequency_hz: i32) -> Result<Vec<u8>, String>
     })
 }
 
-#[cfg(all(feature = "profiling", feature = "allocator-jemalloc", not(target_env = "msvc")))]
+#[cfg(all(
+    feature = "profiling",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
 fn capture_heap_profile() -> Result<Vec<u8>, String> {
     let _lock = PPROF_ENDPOINT_MUTEX
         .lock()
@@ -348,8 +352,10 @@ fn capture_heap_profile() -> Result<Vec<u8>, String> {
     any(not(feature = "allocator-jemalloc"), target_env = "msvc")
 ))]
 fn capture_heap_profile() -> Result<Vec<u8>, String> {
-    Err("jemalloc heap profiling requires feature `allocator-jemalloc` and a non-MSVC build"
-        .to_string())
+    Err(
+        "jemalloc heap profiling requires feature `allocator-jemalloc` and a non-MSVC build"
+            .to_string(),
+    )
 }
 
 #[cfg(feature = "profiling")]
@@ -425,7 +431,11 @@ fn parse_i32_param(query: Option<&str>, key: &str) -> Option<i32> {
         .and_then(|value| value.parse::<i32>().ok())
 }
 
-#[cfg(all(feature = "profiling", feature = "allocator-jemalloc", not(target_env = "msvc")))]
+#[cfg(all(
+    feature = "profiling",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
 fn ensure_jemalloc_profiling() {
     // Best-effort: try to activate runtime profiling. If jemalloc was built
     // without profiling, mallctl will return an error and heap endpoint will
@@ -440,7 +450,11 @@ fn ensure_jemalloc_profiling() {
 ))]
 fn ensure_jemalloc_profiling() {}
 
-#[cfg(all(feature = "profiling", feature = "allocator-jemalloc", not(target_env = "msvc")))]
+#[cfg(all(
+    feature = "profiling",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
 fn disable_heap_profiling_for_current_thread() {
     let _ = unsafe { raw::write(b"prof.thread_active\0", false) };
 }
@@ -451,7 +465,11 @@ fn disable_heap_profiling_for_current_thread() {
 ))]
 fn disable_heap_profiling_for_current_thread() {}
 
-#[cfg(all(feature = "profiling", feature = "allocator-jemalloc", not(target_env = "msvc")))]
+#[cfg(all(
+    feature = "profiling",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
 fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let _lock = PPROF_ENDPOINT_MUTEX
         .lock()
