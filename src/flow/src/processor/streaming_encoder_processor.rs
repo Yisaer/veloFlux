@@ -124,7 +124,11 @@ impl StreamingEncoderProcessor {
             *row_count += 1;
             if let Some(count) = mode.count_threshold() {
                 if *row_count >= count {
-                    Self::flush_buffer(processor_id, row_count, stream_state, output).await?;
+                    let flushed =
+                        Self::flush_buffer(processor_id, row_count, stream_state, output).await?;
+                    if flushed > 0 {
+                        stats.record_out(1);
+                    }
                 }
             }
             if let Some(duration) = mode.duration() {
@@ -139,10 +143,10 @@ impl StreamingEncoderProcessor {
         row_count: &mut usize,
         stream_state: &mut Option<Box<dyn CollectionEncoderStream>>,
         output: &broadcast::Sender<StreamData>,
-    ) -> Result<(), ProcessorError> {
+    ) -> Result<usize, ProcessorError> {
         if *row_count == 0 {
             *stream_state = None;
-            return Ok(());
+            return Ok(0);
         }
         let flushed_rows = std::mem::take(row_count);
         let stream = stream_state.take().ok_or_else(|| {
@@ -159,7 +163,7 @@ impl StreamingEncoderProcessor {
         )
         .await?;
         tracing::debug!(processor_id = %processor_id, "flushed batch");
-        Ok(())
+        Ok(flushed_rows)
     }
 
     fn schedule_timer(timer: &mut Option<Pin<Box<Sleep>>>, duration: Duration, has_data: bool) {
@@ -203,12 +207,19 @@ impl Processor for StreamingEncoderProcessor {
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(&control_output, control_signal).await?;
                             if is_terminal {
-                                if let Err(err) = StreamingEncoderProcessor::flush_buffer(
-                                    &processor_id,
-                                    &mut row_count,
-                                    &mut stream_state,
-                                    &output,
-                                )
+                                if let Err(err) = async {
+                                    let flushed = StreamingEncoderProcessor::flush_buffer(
+                                        &processor_id,
+                                        &mut row_count,
+                                        &mut stream_state,
+                                        &output,
+                                    )
+                                    .await?;
+                                    if flushed > 0 {
+                                        stats.record_out(1);
+                                    }
+                                    Ok::<(), ProcessorError>(())
+                                }
                                 .await
                                 {
                                     tracing::error!(processor_id = %processor_id, error = %err, "flush error");
@@ -227,12 +238,19 @@ impl Processor for StreamingEncoderProcessor {
                             timer.as_mut().await;
                         }
                     }, if timer.is_some() => {
-                        if let Err(err) = StreamingEncoderProcessor::flush_buffer(
-                            &processor_id,
-                            &mut row_count,
-                            &mut stream_state,
-                            &output,
-                        )
+                        if let Err(err) = async {
+                            let flushed = StreamingEncoderProcessor::flush_buffer(
+                                &processor_id,
+                                &mut row_count,
+                                &mut stream_state,
+                                &output,
+                            )
+                            .await?;
+                            if flushed > 0 {
+                                stats.record_out(1);
+                            }
+                            Ok::<(), ProcessorError>(())
+                        }
                         .await
                         {
                             tracing::error!(processor_id = %processor_id, error = %err, "flush error");
@@ -273,12 +291,19 @@ impl Processor for StreamingEncoderProcessor {
                                     data => {
                                         let is_terminal = data.is_terminal();
                                         if is_terminal {
-                                            if let Err(err) = StreamingEncoderProcessor::flush_buffer(
-                                                &processor_id,
-                                                &mut row_count,
-                                                &mut stream_state,
-                                                &output,
-                                            )
+                                            if let Err(err) = async {
+                                                let flushed = StreamingEncoderProcessor::flush_buffer(
+                                                    &processor_id,
+                                                    &mut row_count,
+                                                    &mut stream_state,
+                                                    &output,
+                                                )
+                                                .await?;
+                                                if flushed > 0 {
+                                                    stats.record_out(1);
+                                                }
+                                                Ok::<(), ProcessorError>(())
+                                            }
                                             .await
                                             {
                                                 tracing::error!(processor_id = %processor_id, error = %err, "flush error");
@@ -313,12 +338,19 @@ impl Processor for StreamingEncoderProcessor {
                                 continue;
                             }
                             None => {
-                                if let Err(err) = StreamingEncoderProcessor::flush_buffer(
-                                    &processor_id,
-                                    &mut row_count,
-                                    &mut stream_state,
-                                    &output,
-                                )
+                                if let Err(err) = async {
+                                    let flushed = StreamingEncoderProcessor::flush_buffer(
+                                        &processor_id,
+                                        &mut row_count,
+                                        &mut stream_state,
+                                        &output,
+                                    )
+                                    .await?;
+                                    if flushed > 0 {
+                                        stats.record_out(1);
+                                    }
+                                    Ok::<(), ProcessorError>(())
+                                }
                                 .await
                                 {
                                     tracing::error!(processor_id = %processor_id, error = %err, "flush error");
