@@ -593,22 +593,9 @@ fn format_project_field(expr: &Expr, field_name: &str) -> String {
     if expr_str == field_name {
         expr_str
     } else {
-        // Only show `expr as alias` when the output name is a simple identifier.
-        // For derived/system-generated names like `sum(a)` or `lag(a)`, keep the legacy
-        // behavior and print the field name only.
-        let mut chars = field_name.chars();
-        let is_simple_identifier = match chars.next() {
-            Some(c) if c.is_ascii_alphabetic() || c == '_' => {
-                chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-            }
-            _ => false,
-        };
-
-        if is_simple_identifier {
-            format!("{expr_str} as {field_name}")
-        } else {
-            field_name.to_string()
-        }
+        // Always show `expr as <output_name>` when they differ so EXPLAIN reveals placeholder
+        // rewrites (e.g., `sum(a)` -> `col_1`) while still keeping user-facing names.
+        format!("{expr_str} as {field_name}")
     }
 }
 

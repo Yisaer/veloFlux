@@ -89,6 +89,9 @@ jobs:
 
       - name: Start veloflux
         if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily' }}
+        env:
+          # Use the default jemalloc (enabled by default features) with perf-oriented runtime tuning.
+          _RJEM_MALLOC_CONF: "background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
         run: |
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci
@@ -144,6 +147,9 @@ jobs:
 
       - name: Start veloflux (for select *)
         if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily' }}
+        env:
+          # Use the default jemalloc (enabled by default features) with perf-oriented runtime tuning.
+          _RJEM_MALLOC_CONF: "background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
         run: |
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci
