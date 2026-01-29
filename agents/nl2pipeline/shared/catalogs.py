@@ -4,6 +4,15 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 
+_MAX_SYNTAX_SEMANTICS_CHARS = 240
+
+
+def _truncate_ascii(s: str, max_chars: int) -> str:
+    if len(s) <= max_chars:
+        return s
+    return s[:max_chars].rstrip() + "..."
+
+
 def supported_schema_type_strings() -> List[str]:
     return [
         "null",
@@ -45,6 +54,9 @@ def _minimize_syntax_construct(node: Dict[str, Any]) -> Dict[str, Any]:
     }
     if "status" in node and node.get("status") is not None:
         out["status"] = node.get("status")
+    semantics = str(node.get("semantics") or "").strip()
+    if semantics:
+        out["semantics"] = _truncate_ascii(semantics, _MAX_SYNTAX_SEMANTICS_CHARS)
     placement = node.get("placement")
     if placement:
         out["placement"] = placement
