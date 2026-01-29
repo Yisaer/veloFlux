@@ -35,6 +35,9 @@ jobs:
         run: make release
 
       - name: Start veloflux
+        env:
+          # Use the default jemalloc (enabled by default features) with perf-oriented runtime tuning.
+          _RJEM_MALLOC_CONF: "background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
         run: |
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci
@@ -87,6 +90,9 @@ jobs:
           fi
 
       - name: Start veloflux (for select *)
+        env:
+          # Use the default jemalloc (enabled by default features) with perf-oriented runtime tuning.
+          _RJEM_MALLOC_CONF: "background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
         run: |
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci
