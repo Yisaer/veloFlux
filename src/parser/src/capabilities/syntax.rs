@@ -230,6 +230,62 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
                 &["Aggregation"],
                 vec![],
             ),
+            feature(
+                "select.having",
+                "HAVING filter",
+                SyntaxFeatureStatus::Partial,
+                Some("Filter groups after aggregation (post-window)."),
+                Some(
+                    "HAVING is evaluated after windowing and aggregation. In veloFlux, HAVING is only supported for windowed aggregation and must reference aggregate results (not raw input columns).",
+                ),
+                Some(SyntaxPlacement {
+                    clause: "HAVING".to_string(),
+                    contexts: vec!["select".to_string()],
+                }),
+                &[
+                    "having_requires_group_by_window",
+                    "having_must_reference_aggregates_only",
+                ],
+                &[
+                    "If you need a row-level filter, use WHERE instead of HAVING.",
+                    "If you need HAVING, add a GROUP BY window(...) and use aggregate expressions in HAVING.",
+                ],
+                &["HAVING <predicate_expr>"],
+                &["SELECT count(*) FROM s GROUP BY tumblingwindow('ss', 10) HAVING count(*) > 100"],
+                &["Filter"],
+                vec![],
+            ),
+            feature(
+                "select.order_by",
+                "ORDER BY",
+                SyntaxFeatureStatus::Supported,
+                Some("Sort results by one or more expressions."),
+                Some(
+                    "Ordering is applied by the Order operator. In streaming, sorting is performed within each incoming batch/collection; it does not guarantee a global order across the unbounded stream.",
+                ),
+                Some(SyntaxPlacement {
+                    clause: "ORDER BY".to_string(),
+                    contexts: vec!["select".to_string()],
+                }),
+                &[
+                    "order_by_nulls_first_last_unsupported",
+                    "order_by_requires_aggregate_or_group_by_when_aggregated",
+                    "order_by_disallow_stateful_when_aggregated",
+                ],
+                &[
+                    "If you need NULLS FIRST/LAST, rewrite the sort key expression explicitly (e.g., `a IS NULL`, then `a`).",
+                ],
+                &[
+                    "ORDER BY <expr> [ASC|DESC] [, <expr> [ASC|DESC] ...]",
+                    "ORDER BY <expr> [ASC|DESC]",
+                ],
+                &[
+                    "SELECT * FROM s ORDER BY a DESC",
+                    "SELECT count(*) FROM s GROUP BY tumblingwindow('ss', 10) ORDER BY count(*) DESC",
+                ],
+                &["Order"],
+                vec![],
+            ),
         ],
     );
 
@@ -387,14 +443,17 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
             feature(
                 "expr.binary.logical",
                 "Logical AND/OR",
-                SyntaxFeatureStatus::Unsupported,
+                SyntaxFeatureStatus::Supported,
                 Some("Combine boolean conditions."),
                 None,
                 None,
                 &[],
                 &[],
                 &["<expr> AND <expr>", "<expr> OR <expr>"],
-                &[],
+                &[
+                    "SELECT * FROM s WHERE a > 0 AND b < 10",
+                    "SELECT * FROM s WHERE a = 1 OR b = 2",
+                ],
                 &[],
                 vec![],
             ),
