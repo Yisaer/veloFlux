@@ -31,22 +31,28 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Build veloflux (release)
-        run: make release
+      - name: Build veloflux (release, jemalloc)
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR=target-jemalloc cargo build --release
 
-      - name: Start veloflux
+      - name: Build veloflux (release, system allocator)
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR=target-system cargo build --release --no-default-features --features "metrics,profiling,allocator-system"
+
+      - name: Start veloflux (jemalloc)
         env:
-          # Use the default jemalloc (enabled by default features) with perf-oriented runtime tuning.
           _RJEM_MALLOC_CONF: "background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
         run: |
           set -euo pipefail
-          mkdir -p tmp/perf_daily_ci
-          target/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/data > tmp/perf_daily_ci/veloflux.log 2>&1 &
-          echo $! > tmp/perf_daily_ci/veloflux.pid
+          mkdir -p tmp/perf_daily_ci/jemalloc
+          target-jemalloc/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/jemalloc/data > tmp/perf_daily_ci/jemalloc/veloflux.log 2>&1 &
+          echo $! > tmp/perf_daily_ci/jemalloc/veloflux.pid
 
-      - name: Run perf scenario (explicit columns)
+      - name: Run perf scenario (jemalloc, explicit columns)
         env:
-          PERF_OUT_DIR: tmp/perf_daily_ci/out_explicit
+          PERF_OUT_DIR: tmp/perf_daily_ci/jemalloc/out_explicit
           PERF_DURATION_SECS: "120"
         run: |
           set -euo pipefail
@@ -69,9 +75,9 @@ jobs:
             --out-dir "${PERF_OUT_DIR}" \
             run
 
-      - name: Render report (explicit columns)
+      - name: Render report (jemalloc, explicit columns)
         env:
-          PERF_OUT_DIR: tmp/perf_daily_ci/out_explicit
+          PERF_OUT_DIR: tmp/perf_daily_ci/jemalloc/out_explicit
         run: |
           set -euo pipefail
           PYTHONPYCACHEPREFIX=tmp/pycache \
@@ -79,29 +85,28 @@ jobs:
             --result-json "${PERF_OUT_DIR}/result.json" \
             --out-html "${PERF_OUT_DIR}/report.html" \
             --summary-path "${GITHUB_STEP_SUMMARY}" \
-            --title "Perf Daily Wide MQTT - explicit (2m) (${{ github.sha }})"
+            --title "Perf Daily Wide MQTT (jemalloc) - explicit (2m) (${{ github.sha }})"
 
-      - name: Stop veloflux (after explicit)
+      - name: Stop veloflux (jemalloc, after explicit)
         if: always()
         run: |
           set +e
-          if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/veloflux.pid)" 2>/dev/null || true
+          if [ -f tmp/perf_daily_ci/jemalloc/veloflux.pid ]; then
+            kill "$(cat tmp/perf_daily_ci/jemalloc/veloflux.pid)" 2>/dev/null || true
           fi
 
-      - name: Start veloflux (for select *)
+      - name: Start veloflux (jemalloc, for select *)
         env:
-          # Use the default jemalloc (enabled by default features) with perf-oriented runtime tuning.
           _RJEM_MALLOC_CONF: "background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
         run: |
           set -euo pipefail
-          mkdir -p tmp/perf_daily_ci
-          target/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/data > tmp/perf_daily_ci/veloflux.log 2>&1 &
-          echo $! > tmp/perf_daily_ci/veloflux.pid
+          mkdir -p tmp/perf_daily_ci/jemalloc
+          target-jemalloc/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/jemalloc/data > tmp/perf_daily_ci/jemalloc/veloflux.log 2>&1 &
+          echo $! > tmp/perf_daily_ci/jemalloc/veloflux.pid
 
-      - name: Run perf scenario (select *)
+      - name: Run perf scenario (jemalloc, select *)
         env:
-          PERF_OUT_DIR: tmp/perf_daily_ci/out_star
+          PERF_OUT_DIR: tmp/perf_daily_ci/jemalloc/out_star
           PERF_DURATION_SECS: "120"
         run: |
           set -euo pipefail
@@ -124,9 +129,9 @@ jobs:
             --out-dir "${PERF_OUT_DIR}" \
             run
 
-      - name: Render report (select *)
+      - name: Render report (jemalloc, select *)
         env:
-          PERF_OUT_DIR: tmp/perf_daily_ci/out_star
+          PERF_OUT_DIR: tmp/perf_daily_ci/jemalloc/out_star
         run: |
           set -euo pipefail
           PYTHONPYCACHEPREFIX=tmp/pycache \
@@ -134,7 +139,111 @@ jobs:
             --result-json "${PERF_OUT_DIR}/result.json" \
             --out-html "${PERF_OUT_DIR}/report.html" \
             --summary-path "${GITHUB_STEP_SUMMARY}" \
-            --title "Perf Daily Wide MQTT - select * (2m) (${{ github.sha }})"
+            --title "Perf Daily Wide MQTT (jemalloc) - select * (2m) (${{ github.sha }})"
+
+      - name: Stop veloflux (jemalloc)
+        if: always()
+        run: |
+          set +e
+          if [ -f tmp/perf_daily_ci/jemalloc/veloflux.pid ]; then
+            kill "$(cat tmp/perf_daily_ci/jemalloc/veloflux.pid)" 2>/dev/null || true
+          fi
+
+      - name: Start veloflux (system allocator)
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/perf_daily_ci/system
+          target-system/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/system/data > tmp/perf_daily_ci/system/veloflux.log 2>&1 &
+          echo $! > tmp/perf_daily_ci/system/veloflux.pid
+
+      - name: Run perf scenario (system, explicit columns)
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_ci/system/out_explicit
+          PERF_DURATION_SECS: "120"
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily.py \
+            --force \
+            --base-url http://127.0.0.1:8080 \
+            --metrics-url http://127.0.0.1:9898/metrics \
+            --broker-url tcp://127.0.0.1:1883 \
+            --topic /perf/daily \
+            --qos 1 \
+            --columns 15000 \
+            --sql-mode explicit \
+            --pipeline-id perf_daily_pipeline_explicit \
+            --cases 20 \
+            --str-len 10 \
+            --duration-secs "${PERF_DURATION_SECS}" \
+            --rate 50 \
+            --scrape-interval-ms 15000 \
+            --out-dir "${PERF_OUT_DIR}" \
+            run
+
+      - name: Render report (system, explicit columns)
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_ci/system/out_explicit
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily_report.py \
+            --result-json "${PERF_OUT_DIR}/result.json" \
+            --out-html "${PERF_OUT_DIR}/report.html" \
+            --summary-path "${GITHUB_STEP_SUMMARY}" \
+            --title "Perf Daily Wide MQTT (system) - explicit (2m) (${{ github.sha }})"
+
+      - name: Stop veloflux (system, after explicit)
+        if: always()
+        run: |
+          set +e
+          if [ -f tmp/perf_daily_ci/system/veloflux.pid ]; then
+            kill "$(cat tmp/perf_daily_ci/system/veloflux.pid)" 2>/dev/null || true
+          fi
+
+      - name: Start veloflux (system, for select *)
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/perf_daily_ci/system
+          target-system/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/system/data > tmp/perf_daily_ci/system/veloflux.log 2>&1 &
+          echo $! > tmp/perf_daily_ci/system/veloflux.pid
+
+      - name: Run perf scenario (system, select *)
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_ci/system/out_star
+          PERF_DURATION_SECS: "120"
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily.py \
+            --force \
+            --base-url http://127.0.0.1:8080 \
+            --metrics-url http://127.0.0.1:9898/metrics \
+            --broker-url tcp://127.0.0.1:1883 \
+            --topic /perf/daily \
+            --qos 1 \
+            --columns 15000 \
+            --sql-mode star \
+            --pipeline-id perf_daily_pipeline_star \
+            --cases 20 \
+            --str-len 10 \
+            --duration-secs "${PERF_DURATION_SECS}" \
+            --rate 50 \
+            --scrape-interval-ms 15000 \
+            --out-dir "${PERF_OUT_DIR}" \
+            run
+
+      - name: Render report (system, select *)
+        env:
+          PERF_OUT_DIR: tmp/perf_daily_ci/system/out_star
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily_report.py \
+            --result-json "${PERF_OUT_DIR}/result.json" \
+            --out-html "${PERF_OUT_DIR}/report.html" \
+            --summary-path "${GITHUB_STEP_SUMMARY}" \
+            --title "Perf Daily Wide MQTT (system) - select * (2m) (${{ github.sha }})"
 
       - name: Upload artifacts
         if: always()
@@ -143,18 +252,28 @@ jobs:
           name: perf-daily-wide-mqtt-${{ github.run_id }}
           if-no-files-found: ignore
           path: |
-            tmp/perf_daily_ci/out_explicit/result.json
-            tmp/perf_daily_ci/out_explicit/metrics.openmetrics
-            tmp/perf_daily_ci/out_explicit/report.html
-            tmp/perf_daily_ci/out_star/result.json
-            tmp/perf_daily_ci/out_star/metrics.openmetrics
-            tmp/perf_daily_ci/out_star/report.html
-            tmp/perf_daily_ci/veloflux.log
+            tmp/perf_daily_ci/jemalloc/out_explicit/result.json
+            tmp/perf_daily_ci/jemalloc/out_explicit/metrics.openmetrics
+            tmp/perf_daily_ci/jemalloc/out_explicit/report.html
+            tmp/perf_daily_ci/jemalloc/out_star/result.json
+            tmp/perf_daily_ci/jemalloc/out_star/metrics.openmetrics
+            tmp/perf_daily_ci/jemalloc/out_star/report.html
+            tmp/perf_daily_ci/jemalloc/veloflux.log
+            tmp/perf_daily_ci/system/out_explicit/result.json
+            tmp/perf_daily_ci/system/out_explicit/metrics.openmetrics
+            tmp/perf_daily_ci/system/out_explicit/report.html
+            tmp/perf_daily_ci/system/out_star/result.json
+            tmp/perf_daily_ci/system/out_star/metrics.openmetrics
+            tmp/perf_daily_ci/system/out_star/report.html
+            tmp/perf_daily_ci/system/veloflux.log
 
       - name: Stop veloflux
         if: always()
         run: |
           set +e
-          if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/veloflux.pid)" 2>/dev/null || true
+          if [ -f tmp/perf_daily_ci/jemalloc/veloflux.pid ]; then
+            kill "$(cat tmp/perf_daily_ci/jemalloc/veloflux.pid)" 2>/dev/null || true
+          fi
+          if [ -f tmp/perf_daily_ci/system/veloflux.pid ]; then
+            kill "$(cat tmp/perf_daily_ci/system/veloflux.pid)" 2>/dev/null || true
           fi
