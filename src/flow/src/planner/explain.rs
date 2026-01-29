@@ -63,6 +63,15 @@ impl ExplainReport {
                 info: "info".to_string(),
             },
         );
+
+        // Truncate the info field if it's too long
+        for row in &mut rows {
+            if row.info.len() > 2048 {
+                row.info.truncate(2048);
+                row.info.push_str("...");
+            }
+        }
+
         let id_width = rows.iter().map(|r| r.id.len()).max().unwrap_or(2);
         let info_width = rows.iter().map(|r| r.info.len()).max().unwrap_or(4);
 
@@ -70,10 +79,14 @@ impl ExplainReport {
             .enumerate()
             .map(|(idx, row)| {
                 let sep = if idx == 0 { "-" } else { " " };
-                // Manual padding to avoid format! panic when width >= 65536
-                let id_pad = " ".repeat(id_width.saturating_sub(row.id.len()));
-                let info_pad = " ".repeat(info_width.saturating_sub(row.info.len()));
-                format!("{} {}{} | {}{}", sep, row.id, id_pad, row.info, info_pad)
+                format!(
+                    "{} {:<id_width$} | {:<info_width$}",
+                    sep,
+                    row.id,
+                    row.info,
+                    id_width = id_width,
+                    info_width = info_width
+                )
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -1151,7 +1164,8 @@ mod tests {
         let output = report.table_string();
 
         assert!(output.contains("test"));
-        assert!(output.len() > 70000);
+        assert!(output.contains("..."));
+        assert!(output.len() < 5000);
     }
 
     /// Test with many columns (simulates DBC schema with thousands of signals)
@@ -1174,7 +1188,8 @@ mod tests {
         let output = report.table_string();
         assert!(output.contains("DataSource"));
         assert!(output.contains("Signal0"));
-        assert!(output.contains("Signal4999"));
+        assert!(output.contains("..."));
+        assert!(!output.contains("Signal4999"));
     }
 
     #[test]
