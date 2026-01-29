@@ -103,6 +103,7 @@ Examples:
 - `statement.select`
 - `select.projection`
 - `select.group_by`
+- `select.having`
 - `select.order_by`
 - `from.join`
 - `expr.case`
