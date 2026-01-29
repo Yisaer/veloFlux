@@ -32,6 +32,8 @@ class Candidate:
     sql: str
     questions: List[str]
     assumptions: List[str]
+    # Short, user-visible explanation for how the SQL was produced/repaired.
+    rationale: str
 
 
 @dataclass(frozen=True)
@@ -40,6 +42,7 @@ class PipelineCandidate:
     explain_pretty: str
     create_pipeline_request: Dict[str, Any]
     assumptions: List[str]
+    rationale: str
 
 
 @dataclass(frozen=True)
@@ -76,10 +79,12 @@ def _candidate_from_json(obj: Dict[str, Any]) -> Candidate:
         raise LlmError(f"LLM response missing sql: {obj}")
     questions = obj.get("questions", []) or []
     assumptions = obj.get("assumptions", []) or []
+    rationale = str(obj.get("rationale", "") or "").strip()
     return Candidate(
         sql=sql,
         questions=[str(x) for x in questions],
         assumptions=[str(x) for x in assumptions],
+        rationale=rationale,
     )
 
 
@@ -114,11 +119,16 @@ def _candidate_from_preview_text(text: str) -> Candidate:
     raw = _strip_code_fences(text).strip()
     if raw.lower().startswith("question:"):
         q = raw[len("question:") :].strip()
-        return Candidate(sql="", questions=[q] if q else ["Which stream/fields should be used?"], assumptions=[])
+        return Candidate(
+            sql="",
+            questions=[q] if q else ["Which stream/fields should be used?"],
+            assumptions=[],
+            rationale="",
+        )
     sql = _extract_sql_from_preview(raw)
     if not sql or sql == ";":
         raise LlmError(f"LLM preview did not produce SQL: {text}")
-    return Candidate(sql=sql, questions=[], assumptions=[])
+    return Candidate(sql=sql, questions=[], assumptions=[], rationale="")
 
 
 class Workflow:
@@ -292,6 +302,7 @@ class Workflow:
                         "sql": "string (required)",
                         "questions": "string[] (optional)",
                         "assumptions": "string[] (optional)",
+                        "rationale": "string (optional; 1 sentence explaining how you addressed previous_error)",
                     },
                 }
                 self._append_user_json(llm_payload)
@@ -378,6 +389,7 @@ class Workflow:
                     sink_qos=self.sink_qos,
                 ),
                 assumptions=candidate.assumptions,
+                rationale=candidate.rationale,
             )
             yield WorkflowEvent(
                 kind=EventKind.Explained,
