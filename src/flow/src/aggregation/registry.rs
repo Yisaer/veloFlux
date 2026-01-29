@@ -1,4 +1,7 @@
-use crate::aggregation::{sum_function_def, LastRowFunction, NdvFunction, SumFunction};
+use crate::aggregation::{
+    count_function_def, last_row_function_def, ndv_function_def, sum_function_def, CountFunction,
+    LastRowFunction, NdvFunction, SumFunction,
+};
 use crate::catalog::FunctionDef;
 use datatypes::{ConcreteDatatype, Value};
 use parser::aggregate_registry::AggregateRegistry;
@@ -70,6 +73,7 @@ impl AggregateFunctionRegistry {
     }
 
     fn register_builtin_functions(&self) {
+        self.register_function(Arc::new(CountFunction::new()));
         self.register_function(Arc::new(SumFunction::new()));
         self.register_function(Arc::new(LastRowFunction::new()));
         self.register_function(Arc::new(NdvFunction::new()));
@@ -91,7 +95,12 @@ impl AggregateRegistry for AggregateFunctionRegistry {
 }
 
 pub fn builtin_aggregation_defs() -> Vec<FunctionDef> {
-    vec![sum_function_def()]
+    vec![
+        count_function_def(),
+        last_row_function_def(),
+        ndv_function_def(),
+        sum_function_def(),
+    ]
 }
 
 #[cfg(test)]

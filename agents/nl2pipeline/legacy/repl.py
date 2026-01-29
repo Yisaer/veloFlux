@@ -126,6 +126,8 @@ def _get_stream_schema(manager: VeloFluxMcpClient, stream: str) -> Dict[str, Any
 
 def _render_result(result: PipelineCandidate) -> None:
     print("\nSQL:\n" + result.sql)
+    if result.rationale.strip():
+        print("\nLLM rationale:\n" + result.rationale.strip())
     if result.assumptions:
         print("\nAssumptions:")
         for a in result.assumptions:
@@ -319,21 +321,60 @@ def run_repl(
 
         preview_started = False
         preview_emitted = False
+        last_phase: Optional[str] = None
+        last_validation_error: Optional[str] = None
 
         for ev in workflow.run_turn(ctx, turn):
             if ev.kind == EventKind.PhaseChanged and ev.phase is not None:
+                last_phase = ev.phase.value
+                if ev.attempt is not None:
+                    print(
+                        f"[PHASE] {ev.phase.value} (attempt {ev.attempt}/{check_max_attempts})",
+                        file=sys.stderr,
+                    )
                 if ev.phase.value == "draft_sql" and not preview_started:
                     preview_started = True
-                    print("[LLM] drafting SQL", file=sys.stderr)
+                    print(
+                        "[LLM] drafting SQL (first output is a PREVIEW and is NOT validated yet)",
+                        file=sys.stderr,
+                    )
+                if ev.phase.value == "draft_sql" and ev.attempt and ev.attempt > 1:
+                    if last_validation_error:
+                        print(
+                            f"[LLM] repairing SQL based on last validation error: {last_validation_error}",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print("[LLM] repairing SQL based on validation feedback...", file=sys.stderr)
+                if ev.phase.value == "validate_pipeline":
+                    print(
+                        "[VALIDATE] creating temporary pipeline to validate SQL...",
+                        file=sys.stderr,
+                    )
+                if ev.phase.value == "explain_pipeline":
+                    print("[EXPLAIN] fetching explain for confirmation...", file=sys.stderr)
 
             if ev.kind == EventKind.DraftPreviewDelta and ev.text_delta:
                 if not preview_emitted:
-                    print("[LLM] SQL preview:", file=sys.stderr)
+                    print("[PREVIEW][UNVALIDATED] SQL:", file=sys.stderr)
                     preview_emitted = True
                 print(ev.text_delta, end="", file=sys.stderr, flush=True)
 
             if ev.kind == EventKind.NeedUserInput and ev.candidate is not None:
                 needs_user_input = ev.candidate.questions
+            if ev.kind == EventKind.PlanningFailed and ev.error:
+                last_validation_error = ev.error
+                # Surface planning/validation failures immediately so users don't think the tool "hung".
+                attempt = ev.attempt or 0
+                remaining = max(0, check_max_attempts - attempt)
+                suffix = (
+                    f" (will retry, remaining={remaining})" if remaining > 0 else " (no retries left)"
+                )
+                print(f"[VALIDATE] failed: {ev.error}{suffix}", file=sys.stderr)
+            if ev.kind == EventKind.CandidateGenerated and ev.candidate is not None:
+                rationale = getattr(ev.candidate, "rationale", "") or ""
+                if rationale.strip():
+                    print(f"[LLM] rationale: {rationale.strip()}", file=sys.stderr)
             if ev.kind == EventKind.Explained and ev.result is not None:
                 last_result = ev.result
             if ev.kind == EventKind.Failed:
