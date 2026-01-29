@@ -1,5 +1,6 @@
 use crate::aggregation::{
-    count_function_def, sum_function_def, CountFunction, LastRowFunction, NdvFunction, SumFunction,
+    count_function_def, last_row_function_def, ndv_function_def, sum_function_def, CountFunction,
+    LastRowFunction, NdvFunction, SumFunction,
 };
 use crate::catalog::FunctionDef;
 use datatypes::{ConcreteDatatype, Value};
@@ -94,7 +95,12 @@ impl AggregateRegistry for AggregateFunctionRegistry {
 }
 
 pub fn builtin_aggregation_defs() -> Vec<FunctionDef> {
-    vec![count_function_def(), sum_function_def()]
+    vec![
+        count_function_def(),
+        last_row_function_def(),
+        ndv_function_def(),
+        sum_function_def(),
+    ]
 }
 
 #[cfg(test)]

@@ -214,7 +214,7 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
                 SyntaxFeatureStatus::Partial,
                 Some("Group rows for aggregation, optionally with stream windows."),
                 Some(
-                    "GROUP BY defines grouping keys for aggregates. In veloFlux, window declarations also live in GROUP BY to define how the stream is segmented over time/count/state. Built-in aggregate functions include sum, count, last_row, and ndv.",
+                    "GROUP BY defines grouping keys for aggregates. In veloFlux, window declarations also live in GROUP BY to define how the stream is segmented over time/count/state.",
                 ),
                 Some(SyntaxPlacement {
                     clause: "GROUP BY".to_string(),

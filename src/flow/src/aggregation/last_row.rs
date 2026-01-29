@@ -1,7 +1,45 @@
 use super::{AggregateAccumulator, AggregateFunction};
+use crate::catalog::{
+    AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
+    FunctionRequirement, FunctionSignatureSpec, TypeSpec,
+};
 use datatypes::{ConcreteDatatype, Value};
 
 pub struct LastRowFunction;
+
+pub fn last_row_function_def() -> FunctionDef {
+    FunctionDef {
+        kind: FunctionKind::Aggregate,
+        name: "last_row".to_string(),
+        aliases: vec![],
+        signature: FunctionSignatureSpec {
+            args: vec![FunctionArgSpec {
+                name: "x".to_string(),
+                r#type: TypeSpec::Any,
+                optional: false,
+                variadic: false,
+            }],
+            return_type: TypeSpec::Any,
+        },
+        description: "Return the most recent value in the group/window.".to_string(),
+        allowed_contexts: vec![FunctionContext::Select],
+        requirements: vec![FunctionRequirement::AggregateContext],
+        constraints: vec![
+            "Requires exactly 1 argument.".to_string(),
+            "Return type matches the input type.".to_string(),
+            "Returns NULL if the group/window is empty.".to_string(),
+        ],
+        examples: vec![
+            "SELECT last_row(a) FROM s GROUP BY tumblingwindow('ss', 10)".to_string(),
+            "SELECT user_id, last_row(status) FROM s GROUP BY user_id, tumblingwindow('ss', 10)"
+                .to_string(),
+        ],
+        aggregate: Some(AggregateFunctionSpec {
+            supports_incremental: true,
+        }),
+        stateful: None,
+    }
+}
 
 impl LastRowFunction {
     pub fn new() -> Self {

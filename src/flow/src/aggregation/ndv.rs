@@ -1,9 +1,49 @@
 use crate::aggregation::{AggregateAccumulator, AggregateFunction};
+use crate::catalog::{
+    AggregateFunctionSpec, FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind,
+    FunctionRequirement, FunctionSignatureSpec, TypeSpec,
+};
 use datatypes::{ConcreteDatatype, Int64Type, Value};
 use std::collections::HashSet;
 
 #[derive(Debug, Default)]
 pub struct NdvFunction;
+
+pub fn ndv_function_def() -> FunctionDef {
+    FunctionDef {
+        kind: FunctionKind::Aggregate,
+        name: "ndv".to_string(),
+        aliases: vec![],
+        signature: FunctionSignatureSpec {
+            args: vec![FunctionArgSpec {
+                name: "x".to_string(),
+                r#type: TypeSpec::Any,
+                optional: false,
+                variadic: false,
+            }],
+            return_type: TypeSpec::Named {
+                name: "int64".to_string(),
+            },
+        },
+        description: "Number of distinct non-NULL values.".to_string(),
+        allowed_contexts: vec![FunctionContext::Select],
+        requirements: vec![FunctionRequirement::AggregateContext],
+        constraints: vec![
+            "Requires exactly 1 argument.".to_string(),
+            "Ignores NULL inputs.".to_string(),
+            "Returns 0 if all inputs are NULL or the group/window is empty.".to_string(),
+            "Does not support incremental (streaming) updates.".to_string(),
+        ],
+        examples: vec![
+            "SELECT ndv(user_id) FROM s GROUP BY tumblingwindow('ss', 10)".to_string(),
+            "SELECT ndv(tag) FROM s GROUP BY b".to_string(),
+        ],
+        aggregate: Some(AggregateFunctionSpec {
+            supports_incremental: false,
+        }),
+        stateful: None,
+    }
+}
 
 impl NdvFunction {
     pub fn new() -> Self {
