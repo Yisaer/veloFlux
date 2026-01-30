@@ -2,6 +2,7 @@
 
 use crate::connector::mqtt_client::{MqttClientManager, SharedMqttEvent};
 use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
+use crate::processor::base::normalize_channel_capacity;
 use once_cell::sync::Lazy;
 use prometheus::{register_int_counter_vec, IntCounterVec};
 use rumqttc::{AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport};
@@ -59,6 +60,7 @@ impl MqttSourceConfig {
 pub struct MqttSourceConnector {
     id: String,
     config: MqttSourceConfig,
+    channel_capacity: usize,
     receiver: Option<mpsc::Receiver<Result<ConnectorEvent, ConnectorError>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     mqtt_clients: MqttClientManager,
@@ -91,10 +93,20 @@ impl MqttSourceConnector {
         Self {
             id: id.into(),
             config,
+            channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
             receiver: None,
             shutdown_tx: None,
             mqtt_clients,
         }
+    }
+
+    pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
+        self.channel_capacity = normalize_channel_capacity(capacity);
+        self
+    }
+
+    pub fn set_channel_capacity(&mut self, capacity: usize) {
+        self.channel_capacity = normalize_channel_capacity(capacity);
     }
 }
 
@@ -108,7 +120,7 @@ impl SourceConnector for MqttSourceConnector {
             return Err(ConnectorError::AlreadySubscribed(self.id.clone()));
         }
 
-        let (sender, receiver) = mpsc::channel(256);
+        let (sender, receiver) = mpsc::channel(self.channel_capacity);
         let config = self.config.clone();
         let connector_id = self.id.clone();
         let (shutdown_tx, shutdown_rx) = oneshot::channel();

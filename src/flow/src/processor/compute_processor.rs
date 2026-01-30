@@ -7,8 +7,9 @@ use crate::expr::ScalarExpr;
 use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{PhysicalCompute, PhysicalPlan};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -31,13 +32,22 @@ pub struct ComputeProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
 
 impl ComputeProcessor {
     pub fn new(id: impl Into<String>, physical_compute: Arc<PhysicalCompute>) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, physical_compute, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical_compute: Arc<PhysicalCompute>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         let fields = physical_compute
             .fields
             .iter()
@@ -54,6 +64,7 @@ impl ComputeProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -118,6 +129,7 @@ impl Processor for ComputeProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let fields = self.fields.clone();
+        let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "compute processor starting");
 
@@ -128,7 +140,12 @@ impl Processor for ComputeProcessor {
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 tracing::info!(processor_id = %id, "received StreamEnd (control)");
                                 tracing::info!(processor_id = %id, "stopped");
@@ -152,7 +169,12 @@ impl Processor for ComputeProcessor {
                                             Ok(out_collection) => {
                                                 let out_data = StreamData::collection(out_collection);
                                                 let out_rows = out_data.num_rows_hint();
-                                                send_with_backpressure(&output, out_data).await?;
+                                                send_with_backpressure(
+                                                    &output,
+                                                    channel_capacities.data,
+                                                    out_data,
+                                                )
+                                                .await?;
                                                 if let Some(rows) = out_rows {
                                                     stats.record_out(rows);
                                                 }
@@ -164,7 +186,12 @@ impl Processor for ComputeProcessor {
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
-                                        send_with_backpressure(&output, data).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            data,
+                                        )
+                                        .await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");

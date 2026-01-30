@@ -199,10 +199,21 @@ impl PipelineDefinition {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineOptions {
+    pub data_channel_capacity: usize,
     pub plan_cache: PlanCacheOptions,
     pub eventtime: EventtimeOptions,
+}
+
+impl Default for PipelineOptions {
+    fn default() -> Self {
+        Self {
+            data_channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
+            plan_cache: PlanCacheOptions::default(),
+            eventtime: EventtimeOptions::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

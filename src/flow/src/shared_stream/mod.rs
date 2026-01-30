@@ -3,7 +3,9 @@ use crate::codec::RecordDecoder;
 use crate::connector::SourceConnector;
 use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
-use crate::processor::base::DEFAULT_CHANNEL_CAPACITY;
+use crate::processor::base::{
+    normalize_channel_capacity, DEFAULT_CONTROL_CHANNEL_CAPACITY, DEFAULT_DATA_CHANNEL_CAPACITY,
+};
 use crate::processor::processor_builder::{
     create_processor_pipeline_for_shared_stream, PlanProcessor, SharedStreamPipelineOptions,
 };
@@ -263,7 +265,7 @@ impl SharedStreamConfig {
             schema,
             decoder: StreamDecoderConfig::json(),
             connector: None,
-            channel_capacity: DEFAULT_CHANNEL_CAPACITY,
+            channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
             sampler: None,
         }
     }
@@ -278,7 +280,7 @@ impl SharedStreamConfig {
     }
 
     pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
-        self.channel_capacity = capacity.max(1);
+        self.channel_capacity = normalize_channel_capacity(capacity);
         self
     }
 
@@ -406,6 +408,8 @@ struct SharedStreamInner {
     connector_id: String,
     connector_factory: Arc<dyn SharedStreamConnectorFactory>,
     sampler: Option<SamplerConfig>,
+    data_channel_capacity: usize,
+    control_channel_capacity: usize,
     runtime_lock: Mutex<()>,
     decoding_columns: Arc<std::sync::RwLock<Vec<String>>>,
     decode_projection: Arc<std::sync::RwLock<Arc<DecodeProjection>>>,
@@ -441,6 +445,8 @@ impl SharedStreamInner {
             channel_capacity,
             sampler,
         } = config;
+        let data_channel_capacity = normalize_channel_capacity(channel_capacity);
+        let control_channel_capacity = DEFAULT_CONTROL_CHANNEL_CAPACITY;
 
         let connector_factory: Arc<dyn SharedStreamConnectorFactory> = match connector {
             Some(SharedStreamConnectorSpec::Factory(factory)) => factory,
@@ -472,8 +478,8 @@ impl SharedStreamInner {
             ),
         )));
 
-        let (data_sender, _) = broadcast::channel(channel_capacity);
-        let (control_sender, _) = broadcast::channel(channel_capacity);
+        let (data_sender, _) = broadcast::channel(data_channel_capacity);
+        let (control_sender, _) = broadcast::channel(control_channel_capacity);
 
         let data_anchor = data_sender.subscribe();
         let control_anchor = control_sender.subscribe();
@@ -486,6 +492,8 @@ impl SharedStreamInner {
             connector_id,
             connector_factory,
             sampler,
+            data_channel_capacity,
+            control_channel_capacity,
             runtime_lock: Mutex::new(()),
             decoding_columns: Arc::clone(&decoding_columns),
             decode_projection: Arc::clone(&decode_projection),
@@ -602,12 +610,15 @@ impl SharedStreamInner {
 
         let data_tx = self.data_sender.clone();
         let control_tx = self.control_sender.clone();
+        let data_channel_capacity = self.data_channel_capacity;
+        let control_channel_capacity = self.control_channel_capacity;
         let forward = tokio::spawn(async move {
             while let Some(item) = output_rx.recv().await {
                 match item {
                     StreamData::Control(signal) => {
                         if crate::processor::base::send_control_with_backpressure(
                             &control_tx,
+                            control_channel_capacity,
                             signal,
                         )
                         .await
@@ -617,9 +628,13 @@ impl SharedStreamInner {
                         }
                     }
                     other => {
-                        if crate::processor::base::send_with_backpressure(&data_tx, other)
-                            .await
-                            .is_err()
+                        if crate::processor::base::send_with_backpressure(
+                            &data_tx,
+                            data_channel_capacity,
+                            other,
+                        )
+                        .await
+                        .is_err()
                         {
                             break;
                         }

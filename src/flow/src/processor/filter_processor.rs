@@ -5,8 +5,9 @@
 use crate::model::Collection;
 use crate::planner::physical::{PhysicalFilter, PhysicalPlan};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -33,14 +34,23 @@ pub struct FilterProcessor {
     output: broadcast::Sender<StreamData>,
     /// Dedicated control output channel
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
 
 impl FilterProcessor {
     /// Create a new FilterProcessor from PhysicalFilter
     pub fn new(id: impl Into<String>, physical_filter: Arc<PhysicalFilter>) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, physical_filter, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical_filter: Arc<PhysicalFilter>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             physical_filter,
@@ -48,6 +58,7 @@ impl FilterProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -93,6 +104,7 @@ impl Processor for FilterProcessor {
 
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let filter_expr = self.physical_filter.scalar_predicate.clone();
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "filter processor starting");
@@ -105,7 +117,12 @@ impl Processor for FilterProcessor {
                         match control_item {
                             Some(Ok(control_signal)) => {
                                 let is_terminal = control_signal.is_terminal();
-                                send_control_with_backpressure(&control_output, control_signal).await?;
+                                send_control_with_backpressure(
+                                    &control_output,
+                                    channel_capacities.control,
+                                    control_signal,
+                                )
+                                .await?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %id, "received StreamEnd (control)");
                                     tracing::info!(processor_id = %id, "stopped");
@@ -134,7 +151,12 @@ impl Processor for FilterProcessor {
                                             Ok(filtered_collection) => {
                                                 let filtered_data = StreamData::collection(filtered_collection);
                                                 let out_rows = filtered_data.num_rows_hint();
-                                                send_with_backpressure(&output, filtered_data).await?;
+                                                send_with_backpressure(
+                                                    &output,
+                                                    channel_capacities.data,
+                                                    filtered_data,
+                                                )
+                                                .await?;
                                                 if let Some(rows) = out_rows {
                                                     stats.record_out(rows);
                                                 }
@@ -147,7 +169,12 @@ impl Processor for FilterProcessor {
                                     StreamData::Control(control_signal) => {
                                         let is_terminal = control_signal.is_terminal();
                                         let out = StreamData::control(control_signal);
-                                        send_with_backpressure(&output, out).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            out,
+                                        )
+                                        .await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");
@@ -156,7 +183,12 @@ impl Processor for FilterProcessor {
                                     }
                                     other => {
                                         let is_terminal = other.is_terminal();
-                                        send_with_backpressure(&output, other).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            other,
+                                        )
+                                        .await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");

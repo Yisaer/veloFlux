@@ -71,13 +71,25 @@ pub struct UpsertPipelineRequest {
     pub options: PipelineOptionsRequest,
 }
 
-#[derive(Deserialize, Serialize, Default, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct PipelineOptionsRequest {
+    #[serde(rename = "dataChannelCapacity")]
+    pub data_channel_capacity: usize,
     #[serde(rename = "plan_cache")]
     pub plan_cache: PlanCacheOptionsRequest,
     #[serde(default)]
     pub eventtime: EventtimeOptionsRequest,
+}
+
+impl Default for PipelineOptionsRequest {
+    fn default() -> Self {
+        Self {
+            data_channel_capacity: 16,
+            plan_cache: PlanCacheOptionsRequest::default(),
+            eventtime: EventtimeOptionsRequest::default(),
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -948,6 +960,9 @@ fn validate_create_request(req: &CreatePipelineRequest) -> Result<(), String> {
     if req.sinks.is_empty() {
         return Err("pipeline must define at least one sink".to_string());
     }
+    if req.options.data_channel_capacity == 0 {
+        return Err("options.dataChannelCapacity must be greater than 0".to_string());
+    }
     Ok(())
 }
 
@@ -1072,6 +1087,7 @@ pub(crate) fn build_pipeline_definition(
         sinks.push(sink_definition);
     }
     let options = PipelineOptions {
+        data_channel_capacity: req.options.data_channel_capacity,
         plan_cache: PlanCacheOptions {
             enabled: req.options.plan_cache.enabled,
         },

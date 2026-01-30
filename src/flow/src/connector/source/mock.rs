@@ -26,7 +26,14 @@ pub struct MockSourceHandle {
 impl MockSourceConnector {
     /// Create a new mock connector along with the handle used for sending data.
     pub fn new(id: impl Into<String>) -> (Self, MockSourceHandle) {
-        let (sender, receiver) = mpsc::channel(100);
+        Self::new_with_channel_capacity(id, crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY)
+    }
+
+    pub fn new_with_channel_capacity(
+        id: impl Into<String>,
+        channel_capacity: usize,
+    ) -> (Self, MockSourceHandle) {
+        let (sender, receiver) = mpsc::channel(channel_capacity.max(1));
         (
             Self {
                 id: id.into(),

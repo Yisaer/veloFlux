@@ -8,6 +8,10 @@ use crate::codec::{DecoderRegistry, EncoderRegistry, MergerRegistry, RecordDecod
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::physical::PhysicalPlan;
+use crate::processor::base::{
+    normalize_channel_capacity, ProcessorChannelCapacities, DEFAULT_CONTROL_CHANNEL_CAPACITY,
+    DEFAULT_DATA_CHANNEL_CAPACITY,
+};
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
 use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
 use crate::processor::EventtimePipelineContext;
@@ -123,6 +127,33 @@ impl ProcessorPipelineDependencies {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessorPipelineOptions {
+    pub data_channel_capacity: usize,
+}
+
+impl Default for ProcessorPipelineOptions {
+    fn default() -> Self {
+        Self {
+            data_channel_capacity: DEFAULT_DATA_CHANNEL_CAPACITY,
+        }
+    }
+}
+
+impl ProcessorPipelineOptions {
+    pub fn with_data_channel_capacity(mut self, capacity: usize) -> Self {
+        self.data_channel_capacity = normalize_channel_capacity(capacity);
+        self
+    }
+
+    fn channel_capacities(&self) -> ProcessorChannelCapacities {
+        ProcessorChannelCapacities::new(
+            normalize_channel_capacity(self.data_channel_capacity),
+            DEFAULT_CONTROL_CHANNEL_CAPACITY,
+        )
+    }
+}
+
 #[derive(Clone)]
 struct ProcessorBuilderContext {
     mqtt_clients: Option<MqttClientManager>,
@@ -134,6 +165,7 @@ struct ProcessorBuilderContext {
     eventtime: Option<EventtimePipelineContext>,
     merger_registry: Option<Arc<MergerRegistry>>,
     shared_stream: Option<SharedStreamPipelineOptions>,
+    channel_capacities: ProcessorChannelCapacities,
 }
 
 impl ProcessorBuilderContext {
@@ -473,6 +505,7 @@ pub struct ProcessorPipeline {
     ack_manager: Arc<AckManager>,
     /// Processor-local stats handles (one per processor instance).
     processor_stats: Vec<ProcessorStatsHandle>,
+    channel_capacities: ProcessorChannelCapacities,
 }
 
 impl ProcessorPipeline {
@@ -632,6 +665,14 @@ impl ProcessorPipeline {
         &self.pipeline_id
     }
 
+    pub fn data_channel_capacity(&self) -> usize {
+        self.channel_capacities.data
+    }
+
+    pub fn control_channel_capacity(&self) -> usize {
+        self.channel_capacities.control
+    }
+
     pub fn processor_stats(&self) -> &[ProcessorStatsHandle] {
         &self.processor_stats
     }
@@ -672,7 +713,7 @@ impl ProcessorPipeline {
     }
 
     fn replace_ingress_sender(&mut self) {
-        let (dummy_tx, _) = mpsc::channel(1);
+        let (dummy_tx, _) = mpsc::channel(self.channel_capacities.control);
         let old = std::mem::replace(&mut self.ingress, dummy_tx);
         drop(old);
     }
@@ -747,6 +788,7 @@ fn create_processor_from_plan_node(
     context: &ProcessorBuilderContext,
 ) -> Result<ProcessorBuildOutput, ProcessorError> {
     let plan_name = plan.get_plan_name();
+    let channel_capacities = context.channel_capacities;
     let processor_id = context
         .shared_stream()
         .map(|opts| format!("shared:{}/{}", opts.stream_name, plan_name))
@@ -754,8 +796,13 @@ fn create_processor_from_plan_node(
     match plan.as_ref() {
         PhysicalPlan::DataSource(ds) => {
             let schema = ds.schema();
-            let processor =
-                DataSourceProcessor::new(&processor_id, ds.source_name().to_string(), schema);
+            let processor = DataSourceProcessor::with_custom_id_and_channel_capacities(
+                None, // plan_index is no longer needed as we use plan_name for ID
+                processor_id.clone(),
+                ds.source_name().to_string(),
+                schema,
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::DataSource(processor),
             ))
@@ -764,8 +811,12 @@ fn create_processor_from_plan_node(
             let schema = decoder_plan.schema();
             let mut processor = match context.shared_stream() {
                 Some(opts) if opts.stream_name == decoder_plan.source_name() => {
-                    DecoderProcessor::new(processor_id.clone(), Arc::clone(&opts.decoder))
-                        .with_shared_decode_projection(Arc::clone(&opts.decode_projection))
+                    DecoderProcessor::with_custom_id_and_channel_capacities(
+                        processor_id.clone(),
+                        Arc::clone(&opts.decoder),
+                        channel_capacities,
+                    )
+                    .with_shared_decode_projection(Arc::clone(&opts.decode_projection))
                 }
                 _ => {
                     let decoder = context
@@ -776,7 +827,11 @@ fn create_processor_from_plan_node(
                             Arc::clone(&schema),
                         )
                         .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-                    let mut processor = DecoderProcessor::new(processor_id.clone(), decoder);
+                    let mut processor = DecoderProcessor::with_custom_id_and_channel_capacities(
+                        processor_id.clone(),
+                        decoder,
+                        channel_capacities,
+                    );
                     if let Some(projection) = decoder_plan.decode_projection().cloned() {
                         processor = processor.with_decode_projection(projection);
                     }
@@ -807,91 +862,105 @@ fn create_processor_from_plan_node(
                 PlanProcessor::Decoder(processor),
             ))
         }
-        PhysicalPlan::CollectionLayoutNormalize(_) => {
-            let processor = CollectionLayoutNormalizeProcessor::from_physical_plan(
+        PhysicalPlan::CollectionLayoutNormalize(spec) => {
+            let processor = CollectionLayoutNormalizeProcessor::new_with_channel_capacities(
                 processor_id.clone(),
-                Arc::clone(plan),
-            )
-            .ok_or_else(|| {
-                ProcessorError::InvalidConfiguration(
-                    "failed to build CollectionLayoutNormalizeProcessor".into(),
-                )
-            })?;
+                Arc::new(spec.clone()),
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::CollectionLayoutNormalize(processor),
             ))
         }
-        PhysicalPlan::MemoryCollectionMaterialize(_) => {
-            let processor = MemoryCollectionMaterializeProcessor::from_physical_plan(
+        PhysicalPlan::MemoryCollectionMaterialize(spec) => {
+            let processor = MemoryCollectionMaterializeProcessor::new_with_channel_capacities(
                 processor_id.clone(),
-                Arc::clone(plan),
-            )
-            .ok_or_else(|| {
-                ProcessorError::InvalidConfiguration(
-                    "failed to build MemoryCollectionMaterializeProcessor".into(),
-                )
-            })?;
+                Arc::new(spec.clone()),
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::MemoryCollectionMaterialize(processor),
             ))
         }
         PhysicalPlan::SharedStream(shared) => {
-            let mut processor =
-                SharedStreamProcessor::new(&processor_id, shared.stream_name().to_string());
+            let mut processor = SharedStreamProcessor::new_with_channel_capacities(
+                &processor_id,
+                shared.stream_name().to_string(),
+                channel_capacities,
+            );
             processor.set_required_columns(shared.required_columns().to_vec());
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::SharedSource(processor),
             ))
         }
         PhysicalPlan::Compute(compute) => {
-            let processor = ComputeProcessor::new(processor_id.clone(), Arc::new(compute.clone()));
+            let processor = ComputeProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Arc::new(compute.clone()),
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Compute(processor),
             ))
         }
         PhysicalPlan::Order(order) => {
-            let processor = OrderProcessor::new(processor_id.clone(), Arc::new(order.clone()));
+            let processor = OrderProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Arc::new(order.clone()),
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Order(
                 processor,
             )))
         }
         PhysicalPlan::Project(project) => {
-            let processor = ProjectProcessor::new(processor_id.clone(), Arc::new(project.clone()));
+            let processor = ProjectProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Arc::new(project.clone()),
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Project(processor),
             ))
         }
         PhysicalPlan::StatefulFunction(stateful) => {
-            let processor = StatefulFunctionProcessor::new(
+            let processor = StatefulFunctionProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 Arc::new(stateful.clone()),
                 context.stateful_registry()?,
+                channel_capacities,
             )?;
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::StatefulFunction(processor),
             ))
         }
         PhysicalPlan::Aggregation(aggregation) => {
-            let processor = AggregationProcessor::new(
+            let processor = AggregationProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 Arc::new(aggregation.clone()),
                 context.aggregate_registry()?,
+                channel_capacities,
             );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Aggregation(processor),
             ))
         }
         PhysicalPlan::Filter(filter) => {
-            let processor = FilterProcessor::new(processor_id.clone(), Arc::new(filter.clone()));
+            let processor = FilterProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Arc::new(filter.clone()),
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Filter(
                 processor,
             )))
         }
         PhysicalPlan::Batch(batch) => {
-            let processor = BatchProcessor::new(
+            let processor = BatchProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 batch.common.batch_count,
                 batch.common.batch_duration,
+                channel_capacities,
             );
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Batch(
                 processor,
@@ -915,16 +984,21 @@ fn create_processor_from_plan_node(
             } else {
                 encoder_impl
             };
-            let processor = EncoderProcessor::new(processor_id.clone(), encoder_impl);
+            let processor = EncoderProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                encoder_impl,
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Encoder(processor),
             ))
         }
         PhysicalPlan::StreamingAggregation(agg) => {
-            let processor = StreamingAggregationProcessor::new(
+            let processor = StreamingAggregationProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 Arc::new(agg.clone()),
                 context.aggregate_registry()?,
+                channel_capacities,
             );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::StreamingAggregation(processor),
@@ -948,24 +1022,28 @@ fn create_processor_from_plan_node(
             } else {
                 encoder_impl
             };
-            let processor = StreamingEncoderProcessor::new(
+            let processor = StreamingEncoderProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 encoder_impl,
                 streaming.common.batch_count,
                 streaming.common.batch_duration,
+                channel_capacities,
             );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::StreamingEncoder(processor),
             ))
         }
         PhysicalPlan::ProcessTimeWatermark(_) | PhysicalPlan::EventtimeWatermark(_) => {
-            let processor =
-                WatermarkProcessor::from_physical_plan(processor_id.clone(), Arc::clone(plan))
-                    .ok_or_else(|| {
-                        ProcessorError::InvalidConfiguration(
-                            "Unsupported watermark configuration".to_string(),
-                        )
-                    })?;
+            let processor = WatermarkProcessor::from_physical_plan_with_channel_capacities(
+                processor_id.clone(),
+                Arc::clone(plan),
+                channel_capacities,
+            )
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration(
+                    "Unsupported watermark configuration".to_string(),
+                )
+            })?;
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Watermark(processor),
             ))
@@ -974,54 +1052,52 @@ fn create_processor_from_plan_node(
             "PhysicalWatermark is deprecated; use PhysicalProcessTimeWatermark".to_string(),
         )),
         PhysicalPlan::CountWindow(count_window) => {
-            let processor = BatchProcessor::new(
+            let processor = BatchProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 Some(count_window.count as usize),
                 None,
+                channel_capacities,
             );
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Batch(
                 processor,
             )))
         }
-        PhysicalPlan::TumblingWindow(_) => {
-            let processor =
-                TumblingWindowProcessor::from_physical_plan(processor_id.clone(), Arc::clone(plan))
-                    .ok_or_else(|| {
-                        ProcessorError::InvalidConfiguration(
-                            "Unsupported tumbling window configuration".to_string(),
-                        )
-                    })?;
+        PhysicalPlan::TumblingWindow(window) => {
+            let processor = TumblingWindowProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Arc::new(window.clone()),
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::TumblingWindow(processor),
             ))
         }
-        PhysicalPlan::SlidingWindow(_) => {
-            let processor =
-                SlidingWindowProcessor::from_physical_plan(processor_id.clone(), Arc::clone(plan))
-                    .ok_or_else(|| {
-                        ProcessorError::InvalidConfiguration(
-                            "Unsupported sliding window configuration".to_string(),
-                        )
-                    })?;
+        PhysicalPlan::SlidingWindow(window) => {
+            let processor = SlidingWindowProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Arc::new(window.clone()),
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::SlidingWindow(processor),
             ))
         }
-        PhysicalPlan::StateWindow(_) => {
-            let processor =
-                StateWindowProcessor::from_physical_plan(processor_id.clone(), Arc::clone(plan))
-                    .ok_or_else(|| {
-                        ProcessorError::InvalidConfiguration(
-                            "Unsupported state window configuration".to_string(),
-                        )
-                    })?;
+        PhysicalPlan::StateWindow(window) => {
+            let processor = StateWindowProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Arc::new(*window.clone()),
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::StateWindow(processor),
             ))
         }
         PhysicalPlan::DataSink(sink_plan) => {
             let processor_id = format!("{}_{}", processor_id, sink_plan.connector.sink_id);
-            let mut processor = SinkProcessor::new(processor_id.clone());
+            let mut processor = SinkProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                channel_capacities,
+            );
             if sink_plan.connector.forward_to_result {
                 processor.enable_result_forwarding();
             } else {
@@ -1049,18 +1125,23 @@ fn create_processor_from_plan_node(
         }
         PhysicalPlan::Barrier(barrier) => {
             let expected_upstreams = barrier.base.children.len();
-            let processor = BarrierProcessor::new(processor_id.clone(), expected_upstreams);
+            let processor = BarrierProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                expected_upstreams,
+                channel_capacities,
+            );
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Barrier(processor),
             ))
         }
         PhysicalPlan::Sampler(sampler) => {
-            let mut processor = SamplerProcessor::new(
+            let mut processor = SamplerProcessor::new_with_channel_capacities(
                 plan_name.clone(),
                 crate::processor::SamplerConfig {
                     interval: sampler.interval,
                     strategy: sampler.strategy.clone(),
                 },
+                channel_capacities,
             );
             if let crate::processor::SamplingStrategy::Packer { .. } = &sampler.strategy {
                 let registry = context.merger_registry()?;
@@ -1296,8 +1377,10 @@ fn create_processor_pipeline_with_context(
     physical_plan: Arc<PhysicalPlan>,
     context: ProcessorBuilderContext,
 ) -> Result<ProcessorPipeline, ProcessorError> {
-    let mut control_source = ControlSourceProcessor::new("control_source");
-    let (ingress_sender, ingress_receiver) = mpsc::channel(100);
+    let channel_capacities = context.channel_capacities;
+    let mut control_source =
+        ControlSourceProcessor::new_with_channel_capacities("control_source", channel_capacities);
+    let (ingress_sender, ingress_receiver) = mpsc::channel(channel_capacities.control);
     control_source.set_ingress_input(ingress_receiver);
     let ack_manager = Arc::new(AckManager::default());
 
@@ -1324,7 +1407,8 @@ fn create_processor_pipeline_with_context(
         .position(|p| matches!(p, PlanProcessor::ResultCollect(_)))
     {
         if let PlanProcessor::ResultCollect(mut collector) = middle_processors.swap_remove(pos) {
-            let (result_output_sender, pipeline_output_rx) = mpsc::channel(100);
+            let (result_output_sender, pipeline_output_rx) =
+                mpsc::channel(channel_capacities.control);
             collector.set_output(result_output_sender);
             collector.add_bus_hook(Arc::new(ErrorLoggingHook));
             collector.add_bus_hook(Arc::new(AckHook::new(Arc::clone(&ack_manager))));
@@ -1394,6 +1478,7 @@ fn create_processor_pipeline_with_context(
         pipeline_id,
         ack_manager,
         processor_stats,
+        channel_capacities,
     })
 }
 
@@ -1413,6 +1498,10 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
             eventtime: None,
             merger_registry: None,
             shared_stream: Some(options),
+            channel_capacities: ProcessorChannelCapacities::new(
+                DEFAULT_DATA_CHANNEL_CAPACITY,
+                DEFAULT_CONTROL_CHANNEL_CAPACITY,
+            ),
         },
     )
 }
@@ -1420,6 +1509,7 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
 pub fn create_processor_pipeline(
     physical_plan: Arc<PhysicalPlan>,
     dependencies: ProcessorPipelineDependencies,
+    options: ProcessorPipelineOptions,
 ) -> Result<ProcessorPipeline, ProcessorError> {
     create_processor_pipeline_with_context(
         physical_plan,
@@ -1433,6 +1523,7 @@ pub fn create_processor_pipeline(
             eventtime: dependencies.eventtime,
             merger_registry: Some(dependencies.merger_registry),
             shared_stream: None,
+            channel_capacities: options.channel_capacities(),
         },
     )
 }
@@ -1503,6 +1594,10 @@ mod tests {
             eventtime: None,
             merger_registry: None,
             shared_stream: None,
+            channel_capacities: ProcessorChannelCapacities::new(
+                DEFAULT_DATA_CHANNEL_CAPACITY,
+                DEFAULT_CONTROL_CHANNEL_CAPACITY,
+            ),
         };
         let result = create_processor_from_plan_node(&physical_project, &context)
             .expect("processor creation failed");

@@ -2,8 +2,8 @@ use super::{build_group_by_meta, AggregationWorker, GroupByMeta};
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
@@ -26,6 +26,7 @@ pub struct StreamingStateAggregationProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
     stats: Arc<ProcessorStats>,
 }
@@ -36,10 +37,24 @@ impl StreamingStateAggregationProcessor {
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
     ) -> Self {
+        Self::new_with_channel_capacities(
+            id,
+            physical,
+            aggregate_registry,
+            default_channel_capacities(),
+        )
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical: Arc<PhysicalStreamingAggregation>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
         let group_by_meta =
             build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             physical,
@@ -48,6 +63,7 @@ impl StreamingStateAggregationProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             group_by_meta,
             stats: Arc::new(ProcessorStats::default()),
         }
@@ -75,6 +91,7 @@ impl Processor for StreamingStateAggregationProcessor {
         let mut control_streams = fan_in_control_streams(control_receivers);
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let physical = Arc::clone(&self.physical);
         let group_by_meta = self.group_by_meta.clone();
@@ -107,7 +124,12 @@ impl Processor for StreamingStateAggregationProcessor {
                     Some(ctrl) = control_streams.next(), if control_active => {
                         if let Ok(control_signal) = ctrl {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 break;
                             }
@@ -210,7 +232,12 @@ impl Processor for StreamingStateAggregationProcessor {
                                         match entry.worker.finalize_current_window() {
                                             Ok(Some(batch)) => {
                                                 stats.record_out(batch.num_rows() as u64);
-                                                send_with_backpressure(&output, StreamData::Collection(batch)).await?;
+                                                send_with_backpressure(
+                                                    &output,
+                                                    channel_capacities.data,
+                                                    StreamData::Collection(batch),
+                                                )
+                                                .await?;
                                             }
                                             Ok(None) => {}
                                             Err(e) => {
@@ -222,19 +249,34 @@ impl Processor for StreamingStateAggregationProcessor {
                                 }
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {
-                                send_with_backpressure(&output, StreamData::watermark(ts)).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    StreamData::watermark(ts),
+                                )
+                                .await?;
                             }
                             Some(Ok(StreamData::Control(control_signal))) => {
                                 let is_terminal = control_signal.is_terminal();
                                 let is_graceful = control_signal.is_graceful_end();
-                                send_with_backpressure(&output, StreamData::control(control_signal)).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    StreamData::control(control_signal),
+                                )
+                                .await?;
                                 if is_terminal {
                                     if is_graceful {
                                         for state in partitions.values_mut() {
                                             if state.active {
                                                 match state.worker.finalize_current_window() {
                                                     Ok(Some(batch)) => {
-                                                        send_with_backpressure(&output, StreamData::Collection(batch)).await?;
+                                                        send_with_backpressure(
+                                                            &output,
+                                                            channel_capacities.data,
+                                                            StreamData::Collection(batch),
+                                                        )
+                                                        .await?;
                                                     }
                                                     Ok(None) => {}
                                                     Err(e) => {
@@ -250,7 +292,12 @@ impl Processor for StreamingStateAggregationProcessor {
                             }
                             Some(Ok(other)) => {
                                 let is_terminal = other.is_terminal();
-                                send_with_backpressure(&output, other).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    other,
+                                )
+                                .await?;
                                 if is_terminal {
                                     break;
                                 }
@@ -299,6 +346,7 @@ mod tests {
     use crate::expr::ScalarExpr;
     use crate::planner::physical::AggregateCall;
     use crate::planner::physical::PhysicalStreamingAggregation;
+    use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
     use datatypes::{BooleanType, ConcreteDatatype, Value};
     use sqlparser::ast::{Expr, Ident};
     use std::collections::HashMap;
@@ -384,7 +432,7 @@ mod tests {
             Arc::clone(&physical),
             Arc::clone(&aggregate_registry),
         );
-        let (input, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
         let _handle = processor.start();
@@ -421,7 +469,7 @@ mod tests {
             Arc::clone(&physical),
             Arc::clone(&aggregate_registry),
         );
-        let (input, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
         let _handle = processor.start();

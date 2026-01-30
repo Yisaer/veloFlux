@@ -6,6 +6,7 @@ use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{
     AggregateCall, PhysicalPlan, PhysicalStreamingAggregation, StreamingWindowSpec,
 };
+use crate::processor::base::{default_channel_capacities, ProcessorChannelCapacities};
 use crate::processor::{Processor, ProcessorError, ProcessorStats};
 use datatypes::Value;
 use sqlparser::ast::Expr;
@@ -42,32 +43,60 @@ impl StreamingAggregationProcessor {
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
     ) -> Self {
+        Self::new_with_channel_capacities(
+            id,
+            physical,
+            aggregate_registry,
+            default_channel_capacities(),
+        )
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical: Arc<PhysicalStreamingAggregation>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
         let window = physical.window.clone();
         match window {
-            StreamingWindowSpec::Count { count } => {
-                StreamingAggregationProcessor::Count(StreamingCountAggregationProcessor::new(
+            StreamingWindowSpec::Count { count } => StreamingAggregationProcessor::Count(
+                StreamingCountAggregationProcessor::new_with_channel_capacities(
                     id,
                     Arc::clone(&physical),
                     Arc::clone(&aggregate_registry),
                     count,
-                ))
-            }
+                    channel_capacities,
+                ),
+            ),
             StreamingWindowSpec::Tumbling {
                 time_unit: _,
                 length: _,
             } => {
                 // Currently only seconds are supported at the logical level.
-                StreamingAggregationProcessor::Tumbling(StreamingTumblingAggregationProcessor::new(
-                    id,
-                    Arc::clone(&physical),
-                    aggregate_registry,
-                ))
+                StreamingAggregationProcessor::Tumbling(
+                    StreamingTumblingAggregationProcessor::new_with_channel_capacities(
+                        id,
+                        Arc::clone(&physical),
+                        aggregate_registry,
+                        channel_capacities,
+                    ),
+                )
             }
             StreamingWindowSpec::Sliding { .. } => StreamingAggregationProcessor::Sliding(
-                StreamingSlidingAggregationProcessor::new(id, physical, aggregate_registry),
+                StreamingSlidingAggregationProcessor::new_with_channel_capacities(
+                    id,
+                    physical,
+                    aggregate_registry,
+                    channel_capacities,
+                ),
             ),
             StreamingWindowSpec::State { .. } => StreamingAggregationProcessor::State(
-                StreamingStateAggregationProcessor::new(id, physical, aggregate_registry),
+                StreamingStateAggregationProcessor::new_with_channel_capacities(
+                    id,
+                    physical,
+                    aggregate_registry,
+                    channel_capacities,
+                ),
             ),
         }
     }

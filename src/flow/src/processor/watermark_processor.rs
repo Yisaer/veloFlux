@@ -5,8 +5,8 @@ use crate::planner::physical::{
     WatermarkStrategy,
 };
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -50,6 +50,43 @@ impl WatermarkProcessor {
             },
             PhysicalPlan::EventtimeWatermark(watermark) => Some(WatermarkProcessor::Eventtime(
                 EventtimeWatermarkProcessor::new(id, Arc::new(watermark.clone())),
+            )),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn from_physical_plan_with_channel_capacities(
+        id: impl Into<String>,
+        plan: Arc<PhysicalPlan>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Option<Self> {
+        match plan.as_ref() {
+            PhysicalPlan::ProcessTimeWatermark(watermark) => match &watermark.config {
+                WatermarkConfig::Tumbling { .. } => Some(WatermarkProcessor::ProcessTime(
+                    ProcessTimeWatermarkProcessor::Tumbling(
+                        TumblingWatermarkProcessor::new_with_channel_capacities(
+                            id,
+                            Arc::new(watermark.clone()),
+                            channel_capacities,
+                        ),
+                    ),
+                )),
+                WatermarkConfig::Sliding { .. } => Some(WatermarkProcessor::ProcessTime(
+                    ProcessTimeWatermarkProcessor::Sliding(
+                        SlidingWatermarkProcessor::new_with_channel_capacities(
+                            id,
+                            Arc::new(watermark.clone()),
+                            channel_capacities,
+                        ),
+                    ),
+                )),
+            },
+            PhysicalPlan::EventtimeWatermark(watermark) => Some(WatermarkProcessor::Eventtime(
+                EventtimeWatermarkProcessor::new_with_channel_capacities(
+                    id,
+                    Arc::new(watermark.clone()),
+                    channel_capacities,
+                ),
             )),
             _ => None,
         }
@@ -168,13 +205,22 @@ pub struct TumblingWatermarkProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
 
 impl TumblingWatermarkProcessor {
     pub fn new(id: impl Into<String>, physical: Arc<PhysicalProcessTimeWatermark>) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, physical, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical: Arc<PhysicalProcessTimeWatermark>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             physical,
@@ -182,6 +228,7 @@ impl TumblingWatermarkProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -216,6 +263,7 @@ impl Processor for TumblingWatermarkProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let mut ticker = Self::build_interval(self.physical.config.strategy());
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "watermark processor starting");
@@ -227,7 +275,12 @@ impl Processor for TumblingWatermarkProcessor {
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 tracing::info!(processor_id = %id, "received StreamEnd (control)");
                                 tracing::info!(processor_id = %id, "stopped");
@@ -247,14 +300,24 @@ impl Processor for TumblingWatermarkProcessor {
                         }
                     }, if ticker.is_some() => {
                         let ts = SystemTime::now();
-                        send_with_backpressure(&output, StreamData::watermark(ts)).await?;
+                        send_with_backpressure(
+                            &output,
+                            channel_capacities.data,
+                            StreamData::watermark(ts),
+                        )
+                        .await?;
                         continue;
                     }
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
-                                send_with_backpressure(&output, StreamData::control(signal)).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    StreamData::control(signal),
+                                )
+                                .await?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                     tracing::info!(processor_id = %id, "stopped");
@@ -267,7 +330,12 @@ impl Processor for TumblingWatermarkProcessor {
                                 }
                                 let is_terminal = data.is_terminal();
                                 let out_rows = data.num_rows_hint();
-                                send_with_backpressure(&output, data).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    data,
+                                )
+                                .await?;
                                 if let Some(rows) = out_rows {
                                     stats.record_out(rows);
                                 }
@@ -334,13 +402,22 @@ pub struct SlidingWatermarkProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
 
 impl SlidingWatermarkProcessor {
     pub fn new(id: impl Into<String>, physical: Arc<PhysicalProcessTimeWatermark>) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, physical, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical: Arc<PhysicalProcessTimeWatermark>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         let (lookahead, strategy) = match &physical.config {
             WatermarkConfig::Sliding {
                 lookahead,
@@ -363,6 +440,7 @@ impl SlidingWatermarkProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -413,6 +491,7 @@ impl Processor for SlidingWatermarkProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let mut ticker = self.ticker.take();
         let stats = Arc::clone(&self.stats);
 
@@ -424,6 +503,7 @@ impl Processor for SlidingWatermarkProcessor {
 
             async fn emit_monotonic_watermark(
                 output: &broadcast::Sender<StreamData>,
+                data_channel_capacity: usize,
                 last_emitted_nanos: &mut Option<u128>,
                 ts: SystemTime,
             ) -> Result<(), ProcessorError> {
@@ -432,7 +512,8 @@ impl Processor for SlidingWatermarkProcessor {
                     return Ok(());
                 }
                 *last_emitted_nanos = Some(nanos);
-                send_with_backpressure(output, StreamData::watermark(ts)).await?;
+                send_with_backpressure(output, data_channel_capacity, StreamData::watermark(ts))
+                    .await?;
                 Ok(())
             }
 
@@ -442,7 +523,12 @@ impl Processor for SlidingWatermarkProcessor {
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 tracing::info!(processor_id = %id, "received StreamEnd (control)");
                                 tracing::info!(processor_id = %id, "stopped");
@@ -461,7 +547,13 @@ impl Processor for SlidingWatermarkProcessor {
                             None
                         }
                     }, if ticker.is_some() => {
-                        emit_monotonic_watermark(&output, &mut last_emitted_nanos, SystemTime::now()).await?;
+                        emit_monotonic_watermark(
+                            &output,
+                            channel_capacities.data,
+                            &mut last_emitted_nanos,
+                            SystemTime::now(),
+                        )
+                        .await?;
                     }
                     _deadline = async {
                         if let Some(sleep) = next_sleep.as_mut() {
@@ -473,8 +565,13 @@ impl Processor for SlidingWatermarkProcessor {
                     }, if next_sleep.is_some() => {
                         if let Some(Reverse(deadline_nanos)) = pending_deadlines.pop() {
                             let deadline_ts = SlidingWatermarkProcessor::from_nanos(deadline_nanos)?;
-                            emit_monotonic_watermark(&output, &mut last_emitted_nanos, deadline_ts)
-                                .await?;
+                            emit_monotonic_watermark(
+                                &output,
+                                channel_capacities.data,
+                                &mut last_emitted_nanos,
+                                deadline_ts,
+                            )
+                            .await?;
                         }
                         next_sleep = if let Some(Reverse(nanos)) = pending_deadlines.peek() {
                             Some(SlidingWatermarkProcessor::build_sleep(*nanos)?)
@@ -503,14 +600,24 @@ impl Processor for SlidingWatermarkProcessor {
                                         }
                                         let out = StreamData::collection(collection);
                                         let out_rows = out.num_rows_hint();
-                                        send_with_backpressure(&output, out).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            out,
+                                        )
+                                        .await?;
                                         if let Some(rows) = out_rows {
                                             stats.record_out(rows);
                                         }
                                     }
                                     other => {
                                         let is_terminal = other.is_terminal();
-                                        send_with_backpressure(&output, other).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            other,
+                                        )
+                                        .await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");
@@ -592,14 +699,23 @@ pub struct EventtimeWatermarkProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     state: EventtimeWatermarkState,
     stats: Arc<ProcessorStats>,
 }
 
 impl EventtimeWatermarkProcessor {
     pub fn new(id: impl Into<String>, physical: Arc<PhysicalEventtimeWatermark>) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, physical, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical: Arc<PhysicalEventtimeWatermark>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
 
         let late_tolerance = match physical.config.strategy() {
             WatermarkStrategy::EventTime { late_tolerance } => *late_tolerance,
@@ -612,6 +728,7 @@ impl EventtimeWatermarkProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             state: EventtimeWatermarkState::new(late_tolerance),
             stats: Arc::new(ProcessorStats::default()),
         }
@@ -653,6 +770,7 @@ impl Processor for EventtimeWatermarkProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let mut state = std::mem::take(&mut self.state);
         let stats = Arc::clone(&self.stats);
 
@@ -671,7 +789,12 @@ impl Processor for EventtimeWatermarkProcessor {
                                             stats.record_error(err);
                                         }
                                         for item in step.outputs {
-                                            send_with_backpressure(&output, item).await?;
+                                            send_with_backpressure(
+                                                &output,
+                                                channel_capacities.data,
+                                                item,
+                                            )
+                                            .await?;
                                         }
                                     }
                                     Err(err) => {
@@ -679,7 +802,12 @@ impl Processor for EventtimeWatermarkProcessor {
                                     }
                                 }
                             }
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 tracing::info!(processor_id = %id, "received StreamEnd (control)");
                                 tracing::info!(processor_id = %id, "stopped");
@@ -710,7 +838,12 @@ impl Processor for EventtimeWatermarkProcessor {
                                         }
                                         for item in step.outputs {
                                             let out_rows = item.num_rows_hint();
-                                            send_with_backpressure(&output, item).await?;
+                                            send_with_backpressure(
+                                                &output,
+                                                channel_capacities.data,
+                                                item,
+                                            )
+                                            .await?;
                                             if let Some(rows) = out_rows {
                                                 stats.record_out(rows);
                                             }
@@ -736,7 +869,12 @@ impl Processor for EventtimeWatermarkProcessor {
                                                 stats.record_error(err);
                                             }
                                             for item in step.outputs {
-                                                send_with_backpressure(&output, item).await?;
+                                                send_with_backpressure(
+                                                    &output,
+                                                    channel_capacities.data,
+                                                    item,
+                                                )
+                                                .await?;
                                             }
                                         }
                                         Err(err) => {
@@ -744,7 +882,12 @@ impl Processor for EventtimeWatermarkProcessor {
                                         }
                                     }
                                 }
-                                send_with_backpressure(&output, StreamData::control(signal)).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    StreamData::control(signal),
+                                )
+                                .await?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                     tracing::info!(processor_id = %id, "stopped");
@@ -753,7 +896,12 @@ impl Processor for EventtimeWatermarkProcessor {
                             }
                             Some(Ok(other)) => {
                                 let is_terminal = other.is_terminal();
-                                send_with_backpressure(&output, other).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    other,
+                                )
+                                .await?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                     tracing::info!(processor_id = %id, "stopped");
@@ -918,6 +1066,7 @@ mod tests {
     use super::*;
     use crate::planner::logical::TimeUnit;
     use crate::planner::physical::WatermarkConfig;
+    use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
     use tokio::time::timeout;
 
     fn tuple_at(sec: u64) -> crate::model::Tuple {
@@ -945,7 +1094,7 @@ mod tests {
             0,
         );
         let mut processor = SlidingWatermarkProcessor::new("wm", Arc::new(physical));
-        let (input, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
         let _handle = processor.start();
@@ -1000,7 +1149,7 @@ mod tests {
             0,
         );
         let mut processor = SlidingWatermarkProcessor::new("wm", Arc::new(physical));
-        let (_input, _) = broadcast::channel::<StreamData>(DEFAULT_CHANNEL_CAPACITY);
+        let (_input, _) = broadcast::channel::<StreamData>(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(_input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
         let _handle = processor.start();
@@ -1032,7 +1181,7 @@ mod tests {
         );
 
         let mut processor = EventtimeWatermarkProcessor::new("ewm", Arc::new(physical));
-        let (input, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
         let _handle = processor.start();

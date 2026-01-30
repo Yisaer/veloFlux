@@ -54,6 +54,7 @@ pub use memory_collection_materialize_processor::MemoryCollectionMaterializeProc
 pub use order_processor::OrderProcessor;
 pub use processor_builder::{
     create_processor_pipeline, ProcessorPipeline, ProcessorPipelineDependencies,
+    ProcessorPipelineOptions,
 };
 pub use project_processor::ProjectProcessor;
 pub use result_collect_processor::ResultCollectProcessor;

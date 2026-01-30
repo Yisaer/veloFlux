@@ -83,8 +83,37 @@ pub fn log_broadcast_lagged(processor_id: &str, skipped: u64, context: &str) {
     );
 }
 
-/// Default buffer size for processor broadcast channels
-pub(crate) const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
+/// Default buffer size for processor data broadcast channels.
+pub(crate) const DEFAULT_DATA_CHANNEL_CAPACITY: usize = 16;
+
+/// Default buffer size for processor control broadcast channels.
+pub(crate) const DEFAULT_CONTROL_CHANNEL_CAPACITY: usize = 2;
+
+pub(crate) fn normalize_channel_capacity(capacity: usize) -> usize {
+    capacity.max(1)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ProcessorChannelCapacities {
+    pub data: usize,
+    pub control: usize,
+}
+
+impl ProcessorChannelCapacities {
+    pub(crate) fn new(data: usize, control: usize) -> Self {
+        Self {
+            data: normalize_channel_capacity(data),
+            control: normalize_channel_capacity(control),
+        }
+    }
+}
+
+pub(crate) fn default_channel_capacities() -> ProcessorChannelCapacities {
+    ProcessorChannelCapacities::new(
+        DEFAULT_DATA_CHANNEL_CAPACITY,
+        DEFAULT_CONTROL_CHANNEL_CAPACITY,
+    )
+}
 
 /// Trait for all stream processors
 ///
@@ -170,12 +199,14 @@ pub(crate) fn fan_in_control_streams(
 /// available (or until there are no receivers left) before sending.
 pub(crate) async fn send_with_backpressure(
     sender: &broadcast::Sender<StreamData>,
+    capacity: usize,
     data: StreamData,
 ) -> Result<(), ProcessorError> {
     const BACKOFF: Duration = Duration::from_millis(1);
+    let capacity = normalize_channel_capacity(capacity);
     let mut payload = Some(data);
     loop {
-        if sender.receiver_count() == 0 || sender.len() < DEFAULT_CHANNEL_CAPACITY {
+        if sender.receiver_count() == 0 || sender.len() < capacity {
             let value = payload
                 .take()
                 .expect("send_with_backpressure payload already taken");
@@ -191,12 +222,14 @@ pub(crate) async fn send_with_backpressure(
 
 pub(crate) async fn send_control_with_backpressure(
     sender: &broadcast::Sender<ControlSignal>,
+    capacity: usize,
     signal: ControlSignal,
 ) -> Result<(), ProcessorError> {
     const BACKOFF: Duration = Duration::from_millis(1);
+    let capacity = normalize_channel_capacity(capacity);
     let mut payload = Some(signal);
     loop {
-        if sender.receiver_count() == 0 || sender.len() < DEFAULT_CHANNEL_CAPACITY {
+        if sender.receiver_count() == 0 || sender.len() < capacity {
             let value = payload
                 .take()
                 .expect("send_control_with_backpressure payload already taken");

@@ -10,8 +10,9 @@ use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry};
 use crate::model::Collection;
 use crate::planner::physical::{AggregateCall, PhysicalAggregation, PhysicalPlan};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
@@ -66,6 +67,7 @@ pub struct AggregationProcessor {
     output: broadcast::Sender<StreamData>,
     /// Dedicated control output channel
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
 
@@ -178,8 +180,22 @@ impl AggregationProcessor {
         physical_aggregation: Arc<PhysicalAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
     ) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(
+            id,
+            physical_aggregation,
+            aggregate_registry,
+            default_channel_capacities(),
+        )
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical_aggregation: Arc<PhysicalAggregation>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             physical_aggregation,
@@ -188,6 +204,7 @@ impl AggregationProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -226,6 +243,7 @@ impl Processor for AggregationProcessor {
         let control_active = !control_receivers.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let physical_aggregation = self.physical_aggregation.clone();
         let aggregate_registry = self.aggregate_registry.clone();
         let stats = Arc::clone(&self.stats);
@@ -241,7 +259,12 @@ impl Processor for AggregationProcessor {
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 tracing::info!(processor_id = %id, "received StreamEnd (control)");
                                 stream_ended = true;
@@ -266,7 +289,13 @@ impl Processor for AggregationProcessor {
                                             Ok(result_collection) => {
                                                 let result_data = StreamData::Collection(result_collection);
                                                 let out_rows = result_data.num_rows_hint();
-                                                if let Err(e) = send_with_backpressure(&output, result_data).await {
+                                                if let Err(e) = send_with_backpressure(
+                                                    &output,
+                                                    channel_capacities.data,
+                                                    result_data,
+                                                )
+                                                .await
+                                                {
                                                     tracing::error!(processor_id = %id, error = %e, "failed to send result");
                                                     return Err(e);
                                                 }
@@ -288,7 +317,12 @@ impl Processor for AggregationProcessor {
                                     StreamData::Control(control_signal) => {
                                         let is_terminal = control_signal.is_terminal();
                                         let out = StreamData::control(control_signal);
-                                        send_with_backpressure(&output, out).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            out,
+                                        )
+                                        .await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             stream_ended = true;
@@ -297,7 +331,12 @@ impl Processor for AggregationProcessor {
                                     }
                                     other_data => {
                                         // Forward non-collection data (like Encoded, Bytes) as-is
-                                        send_with_backpressure(&output, other_data).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            other_data,
+                                        )
+                                        .await?;
                                     }
                                 }
                             }

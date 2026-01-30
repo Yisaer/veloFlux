@@ -3,8 +3,9 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::model::Collection;
 use crate::planner::physical::PhysicalStreamingAggregation;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -42,6 +43,7 @@ pub struct StreamingCountAggregationProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
     target: u64,
     stats: Arc<ProcessorStats>,
@@ -54,10 +56,26 @@ impl StreamingCountAggregationProcessor {
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         target: u64,
     ) -> Self {
+        Self::new_with_channel_capacities(
+            id,
+            physical,
+            aggregate_registry,
+            target,
+            default_channel_capacities(),
+        )
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical: Arc<PhysicalStreamingAggregation>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        target: u64,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
         let group_by_meta =
             build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             physical,
@@ -66,6 +84,7 @@ impl StreamingCountAggregationProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             group_by_meta,
             target,
             stats: Arc::new(ProcessorStats::default()),
@@ -113,6 +132,7 @@ impl Processor for StreamingCountAggregationProcessor {
         let mut control_streams = fan_in_control_streams(control_receivers);
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let physical = Arc::clone(&self.physical);
         let group_by_meta = self.group_by_meta.clone();
@@ -130,7 +150,12 @@ impl Processor for StreamingCountAggregationProcessor {
                     Some(ctrl) = control_streams.next(), if control_active => {
                         if let Ok(control_signal) = ctrl {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 break;
                             }
@@ -152,7 +177,12 @@ impl Processor for StreamingCountAggregationProcessor {
                                                 for out in outputs {
                                                     stats.record_out(out.num_rows() as u64);
                                                     let data = StreamData::Collection(out);
-                                                    send_with_backpressure(&output, data).await?
+                                                    send_with_backpressure(
+                                                        &output,
+                                                        channel_capacities.data,
+                                                        data,
+                                                    )
+                                                    .await?
                                                 }
                                             }
                                             Err(e) => {
@@ -168,6 +198,7 @@ impl Processor for StreamingCountAggregationProcessor {
                                         let is_terminal = control_signal.is_terminal();
                                         send_with_backpressure(
                                             &output,
+                                            channel_capacities.data,
                                             StreamData::control(control_signal),
                                         )
                                     .await?;
@@ -176,7 +207,12 @@ impl Processor for StreamingCountAggregationProcessor {
                                         }
                                     }
                                     other => {
-                                        send_with_backpressure(&output, other).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            other,
+                                        )
+                                        .await?;
                                     }
                                 }
                             }

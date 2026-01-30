@@ -6,8 +6,9 @@
 
 use crate::processor::barrier::{align_control_signal, BarrierAligner};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -23,13 +24,22 @@ pub struct BarrierProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
 
 impl BarrierProcessor {
     pub fn new(id: impl Into<String>, expected_upstreams: usize) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, expected_upstreams, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        expected_upstreams: usize,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             expected_upstreams,
@@ -37,6 +47,7 @@ impl BarrierProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -66,6 +77,7 @@ impl Processor for BarrierProcessor {
 
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
 
         tracing::info!(
@@ -102,7 +114,12 @@ impl Processor for BarrierProcessor {
                                     align_control_signal(&mut control_barrier, control_signal)?
                                 {
                                     let is_terminal = signal.is_terminal();
-                                    send_control_with_backpressure(&control_output, signal).await?;
+                                    send_control_with_backpressure(
+                                        &control_output,
+                                        channel_capacities.control,
+                                        signal,
+                                    )
+                                    .await?;
                                     if is_terminal {
                                         tracing::info!(processor_id = %id, "received terminal signal (control)");
                                         tracing::info!(processor_id = %id, "stopped");
@@ -132,7 +149,12 @@ impl Processor for BarrierProcessor {
                                         {
                                             let is_terminal = signal.is_terminal();
                                             let out = StreamData::control(signal);
-                                            send_with_backpressure(&output, out).await?;
+                                            send_with_backpressure(
+                                                &output,
+                                                channel_capacities.data,
+                                                out,
+                                            )
+                                            .await?;
                                             if is_terminal {
                                                 tracing::info!(processor_id = %id, "received terminal signal (data)");
                                                 tracing::info!(processor_id = %id, "stopped");
@@ -142,7 +164,12 @@ impl Processor for BarrierProcessor {
                                     }
                                     other => {
                                         let is_terminal = other.is_terminal();
-                                        send_with_backpressure(&output, other).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            other,
+                                        )
+                                        .await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received terminal item (data)");
                                             tracing::info!(processor_id = %id, "stopped");
@@ -183,6 +210,7 @@ impl Processor for BarrierProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::processor::base::{DEFAULT_CONTROL_CHANNEL_CAPACITY, DEFAULT_DATA_CHANNEL_CAPACITY};
     use crate::processor::{BarrierControlSignal, InstantControlSignal};
     use tokio::time::{timeout, Duration};
 
@@ -204,8 +232,8 @@ mod tests {
         let mut data = Vec::with_capacity(upstreams);
         let mut control = Vec::with_capacity(upstreams);
         for _ in 0..upstreams {
-            let (data_tx, data_rx) = broadcast::channel(16);
-            let (control_tx, control_rx) = broadcast::channel(16);
+            let (data_tx, data_rx) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+            let (control_tx, control_rx) = broadcast::channel(DEFAULT_CONTROL_CHANNEL_CAPACITY);
             processor.add_input(data_rx);
             processor.add_control_input(control_rx);
             data.push(data_tx);
