@@ -1,6 +1,6 @@
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use crate::shared_stream_registry;
@@ -22,15 +22,24 @@ pub struct SharedStreamProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
 
 impl SharedStreamProcessor {
     pub fn new(plan_name: &str, stream_name: impl Into<String>) -> Self {
+        Self::new_with_channel_capacities(plan_name, stream_name, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        plan_name: &str,
+        stream_name: impl Into<String>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
         let stream_name = stream_name.into();
         let id = plan_name.to_string();
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id,
             stream_name,
@@ -40,6 +49,7 @@ impl SharedStreamProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -74,6 +84,7 @@ impl Processor for SharedStreamProcessor {
         let mut control_inputs_active = has_control_inputs;
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let stream_name = self.stream_name.clone();
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
@@ -135,7 +146,12 @@ impl Processor for SharedStreamProcessor {
                     control_msg = control_inputs.next(), if control_inputs_active => {
                         if let Some(Ok(signal)) = control_msg {
                             let is_terminal = signal.is_terminal();
-                            send_control_with_backpressure(&control_output, signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 return Ok(());
                             }
@@ -146,7 +162,12 @@ impl Processor for SharedStreamProcessor {
                     shared_control_msg = shared_control.next() => {
                         if let Some(Ok(signal)) = shared_control_msg {
                             let is_terminal = signal.is_terminal();
-                            send_control_with_backpressure(&control_output, signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 return Ok(());
                             }
@@ -161,7 +182,7 @@ impl Processor for SharedStreamProcessor {
                             }
                             let is_terminal = data.is_terminal();
                             let out_rows = data.num_rows_hint();
-                            send_with_backpressure(&output, data).await?;
+                            send_with_backpressure(&output, channel_capacities.data, data).await?;
                             if let Some(rows) = out_rows {
                                 stats.record_out(rows);
                             }
@@ -180,7 +201,8 @@ impl Processor for SharedStreamProcessor {
                                 }
                                 let is_terminal = data.is_terminal();
                                 let out_rows = data.num_rows_hint();
-                                send_with_backpressure(&output, data).await?;
+                                send_with_backpressure(&output, channel_capacities.data, data)
+                                    .await?;
                                 if let Some(rows) = out_rows {
                                     stats.record_out(rows);
                                 }

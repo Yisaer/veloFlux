@@ -3,8 +3,8 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::model::RecordBatch;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
@@ -37,6 +37,7 @@ pub struct StreamingSlidingAggregationProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
     length_secs: u64,
     delay_secs: u64,
@@ -60,10 +61,24 @@ impl StreamingSlidingAggregationProcessor {
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
     ) -> Self {
+        Self::new_with_channel_capacities(
+            id,
+            physical,
+            aggregate_registry,
+            default_channel_capacities(),
+        )
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical: Arc<PhysicalStreamingAggregation>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
         let group_by_meta =
             build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
 
         let (length_secs, delay_secs) = match physical.window {
             StreamingWindowSpec::Sliding {
@@ -82,6 +97,7 @@ impl StreamingSlidingAggregationProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             group_by_meta,
             length_secs,
             delay_secs,
@@ -136,6 +152,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
         let mut control_streams = fan_in_control_streams(control_receivers);
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let physical = Arc::clone(&self.physical);
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let group_by_meta = self.group_by_meta.clone();
@@ -235,6 +252,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
 
             async fn emit_oldest_window(
                 output: &broadcast::Sender<StreamData>,
+                data_channel_capacity: usize,
                 physical: &PhysicalStreamingAggregation,
                 group_by_meta: &[GroupByMeta],
                 windows: &VecDeque<IncAggWindow>,
@@ -281,7 +299,12 @@ impl Processor for StreamingSlidingAggregationProcessor {
                 stats.record_out(out_rows.len() as u64);
                 let batch = RecordBatch::new(out_rows)
                     .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
-                send_with_backpressure(output, StreamData::collection(Box::new(batch))).await?;
+                send_with_backpressure(
+                    output,
+                    data_channel_capacity,
+                    StreamData::collection(Box::new(batch)),
+                )
+                .await?;
                 Ok(())
             }
 
@@ -291,7 +314,12 @@ impl Processor for StreamingSlidingAggregationProcessor {
                     Some(ctrl) = control_streams.next(), if control_active => {
                         if let Ok(control_signal) = ctrl {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 break;
                             }
@@ -333,7 +361,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                     }
 
                                     if delay_secs == 0 {
-                                        emit_oldest_window(&output, &physical, &group_by_meta, &windows, &stats)
+                                        emit_oldest_window(&output, channel_capacities.data, &physical, &group_by_meta, &windows, &stats)
                                             .await?;
                                     }
                                 }
@@ -346,7 +374,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                 gc_windows(&mut windows, now_secs, length_secs, delay_secs);
                                 if let Some(front) = windows.front() {
                                     if front.start_secs.saturating_add(delay_secs) <= now_secs {
-                                        emit_oldest_window(&output, &physical, &group_by_meta, &windows, &stats)
+                                        emit_oldest_window(&output, channel_capacities.data, &physical, &group_by_meta, &windows, &stats)
                                             .await?;
                                     }
                                 }
@@ -354,17 +382,23 @@ impl Processor for StreamingSlidingAggregationProcessor {
                             Some(Ok(StreamData::Control(control_signal))) => {
                                 let is_terminal = control_signal.is_terminal();
                                 let is_graceful = control_signal.is_graceful_end();
-                                send_with_backpressure(&output, StreamData::control(control_signal)).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    StreamData::control(control_signal),
+                                )
+                                .await?;
                                 if is_terminal {
                                     if is_graceful {
-                                        emit_oldest_window(&output, &physical, &group_by_meta, &windows, &stats)
+                                        emit_oldest_window(&output, channel_capacities.data, &physical, &group_by_meta, &windows, &stats)
                                             .await?;
                                     }
                                     break;
                                 }
                             }
                             Some(Ok(other)) => {
-                                send_with_backpressure(&output, other).await?;
+                                send_with_backpressure(&output, channel_capacities.data, other)
+                                    .await?;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
                                 log_broadcast_lagged(&id, n, "data input");

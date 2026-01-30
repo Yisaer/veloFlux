@@ -7,8 +7,8 @@
 
 use crate::planner::physical::{PhysicalPlan, PhysicalStateWindow};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, send_control_with_backpressure,
-    send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
@@ -30,13 +30,22 @@ pub struct StateWindowProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
 
 impl StateWindowProcessor {
     pub fn new(id: impl Into<String>, physical: Arc<PhysicalStateWindow>) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, physical, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical: Arc<PhysicalStateWindow>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             physical,
@@ -44,6 +53,7 @@ impl StateWindowProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -75,6 +85,7 @@ impl Processor for StateWindowProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
 
         let open_expr = self.physical.open_scalar.clone();
@@ -90,7 +101,12 @@ impl Processor for StateWindowProcessor {
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
@@ -194,18 +210,33 @@ impl Processor for StateWindowProcessor {
                                         stats.record_out(batch_rows.len() as u64);
                                         let batch = crate::model::RecordBatch::new(batch_rows)
                                             .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
-                                        send_with_backpressure(&output, StreamData::collection(Box::new(batch))).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            StreamData::collection(Box::new(batch)),
+                                        )
+                                        .await?;
                                         state.active = false;
                                     }
                                 }
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {
-                                send_with_backpressure(&output, StreamData::watermark(ts)).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    StreamData::watermark(ts),
+                                )
+                                .await?;
                             }
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
                                 let is_graceful = signal.is_graceful_end();
-                                send_with_backpressure(&output, StreamData::control(signal)).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    StreamData::control(signal),
+                                )
+                                .await?;
                                 if is_terminal {
                                     if is_graceful {
                                         for state in partitions.values_mut() {
@@ -216,6 +247,7 @@ impl Processor for StateWindowProcessor {
                                                     .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
                                                 send_with_backpressure(
                                                     &output,
+                                                    channel_capacities.data,
                                                     StreamData::collection(Box::new(batch)),
                                                 )
                                                 .await?;
@@ -229,7 +261,12 @@ impl Processor for StateWindowProcessor {
                             }
                             Some(Ok(other)) => {
                                 let is_terminal = other.is_terminal();
-                                send_with_backpressure(&output, other).await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    other,
+                                )
+                                .await?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
@@ -272,6 +309,7 @@ mod tests {
     use super::*;
     use crate::expr::scalar::ColumnRef;
     use crate::expr::ScalarExpr;
+    use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
     use datatypes::{BooleanType, ConcreteDatatype, Value};
     use sqlparser::ast::{Expr, Ident};
     use std::time::{Duration, UNIX_EPOCH};
@@ -306,7 +344,7 @@ mod tests {
             0,
         );
         let mut processor = StateWindowProcessor::new("sw", Arc::new(physical));
-        let (input, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
         let _handle = processor.start();
@@ -342,7 +380,7 @@ mod tests {
             0,
         );
         let mut processor = StateWindowProcessor::new("sw", Arc::new(physical));
-        let (input, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
         let _handle = processor.start();
@@ -371,7 +409,7 @@ mod tests {
         );
 
         let mut processor = StateWindowProcessor::new("sw", Arc::new(physical));
-        let (input, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
         let _handle = processor.start();
@@ -436,7 +474,7 @@ mod tests {
         );
 
         let mut processor = StateWindowProcessor::new("sw", Arc::new(physical));
-        let (input, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
         let _handle = processor.start();

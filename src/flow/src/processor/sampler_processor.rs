@@ -8,8 +8,9 @@
 //! - Future: Merge strategy for combining multiple records
 
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -89,6 +90,7 @@ pub struct SamplerProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     config: SamplerConfig,
     stats: Arc<ProcessorStats>,
     merger_registry: Option<Arc<MergerRegistry>>,
@@ -96,14 +98,23 @@ pub struct SamplerProcessor {
 
 impl SamplerProcessor {
     pub fn new(id: impl Into<String>, config: SamplerConfig) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, config, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        config: SamplerConfig,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             config,
             stats: Arc::new(ProcessorStats::default()),
             merger_registry: None,
@@ -138,6 +149,7 @@ impl Processor for SamplerProcessor {
         let control_output = self.control_output.clone();
         let emit_interval = self.config.interval;
         let processor_id = self.id.clone();
+        let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
         let strategy = self.config.strategy.clone();
 
@@ -163,10 +175,16 @@ impl Processor for SamplerProcessor {
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 if let Some(pending) = strategy_state.flush() {
-                                    emit_data(&output, &stats, pending).await?;
+                                    emit_data(&output, channel_capacities.data, &stats, pending)
+                                        .await?;
                                 }
                                 tracing::info!(processor_id = %processor_id, "sampler received terminal signal, shutting down");
                                 return Ok(());
@@ -179,7 +197,7 @@ impl Processor for SamplerProcessor {
                     }
                     _ = ticker.tick() => {
                         if let Some(data) = strategy_state.on_tick() {
-                            emit_data(&output, &stats, data).await?;
+                            emit_data(&output, channel_capacities.data, &stats, data).await?;
                             tracing::trace!(processor_id = %processor_id, "sampler emitted tick value");
                         }
                     }
@@ -195,13 +213,21 @@ impl Processor for SamplerProcessor {
                                     let is_terminal = data.is_terminal();
                                     if is_terminal {
                                         if let Some(pending) = strategy_state.flush() {
-                                            emit_data(&output, &stats, pending).await?;
+                                            emit_data(
+                                                &output,
+                                                channel_capacities.data,
+                                                &stats,
+                                                pending,
+                                            )
+                                            .await?;
                                         }
-                                        emit_data(&output, &stats, data).await?;
+                                        emit_data(&output, channel_capacities.data, &stats, data)
+                                            .await?;
                                         tracing::info!(processor_id = %processor_id, "sampler received terminal item on data channel, shutting down");
                                         return Ok(());
                                     }
-                                    emit_data(&output, &stats, data).await?;
+                                    emit_data(&output, channel_capacities.data, &stats, data)
+                                        .await?;
                                     continue;
                                 }
 
@@ -216,7 +242,8 @@ impl Processor for SamplerProcessor {
                             }
                             None => {
                                 if let Some(pending) = strategy_state.flush() {
-                                    emit_data(&output, &stats, pending).await?;
+                                    emit_data(&output, channel_capacities.data, &stats, pending)
+                                        .await?;
                                 }
                                 tracing::info!(processor_id = %processor_id, "sampler input closed, shutting down");
                                 return Ok(());
@@ -312,11 +339,12 @@ fn should_sample_data(item: &StreamData) -> bool {
 
 async fn emit_data(
     output: &broadcast::Sender<StreamData>,
+    data_channel_capacity: usize,
     stats: &Arc<ProcessorStats>,
     data: StreamData,
 ) -> Result<(), ProcessorError> {
     let row_count = data.num_rows_hint().unwrap_or(0);
-    send_with_backpressure(output, data).await?;
+    send_with_backpressure(output, data_channel_capacity, data).await?;
     stats.record_out(row_count);
     Ok(())
 }

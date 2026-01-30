@@ -3,8 +3,9 @@
 use crate::model::{Collection, Message, RecordBatch, Tuple};
 use crate::planner::physical::{PhysicalCollectionLayoutNormalize, PhysicalPlan};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use datatypes::Value;
@@ -23,13 +24,22 @@ pub struct CollectionLayoutNormalizeProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
 
 impl CollectionLayoutNormalizeProcessor {
     pub fn new(id: impl Into<String>, spec: Arc<PhysicalCollectionLayoutNormalize>) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, spec, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        spec: Arc<PhysicalCollectionLayoutNormalize>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
 
         let schema = spec.schema();
         let keys: Vec<Arc<str>> = schema
@@ -46,6 +56,7 @@ impl CollectionLayoutNormalizeProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -209,6 +220,7 @@ impl Processor for CollectionLayoutNormalizeProcessor {
 
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let schema_keys: Vec<Arc<str>> = self.keys.iter().cloned().collect();
         let output_source_name = Arc::clone(&self.output_source_name);
         let shared_keys = Arc::clone(&self.keys);
@@ -224,7 +236,12 @@ impl Processor for CollectionLayoutNormalizeProcessor {
                         match control_item {
                             Some(Ok(control_signal)) => {
                                 let is_terminal = control_signal.is_terminal();
-                                send_control_with_backpressure(&control_output, control_signal).await?;
+                                send_control_with_backpressure(
+                                    &control_output,
+                                    channel_capacities.control,
+                                    control_signal,
+                                )
+                                .await?;
                                 if is_terminal {
                                     tracing::info!(processor_id = %id, "received StreamEnd (control)");
                                     tracing::info!(processor_id = %id, "stopped");
@@ -257,7 +274,12 @@ impl Processor for CollectionLayoutNormalizeProcessor {
                                             Ok(out_collection) => {
                                                 let out = StreamData::collection(out_collection);
                                                 let out_rows = out.num_rows_hint();
-                                                send_with_backpressure(&output, out).await?;
+                                                send_with_backpressure(
+                                                    &output,
+                                                    channel_capacities.data,
+                                                    out,
+                                                )
+                                                .await?;
                                                 if let Some(rows) = out_rows {
                                                     stats.record_out(rows);
                                                 }
@@ -270,7 +292,12 @@ impl Processor for CollectionLayoutNormalizeProcessor {
                                     StreamData::Control(control_signal) => {
                                         let is_terminal = control_signal.is_terminal();
                                         let out = StreamData::control(control_signal);
-                                        send_with_backpressure(&output, out).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            out,
+                                        )
+                                        .await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %id, "stopped");
@@ -278,7 +305,12 @@ impl Processor for CollectionLayoutNormalizeProcessor {
                                         }
                                     }
                                     other => {
-                                        send_with_backpressure(&output, other).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            other,
+                                        )
+                                        .await?;
                                     }
                                 }
                             }

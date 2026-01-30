@@ -14,7 +14,9 @@ use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::EventtimePipelineContext;
 use crate::processor::Processor;
 use crate::processor::ProcessorStatsEntry;
-use crate::processor::{create_processor_pipeline, ProcessorPipelineDependencies};
+use crate::processor::{
+    create_processor_pipeline, ProcessorPipelineDependencies, ProcessorPipelineOptions,
+};
 use crate::shared_stream::SharedStreamRegistry;
 use crate::{
     explain_pipeline_with_options, optimize_physical_plan, PipelineExplain, PipelineExplainConfig,
@@ -527,6 +529,7 @@ fn build_pipeline_runtime_with_logical_ir(
     let mut pipeline = create_processor_pipeline(
         optimized_plan,
         ProcessorPipelineDependencies::new(mqtt_client_manager.clone(), registries, eventtime),
+        ProcessorPipelineOptions::default(),
     )
     .map_err(|err| err.to_string())?;
     pipeline.set_pipeline_id(definition.id().to_string());
@@ -645,6 +648,7 @@ fn build_pipeline_runtime_from_logical_ir(
     let mut pipeline = create_processor_pipeline(
         optimized_plan,
         ProcessorPipelineDependencies::new(mqtt_client_manager.clone(), registries, eventtime),
+        ProcessorPipelineOptions::default(),
     )
     .map_err(|err| err.to_string())?;
 
@@ -793,6 +797,7 @@ pub(super) fn attach_sources_from_catalog(
 ) -> Result<(), String> {
     let mut has_source_processor = false;
     let pipeline_id = pipeline.pipeline_id().to_string();
+    let data_channel_capacity = pipeline.data_channel_capacity();
     for processor in pipeline.middle_processors.iter_mut() {
         if let PlanProcessor::DataSource(ds) = processor {
             has_source_processor = true;
@@ -820,7 +825,8 @@ pub(super) fn attach_sources_from_catalog(
                         format!("{processor_id}_source_connector"),
                         config,
                         mqtt_client_manager.clone(),
-                    );
+                    )
+                    .with_channel_capacity(data_channel_capacity);
                     ds.add_connector(Box::new(connector));
                 }
                 StreamProps::History(props) => {
@@ -832,12 +838,15 @@ pub(super) fn attach_sources_from_catalog(
                     }
                     config.send_interval = props.send_interval;
 
-                    let connector = HistorySourceConnector::new(processor_id.clone(), config);
+                    let connector = HistorySourceConnector::new(processor_id.clone(), config)
+                        .with_channel_capacity(data_channel_capacity);
                     ds.add_connector(Box::new(connector));
                 }
                 StreamProps::Mock(_) => {
-                    let (connector, handle) =
-                        MockSourceConnector::new(format!("{processor_id}_mock_source_connector"));
+                    let (connector, handle) = MockSourceConnector::new_with_channel_capacity(
+                        format!("{processor_id}_mock_source_connector"),
+                        data_channel_capacity,
+                    );
                     let key = format!("{pipeline_id}:{stream_name}:{processor_id}");
                     register_mock_source_handle(key, handle);
                     ds.add_connector(Box::new(connector));

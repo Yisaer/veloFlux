@@ -2,8 +2,9 @@
 
 use crate::model::{Collection, RecordBatch, Tuple};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 #[cfg(test)]
@@ -22,6 +23,7 @@ pub struct BatchProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     batch_count: Option<usize>,
     batch_duration: Option<Duration>,
     stats: Arc<ProcessorStats>,
@@ -39,14 +41,29 @@ impl BatchProcessor {
         batch_count: Option<usize>,
         batch_duration: Option<Duration>,
     ) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(
+            id,
+            batch_count,
+            batch_duration,
+            default_channel_capacities(),
+        )
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        batch_count: Option<usize>,
+        batch_duration: Option<Duration>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             batch_count,
             batch_duration,
             stats: Arc::new(ProcessorStats::default()),
@@ -65,13 +82,19 @@ impl BatchProcessor {
         processor_id: &str,
         rows: Vec<Tuple>,
         output: &broadcast::Sender<StreamData>,
+        data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         let row_count = rows.len() as u64;
         let batch = RecordBatch::new(rows)
             .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
         let collection: Box<dyn Collection> = Box::new(batch);
-        send_with_backpressure(output, StreamData::collection(collection)).await?;
+        send_with_backpressure(
+            output,
+            data_channel_capacity,
+            StreamData::collection(collection),
+        )
+        .await?;
         stats.record_out(row_count);
         tracing::info!(processor_id = %processor_id, "flushed batch");
         Ok(())
@@ -81,13 +104,14 @@ impl BatchProcessor {
         processor_id: &str,
         buffer: &mut Vec<Tuple>,
         output: &broadcast::Sender<StreamData>,
+        data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         if buffer.is_empty() {
             return Ok(());
         }
         let rows = std::mem::take(buffer);
-        Self::emit_batch(processor_id, rows, output, stats).await
+        Self::emit_batch(processor_id, rows, output, data_channel_capacity, stats).await
     }
 
     async fn flush_count(
@@ -95,13 +119,14 @@ impl BatchProcessor {
         buffer: &mut Vec<Tuple>,
         output: &broadcast::Sender<StreamData>,
         count: usize,
+        data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         if buffer.len() < count {
             return Ok(());
         }
         let rows: Vec<Tuple> = buffer.drain(..count).collect();
-        Self::emit_batch(processor_id, rows, output, stats).await
+        Self::emit_batch(processor_id, rows, output, data_channel_capacity, stats).await
     }
 
     async fn drain_by_count(
@@ -109,10 +134,19 @@ impl BatchProcessor {
         buffer: &mut Vec<Tuple>,
         output: &broadcast::Sender<StreamData>,
         count: usize,
+        data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         while buffer.len() >= count {
-            Self::flush_count(processor_id, buffer, output, count, stats).await?;
+            Self::flush_count(
+                processor_id,
+                buffer,
+                output,
+                count,
+                data_channel_capacity,
+                stats,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -140,6 +174,7 @@ impl Processor for BatchProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let mode = match (self.batch_count, self.batch_duration) {
             (Some(count), Some(duration)) => BatchMode::Combined { count, duration },
             (Some(count), None) => BatchMode::CountOnly { count },
@@ -158,11 +193,23 @@ impl Processor for BatchProcessor {
                 tokio::select! {
                     biased;
                     control_item = control_streams.next(), if control_active => {
-                            if let Some(Ok(control_signal)) = control_item {
+                        if let Some(Ok(control_signal)) = control_item {
                                 let is_terminal = control_signal.is_terminal();
-                                send_control_with_backpressure(&control_output, control_signal).await?;
+                                send_control_with_backpressure(
+                                    &control_output,
+                                    channel_capacities.control,
+                                    control_signal,
+                                )
+                                .await?;
                                 if is_terminal {
-                                    BatchProcessor::flush_all(&processor_id, &mut buffer, &output, &stats).await?;
+                                    BatchProcessor::flush_all(
+                                        &processor_id,
+                                        &mut buffer,
+                                        &output,
+                                        channel_capacities.data,
+                                        &stats,
+                                    )
+                                    .await?;
                                     tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
                                     return Ok(());
                                 }
@@ -176,7 +223,14 @@ impl Processor for BatchProcessor {
                             timer.as_mut().await;
                         }
                     }, if timer.is_some() => {
-                        BatchProcessor::flush_all(&processor_id, &mut buffer, &output, &stats).await?;
+                        BatchProcessor::flush_all(
+                            &processor_id,
+                            &mut buffer,
+                            &output,
+                            channel_capacities.data,
+                            &stats,
+                        )
+                        .await?;
                         if let BatchMode::DurationOnly { duration } | BatchMode::Combined { duration, .. } = &mode {
                             BatchProcessor::schedule_timer(&mut timer, *duration, !buffer.is_empty());
                         }
@@ -199,6 +253,7 @@ impl Processor for BatchProcessor {
                                                     &mut buffer,
                                                     &output,
                                                     *count,
+                                                    channel_capacities.data,
                                                     &stats,
                                                 )
                                                 .await?;
@@ -216,6 +271,7 @@ impl Processor for BatchProcessor {
                                                     &mut buffer,
                                                     &output,
                                                     *count,
+                                                    channel_capacities.data,
                                                     &stats,
                                                 )
                                                 .await?;
@@ -234,11 +290,17 @@ impl Processor for BatchProcessor {
                                                 &processor_id,
                                                 &mut buffer,
                                                 &output,
+                                                channel_capacities.data,
                                                 &stats,
                                             )
                                             .await?;
                                         }
-                                        send_with_backpressure(&output, data).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            data,
+                                        )
+                                        .await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                             return Ok(());
@@ -260,7 +322,14 @@ impl Processor for BatchProcessor {
                                 continue;
                             }
                             None => {
-                                BatchProcessor::flush_all(&processor_id, &mut buffer, &output, &stats).await?;
+                                BatchProcessor::flush_all(
+                                    &processor_id,
+                                    &mut buffer,
+                                    &output,
+                                    channel_capacities.data,
+                                    &stats,
+                                )
+                                .await?;
                                 tracing::info!(processor_id = %processor_id, "input streams closed");
                                 return Ok(());
                             }
@@ -292,14 +361,15 @@ impl Processor for BatchProcessor {
 mod tests {
     use super::*;
     use crate::model::batch_from_columns_simple;
+    use crate::processor::base::{DEFAULT_CONTROL_CHANNEL_CAPACITY, DEFAULT_DATA_CHANNEL_CAPACITY};
     use tokio::time::Duration;
 
     #[tokio::test]
     async fn test_batch_processor_count_only() {
         let mut processor = BatchProcessor::new("batch_count", Some(2), None);
-        let (tx, rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (tx, rx) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(rx);
-        let (control_tx, control_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (control_tx, control_rx) = broadcast::channel(DEFAULT_CONTROL_CHANNEL_CAPACITY);
         processor.add_control_input(control_rx);
         processor.output.subscribe(); // ensure there is at least one subscriber
         let mut output = processor
@@ -346,9 +416,9 @@ mod tests {
     async fn test_batch_processor_duration_only() {
         let mut processor =
             BatchProcessor::new("batch_duration", None, Some(Duration::from_millis(50)));
-        let (tx, rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (tx, rx) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(rx);
-        let (control_tx, control_rx) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (control_tx, control_rx) = broadcast::channel(DEFAULT_CONTROL_CHANNEL_CAPACITY);
         processor.add_control_input(control_rx);
         let mut output = processor.subscribe_output().expect("output");
         processor.start();

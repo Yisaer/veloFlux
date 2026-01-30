@@ -67,7 +67,10 @@ pub use stateful::StatefulFunctionRegistry;
 use connector::{ConnectorRegistry, MqttClientManager};
 use explain_shared_stream::shared_stream_decode_applied_snapshot;
 use planner::logical::create_logical_plan;
-use processor::{create_processor_pipeline, ProcessorPipeline, ProcessorPipelineDependencies};
+use processor::{
+    create_processor_pipeline, ProcessorPipeline, ProcessorPipelineDependencies,
+    ProcessorPipelineOptions,
+};
 use shared_stream::SharedStreamRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -286,6 +289,7 @@ pub fn create_pipeline(
     let pipeline = create_processor_pipeline(
         physical_plan,
         ProcessorPipelineDependencies::new(mqtt_client_manager, registries, None),
+        ProcessorPipelineOptions::default(),
     )?;
     Ok(pipeline)
 }

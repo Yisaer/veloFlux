@@ -2,8 +2,9 @@ use super::{build_group_by_meta, AggregationWorker, GroupByMeta};
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -22,6 +23,7 @@ pub struct StreamingTumblingAggregationProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
     stats: Arc<ProcessorStats>,
 }
@@ -32,10 +34,24 @@ impl StreamingTumblingAggregationProcessor {
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
     ) -> Self {
+        Self::new_with_channel_capacities(
+            id,
+            physical,
+            aggregate_registry,
+            default_channel_capacities(),
+        )
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        physical: Arc<PhysicalStreamingAggregation>,
+        aggregate_registry: Arc<AggregateFunctionRegistry>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
         let group_by_meta =
             build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             physical,
@@ -44,6 +60,7 @@ impl StreamingTumblingAggregationProcessor {
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             group_by_meta,
             stats: Arc::new(ProcessorStats::default()),
         }
@@ -71,6 +88,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
         let mut control_streams = fan_in_control_streams(control_receivers);
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let physical = Arc::clone(&self.physical);
         let group_by_meta = self.group_by_meta.clone();
@@ -97,7 +115,12 @@ impl Processor for StreamingTumblingAggregationProcessor {
                     Some(ctrl) = control_streams.next(), if control_active => {
                         if let Ok(control_signal) = ctrl {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 break;
                             }
@@ -119,25 +142,44 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                         }
                                     }
                                     StreamData::Watermark(ts) => {
-                                        window_state.flush_until(ts, &output, &stats).await?;
+                                        window_state
+                                            .flush_until(
+                                                ts,
+                                                &output,
+                                                channel_capacities.data,
+                                                &stats,
+                                            )
+                                            .await?;
                                     }
                                     StreamData::Control(control_signal) => {
                                         let is_terminal = control_signal.is_terminal();
                                         let is_graceful = control_signal.is_graceful_end();
                                         send_with_backpressure(
                                             &output,
+                                            channel_capacities.data,
                                             StreamData::control(control_signal),
                                         )
                                         .await?;
                                         if is_terminal {
                                             if is_graceful {
-                                                window_state.flush_all(&output, &stats).await?;
+                                                window_state
+                                                    .flush_all(
+                                                        &output,
+                                                        channel_capacities.data,
+                                                        &stats,
+                                                    )
+                                                    .await?;
                                             }
                                             break;
                                         }
                                     }
                                     other => {
-                                        send_with_backpressure(&output, other).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            other,
+                                        )
+                                        .await?;
                                     }
                                 }
                             }
@@ -252,6 +294,7 @@ impl ProcessingWindowState {
         &mut self,
         watermark: SystemTime,
         output: &broadcast::Sender<StreamData>,
+        data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         let watermark_secs = to_secs(watermark, "watermark")?;
@@ -266,7 +309,12 @@ impl ProcessingWindowState {
                 .map_err(ProcessorError::ProcessingError)?
             {
                 stats.record_out(batch.num_rows() as u64);
-                send_with_backpressure(output, StreamData::Collection(batch)).await?;
+                send_with_backpressure(
+                    output,
+                    data_channel_capacity,
+                    StreamData::Collection(batch),
+                )
+                .await?;
             }
         }
         Ok(())
@@ -275,6 +323,7 @@ impl ProcessingWindowState {
     async fn flush_all(
         &mut self,
         output: &broadcast::Sender<StreamData>,
+        data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         while let Some(mut state) = self.windows.pop_front() {
@@ -284,7 +333,12 @@ impl ProcessingWindowState {
                 .map_err(ProcessorError::ProcessingError)?
             {
                 stats.record_out(batch.num_rows() as u64);
-                send_with_backpressure(output, StreamData::Collection(batch)).await?;
+                send_with_backpressure(
+                    output,
+                    data_channel_capacity,
+                    StreamData::Collection(batch),
+                )
+                .await?;
             }
         }
         Ok(())

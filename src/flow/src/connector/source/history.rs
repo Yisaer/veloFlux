@@ -1,4 +1,5 @@
 use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
+use crate::processor::base::normalize_channel_capacity;
 use arrow::array::{Array, BinaryArray, Int64Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -35,6 +36,7 @@ impl HistorySourceConfig {
 pub struct HistorySourceConnector {
     id: String,
     config: HistorySourceConfig,
+    channel_capacity: usize,
     receiver: Option<mpsc::Receiver<Result<ConnectorEvent, ConnectorError>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
 }
@@ -44,9 +46,19 @@ impl HistorySourceConnector {
         Self {
             id: id.into(),
             config,
+            channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
             receiver: None,
             shutdown_tx: None,
         }
+    }
+
+    pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
+        self.channel_capacity = normalize_channel_capacity(capacity);
+        self
+    }
+
+    pub fn set_channel_capacity(&mut self, capacity: usize) {
+        self.channel_capacity = normalize_channel_capacity(capacity);
     }
 }
 
@@ -60,7 +72,7 @@ impl SourceConnector for HistorySourceConnector {
             return Err(ConnectorError::AlreadySubscribed(self.id.clone()));
         }
 
-        let (sender, receiver) = mpsc::channel(256);
+        let (sender, receiver) = mpsc::channel(self.channel_capacity);
         let config = self.config.clone();
         let connector_id = self.id.clone();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();

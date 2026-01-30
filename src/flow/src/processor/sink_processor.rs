@@ -2,8 +2,9 @@
 use crate::connector::SinkConnector;
 use crate::model::Collection;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -86,6 +87,12 @@ enum ControlAction {
     Stop,
 }
 
+struct SinkForwarding<'a> {
+    forward_data: bool,
+    output: &'a broadcast::Sender<StreamData>,
+    data_channel_capacity: usize,
+}
+
 struct ConnectorBinding {
     connector: Box<dyn SinkConnector>,
 }
@@ -140,6 +147,7 @@ pub struct SinkProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     connector: Option<ConnectorBinding>,
     forward_to_result: bool,
     stats: Arc<ProcessorStats>,
@@ -148,14 +156,22 @@ pub struct SinkProcessor {
 impl SinkProcessor {
     /// Create a new sink processor with the provided identifier.
     pub fn new(id: impl Into<String>) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             connector: None,
             forward_to_result: false,
             stats: Arc::new(ProcessorStats::default()),
@@ -224,6 +240,7 @@ impl SinkProcessor {
     async fn handle_control_item(
         processor_id: &str,
         control_output: &broadcast::Sender<ControlSignal>,
+        control_channel_capacity: usize,
         connector: &mut ConnectorBinding,
         item: Option<Result<ControlSignal, BroadcastStreamRecvError>>,
     ) -> Result<ControlAction, ProcessorError> {
@@ -231,7 +248,8 @@ impl SinkProcessor {
             return Ok(ControlAction::Deactivate);
         };
         let is_terminal = control_signal.is_terminal();
-        send_control_with_backpressure(control_output, control_signal).await?;
+        send_control_with_backpressure(control_output, control_channel_capacity, control_signal)
+            .await?;
         if is_terminal {
             tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
             Self::handle_terminal(connector).await?;
@@ -246,8 +264,7 @@ impl SinkProcessor {
         stats: &ProcessorStats,
         ready_state: &mut ReadyState,
         connector: &mut ConnectorBinding,
-        forward_data: bool,
-        output: &broadcast::Sender<StreamData>,
+        forwarding: SinkForwarding<'_>,
         data: StreamData,
     ) -> Result<bool, ProcessorError> {
         log_received_data(processor_id, &data);
@@ -276,9 +293,13 @@ impl SinkProcessor {
                     return Ok(false);
                 }
                 stats.record_out(1);
-                if forward_data {
-                    send_with_backpressure(output, StreamData::EncodedBytes { payload, num_rows })
-                        .await?;
+                if forwarding.forward_data {
+                    send_with_backpressure(
+                        forwarding.output,
+                        forwarding.data_channel_capacity,
+                        StreamData::EncodedBytes { payload, num_rows },
+                    )
+                    .await?;
                 }
             }
             StreamData::Collection(collection) => {
@@ -303,13 +324,19 @@ impl SinkProcessor {
                     return Ok(false);
                 }
                 stats.record_out(in_rows);
-                if forward_data {
-                    send_with_backpressure(output, StreamData::Collection(collection)).await?;
+                if forwarding.forward_data {
+                    send_with_backpressure(
+                        forwarding.output,
+                        forwarding.data_channel_capacity,
+                        StreamData::Collection(collection),
+                    )
+                    .await?;
                 }
             }
             data => {
                 let is_terminal = data.is_terminal();
-                send_with_backpressure(output, data).await?;
+                send_with_backpressure(forwarding.output, forwarding.data_channel_capacity, data)
+                    .await?;
                 if is_terminal {
                     tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                     Self::handle_terminal(connector).await?;
@@ -335,6 +362,7 @@ impl Processor for SinkProcessor {
         let output = self.output.clone();
         let forward_data = self.forward_to_result;
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
 
         let Some(mut connector) = self.connector.take() else {
@@ -357,6 +385,7 @@ impl Processor for SinkProcessor {
                         match Self::handle_control_item(
                             &processor_id,
                             &control_output,
+                            channel_capacities.control,
                             &mut connector,
                             control_item,
                         )
@@ -388,8 +417,11 @@ impl Processor for SinkProcessor {
                                     stats.as_ref(),
                                     &mut ready_state,
                                     &mut connector,
-                                    forward_data,
-                                    &output,
+                                    SinkForwarding {
+                                        forward_data,
+                                        output: &output,
+                                        data_channel_capacity: channel_capacities.data,
+                                    },
                                     data,
                                 )
                                 .await?

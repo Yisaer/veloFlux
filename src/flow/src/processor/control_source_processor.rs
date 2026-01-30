@@ -4,7 +4,8 @@
 //! and it forwards them to downstream processors while preserving channel isolation.
 
 use crate::processor::base::{
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{
     BarrierControlSignal, ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData,
@@ -57,6 +58,7 @@ pub struct ControlSourceProcessor {
     output: broadcast::Sender<StreamData>,
     /// Dedicated control channel for urgent control propagation
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     /// Monotonically increasing control-signal id allocator (shared across control/data channels).
     next_control_signal_id: Arc<AtomicU64>,
     stats: Arc<ProcessorStats>,
@@ -65,13 +67,21 @@ pub struct ControlSourceProcessor {
 impl ControlSourceProcessor {
     /// Create a new ControlSourceProcessor
     pub fn new(id: impl Into<String>) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             ingress: None,
             output,
             control_output,
+            channel_capacities,
             next_control_signal_id: Arc::new(AtomicU64::new(1)),
             stats: Arc::new(ProcessorStats::default()),
         }
@@ -91,7 +101,7 @@ impl ControlSourceProcessor {
 
     /// Send StreamData to all downstream processors
     pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
-        send_with_backpressure(&self.output, data).await
+        send_with_backpressure(&self.output, self.channel_capacities.data, data).await
     }
 
     /// Send StreamData to a specific downstream processor by id.
@@ -124,6 +134,7 @@ impl Processor for ControlSourceProcessor {
         let control_signal_id_allocator = Arc::clone(&self.next_control_signal_id);
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "control source processor starting");
+        let channel_capacities = self.channel_capacities;
 
         tokio::spawn(async move {
             let input = match input_result {
@@ -140,7 +151,8 @@ impl Processor for ControlSourceProcessor {
                         if let Some(rows) = rows {
                             stats.record_in(rows);
                         }
-                        send_with_backpressure(&output, ingress.data).await?;
+                        send_with_backpressure(&output, channel_capacities.data, ingress.data)
+                            .await?;
                         if let Some(rows) = rows {
                             stats.record_out(rows);
                         }
@@ -159,7 +171,12 @@ impl Processor for ControlSourceProcessor {
                         };
 
                         let is_terminal = signal.is_terminal();
-                        send_control_with_backpressure(&control_output, signal).await?;
+                        send_control_with_backpressure(
+                            &control_output,
+                            channel_capacities.control,
+                            signal,
+                        )
+                        .await?;
                         if is_terminal {
                             tracing::info!(
                                 processor_id = %processor_id,
@@ -176,6 +193,7 @@ impl Processor for ControlSourceProcessor {
             let barrier_id = control_signal_id_allocator.fetch_add(1, Ordering::Relaxed);
             send_with_backpressure(
                 &output,
+                channel_capacities.data,
                 StreamData::control(ControlSignal::Barrier(
                     BarrierControlSignal::StreamGracefulEnd { barrier_id },
                 )),

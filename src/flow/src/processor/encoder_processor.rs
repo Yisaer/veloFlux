@@ -6,8 +6,9 @@
 
 use crate::codec::encoder::CollectionEncoder;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -22,6 +23,7 @@ pub struct EncoderProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     encoder: Arc<dyn CollectionEncoder>,
     stats: Arc<ProcessorStats>,
 }
@@ -29,14 +31,23 @@ pub struct EncoderProcessor {
 impl EncoderProcessor {
     /// Create a new encoder processor with the provided encoder instance.
     pub fn new(id: impl Into<String>, encoder: Arc<dyn CollectionEncoder>) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(id, encoder, default_channel_capacities())
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        encoder: Arc<dyn CollectionEncoder>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             encoder,
             stats: Arc::new(ProcessorStats::default()),
         }
@@ -61,6 +72,7 @@ impl Processor for EncoderProcessor {
         let control_output = self.control_output.clone();
         let encoder = Arc::clone(&self.encoder);
         let processor_id = self.id.clone();
+        let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "encoder processor starting");
 
@@ -71,7 +83,12 @@ impl Processor for EncoderProcessor {
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
                                 tracing::info!(processor_id = %processor_id, "stopped");
@@ -96,7 +113,12 @@ impl Processor for EncoderProcessor {
                                             Ok(payload) => {
                                                 let out = StreamData::encoded_bytes(payload, rows);
                                                 let out_rows = out.num_rows_hint();
-                                                send_with_backpressure(&output, out).await?;
+                                                send_with_backpressure(
+                                                    &output,
+                                                    channel_capacities.data,
+                                                    out,
+                                                )
+                                                .await?;
                                                 if let Some(rows) = out_rows {
                                                     stats.record_out(rows);
                                                 }
@@ -111,7 +133,12 @@ impl Processor for EncoderProcessor {
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
-                                        send_with_backpressure(&output, data).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            data,
+                                        )
+                                        .await?;
                                         if is_terminal {
                                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                             tracing::info!(processor_id = %processor_id, "stopped");

@@ -4,8 +4,9 @@
 use crate::codec::{CollectionEncoder, CollectionEncoderStream};
 use crate::model::Collection;
 use crate::processor::base::{
-    fan_in_control_streams, fan_in_streams, log_broadcast_lagged, log_received_data,
-    send_control_with_backpressure, send_with_backpressure, DEFAULT_CHANNEL_CAPACITY,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    log_received_data, send_control_with_backpressure, send_with_backpressure,
+    ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
@@ -21,6 +22,7 @@ pub struct StreamingEncoderProcessor {
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
     control_output: broadcast::Sender<ControlSignal>,
+    channel_capacities: ProcessorChannelCapacities,
     encoder: Arc<dyn CollectionEncoder>,
     batch_count: Option<usize>,
     batch_duration: Option<Duration>,
@@ -67,14 +69,31 @@ impl StreamingEncoderProcessor {
         batch_count: Option<usize>,
         batch_duration: Option<Duration>,
     ) -> Self {
-        let (output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
-        let (control_output, _) = broadcast::channel(DEFAULT_CHANNEL_CAPACITY);
+        Self::new_with_channel_capacities(
+            id,
+            encoder,
+            batch_count,
+            batch_duration,
+            default_channel_capacities(),
+        )
+    }
+
+    pub(crate) fn new_with_channel_capacities(
+        id: impl Into<String>,
+        encoder: Arc<dyn CollectionEncoder>,
+        batch_count: Option<usize>,
+        batch_duration: Option<Duration>,
+        channel_capacities: ProcessorChannelCapacities,
+    ) -> Self {
+        let (output, _) = broadcast::channel(channel_capacities.data);
+        let (control_output, _) = broadcast::channel(channel_capacities.control);
         Self {
             id: id.into(),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
             control_output,
+            channel_capacities,
             encoder,
             batch_count,
             batch_duration,
@@ -112,6 +131,7 @@ impl StreamingEncoderProcessor {
         stream_state: &mut Option<Box<dyn CollectionEncoderStream>>,
         mode: &StreamingBatchMode,
         output: &broadcast::Sender<StreamData>,
+        data_channel_capacity: usize,
         timer: &mut Option<Pin<Box<Sleep>>>,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
@@ -124,8 +144,14 @@ impl StreamingEncoderProcessor {
             *row_count += 1;
             if let Some(count) = mode.count_threshold() {
                 if *row_count >= count {
-                    let flushed =
-                        Self::flush_buffer(processor_id, row_count, stream_state, output).await?;
+                    let flushed = Self::flush_buffer(
+                        processor_id,
+                        row_count,
+                        stream_state,
+                        output,
+                        data_channel_capacity,
+                    )
+                    .await?;
                     if flushed > 0 {
                         stats.record_out(1);
                     }
@@ -143,6 +169,7 @@ impl StreamingEncoderProcessor {
         row_count: &mut usize,
         stream_state: &mut Option<Box<dyn CollectionEncoderStream>>,
         output: &broadcast::Sender<StreamData>,
+        data_channel_capacity: usize,
     ) -> Result<usize, ProcessorError> {
         if *row_count == 0 {
             *stream_state = None;
@@ -159,6 +186,7 @@ impl StreamingEncoderProcessor {
         })?;
         send_with_backpressure(
             output,
+            data_channel_capacity,
             StreamData::encoded_bytes(payload, flushed_rows as u64),
         )
         .await?;
@@ -189,6 +217,7 @@ impl Processor for StreamingEncoderProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
+        let channel_capacities = self.channel_capacities;
         let encoder = Arc::clone(&self.encoder);
         let mode = StreamingBatchMode::new(self.batch_count, self.batch_duration).unwrap();
         let processor_id = self.id.clone();
@@ -205,7 +234,12 @@ impl Processor for StreamingEncoderProcessor {
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
                             let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(&control_output, control_signal).await?;
+                            send_control_with_backpressure(
+                                &control_output,
+                                channel_capacities.control,
+                                control_signal,
+                            )
+                            .await?;
                             if is_terminal {
                                 if let Err(err) = async {
                                     let flushed = StreamingEncoderProcessor::flush_buffer(
@@ -213,6 +247,7 @@ impl Processor for StreamingEncoderProcessor {
                                         &mut row_count,
                                         &mut stream_state,
                                         &output,
+                                        channel_capacities.data,
                                     )
                                     .await?;
                                     if flushed > 0 {
@@ -244,6 +279,7 @@ impl Processor for StreamingEncoderProcessor {
                                 &mut row_count,
                                 &mut stream_state,
                                 &output,
+                                channel_capacities.data,
                             )
                             .await?;
                             if flushed > 0 {
@@ -275,6 +311,7 @@ impl Processor for StreamingEncoderProcessor {
                                                 &mut stream_state,
                                                 &mode,
                                                 &output,
+                                                channel_capacities.data,
                                                 &mut timer,
                                                 &stats,
                                             )
@@ -297,6 +334,7 @@ impl Processor for StreamingEncoderProcessor {
                                                     &mut row_count,
                                                     &mut stream_state,
                                                     &output,
+                                                    channel_capacities.data,
                                                 )
                                                 .await?;
                                                 if flushed > 0 {
@@ -311,7 +349,12 @@ impl Processor for StreamingEncoderProcessor {
                                             }
                                         }
                                         let out_rows = data.num_rows_hint();
-                                        send_with_backpressure(&output, data).await?;
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            data,
+                                        )
+                                        .await?;
                                         if let Some(rows) = out_rows {
                                             stats.record_out(rows);
                                         }
@@ -344,6 +387,7 @@ impl Processor for StreamingEncoderProcessor {
                                         &mut row_count,
                                         &mut stream_state,
                                         &output,
+                                        channel_capacities.data,
                                     )
                                     .await?;
                                     if flushed > 0 {
