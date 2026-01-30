@@ -1594,6 +1594,10 @@ mod tests {
             eventtime: None,
             merger_registry: None,
             shared_stream: None,
+            channel_capacities: ProcessorChannelCapacities::new(
+                DEFAULT_DATA_CHANNEL_CAPACITY,
+                DEFAULT_CONTROL_CHANNEL_CAPACITY,
+            ),
         };
         let result = create_processor_from_plan_node(&physical_project, &context)
             .expect("processor creation failed");
