@@ -439,7 +439,7 @@ fn resolve_select_aliases(select_stmt: &mut SelectStmt) -> Result<(), String> {
         return Ok(());
     }
 
-    // For now, aliases are only supported in SELECT and WHERE.
+    // For now, aliases are only supported in SELECT, WHERE, and ORDER BY.
     //
     // We intentionally fail fast for other clauses so users get a clear error rather
     // than a later "column not found" during physical compilation.
@@ -473,12 +473,6 @@ fn resolve_select_aliases(select_stmt: &mut SelectStmt) -> Result<(), String> {
         }
     }
 
-    for item in &select_stmt.order_by {
-        if expr_references_any_alias(&item.expr, &all_aliases) {
-            return Err("aliases in ORDER BY are not supported yet".to_string());
-        }
-    }
-
     // Resolve aliases left-to-right.
     //
     // Example:
@@ -499,6 +493,11 @@ fn resolve_select_aliases(select_stmt: &mut SelectStmt) -> Result<(), String> {
     if let Some(expr) = select_stmt.where_condition.as_mut() {
         let rewritten = rewrite_expr_with_aliases(expr, &env);
         *expr = rewritten;
+    }
+
+    // Resolve aliases in ORDER BY using the final environment.
+    for item in &mut select_stmt.order_by {
+        item.expr = rewrite_expr_with_aliases(&item.expr, &env);
     }
 
     Ok(())
@@ -880,6 +879,16 @@ fn rewrite_expr_with_aliases(
     }
 }
 
+fn expr_without_outer_nested(expr: &sqlparser::ast::Expr) -> &sqlparser::ast::Expr {
+    use sqlparser::ast::Expr;
+
+    let mut current = expr;
+    while let Expr::Nested(inner) = current {
+        current = inner.as_ref();
+    }
+    current
+}
+
 fn validate_expr_against_sources(
     expr: &sqlparser::ast::Expr,
     sources: &[SourceSchemaEntry],
@@ -1180,11 +1189,11 @@ fn validate_order_by_constraints(select_stmt: &SelectStmt) -> Result<(), String>
     let group_by_exprs: std::collections::HashSet<String> = select_stmt
         .group_by_exprs
         .iter()
-        .map(|expr| expr.to_string())
+        .map(|expr| expr_without_outer_nested(expr).to_string())
         .collect();
 
     for item in &select_stmt.order_by {
-        if group_by_exprs.contains(&item.expr.to_string()) {
+        if group_by_exprs.contains(&expr_without_outer_nested(&item.expr).to_string()) {
             continue;
         }
 

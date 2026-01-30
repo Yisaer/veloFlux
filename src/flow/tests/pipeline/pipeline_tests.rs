@@ -599,6 +599,89 @@ async fn pipeline_table_driven_queries() {
             ],
         },
         TestCase {
+            name: "order_by_projection_alias_non_aggregate",
+            sql: "SELECT a + 1 AS b FROM stream ORDER BY b DESC",
+            input_data: vec![("a".to_string(), vec![Value::Int64(0), Value::Int64(2), Value::Int64(1)])],
+            expected_rows: 3,
+            expected_columns: 1,
+            column_checks: vec![ColumnCheck {
+                expected_name: "b".to_string(),
+                expected_values: vec![Value::Int64(3), Value::Int64(2), Value::Int64(1)],
+            }],
+        },
+        TestCase {
+            name: "order_by_group_key_alias_with_countwindow",
+            sql: "SELECT b AS k, sum(a) AS s FROM stream GROUP BY countwindow(4), b ORDER BY k",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(2),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(1),
+                    ],
+                ),
+            ],
+            expected_rows: 2,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "k".to_string(),
+                    expected_values: vec![Value::Int64(1), Value::Int64(2)],
+                },
+                ColumnCheck {
+                    expected_name: "s".to_string(),
+                    expected_values: vec![Value::Int64(2), Value::Int64(2)],
+                },
+            ],
+        },
+        TestCase {
+            name: "order_by_aggregate_alias_with_countwindow",
+            sql: "SELECT b, sum(a) AS s FROM stream GROUP BY countwindow(4), b ORDER BY s DESC",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                    ],
+                ),
+            ],
+            expected_rows: 2,
+            expected_columns: 2,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "b".to_string(),
+                    expected_values: vec![Value::Int64(2), Value::Int64(1)],
+                },
+                ColumnCheck {
+                    expected_name: "s".to_string(),
+                    expected_values: vec![Value::Int64(3), Value::Int64(1)],
+                },
+            ],
+        },
+        TestCase {
             name: "having_filters_groups_countwindow",
             sql: "SELECT sum(a) AS s, b FROM stream GROUP BY countwindow(4), b HAVING sum(a) > 2 AND sum(a) < 10",
             input_data: vec![
