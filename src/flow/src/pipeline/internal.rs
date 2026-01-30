@@ -529,7 +529,8 @@ fn build_pipeline_runtime_with_logical_ir(
     let mut pipeline = create_processor_pipeline(
         optimized_plan,
         ProcessorPipelineDependencies::new(mqtt_client_manager.clone(), registries, eventtime),
-        ProcessorPipelineOptions::default(),
+        ProcessorPipelineOptions::default()
+            .with_data_channel_capacity(definition.options().data_channel_capacity),
     )
     .map_err(|err| err.to_string())?;
     pipeline.set_pipeline_id(definition.id().to_string());
@@ -648,7 +649,8 @@ fn build_pipeline_runtime_from_logical_ir(
     let mut pipeline = create_processor_pipeline(
         optimized_plan,
         ProcessorPipelineDependencies::new(mqtt_client_manager.clone(), registries, eventtime),
-        ProcessorPipelineOptions::default(),
+        ProcessorPipelineOptions::default()
+            .with_data_channel_capacity(definition.options().data_channel_capacity),
     )
     .map_err(|err| err.to_string())?;
 
