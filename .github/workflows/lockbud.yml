@@ -1,35 +1,16 @@
-name: Deadlock Static Analysis
+name: Deadlock Detection (Kani)
 
-on:
-  push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
+on: [push, pull_request]
 
 jobs:
-  lockbud-analysis:
+  kani-analysis:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src, rustc-dev, llvm-tools-preview
+      - name: Install Kani
+        uses: model-checking/kani-github-action@v1
 
-      - name: Cache Lockbud
-        id: cache-lockbud
-        uses: actions/cache@v3
-        with:
-          path: ~/.cargo/bin/lockbud
-          key: ${{ runner.os }}-lockbud-v3
-
-      - name: Install Lockbud
-        if: steps.cache-lockbud.outputs.cache-hit != 'true'
-        run: cargo install --git https://github.com/BurtonQin/lockbud.git lockbud --locked
-
-      - name: Run Lockbud Analysis
-        run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          lockbud analyze
+      - name: Verify Deadlock-free
+        run: cargo kani --enable-unstable --mir-linker
