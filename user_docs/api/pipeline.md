@@ -27,7 +27,7 @@ Request body: `CreatePipelineRequest`
   ],
   "options": {
     "plan_cache": { "enabled": true },
-    "eventtime": { "enabled": false, "lateTolerance": 0 }
+    "eventtime": { "enabled": false, "late_tolerance_ms": 0 }
   }
 }
 ```
@@ -165,8 +165,8 @@ Response:
 ### `PipelineOptionsRequest`
 
 - `plan_cache: { enabled: boolean }` (default `false`)
-- `eventtime: { enabled: boolean, lateTolerance: number }`
-  - `lateTolerance` is milliseconds (default `0`)
+- `eventtime: { enabled: boolean, late_tolerance_ms: number }`
+  - `late_tolerance_ms` is milliseconds (default `0`)
 
 ### `CreatePipelineSinkRequest`
 
@@ -174,9 +174,9 @@ Response:
 - `type: string` (required)
   - Supported: `mqtt`, `nop`, `kuksa`
 - `props: object` (optional, defaults to `{}`)
-- `commonSinkProps: object` (optional)
-  - Optional `batchCount: number`
-  - Optional `batchDuration: number` (milliseconds)
+- `common_sink_props: object` (optional)
+  - Optional `batch_count: number`
+  - Optional `batch_duration: number` (milliseconds)
 - `encoder: { type: string, props: object }` (optional; default is `{ "type": "json", "props": {} }`)
   - For `type == "kuksa"`, encoder is ignored and forced to `none`.
 
@@ -198,7 +198,7 @@ Response:
 `type == "kuksa"`:
 
 - `addr: string` (required)
-- `vssPath: string` (required)
+- `vss_path: string` (required)
 
 ## Response Shapes
 

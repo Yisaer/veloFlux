@@ -9,7 +9,7 @@ Some deployments need to forward streaming signal values into an Eclipse Kuksa D
 Key requirements:
 
 - Sink consumes decoded values directly (no byte encoding step).
-- Column names are mapped to VSS paths via a JSON mapping file (`vssPath`).
+- Column names are mapped to VSS paths via a JSON mapping file (`vss_path`).
 - One input row corresponds to one update request containing multiple key/value updates.
 - `null` values are skipped.
 
@@ -21,7 +21,7 @@ veloFlux executes sinks over `Collection`s. For the Kuksa sink:
 - Each **row** is converted into one update operation.
 - Each column in the row is a candidate update entry:
   - If the value is `null`, it is skipped.
-  - If the column name has no mapping entry in `vssPath`, it is skipped.
+  - If the column name has no mapping entry in `vss_path`, it is skipped.
   - If multiple columns map to the same VSS path within a row, the later column overwrites the earlier one.
 - If a value cannot be converted to the VSS path’s declared data type, the sink returns an error.
 
@@ -30,7 +30,7 @@ veloFlux executes sinks over `Collection`s. For the Kuksa sink:
 Kuksa sink properties:
 
 - `addr` (string, required): Kuksa DataBroker address (for example `localhost:55575`).
-- `vssPath` (string, required): file path to the VSS mapping JSON.
+- `vss_path` (string, required): file path to the VSS mapping JSON.
 
 Manager defaults:
 
@@ -38,7 +38,7 @@ Manager defaults:
 
 ## VSS Mapping File
 
-`vssPath` points to a JSON file that defines a mapping from input column keys to VSS paths.
+`vss_path` points to a JSON file that defines a mapping from input column keys to VSS paths.
 
 veloFlux parses the JSON tree and records entries whenever it encounters:
 
@@ -85,7 +85,7 @@ POST /pipelines
       "type": "kuksa",
       "props": {
         "addr": "localhost:55575",
-        "vssPath": "/path/to/vss.json"
+        "vss_path": "/path/to/vss.json"
       }
     }
   ]

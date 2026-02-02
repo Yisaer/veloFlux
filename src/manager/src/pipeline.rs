@@ -74,7 +74,7 @@ pub struct UpsertPipelineRequest {
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct PipelineOptionsRequest {
-    #[serde(rename = "dataChannelCapacity")]
+    #[serde(rename = "data_channel_capacity")]
     pub data_channel_capacity: usize,
     #[serde(rename = "plan_cache")]
     pub plan_cache: PlanCacheOptionsRequest,
@@ -96,7 +96,6 @@ impl Default for PipelineOptionsRequest {
 #[serde(default)]
 pub struct EventtimeOptionsRequest {
     pub enabled: bool,
-    #[serde(rename = "lateTolerance")]
     pub late_tolerance_ms: u64,
 }
 
@@ -183,7 +182,7 @@ pub struct CreatePipelineSinkRequest {
     pub sink_type: String,
     #[serde(default)]
     pub props: SinkPropsRequest,
-    #[serde(rename = "commonSinkProps", default)]
+    #[serde(rename = "common_sink_props", default)]
     pub common: CommonSinkPropsRequest,
     #[serde(default)]
     pub encoder: EncoderConfigRequest,
@@ -260,16 +259,16 @@ pub struct MemorySinkPropsRequest {
 #[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct CommonSinkPropsRequest {
-    #[serde(rename = "batchCount")]
+    #[serde(rename = "batch_count")]
     pub batch_count: Option<usize>,
-    #[serde(rename = "batchDuration")]
+    #[serde(rename = "batch_duration")]
     pub batch_duration_ms: Option<u64>,
 }
 
 #[derive(Deserialize)]
 struct KuksaSinkPropsRequest {
     pub addr: Option<String>,
-    #[serde(rename = "vssPath")]
+    #[serde(rename = "vss_path")]
     pub vss_path: Option<String>,
 }
 
@@ -961,7 +960,7 @@ fn validate_create_request(req: &CreatePipelineRequest) -> Result<(), String> {
         return Err("pipeline must define at least one sink".to_string());
     }
     if req.options.data_channel_capacity == 0 {
-        return Err("options.dataChannelCapacity must be greater than 0".to_string());
+        return Err("options.data_channel_capacity must be greater than 0".to_string());
     }
     Ok(())
 }
@@ -1023,7 +1022,7 @@ pub(crate) fn build_pipeline_definition(
                     .ok_or_else(|| "kuksa sink props missing addr".to_string())?;
                 let vss_path = kuksa_props
                     .vss_path
-                    .ok_or_else(|| "kuksa sink props missing vssPath".to_string())?;
+                    .ok_or_else(|| "kuksa sink props missing vss_path".to_string())?;
                 SinkDefinition::new(
                     sink_id.clone(),
                     SinkType::Kuksa,

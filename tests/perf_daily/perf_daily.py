@@ -177,7 +177,7 @@ def create_pipeline_body(pipeline_id: str, sql: str) -> Dict[str, Any]:
             {
                 "type": "nop",
                 "props": {"log": False},
-                "commonSinkProps": {"batchDuration": 100, "batchCount": 50},
+                "common_sink_props": {"batch_duration": 100, "batch_count": 50},
                 "encoder": {"type": "json", "props": {}},
             }
         ],

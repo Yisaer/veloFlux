@@ -882,7 +882,7 @@ fn build_physical_node_with_prefix(
                     }
                     WatermarkStrategy::EventTime { late_tolerance } => {
                         info.push("mode=event_time".to_string());
-                        info.push(format!("lateToleranceMs={}", late_tolerance.as_millis()));
+                        info.push(format!("late_tolerance_ms={}", late_tolerance.as_millis()));
                     }
                 }
             }
@@ -906,7 +906,7 @@ fn build_physical_node_with_prefix(
                     }
                     WatermarkStrategy::EventTime { late_tolerance } => {
                         info.push("mode=event_time".to_string());
-                        info.push(format!("lateToleranceMs={}", late_tolerance.as_millis()));
+                        info.push(format!("late_tolerance_ms={}", late_tolerance.as_millis()));
                     }
                 }
             }
@@ -927,7 +927,7 @@ fn build_physical_node_with_prefix(
                     }
                     WatermarkStrategy::EventTime { late_tolerance } => {
                         info.push("mode=event_time".to_string());
-                        info.push(format!("lateToleranceMs={}", late_tolerance.as_millis()));
+                        info.push(format!("late_tolerance_ms={}", late_tolerance.as_millis()));
                     }
                 }
             }
@@ -951,7 +951,7 @@ fn build_physical_node_with_prefix(
                     }
                     WatermarkStrategy::EventTime { late_tolerance } => {
                         info.push("mode=event_time".to_string());
-                        info.push(format!("lateToleranceMs={}", late_tolerance.as_millis()));
+                        info.push(format!("late_tolerance_ms={}", late_tolerance.as_millis()));
                     }
                 }
             }
@@ -972,7 +972,7 @@ fn build_physical_node_with_prefix(
                     }
                     WatermarkStrategy::EventTime { late_tolerance } => {
                         info.push("mode=event_time".to_string());
-                        info.push(format!("lateToleranceMs={}", late_tolerance.as_millis()));
+                        info.push(format!("late_tolerance_ms={}", late_tolerance.as_millis()));
                     }
                 }
             }
@@ -996,7 +996,7 @@ fn build_physical_node_with_prefix(
                     }
                     WatermarkStrategy::EventTime { late_tolerance } => {
                         info.push("mode=event_time".to_string());
-                        info.push(format!("lateToleranceMs={}", late_tolerance.as_millis()));
+                        info.push(format!("late_tolerance_ms={}", late_tolerance.as_millis()));
                     }
                 }
             }

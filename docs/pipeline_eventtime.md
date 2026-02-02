@@ -50,7 +50,7 @@ Validation requirements (planner-time preferred):
 The pipeline options gain:
 
 - `eventtime.enabled: bool` (default `false`)
-- `eventtime.lateTolerance: Duration` (default `0`)
+- `eventtime.late_tolerance_ms: Duration` (default `0`)
 
 Semantics:
 
@@ -105,11 +105,11 @@ Key contract:
 
 - After emitting `StreamData::Watermark(W)`, the operator must never emit any tuple with `Tuple.timestamp <= W`.
 
-### lateTolerance semantics
+### late_tolerance_ms semantics
 
 Event-time inputs are assumed **out of order**.
 
-`lateTolerance` defines the tolerated disorder bound. Intuitively:
+`late_tolerance_ms` defines the tolerated disorder bound. Intuitively:
 
 - The operator waits for late/out-of-order tuples within the tolerance window.
 - Once event time has progressed enough, it emits a watermark and releases all buffered tuples that are now safe to order.
@@ -139,7 +139,7 @@ Maintain the following state per operator instance:
        - push `(ts, seq, tuple)` into `buffer`, increment `seq`.
 
 2. **Compute target watermark (data-driven, no ticker)**
-   - `candidate = max_timestamp_seen - lateTolerance`
+   - `candidate = max_timestamp_seen - late_tolerance_ms`
    - `target = max(current_watermark, candidate)` (never move backward)
 
 3. **Emit in-order tuples up to target watermark**
@@ -167,11 +167,11 @@ On end-of-stream / shutdown:
 
 - **Monotonic watermarks**: `current_watermark` never decreases.
 - **Ordered downstream tuples**: forwarded tuples are in non-decreasing `Tuple.timestamp` order.
-- **Bounded disorder**: tuples that arrive within `lateTolerance` of the observed maximum can still be ordered and delivered; older tuples become late.
+- **Bounded disorder**: tuples that arrive within `late_tolerance_ms` of the observed maximum can still be ordered and delivered; older tuples become late.
 
 ### Operational considerations
 
-- Buffer memory grows with the amount of disorder and the chosen `lateTolerance`.
+- Buffer memory grows with the amount of disorder and the chosen `late_tolerance_ms`.
 - Implement metrics:
   - `buffer_size`
   - `late_dropped_count`
@@ -181,14 +181,14 @@ On end-of-stream / shutdown:
 ## Implementation checklist
 
 1. Extend `StreamDefinition` with `eventtime.column` and `eventtime.type`.
-2. Add `eventtime.enabled` and `eventtime.lateTolerance` to pipeline options.
+2. Add `eventtime.enabled` and `eventtime.late_tolerance_ms` to pipeline options.
 3. Introduce `EventtimeTypeRegistry` in `FlowInstance`, register `unixtimestamp_s` and `unixtimestamp_ms` by default.
 4. Split `PhysicalWatermark` into `PhysicalProcessTimeWatermark` and `PhysicalEventtimeWatermark`.
 5. Implement `PhysicalEventtimeWatermark` processor using `StreamData::Watermark` emission semantics described above.
 6. Add tests covering:
    - processing-time mode regression (no behavior change),
    - event-time ordering + watermark advancement,
-   - late events beyond `lateTolerance`,
+   - late events beyond `late_tolerance_ms`,
    - unknown `eventtime.type` and missing `eventtime.column` validation.
 
 ## Message-scoped event time
