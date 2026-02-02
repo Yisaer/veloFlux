@@ -6,7 +6,6 @@
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::codec::{DecoderRegistry, EncoderRegistry, MergerRegistry, RecordDecoder};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
-use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::physical::PhysicalPlan;
 use crate::processor::base::{
     normalize_channel_capacity, ProcessorChannelCapacities, DEFAULT_CONTROL_CHANNEL_CAPACITY,
@@ -26,6 +25,7 @@ use crate::processor::{
     StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
+use crate::shared_stream::AppliedDecodeState;
 use crate::stateful::StatefulFunctionRegistry;
 use crate::PipelineRegistries;
 use std::collections::HashSet;
@@ -39,7 +39,7 @@ use uuid::Uuid;
 pub(crate) struct SharedStreamPipelineOptions {
     pub stream_name: String,
     pub decoder: Arc<dyn RecordDecoder>,
-    pub decode_projection: Arc<std::sync::RwLock<Arc<DecodeProjection>>>,
+    pub applied_decode_state: Arc<std::sync::RwLock<AppliedDecodeState>>,
 }
 
 /// Enum for all processor types created from PhysicalPlan
@@ -816,7 +816,7 @@ fn create_processor_from_plan_node(
                         Arc::clone(&opts.decoder),
                         channel_capacities,
                     )
-                    .with_shared_decode_projection(Arc::clone(&opts.decode_projection))
+                    .with_shared_decode_state(Arc::clone(&opts.applied_decode_state))
                 }
                 _ => {
                     let decoder = context

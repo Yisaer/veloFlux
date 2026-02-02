@@ -9,6 +9,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::shared_stream::AppliedDecodeState;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -32,7 +33,7 @@ pub struct DecoderProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     decoder: Arc<dyn RecordDecoder>,
-    shared_decode_projection: Option<Arc<std::sync::RwLock<Arc<DecodeProjection>>>>,
+    shared_decode_state: Option<Arc<std::sync::RwLock<AppliedDecodeState>>>,
     decode_projection: Option<DecodeProjection>,
     eventtime: Option<EventtimeDecodeConfig>,
     stats: Arc<ProcessorStats>,
@@ -63,18 +64,18 @@ impl DecoderProcessor {
             control_output,
             channel_capacities,
             decoder,
-            shared_decode_projection: None,
+            shared_decode_state: None,
             decode_projection: None,
             eventtime: None,
             stats: Arc::new(ProcessorStats::default()),
         }
     }
 
-    pub fn with_shared_decode_projection(
+    pub(crate) fn with_shared_decode_state(
         mut self,
-        projection: Arc<std::sync::RwLock<Arc<DecodeProjection>>>,
+        state: Arc<std::sync::RwLock<AppliedDecodeState>>,
     ) -> Self {
-        self.shared_decode_projection = Some(projection);
+        self.shared_decode_state = Some(state);
         self
     }
 
@@ -102,7 +103,7 @@ impl Processor for DecoderProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let decoder = Arc::clone(&self.decoder);
-        let shared_decode_projection = self.shared_decode_projection.clone();
+        let shared_decode_state = self.shared_decode_state.clone();
         let decode_projection = self.decode_projection.clone();
         let eventtime = self.eventtime.clone();
         let processor_id = self.id.clone();
@@ -147,12 +148,12 @@ impl Processor for DecoderProcessor {
                                 if let StreamData::Bytes(payload) = &data {
                                     let decoded = if let Some(proj) = decode_projection.as_ref() {
                                         decoder.decode_with_projection(payload.as_ref(), Some(proj))
-                                    } else if let Some(lock) = &shared_decode_projection {
+                                    } else if let Some(lock) = &shared_decode_state {
                                         let projection = {
                                             let guard = lock
                                                 .read()
-                                                .expect("shared decode projection lock poisoned");
-                                            Arc::clone(&*guard)
+                                                .expect("shared decode state lock poisoned");
+                                            Arc::clone(&guard.decode_projection)
                                         };
                                         decoder.decode_with_projection(
                                             payload.as_ref(),
