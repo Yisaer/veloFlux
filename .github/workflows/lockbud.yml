@@ -13,9 +13,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # lockbud is not published on crates.io; install from git by default.
+  # lockbud is not published on crates.io; install from a checked-out repo.
   # Override if you use a fork.
-  LOCKBUD_GIT_URL: https://github.com/sslab-gatech/lockbud
+  LOCKBUD_REPOSITORY: sslab-gatech/lockbud
+  LOCKBUD_SRC_DIR: _lockbud_src
 
 jobs:
   lockbud:
@@ -30,37 +31,49 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Checkout lockbud
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.LOCKBUD_REPOSITORY }}
+          path: ${{ env.LOCKBUD_SRC_DIR }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install lockbud
         run: |
           set -euo pipefail
-          if cargo +nightly install cargo-lockbud --locked; then
-            exit 0
+          if [ -f "${LOCKBUD_SRC_DIR}/Cargo.lock" ]; then
+            cargo +nightly install --locked --path "${LOCKBUD_SRC_DIR}" --bins
+          else
+            cargo +nightly install --path "${LOCKBUD_SRC_DIR}" --bins
           fi
-          if cargo +nightly install lockbud --locked; then
-            exit 0
-          fi
-
-          echo "lockbud is not available on crates.io; installing from ${LOCKBUD_GIT_URL}"
-          cargo +nightly install --git "${LOCKBUD_GIT_URL}" --locked --bins || \
-            cargo +nightly install --git "${LOCKBUD_GIT_URL}" --locked -p cargo-lockbud || \
-            cargo +nightly install --git "${LOCKBUD_GIT_URL}" --locked -p lockbud
 
       - name: Run lockbud
         run: |
           set -euo pipefail
 
-          cargo +nightly lockbud --version
+          if cargo +nightly lockbud --version >/dev/null 2>&1; then
+            LOCKBUD="cargo +nightly lockbud"
+          elif cargo lockbud --version >/dev/null 2>&1; then
+            LOCKBUD="cargo lockbud"
+          elif lockbud --version >/dev/null 2>&1; then
+            LOCKBUD="lockbud"
+          else
+            echo "lockbud is installed but no runnable entrypoint was found (expected cargo-lockbud or lockbud binary)."
+            exit 1
+          fi
 
-          if cargo +nightly lockbud --help | grep -qE '(^|[[:space:]])check([[:space:]]|$)'; then
-            if cargo +nightly lockbud check --help | grep -q -- '--workspace'; then
-              cargo +nightly lockbud check --workspace
+          ${LOCKBUD} --version
+
+          if ${LOCKBUD} --help | grep -qE '(^|[[:space:]])check([[:space:]]|$)'; then
+            if ${LOCKBUD} check --help | grep -q -- '--workspace'; then
+              ${LOCKBUD} check --workspace
             else
-              cargo +nightly lockbud check
+              ${LOCKBUD} check
             fi
           else
-            if cargo +nightly lockbud --help | grep -q -- '--workspace'; then
-              cargo +nightly lockbud --workspace
+            if ${LOCKBUD} --help | grep -q -- '--workspace'; then
+              ${LOCKBUD} --workspace
             else
-              cargo +nightly lockbud
+              ${LOCKBUD}
             fi
           fi
