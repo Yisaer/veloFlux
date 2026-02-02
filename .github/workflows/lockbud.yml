@@ -13,6 +13,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # lockbud is not published on crates.io; install from git by default.
+  # Override if you use a fork.
+  LOCKBUD_GIT_URL: https://github.com/sslab-gatech/lockbud
 
 jobs:
   lockbud:
@@ -30,7 +33,17 @@ jobs:
       - name: Install lockbud
         run: |
           set -euo pipefail
-          cargo +nightly install cargo-lockbud --locked || cargo +nightly install lockbud --locked
+          if cargo +nightly install cargo-lockbud --locked; then
+            exit 0
+          fi
+          if cargo +nightly install lockbud --locked; then
+            exit 0
+          fi
+
+          echo "lockbud is not available on crates.io; installing from ${LOCKBUD_GIT_URL}"
+          cargo +nightly install --git "${LOCKBUD_GIT_URL}" --locked --bins || \
+            cargo +nightly install --git "${LOCKBUD_GIT_URL}" --locked -p cargo-lockbud || \
+            cargo +nightly install --git "${LOCKBUD_GIT_URL}" --locked -p lockbud
 
       - name: Run lockbud
         run: |
