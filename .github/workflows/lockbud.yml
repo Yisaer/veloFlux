@@ -27,8 +27,10 @@ jobs:
 
       - name: Install Lockbud
         if: steps.cache-lockbud.outputs.cache-hit != 'true'
-        run: cargo install lockbud
+        run: cargo install --git https://github.com/BurtonQin/lockbud.git --locked
+
+      - name: Add Cargo bin to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Run Lockbud Analysis
-        run: |
-          lockbud analyze
+        run: lockbud analyze
