@@ -1,0 +1,52 @@
+name: Lockbud
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+    branches: [ main, master ]
+  push:
+    branches: [ main, master ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lockbud:
+    name: Lockbud (deadlock scan)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install lockbud
+        run: cargo +nightly install lockbud --locked
+
+      - name: Run lockbud
+        run: |
+          set -euo pipefail
+
+          cargo +nightly lockbud --version
+
+          if cargo +nightly lockbud --help | grep -qE '(^|[[:space:]])check([[:space:]]|$)'; then
+            if cargo +nightly lockbud check --help | grep -q -- '--workspace'; then
+              cargo +nightly lockbud check --workspace
+            else
+              cargo +nightly lockbud check
+            fi
+          else
+            if cargo +nightly lockbud --help | grep -q -- '--workspace'; then
+              cargo +nightly lockbud --workspace
+            else
+              cargo +nightly lockbud
+            fi
+          fi
+
