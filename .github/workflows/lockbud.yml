@@ -28,7 +28,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install lockbud
-        run: cargo +nightly install lockbud --locked
+        run: |
+          set -euo pipefail
+          cargo +nightly install cargo-lockbud --locked || cargo +nightly install lockbud --locked
 
       - name: Run lockbud
         run: |
@@ -49,4 +51,3 @@ jobs:
               cargo +nightly lockbud
             fi
           fi
-
