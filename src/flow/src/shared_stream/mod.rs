@@ -352,6 +352,12 @@ pub struct SharedStreamInfo {
     pub decoding_columns: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct AppliedDecodeState {
+    pub decoding_columns: Vec<String>,
+    pub decode_projection: Arc<DecodeProjection>,
+}
+
 /// Handle returned to pipeline consumers.
 pub struct SharedStreamSubscription {
     stream: Arc<SharedStreamInner>,
@@ -411,8 +417,7 @@ struct SharedStreamInner {
     data_channel_capacity: usize,
     control_channel_capacity: usize,
     runtime_lock: Mutex<()>,
-    decoding_columns: Arc<std::sync::RwLock<Vec<String>>>,
-    decode_projection: Arc<std::sync::RwLock<Arc<DecodeProjection>>>,
+    applied_decode_state: Arc<std::sync::RwLock<AppliedDecodeState>>,
     data_sender: broadcast::Sender<StreamData>,
     control_sender: broadcast::Sender<ControlSignal>,
     handles: Mutex<SharedStreamHandles>,
@@ -467,16 +472,14 @@ impl SharedStreamInner {
             .iter()
             .map(|col| col.name.clone())
             .collect();
-        let decoding_columns = Arc::new(std::sync::RwLock::new(initial_decoding_columns));
-        let decode_projection = Arc::new(std::sync::RwLock::new(Arc::new(
-            DecodeProjection::from_top_level_columns_with_version(
-                decoding_columns
-                    .read()
-                    .expect("shared stream decoding columns lock poisoned")
-                    .as_slice(),
-                1,
-            ),
-        )));
+        let decode_projection = Arc::new(DecodeProjection::from_top_level_columns_with_version(
+            initial_decoding_columns.as_slice(),
+            1,
+        ));
+        let applied_decode_state = Arc::new(std::sync::RwLock::new(AppliedDecodeState {
+            decoding_columns: initial_decoding_columns,
+            decode_projection,
+        }));
 
         let (data_sender, _) = broadcast::channel(data_channel_capacity);
         let (control_sender, _) = broadcast::channel(control_channel_capacity);
@@ -495,8 +498,7 @@ impl SharedStreamInner {
             data_channel_capacity,
             control_channel_capacity,
             runtime_lock: Mutex::new(()),
-            decoding_columns: Arc::clone(&decoding_columns),
-            decode_projection: Arc::clone(&decode_projection),
+            applied_decode_state: Arc::clone(&applied_decode_state),
             data_sender,
             control_sender,
             handles: Mutex::new(SharedStreamHandles {
@@ -523,22 +525,18 @@ impl SharedStreamInner {
     /// This avoids rebuilding the projection on the decoder hot path. The projection version is
     /// bumped only when the applied decoding columns actually change.
     fn set_applied_decoding_columns(&self, applied: Vec<String>) {
-        let mut cols_guard = self
-            .decoding_columns
+        let mut guard = self
+            .applied_decode_state
             .write()
-            .expect("shared stream decoding columns lock poisoned");
-        if *cols_guard == applied {
+            .expect("shared stream applied decode state lock poisoned");
+        if guard.decoding_columns == applied {
             return;
         }
-        *cols_guard = applied.clone();
+        guard.decoding_columns = applied.clone();
 
-        let mut proj_guard = self
-            .decode_projection
-            .write()
-            .expect("shared stream decode projection lock poisoned");
-        let next_version = proj_guard.version().saturating_add(1);
-        *proj_guard = Arc::new(DecodeProjection::from_top_level_columns_with_version(
-            &applied,
+        let next_version = guard.decode_projection.version().saturating_add(1);
+        guard.decode_projection = Arc::new(DecodeProjection::from_top_level_columns_with_version(
+            applied.as_slice(),
             next_version,
         ));
     }
@@ -582,7 +580,7 @@ impl SharedStreamInner {
         let options = SharedStreamPipelineOptions {
             stream_name: self.name.clone(),
             decoder,
-            decode_projection: Arc::clone(&self.decode_projection),
+            applied_decode_state: Arc::clone(&self.applied_decode_state),
         };
         let mut pipeline = create_processor_pipeline_for_shared_stream(physical_plan, options)
             .map_err(|err| SharedStreamError::Internal(err.to_string()))?;
@@ -675,9 +673,10 @@ impl SharedStreamInner {
     async fn snapshot(&self) -> SharedStreamInfo {
         let state = self.state.lock().await;
         let decoding_columns = self
-            .decoding_columns
+            .applied_decode_state
             .read()
-            .expect("shared stream decoding columns lock poisoned")
+            .expect("shared stream applied decode state lock poisoned")
+            .decoding_columns
             .clone();
         SharedStreamInfo {
             name: self.name.clone(),
