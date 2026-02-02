@@ -16,21 +16,20 @@ jobs:
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
         with:
-          components: rust-src
+          components: rust-src, rustc-dev, llvm-tools-preview
 
       - name: Cache Lockbud
         id: cache-lockbud
         uses: actions/cache@v3
         with:
           path: ~/.cargo/bin/lockbud
-          key: ${{ runner.os }}-lockbud
+          key: ${{ runner.os }}-lockbud-v3
 
       - name: Install Lockbud
         if: steps.cache-lockbud.outputs.cache-hit != 'true'
-        run: cargo install --git https://github.com/BurtonQin/lockbud.git --locked
-
-      - name: Add Cargo bin to PATH
-        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+        run: cargo install --git https://github.com/BurtonQin/lockbud.git lockbud --locked
 
       - name: Run Lockbud Analysis
-        run: lockbud analyze
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          lockbud analyze
