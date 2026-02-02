@@ -37,11 +37,11 @@ fmt:
 # 运行 Clippy 静态检查
 clippy:
 	@echo "Running Clippy checks..."
-	@cargo clippy -- -D warnings
+	@cargo clippy -- -D warnings -D clippy::await_holding_lock
 	@echo "Running Clippy checks for sub-crates..."
-	@cd src/datatypes && cargo clippy -- -D warnings
-	@cd src/flow && cargo clippy -- -D warnings
-	@cd src/parser && cargo clippy -- -D warnings
+	@cd src/datatypes && cargo clippy -- -D warnings -D clippy::await_holding_lock
+	@cd src/flow && cargo clippy -- -D warnings -D clippy::await_holding_lock
+	@cd src/parser && cargo clippy -- -D warnings -D clippy::await_holding_lock
 
 # 清理构建文件
 clean:
