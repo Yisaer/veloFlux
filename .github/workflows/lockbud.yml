@@ -1,79 +1,34 @@
-name: Lockbud
+name: Deadlock Static Analysis
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize, reopened]
-    branches: [ main, master ]
   push:
-    branches: [ main, master ]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
-
-env:
-  CARGO_TERM_COLOR: always
-  # lockbud is not published on crates.io; install from a checked-out repo.
-  # Override if you use a fork.
-  LOCKBUD_REPOSITORY: sslab-gatech/lockbud
-  LOCKBUD_SRC_DIR: _lockbud_src
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
 
 jobs:
-  lockbud:
-    name: Lockbud (deadlock scan)
+  lockbud-analysis:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Checkout lockbud
+      - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
         with:
-          repository: ${{ env.LOCKBUD_REPOSITORY }}
-          path: ${{ env.LOCKBUD_SRC_DIR }}
-          token: ${{ secrets.GITHUB_TOKEN }}
+          components: rust-src
 
-      - name: Install lockbud
+      - name: Cache Lockbud
+        id: cache-lockbud
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/bin/lockbud
+          key: ${{ runner.os }}-lockbud
+
+      - name: Install Lockbud
+        if: steps.cache-lockbud.outputs.cache-hit != 'true'
+        run: cargo install lockbud
+
+      - name: Run Lockbud Analysis
         run: |
-          set -euo pipefail
-          if [ -f "${LOCKBUD_SRC_DIR}/Cargo.lock" ]; then
-            cargo +nightly install --locked --path "${LOCKBUD_SRC_DIR}" --bins
-          else
-            cargo +nightly install --path "${LOCKBUD_SRC_DIR}" --bins
-          fi
-
-      - name: Run lockbud
-        run: |
-          set -euo pipefail
-
-          if cargo +nightly lockbud --version >/dev/null 2>&1; then
-            LOCKBUD="cargo +nightly lockbud"
-          elif cargo lockbud --version >/dev/null 2>&1; then
-            LOCKBUD="cargo lockbud"
-          elif lockbud --version >/dev/null 2>&1; then
-            LOCKBUD="lockbud"
-          else
-            echo "lockbud is installed but no runnable entrypoint was found (expected cargo-lockbud or lockbud binary)."
-            exit 1
-          fi
-
-          ${LOCKBUD} --version
-
-          if ${LOCKBUD} --help | grep -qE '(^|[[:space:]])check([[:space:]]|$)'; then
-            if ${LOCKBUD} check --help | grep -q -- '--workspace'; then
-              ${LOCKBUD} check --workspace
-            else
-              ${LOCKBUD} check
-            fi
-          else
-            if ${LOCKBUD} --help | grep -q -- '--workspace'; then
-              ${LOCKBUD} --workspace
-            else
-              ${LOCKBUD}
-            fi
-          fi
+          lockbud analyze
