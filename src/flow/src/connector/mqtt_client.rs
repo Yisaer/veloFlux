@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
+use parking_lot::{Mutex, RwLock};
 use rumqttc::{
     AsyncClient, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS, Transport,
 };
@@ -65,12 +66,7 @@ impl SharedMqttClient {
         payload: Vec<u8>,
     ) -> Result<(), ConnectorError> {
         if !self.is_connected() {
-            let last_error = self
-                .entry
-                .last_error
-                .read()
-                .expect("mqtt client error lock poisoned")
-                .clone();
+            let last_error = self.entry.last_error.read().clone();
             let message = last_error
                 .map(|err| format!("mqtt not connected: {err}"))
                 .unwrap_or_else(|| "mqtt not connected".to_string());
@@ -161,17 +157,13 @@ impl MqttClientEntry {
                         }
                         Ok(Event::Incoming(Packet::Disconnect)) => {
                             entry_for_task.connected.store(false, Ordering::Release);
-                            if let Ok(mut guard) = entry_for_task.last_error.write() {
-                                *guard = Some("disconnect".to_string());
-                            }
+                            *entry_for_task.last_error.write() = Some("disconnect".to_string());
                             tracing::warn!("shared mqtt client disconnected; reconnecting");
                             event_loop.clean();
                         }
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
                             entry_for_task.connected.store(true, Ordering::Release);
-                            if let Ok(mut guard) = entry_for_task.last_error.write() {
-                                *guard = None;
-                            }
+                            *entry_for_task.last_error.write() = None;
                             backoff = Duration::from_millis(100);
                             let _ = client.subscribe(topic.clone(), qos).await;
                         }
@@ -183,9 +175,7 @@ impl MqttClientEntry {
                         }
                         Err(err) => {
                             entry_for_task.connected.store(false, Ordering::Release);
-                            if let Ok(mut guard) = entry_for_task.last_error.write() {
-                                *guard = Some(err.to_string());
-                            }
+                            *entry_for_task.last_error.write() = Some(err.to_string());
                             let _ = events_tx.send(Err(ConnectorError::Connection(err.to_string())));
                             sleep(backoff).await;
                             backoff = std::cmp::min(backoff * 2, max_backoff);
@@ -195,14 +185,14 @@ impl MqttClientEntry {
             }
         });
 
-        *entry.join_handle.lock().unwrap() = Some(handle);
+        *entry.join_handle.lock() = Some(handle);
     }
 
     fn spawn_shutdown(entry: Arc<Self>) {
         tokio::spawn(async move {
             let _ = entry.shutdown_tx.send(true);
             let _ = entry.client.disconnect().await;
-            if let Some(handle) = entry.join_handle.lock().unwrap().take() {
+            if let Some(handle) = entry.join_handle.lock().take() {
                 handle.abort();
             }
             let _ = entry.events_tx.send(Ok(SharedMqttEvent::EndOfStream));
@@ -228,7 +218,7 @@ impl MqttClientManager {
     ) -> Result<(), ConnectorError> {
         let key = config.key.clone();
         {
-            if self.entries.lock().unwrap().contains_key(&key) {
+            if self.entries.lock().contains_key(&key) {
                 return Err(ConnectorError::AlreadyExists(key));
             }
         }
@@ -237,19 +227,19 @@ impl MqttClientManager {
         let entry = Arc::new(entry);
         MqttClientEntry::start_event_loop(&entry, event_loop);
 
-        self.entries.lock().unwrap().insert(key, entry);
+        self.entries.lock().insert(key, entry);
         Ok(())
     }
 
     pub async fn acquire_client(&self, key: &str) -> Result<SharedMqttClient, ConnectorError> {
-        if let Some(entry) = self.entries.lock().unwrap().get(key).cloned() {
+        if let Some(entry) = self.entries.lock().get(key).cloned() {
             return Ok(SharedMqttClient::new(key.to_string(), entry, self.clone()));
         }
         Err(ConnectorError::NotFound(key.to_string()))
     }
 
     pub fn drop_client(&self, key: &str) -> Result<(), ConnectorError> {
-        let mut guard = self.entries.lock().unwrap();
+        let mut guard = self.entries.lock();
         let entry = guard
             .get(key)
             .cloned()
@@ -265,7 +255,7 @@ impl MqttClientManager {
     }
 
     pub fn release(&self, key: &str) {
-        if let Some(entry) = self.entries.lock().unwrap().get(key) {
+        if let Some(entry) = self.entries.lock().get(key) {
             entry.ref_count.fetch_sub(1, Ordering::AcqRel);
         }
     }

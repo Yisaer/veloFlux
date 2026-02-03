@@ -7,8 +7,8 @@ use crate::processor::base::{
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use futures::stream::StreamExt;
+use parking_lot::Mutex;
 use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::sync::oneshot;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -24,7 +24,7 @@ impl AckManager {
         signal_id: u64,
     ) -> Result<oneshot::Receiver<ControlSignal>, ProcessorError> {
         let (tx, rx) = oneshot::channel();
-        let mut guard = self.waiters.lock().expect("ack manager lock poisoned");
+        let mut guard = self.waiters.lock();
         if guard.contains_key(&signal_id) {
             return Err(ProcessorError::InvalidConfiguration(format!(
                 "duplicate signal_id registration: {signal_id}"
@@ -35,12 +35,12 @@ impl AckManager {
     }
 
     pub(crate) fn unregister(&self, signal_id: u64) {
-        let mut guard = self.waiters.lock().expect("ack manager lock poisoned");
+        let mut guard = self.waiters.lock();
         guard.remove(&signal_id);
     }
 
     pub(crate) fn ack(&self, signal: &ControlSignal) {
-        let mut guard = self.waiters.lock().expect("ack manager lock poisoned");
+        let mut guard = self.waiters.lock();
         let Some(tx) = guard.remove(&signal.id()) else {
             return;
         };

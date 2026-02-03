@@ -4,9 +4,10 @@ use crate::aggregation::{
 };
 use crate::catalog::FunctionDef;
 use datatypes::{ConcreteDatatype, Value};
+use parking_lot::RwLock;
 use parser::aggregate_registry::AggregateRegistry;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 pub trait AggregateAccumulator: Send + Sync {
     fn update(&mut self, args: &[Value]) -> Result<(), String>;
@@ -43,30 +44,21 @@ impl AggregateFunctionRegistry {
     pub fn register_function(&self, function: Arc<dyn AggregateFunction>) {
         self.functions
             .write()
-            .expect("aggregate function registry poisoned")
             .insert(function.name().to_lowercase(), function);
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn AggregateFunction>> {
-        self.functions
-            .read()
-            .expect("aggregate function registry poisoned")
-            .get(&name.to_lowercase())
-            .cloned()
+        self.functions.read().get(&name.to_lowercase()).cloned()
     }
 
     pub fn is_registered(&self, name: &str) -> bool {
-        self.functions
-            .read()
-            .expect("aggregate function registry poisoned")
-            .contains_key(&name.to_lowercase())
+        self.functions.read().contains_key(&name.to_lowercase())
     }
 
     /// Check if the given aggregate function supports incremental updates.
     pub fn supports_incremental(&self, name: &str) -> bool {
         self.functions
             .read()
-            .expect("aggregate function registry poisoned")
             .get(&name.to_lowercase())
             .map(|f| f.supports_incremental())
             .unwrap_or(false)

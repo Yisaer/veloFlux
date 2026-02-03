@@ -1,6 +1,7 @@
 use datatypes::Value;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,14 +70,11 @@ impl EventtimeTypeRegistry {
     }
 
     pub fn register(&self, key: impl Into<String>, parser: Arc<dyn EventtimeTypeParser>) {
-        self.parsers
-            .write()
-            .expect("eventtime registry poisoned")
-            .insert(key.into(), parser);
+        self.parsers.write().insert(key.into(), parser);
     }
 
     pub fn resolve(&self, key: &str) -> Result<Arc<dyn EventtimeTypeParser>, EventtimeParseError> {
-        let guard = self.parsers.read().expect("eventtime registry poisoned");
+        let guard = self.parsers.read();
         guard.get(key).cloned().ok_or_else(|| {
             let available = guard.keys().cloned().collect::<Vec<_>>().join(", ");
             EventtimeParseError::new(format!(
@@ -86,12 +84,12 @@ impl EventtimeTypeRegistry {
     }
 
     pub fn is_registered(&self, key: &str) -> bool {
-        let guard = self.parsers.read().expect("eventtime registry poisoned");
+        let guard = self.parsers.read();
         guard.contains_key(key)
     }
 
     pub fn list(&self) -> Vec<String> {
-        let guard = self.parsers.read().expect("eventtime registry poisoned");
+        let guard = self.parsers.read();
         let mut keys = guard.keys().cloned().collect::<Vec<_>>();
         keys.sort();
         keys

@@ -6,8 +6,9 @@ use super::sink::SinkConnector;
 use super::ConnectorError;
 use crate::connector::MqttClientManager;
 use crate::planner::sink::SinkConnectorConfig;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 type SinkConnectorFactory = Arc<
     dyn Fn(
@@ -46,17 +47,11 @@ impl ConnectorRegistry {
     }
 
     pub fn register_sink_factory(&self, kind: impl Into<String>, factory: SinkConnectorFactory) {
-        self.sink_factories
-            .write()
-            .expect("connector registry poisoned")
-            .insert(kind.into(), factory);
+        self.sink_factories.write().insert(kind.into(), factory);
     }
 
     pub fn is_registered(&self, kind: &str) -> bool {
-        let guard = self
-            .sink_factories
-            .read()
-            .expect("connector registry poisoned");
+        let guard = self.sink_factories.read();
         guard.contains_key(kind)
     }
 
@@ -67,10 +62,7 @@ impl ConnectorRegistry {
         config: &SinkConnectorConfig,
         mqtt_clients: &MqttClientManager,
     ) -> Result<Box<dyn SinkConnector>, ConnectorError> {
-        let guard = self
-            .sink_factories
-            .read()
-            .expect("connector registry poisoned");
+        let guard = self.sink_factories.read();
         let factory = guard.get(kind).ok_or_else(|| {
             ConnectorError::NotFound(format!("sink connector kind `{kind}` not registered"))
         })?;

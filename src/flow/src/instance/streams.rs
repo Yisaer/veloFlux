@@ -173,7 +173,7 @@ impl FlowInstance {
                     decoder: crate::catalog::StreamDecoderConfig,
                     decoder_registry: Arc<crate::codec::DecoderRegistry>,
                     // Keep the sender alive so the mock connector stream doesn't immediately EOF.
-                    _handle: std::sync::Mutex<Option<crate::connector::MockSourceHandle>>,
+                    _handle: parking_lot::Mutex<Option<crate::connector::MockSourceHandle>>,
                 }
 
                 impl crate::shared_stream::SharedStreamConnectorFactory for MockSharedStreamConnectorFactory {
@@ -191,11 +191,7 @@ impl FlowInstance {
                         crate::shared_stream::SharedStreamError,
                     > {
                         let (connector, handle) = MockSourceConnector::new(self.connector_id());
-                        let mut guard = self._handle.lock().map_err(|_| {
-                            crate::shared_stream::SharedStreamError::Internal(
-                                "mock shared stream connector factory lock poisoned".to_string(),
-                            )
-                        })?;
+                        let mut guard = self._handle.lock();
                         *guard = Some(handle);
 
                         let decoder = self.decoder_registry.instantiate(
@@ -215,7 +211,7 @@ impl FlowInstance {
                     schema: definition.schema(),
                     decoder: definition.decoder().clone(),
                     decoder_registry: Arc::clone(&self.decoder_registry),
-                    _handle: std::sync::Mutex::new(None),
+                    _handle: parking_lot::Mutex::new(None),
                 });
 
                 config.set_connector_factory(factory);

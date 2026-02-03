@@ -2,6 +2,7 @@ pub mod aggregation;
 pub mod catalog;
 pub mod codec;
 pub mod connector;
+mod deadlock;
 pub mod eventtime;
 mod explain_shared_stream;
 pub mod expr;
@@ -104,6 +105,8 @@ impl PipelineRegistries {
         eventtime_type_registry: Arc<EventtimeTypeRegistry>,
         merger_registry: Arc<MergerRegistry>,
     ) -> Self {
+        crate::deadlock::start_deadlock_detector_once();
+
         Self {
             connector_registry,
             encoder_registry,

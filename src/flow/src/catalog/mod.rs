@@ -1,8 +1,9 @@
 use crate::processor::SamplerConfig;
 use datatypes::Schema;
+use parking_lot::RwLock;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 mod function_catalog;
 mod functions;
@@ -252,12 +253,12 @@ impl Catalog {
     }
 
     pub fn get(&self, stream_id: &str) -> Option<Arc<StreamDefinition>> {
-        let guard = self.streams.read().expect("catalog poisoned");
+        let guard = self.streams.read();
         guard.get(stream_id).cloned()
     }
 
     pub fn list(&self) -> Vec<Arc<StreamDefinition>> {
-        let guard = self.streams.read().expect("catalog poisoned");
+        let guard = self.streams.read();
         guard.values().cloned().collect()
     }
 
@@ -265,7 +266,7 @@ impl Catalog {
         &self,
         definition: StreamDefinition,
     ) -> Result<Arc<StreamDefinition>, CatalogError> {
-        let mut guard = self.streams.write().expect("catalog poisoned");
+        let mut guard = self.streams.write();
         let stream_id = definition.id().to_string();
         if guard.contains_key(&stream_id) {
             return Err(CatalogError::AlreadyExists(stream_id));
@@ -276,7 +277,7 @@ impl Catalog {
     }
 
     pub fn upsert(&self, definition: StreamDefinition) -> Arc<StreamDefinition> {
-        let mut guard = self.streams.write().expect("catalog poisoned");
+        let mut guard = self.streams.write();
         let stream_id = definition.id().to_string();
         let definition = Arc::new(definition);
         guard.insert(stream_id, definition.clone());
@@ -284,7 +285,7 @@ impl Catalog {
     }
 
     pub fn remove(&self, stream_id: &str) -> Result<(), CatalogError> {
-        let mut guard = self.streams.write().expect("catalog poisoned");
+        let mut guard = self.streams.write();
         guard
             .remove(stream_id)
             .map(|_| ())

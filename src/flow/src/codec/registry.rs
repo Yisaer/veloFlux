@@ -5,8 +5,9 @@ use crate::catalog::StreamDecoderConfig;
 use crate::codec::encoder::JsonEncoder;
 use crate::planner::sink::SinkEncoderConfig;
 use datatypes::Schema;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 type EncoderFactory =
     Arc<dyn Fn(&SinkEncoderConfig) -> Result<Arc<dyn CollectionEncoder>, CodecError> + Send + Sync>;
@@ -49,10 +50,7 @@ impl DecoderRegistry {
     }
 
     pub fn register_decoder(&self, kind: impl Into<String>, factory: DecoderFactory) {
-        self.factories
-            .write()
-            .expect("decoder registry poisoned")
-            .insert(kind.into(), factory);
+        self.factories.write().insert(kind.into(), factory);
     }
 
     pub fn instantiate(
@@ -61,7 +59,7 @@ impl DecoderRegistry {
         stream_name: &str,
         schema: Arc<Schema>,
     ) -> Result<Arc<dyn RecordDecoder>, CodecError> {
-        let guard = self.factories.read().expect("decoder registry poisoned");
+        let guard = self.factories.read();
         let factory = guard.get(config.kind()).ok_or_else(|| {
             CodecError::Other(format!("decoder kind `{}` not registered", config.kind()))
         })?;
@@ -69,7 +67,7 @@ impl DecoderRegistry {
     }
 
     pub fn is_registered(&self, kind: &str) -> bool {
-        let guard = self.factories.read().expect("decoder registry poisoned");
+        let guard = self.factories.read();
         guard.contains_key(kind)
     }
 
@@ -129,24 +127,21 @@ impl EncoderRegistry {
         supports_streaming: bool,
         supports_by_index_projection: bool,
     ) {
-        self.factories
-            .write()
-            .expect("encoder registry poisoned")
-            .insert(
-                kind.into(),
-                EncoderEntry {
-                    factory,
-                    supports_streaming,
-                    supports_by_index_projection,
-                },
-            );
+        self.factories.write().insert(
+            kind.into(),
+            EncoderEntry {
+                factory,
+                supports_streaming,
+                supports_by_index_projection,
+            },
+        );
     }
 
     pub fn instantiate(
         &self,
         config: &SinkEncoderConfig,
     ) -> Result<Arc<dyn CollectionEncoder>, CodecError> {
-        let guard = self.factories.read().expect("encoder registry poisoned");
+        let guard = self.factories.read();
         let kind = config.kind_str();
         let factory = guard
             .get(kind)
@@ -155,12 +150,12 @@ impl EncoderRegistry {
     }
 
     pub fn is_registered(&self, kind: &str) -> bool {
-        let guard = self.factories.read().expect("encoder registry poisoned");
+        let guard = self.factories.read();
         guard.contains_key(kind)
     }
 
     pub fn supports_streaming(&self, kind: &str) -> bool {
-        let guard = self.factories.read().expect("encoder registry poisoned");
+        let guard = self.factories.read();
         guard
             .get(kind)
             .map(|entry| entry.supports_streaming)
@@ -168,7 +163,7 @@ impl EncoderRegistry {
     }
 
     pub fn supports_by_index_projection(&self, kind: &str) -> bool {
-        let guard = self.factories.read().expect("encoder registry poisoned");
+        let guard = self.factories.read();
         guard
             .get(kind)
             .map(|entry| entry.supports_by_index_projection)
@@ -212,7 +207,7 @@ impl MergerRegistry {
     where
         F: Fn(&Map<String, Value>) -> Result<Box<dyn Merger>, CodecError> + Send + Sync + 'static,
     {
-        let mut map = self.factories.write().expect("lock poisoned");
+        let mut map = self.factories.write();
         map.insert(name.into(), Arc::new(factory));
     }
 
@@ -221,7 +216,7 @@ impl MergerRegistry {
         name: &str,
         props: &Map<String, Value>,
     ) -> Result<Box<dyn Merger>, CodecError> {
-        let map = self.factories.read().expect("lock poisoned");
+        let map = self.factories.read();
         if let Some(factory) = map.get(name) {
             factory(props)
         } else {

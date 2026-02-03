@@ -13,7 +13,9 @@ use crate::shared_stream::{
 use crate::stateful::StatefulFunctionRegistry;
 use crate::PipelineRegistries;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 mod mqtt;
 mod pipelines;
@@ -42,6 +44,8 @@ pub struct FlowInstance {
 impl FlowInstance {
     /// Create a new Flow instance backed by global registries.
     pub fn new() -> Self {
+        crate::deadlock::start_deadlock_detector_once();
+
         let catalog = Arc::new(Catalog::new());
         let shared_stream_registry = shared_stream_registry();
         let mqtt_client_manager = MqttClientManager::new();

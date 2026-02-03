@@ -1,6 +1,7 @@
 use datatypes::{ConcreteDatatype, Value};
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use super::lag::LagFunction;
 
@@ -40,10 +41,7 @@ impl StatefulFunctionRegistry {
         &self,
         function: Arc<dyn StatefulFunction>,
     ) -> Result<(), StatefulRegistryError> {
-        let mut write = self
-            .functions
-            .write()
-            .expect("stateful function registry poisoned");
+        let mut write = self.functions.write();
         let key = function.name().to_lowercase();
         if write.contains_key(&key) {
             return Err(StatefulRegistryError::AlreadyRegistered(key));
@@ -53,18 +51,11 @@ impl StatefulFunctionRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn StatefulFunction>> {
-        self.functions
-            .read()
-            .expect("stateful function registry poisoned")
-            .get(&name.to_lowercase())
-            .cloned()
+        self.functions.read().get(&name.to_lowercase()).cloned()
     }
 
     pub fn is_registered(&self, name: &str) -> bool {
-        self.functions
-            .read()
-            .expect("stateful function registry poisoned")
-            .contains_key(&name.to_lowercase())
+        self.functions.read().contains_key(&name.to_lowercase())
     }
 
     fn register_builtin_functions(&self) {

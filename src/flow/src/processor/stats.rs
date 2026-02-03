@@ -3,7 +3,9 @@ use prometheus::{register_int_counter_vec, register_int_gauge_vec, IntCounterVec
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
+
+use parking_lot::RwLock;
 
 static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     register_int_counter_vec!(
@@ -183,10 +185,7 @@ impl ProcessorStats {
             panic!("metric flat_name is reserved: {}", spec.flat_name);
         }
 
-        let mut guard = self
-            .metrics
-            .write()
-            .expect("ProcessorStats metrics lock poisoned");
+        let mut guard = self.metrics.write();
 
         for entry in guard.values() {
             if entry.flat_name == spec.flat_name && entry.id != spec.id {
@@ -243,32 +242,20 @@ impl ProcessorStats {
                 .inc_by(count);
         }
         let message: String = message.into();
-        let mut guard = self
-            .last_error
-            .write()
-            .expect("ProcessorStats error lock poisoned");
+        let mut guard = self.last_error.write();
         *guard = Some(Arc::<str>::from(message));
     }
 
     pub fn clear_last_error(&self) {
-        let mut guard = self
-            .last_error
-            .write()
-            .expect("ProcessorStats error lock poisoned");
+        let mut guard = self.last_error.write();
         *guard = None;
     }
 
     pub fn snapshot(&self) -> ProcessorStatsSnapshot {
-        let last_error = self
-            .last_error
-            .read()
-            .expect("ProcessorStats error lock poisoned")
-            .as_deref()
-            .map(ToString::to_string);
+        let last_error = self.last_error.read().as_deref().map(ToString::to_string);
         let custom = self
             .metrics
             .read()
-            .expect("ProcessorStats metrics lock poisoned")
             .values()
             .map(|entry| {
                 (
