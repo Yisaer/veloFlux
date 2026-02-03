@@ -13,6 +13,7 @@ use crate::processor::SamplerConfig;
 use crate::processor::{ControlSignal, ProcessorPipeline, StreamData};
 use datatypes::Schema;
 use once_cell::sync::Lazy;
+use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -35,7 +36,7 @@ pub trait SharedStreamConnectorFactory: Send + Sync + 'static {
 
 struct OneShotConnectorFactory {
     connector_id: String,
-    inner: std::sync::Mutex<Option<ConnectorDecoderPair>>,
+    inner: SyncMutex<Option<ConnectorDecoderPair>>,
 }
 
 impl OneShotConnectorFactory {
@@ -43,7 +44,7 @@ impl OneShotConnectorFactory {
         let connector_id = connector.id().to_string();
         Self {
             connector_id,
-            inner: std::sync::Mutex::new(Some((connector, decoder))),
+            inner: SyncMutex::new(Some((connector, decoder))),
         }
     }
 }
@@ -54,10 +55,7 @@ impl SharedStreamConnectorFactory for OneShotConnectorFactory {
     }
 
     fn build(&self) -> Result<ConnectorDecoderPair, SharedStreamError> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| SharedStreamError::Internal("connector factory lock poisoned".into()))?;
+        let mut guard = self.inner.lock();
         guard.take().ok_or_else(|| {
             SharedStreamError::Internal(
                 "shared stream connector factory cannot rebuild connector/decoder".into(),
@@ -417,7 +415,7 @@ struct SharedStreamInner {
     data_channel_capacity: usize,
     control_channel_capacity: usize,
     runtime_lock: Mutex<()>,
-    applied_decode_state: Arc<std::sync::RwLock<AppliedDecodeState>>,
+    applied_decode_state: Arc<SyncRwLock<AppliedDecodeState>>,
     data_sender: broadcast::Sender<StreamData>,
     control_sender: broadcast::Sender<ControlSignal>,
     handles: Mutex<SharedStreamHandles>,
@@ -476,7 +474,7 @@ impl SharedStreamInner {
             initial_decoding_columns.as_slice(),
             1,
         ));
-        let applied_decode_state = Arc::new(std::sync::RwLock::new(AppliedDecodeState {
+        let applied_decode_state = Arc::new(SyncRwLock::new(AppliedDecodeState {
             decoding_columns: initial_decoding_columns,
             decode_projection,
         }));
@@ -525,10 +523,7 @@ impl SharedStreamInner {
     /// This avoids rebuilding the projection on the decoder hot path. The projection version is
     /// bumped only when the applied decoding columns actually change.
     fn set_applied_decoding_columns(&self, applied: Vec<String>) {
-        let mut guard = self
-            .applied_decode_state
-            .write()
-            .expect("shared stream applied decode state lock poisoned");
+        let mut guard = self.applied_decode_state.write();
         if guard.decoding_columns == applied {
             return;
         }
@@ -672,12 +667,7 @@ impl SharedStreamInner {
 
     async fn snapshot(&self) -> SharedStreamInfo {
         let state = self.state.lock().await;
-        let decoding_columns = self
-            .applied_decode_state
-            .read()
-            .expect("shared stream applied decode state lock poisoned")
-            .decoding_columns
-            .clone();
+        let decoding_columns = self.applied_decode_state.read().decoding_columns.clone();
         SharedStreamInfo {
             name: self.name.clone(),
             schema: Arc::clone(&self.schema),

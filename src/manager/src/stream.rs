@@ -19,8 +19,10 @@ use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRunti
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use parking_lot::RwLock;
 
 use flow::{
     BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int8Type, Int16Type,
@@ -128,10 +130,7 @@ impl SchemaRegistry {
     }
 
     pub fn register_schema(&self, kind: impl Into<String>, parser: Arc<SchemaParser>) {
-        self.parsers
-            .write()
-            .expect("schema registry poisoned")
-            .insert(kind.into(), parser);
+        self.parsers.write().insert(kind.into(), parser);
     }
 
     pub fn parse(
@@ -140,7 +139,7 @@ impl SchemaRegistry {
         stream_name: &str,
         props: &JsonMap<String, JsonValue>,
     ) -> Result<Schema, String> {
-        let guard = self.parsers.read().expect("schema registry poisoned");
+        let guard = self.parsers.read();
         let parser = guard
             .get(schema_type)
             .ok_or_else(|| format!("schema type `{schema_type}` not registered"))?;

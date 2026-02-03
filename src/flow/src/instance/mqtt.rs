@@ -13,7 +13,6 @@ impl FlowInstance {
             .await?;
         self.shared_mqtt_client_configs
             .lock()
-            .expect("shared mqtt map poisoned")
             .insert(config.key.clone(), config);
         Ok(())
     }
@@ -21,10 +20,7 @@ impl FlowInstance {
     /// Drop a shared MQTT client identified by key.
     pub fn drop_shared_mqtt_client(&self, key: &str) -> Result<(), FlowInstanceError> {
         self.mqtt_client_manager.drop_client(key)?;
-        self.shared_mqtt_client_configs
-            .lock()
-            .expect("shared mqtt map poisoned")
-            .remove(key);
+        self.shared_mqtt_client_configs.lock().remove(key);
         Ok(())
     }
 
@@ -32,7 +28,6 @@ impl FlowInstance {
     pub fn list_shared_mqtt_clients(&self) -> Vec<SharedMqttClientConfig> {
         self.shared_mqtt_client_configs
             .lock()
-            .expect("shared mqtt map poisoned")
             .values()
             .cloned()
             .collect()
@@ -40,10 +35,6 @@ impl FlowInstance {
 
     /// Fetch metadata for a single shared MQTT client.
     pub fn get_shared_mqtt_client(&self, key: &str) -> Option<SharedMqttClientConfig> {
-        self.shared_mqtt_client_configs
-            .lock()
-            .expect("shared mqtt map poisoned")
-            .get(key)
-            .cloned()
+        self.shared_mqtt_client_configs.lock().get(key).cloned()
     }
 }

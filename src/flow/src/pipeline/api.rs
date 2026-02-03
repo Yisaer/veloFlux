@@ -4,7 +4,9 @@ use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use crate::shared_stream::SharedStreamRegistry;
 use crate::PipelineRegistries;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+
+use parking_lot::RwLock;
 use std::time::Duration;
 
 /// Errors that can occur when mutating pipeline definitions.

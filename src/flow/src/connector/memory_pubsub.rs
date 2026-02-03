@@ -3,8 +3,9 @@
 use crate::model::Collection;
 use bytes::Bytes;
 use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -212,7 +213,7 @@ impl MemoryPubSubRegistry {
         let cap = capacity.max(1);
 
         {
-            let guard = self.topics.read().expect("memory pubsub registry poisoned");
+            let guard = self.topics.read();
             if let Some(entry) = guard.get(topic) {
                 if entry.kind != kind {
                     return Err(MemoryPubSubError::TopicKindMismatch {
@@ -232,10 +233,7 @@ impl MemoryPubSubRegistry {
             }
         }
 
-        let mut guard = self
-            .topics
-            .write()
-            .expect("memory pubsub registry poisoned");
+        let mut guard = self.topics.write();
         guard.entry(topic.to_string()).or_insert_with(|| {
             let (sender, _) = broadcast::channel(cap);
             TopicEntry {
@@ -276,7 +274,7 @@ impl MemoryPubSubRegistry {
         if topic.trim().is_empty() {
             return Err(MemoryPubSubError::InvalidTopic);
         }
-        let guard = self.topics.read().expect("memory pubsub registry poisoned");
+        let guard = self.topics.read();
         let entry = guard
             .get(topic)
             .ok_or_else(|| MemoryPubSubError::NotFound {
@@ -313,12 +311,12 @@ impl MemoryPubSubRegistry {
     }
 
     pub fn topic_capacity(&self, topic: &str) -> Option<usize> {
-        let guard = self.topics.read().expect("memory pubsub registry poisoned");
+        let guard = self.topics.read();
         guard.get(topic).map(|entry| entry.capacity)
     }
 
     pub fn topic_kind(&self, topic: &str) -> Option<MemoryTopicKind> {
-        let guard = self.topics.read().expect("memory pubsub registry poisoned");
+        let guard = self.topics.read();
         guard.get(topic).map(|entry| entry.kind)
     }
 

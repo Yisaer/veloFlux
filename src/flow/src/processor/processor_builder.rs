@@ -39,7 +39,7 @@ use uuid::Uuid;
 pub(crate) struct SharedStreamPipelineOptions {
     pub stream_name: String,
     pub decoder: Arc<dyn RecordDecoder>,
-    pub applied_decode_state: Arc<std::sync::RwLock<AppliedDecodeState>>,
+    pub applied_decode_state: Arc<parking_lot::RwLock<AppliedDecodeState>>,
 }
 
 /// Enum for all processor types created from PhysicalPlan

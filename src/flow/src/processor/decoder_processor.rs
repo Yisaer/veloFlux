@@ -33,7 +33,7 @@ pub struct DecoderProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     decoder: Arc<dyn RecordDecoder>,
-    shared_decode_state: Option<Arc<std::sync::RwLock<AppliedDecodeState>>>,
+    shared_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
     decode_projection: Option<DecodeProjection>,
     eventtime: Option<EventtimeDecodeConfig>,
     stats: Arc<ProcessorStats>,
@@ -73,7 +73,7 @@ impl DecoderProcessor {
 
     pub(crate) fn with_shared_decode_state(
         mut self,
-        state: Arc<std::sync::RwLock<AppliedDecodeState>>,
+        state: Arc<parking_lot::RwLock<AppliedDecodeState>>,
     ) -> Self {
         self.shared_decode_state = Some(state);
         self
@@ -150,9 +150,7 @@ impl Processor for DecoderProcessor {
                                         decoder.decode_with_projection(payload.as_ref(), Some(proj))
                                     } else if let Some(lock) = &shared_decode_state {
                                         let projection = {
-                                            let guard = lock
-                                                .read()
-                                                .expect("shared decode state lock poisoned");
+                                            let guard = lock.read();
                                             Arc::clone(&guard.decode_projection)
                                         };
                                         decoder.decode_with_projection(

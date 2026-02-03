@@ -22,8 +22,9 @@ use crate::{
     explain_pipeline_with_options, optimize_physical_plan, PipelineExplain, PipelineExplainConfig,
     PipelineRegistries, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
 };
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 fn validate_eventtime_enabled(
@@ -108,7 +109,7 @@ impl PipelineManager {
             &self.registries,
         )
         .map_err(PipelineError::BuildFailure)?;
-        let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
+        let mut guard = self.pipelines.write();
         if guard.contains_key(&pipeline_id) {
             return Err(PipelineError::AlreadyExists(pipeline_id));
         }
@@ -139,7 +140,7 @@ impl PipelineManager {
             &self.registries,
         )
         .map_err(PipelineError::BuildFailure)?;
-        let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
+        let mut guard = self.pipelines.write();
         if guard.contains_key(&pipeline_id) {
             return Err(PipelineError::AlreadyExists(pipeline_id));
         }
@@ -209,7 +210,7 @@ impl PipelineManager {
         let pipeline_id = definition.id().to_string();
 
         {
-            let guard = self.pipelines.read().expect("pipeline manager poisoned");
+            let guard = self.pipelines.read();
             if guard.contains_key(&pipeline_id) {
                 return Err(PipelineError::AlreadyExists(pipeline_id));
             }
@@ -225,7 +226,7 @@ impl PipelineManager {
         )
         .map_err(PipelineError::BuildFailure)?;
 
-        let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
+        let mut guard = self.pipelines.write();
         let entry = ManagedPipeline {
             definition: Arc::new(definition),
             pipeline: Some(pipeline),
@@ -239,20 +240,20 @@ impl PipelineManager {
 
     /// Retrieve a snapshot for a specific pipeline.
     pub fn get(&self, pipeline_id: &str) -> Option<PipelineSnapshot> {
-        let guard = self.pipelines.read().expect("pipeline manager poisoned");
+        let guard = self.pipelines.read();
         guard.get(pipeline_id).map(|entry| entry.snapshot())
     }
 
     /// List all managed pipelines.
     pub fn list(&self) -> Vec<PipelineSnapshot> {
-        let guard = self.pipelines.read().expect("pipeline manager poisoned");
+        let guard = self.pipelines.read();
         guard.values().map(|entry| entry.snapshot()).collect()
     }
 
     /// Explain an existing pipeline by id (logical + physical plans).
     pub fn explain_pipeline(&self, pipeline_id: &str) -> Result<PipelineExplain, PipelineError> {
         let definition = {
-            let guard = self.pipelines.read().expect("pipeline manager poisoned");
+            let guard = self.pipelines.read();
             let entry = guard
                 .get(pipeline_id)
                 .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
@@ -282,7 +283,7 @@ impl PipelineManager {
 
     /// Start the pipeline runtime if not already running.
     pub fn start_pipeline(&self, pipeline_id: &str) -> Result<(), PipelineError> {
-        let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
+        let mut guard = self.pipelines.write();
         let entry = guard
             .get_mut(pipeline_id)
             .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
@@ -320,7 +321,7 @@ impl PipelineManager {
         timeout: Duration,
     ) -> Result<(), PipelineError> {
         let maybe_pipeline = {
-            let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
+            let mut guard = self.pipelines.write();
             let entry = guard
                 .get_mut(pipeline_id)
                 .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
@@ -340,7 +341,7 @@ impl PipelineManager {
     /// Remove a pipeline runtime and close it if running.
     pub async fn delete_pipeline(&self, pipeline_id: &str) -> Result<(), PipelineError> {
         let maybe_entry = {
-            let mut guard = self.pipelines.write().expect("pipeline manager poisoned");
+            let mut guard = self.pipelines.write();
             guard.remove(pipeline_id)
         };
         let entry = maybe_entry.ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
@@ -358,7 +359,7 @@ impl PipelineManager {
         pipeline_id: &str,
         _timeout: Duration,
     ) -> Result<Vec<ProcessorStatsEntry>, PipelineError> {
-        let guard = self.pipelines.read().expect("pipeline manager poisoned");
+        let guard = self.pipelines.read();
         let entry = guard
             .get(pipeline_id)
             .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;

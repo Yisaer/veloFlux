@@ -1,8 +1,8 @@
 //! Mock connector that lets tests or scripts push bytes into the pipeline manually.
 
 use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::RwLock;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -91,27 +91,17 @@ impl MockSourceHandle {
 
 /// Register a mock source handle under a stable key.
 pub fn register_mock_source_handle(key: impl Into<String>, handle: MockSourceHandle) {
-    MOCK_HANDLES
-        .write()
-        .expect("mock handle registry poisoned")
-        .insert(key.into(), handle);
+    MOCK_HANDLES.write().insert(key.into(), handle);
 }
 
 /// Get a clone of the handle registered under the given key.
 pub fn get_mock_source_handle(key: &str) -> Option<MockSourceHandle> {
-    MOCK_HANDLES
-        .read()
-        .expect("mock handle registry poisoned")
-        .get(key)
-        .cloned()
+    MOCK_HANDLES.read().get(key).cloned()
 }
 
 /// Remove and return the handle registered under the given key.
 pub fn take_mock_source_handle(key: &str) -> Option<MockSourceHandle> {
-    MOCK_HANDLES
-        .write()
-        .expect("mock handle registry poisoned")
-        .remove(key)
+    MOCK_HANDLES.write().remove(key)
 }
 
 /// Errors returned by [`MockSourceHandle`].

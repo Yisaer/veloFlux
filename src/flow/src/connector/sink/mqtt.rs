@@ -3,13 +3,14 @@
 use super::{SinkConnector, SinkConnectorError};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
+use parking_lot::RwLock;
 use prometheus::{register_int_counter_vec, IntCounterVec};
 use rumqttc::{
     AsyncClient, ClientError, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS,
     Transport,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use url::Url;
@@ -145,24 +146,17 @@ impl MqttConnectionState {
     fn set_connected(&self, connected: bool) {
         self.connected.store(connected, Ordering::Release);
         if connected {
-            if let Ok(mut guard) = self.last_error.write() {
-                *guard = None;
-            }
+            *self.last_error.write() = None;
         }
     }
 
     fn set_error(&self, err: impl Into<String>) {
         self.connected.store(false, Ordering::Release);
-        if let Ok(mut guard) = self.last_error.write() {
-            *guard = Some(err.into());
-        }
+        *self.last_error.write() = Some(err.into());
     }
 
     fn last_error(&self) -> Option<String> {
-        self.last_error
-            .read()
-            .expect("mqtt sink error lock poisoned")
-            .clone()
+        self.last_error.read().clone()
     }
 }
 

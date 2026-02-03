@@ -1,5 +1,11 @@
 use flow::FlowInstance;
 use manager::storage_bridge;
+#[cfg(all(
+    feature = "profiling",
+    feature = "allocator-jemalloc",
+    not(target_env = "msvc")
+))]
+use parking_lot::Mutex;
 #[cfg(feature = "profiling")]
 use std::io::{Read, Write};
 #[cfg(any(feature = "metrics", feature = "profiling"))]
@@ -8,12 +14,6 @@ use std::net::SocketAddr;
 use std::net::{TcpListener, TcpStream};
 #[cfg(any(feature = "metrics", feature = "profiling"))]
 use std::process;
-#[cfg(all(
-    feature = "profiling",
-    feature = "allocator-jemalloc",
-    not(target_env = "msvc")
-))]
-use std::sync::Mutex;
 #[cfg(feature = "profiling")]
 use std::thread;
 #[cfg(feature = "metrics")]
@@ -325,9 +325,7 @@ fn generate_profile(duration: u64, frequency_hz: i32) -> Result<Vec<u8>, String>
     not(target_env = "msvc")
 ))]
 fn capture_heap_profile() -> Result<Vec<u8>, String> {
-    let _lock = PPROF_ENDPOINT_MUTEX
-        .lock()
-        .map_err(|_| "pprof endpoint lock poisoned".to_string())?;
+    let _lock = PPROF_ENDPOINT_MUTEX.lock();
 
     // Ensure profiling is active; if jemalloc lacks profiling support, return a clear error.
     if let Err(err) = unsafe { raw::write(b"prof.active\0", true) } {
@@ -471,9 +469,7 @@ fn disable_heap_profiling_for_current_thread() {}
     not(target_env = "msvc")
 ))]
 fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    let _lock = PPROF_ENDPOINT_MUTEX
-        .lock()
-        .map_err(|_| "pprof endpoint lock poisoned".to_string())?;
+    let _lock = PPROF_ENDPOINT_MUTEX.lock();
 
     let prev_active: Option<bool> = match unsafe { raw::read(b"prof.active\0") } {
         Ok(value) => Some(value),

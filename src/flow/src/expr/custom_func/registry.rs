@@ -1,6 +1,7 @@
 use super::{ConcatFunc, CustomFunc};
+use parking_lot::RwLock;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CustomFuncRegistryError {
@@ -29,10 +30,7 @@ impl CustomFuncRegistry {
         &self,
         function: Arc<dyn CustomFunc>,
     ) -> Result<(), CustomFuncRegistryError> {
-        let mut write = self
-            .functions
-            .write()
-            .expect("custom func registry poisoned");
+        let mut write = self.functions.write();
         let key = function.name().to_lowercase();
         if write.contains_key(&key) {
             return Err(CustomFuncRegistryError::AlreadyRegistered(key));
@@ -42,28 +40,15 @@ impl CustomFuncRegistry {
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn CustomFunc>> {
-        self.functions
-            .read()
-            .expect("custom func registry poisoned")
-            .get(&name.to_lowercase())
-            .cloned()
+        self.functions.read().get(&name.to_lowercase()).cloned()
     }
 
     pub fn is_registered(&self, name: &str) -> bool {
-        self.functions
-            .read()
-            .expect("custom func registry poisoned")
-            .contains_key(&name.to_lowercase())
+        self.functions.read().contains_key(&name.to_lowercase())
     }
 
     pub fn list_names(&self) -> Vec<String> {
-        let mut names: Vec<_> = self
-            .functions
-            .read()
-            .expect("custom func registry poisoned")
-            .keys()
-            .cloned()
-            .collect();
+        let mut names: Vec<_> = self.functions.read().keys().cloned().collect();
         names.sort();
         names
     }
