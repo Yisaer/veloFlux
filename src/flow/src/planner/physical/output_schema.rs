@@ -286,6 +286,7 @@ fn infer_scalar_type(expr: &ScalarExpr, input: &[OutputColumn]) -> Option<Concre
             | BinaryFunc::Div
             | BinaryFunc::Mod => None,
         },
+        ScalarExpr::Case { .. } => None,
         ScalarExpr::Wildcard { .. }
         | ScalarExpr::FieldAccess { .. }
         | ScalarExpr::ListIndex { .. }

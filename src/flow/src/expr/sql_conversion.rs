@@ -709,46 +709,45 @@ fn convert_case_expression(
     bindings: &SchemaBinding,
     custom_func_registry: &CustomFuncRegistry,
 ) -> Result<ScalarExpr, ConversionError> {
-    // For simplicity, convert to a chain of IF-THEN-ELSE
-    // In a real implementation, you might want to handle this more efficiently
-    let mut current_expr = if let Some(else_expr) = else_result {
-        convert_expr_to_scalar_internal(else_expr, bindings, custom_func_registry)?
-    } else {
-        ScalarExpr::Literal(Value::Null, ConcreteDatatype::Int64(Int64Type))
-    };
-
-    // Process conditions in reverse order
-    for i in (0..conditions.len()).rev() {
-        let condition = &conditions[i];
-        let result = &results[i];
-
-        let condition_expr = if let Some(operand_expr) = operand {
-            // Simple CASE: operand WHEN value THEN result
-            let operand_scalar =
-                convert_expr_to_scalar_internal(operand_expr, bindings, custom_func_registry)?;
-            let value_scalar =
-                convert_expr_to_scalar_internal(condition, bindings, custom_func_registry)?;
-            ScalarExpr::CallBinary {
-                func: BinaryFunc::Eq,
-                expr1: Box::new(operand_scalar),
-                expr2: Box::new(value_scalar),
-            }
-        } else {
-            // Searched CASE: WHEN condition THEN result
-            convert_expr_to_scalar_internal(condition, bindings, custom_func_registry)?
-        };
-
-        let result_expr = convert_expr_to_scalar_internal(result, bindings, custom_func_registry)?;
-
-        // This is a simplified implementation - in practice you'd need proper conditional evaluation
-        current_expr = ScalarExpr::CallBinary {
-            func: BinaryFunc::Add, // Using Add as a placeholder for conditional logic
-            expr1: Box::new(condition_expr),
-            expr2: Box::new(result_expr),
-        };
+    if conditions.len() != results.len() {
+        return Err(ConversionError::UnsupportedExpression(format!(
+            "CASE requires conditions/results length match, got {} and {}",
+            conditions.len(),
+            results.len()
+        )));
     }
 
-    Ok(current_expr)
+    let operand_scalar = match operand.as_ref() {
+        Some(expr) => Some(Box::new(convert_expr_to_scalar_internal(
+            expr,
+            bindings,
+            custom_func_registry,
+        )?)),
+        None => None,
+    };
+
+    let mut when_then = Vec::with_capacity(conditions.len());
+    for (when_expr, then_expr) in conditions.iter().zip(results.iter()) {
+        when_then.push((
+            convert_expr_to_scalar_internal(when_expr, bindings, custom_func_registry)?,
+            convert_expr_to_scalar_internal(then_expr, bindings, custom_func_registry)?,
+        ));
+    }
+
+    let else_scalar = match else_result.as_ref() {
+        Some(expr) => Some(Box::new(convert_expr_to_scalar_internal(
+            expr,
+            bindings,
+            custom_func_registry,
+        )?)),
+        None => None,
+    };
+
+    Ok(ScalarExpr::Case {
+        operand: operand_scalar,
+        when_then,
+        else_expr: else_scalar,
+    })
 }
 
 /// Extract expressions from SQL SELECT statement

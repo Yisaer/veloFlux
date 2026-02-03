@@ -48,6 +48,17 @@ pub enum ScalarExpr {
         /// The arguments to the function
         args: Vec<ScalarExpr>,
     },
+    /// A CASE expression.
+    ///
+    /// - When `operand` is `None`, this represents searched CASE:
+    ///   `CASE WHEN <cond> THEN <expr> ... ELSE <expr> END`.
+    /// - When `operand` is `Some`, this represents simple CASE:
+    ///   `CASE <operand> WHEN <value> THEN <expr> ... ELSE <expr> END`.
+    Case {
+        operand: Option<Box<ScalarExpr>>,
+        when_then: Vec<(ScalarExpr, ScalarExpr)>,
+        else_expr: Option<Box<ScalarExpr>>,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -192,6 +203,49 @@ impl ScalarExpr {
                 func.validate_row(&row_args)?;
                 func.eval_row(&row_args)
             }
+            ScalarExpr::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                let operand_value = match operand.as_ref() {
+                    Some(expr) => Some(expr.eval_with_tuple(tuple)?),
+                    None => None,
+                };
+
+                for (when_expr, then_expr) in when_then {
+                    let matched = match operand_value.as_ref() {
+                        Some(operand_value) => {
+                            let when_value = when_expr.eval_with_tuple(tuple)?;
+                            let eq =
+                                BinaryFunc::Eq.eval_binary(operand_value.clone(), when_value)?;
+                            matches!(eq, Value::Bool(true))
+                        }
+                        None => {
+                            let cond = when_expr.eval_with_tuple(tuple)?;
+                            match cond {
+                                Value::Bool(true) => true,
+                                Value::Bool(false) | Value::Null => false,
+                                other => {
+                                    return Err(EvalError::TypeMismatch {
+                                        expected: "Bool".to_string(),
+                                        actual: format!("{:?}", other),
+                                    });
+                                }
+                            }
+                        }
+                    };
+
+                    if matched {
+                        return then_expr.eval_with_tuple(tuple);
+                    }
+                }
+
+                match else_expr.as_ref() {
+                    Some(expr) => expr.eval_with_tuple(tuple),
+                    None => Ok(Value::Null),
+                }
+            }
         }
     }
 
@@ -332,6 +386,17 @@ impl std::fmt::Debug for ScalarExpr {
             ScalarExpr::CallFunc { func, args } => {
                 write!(f, "CallFunc({}, {:?})", func.name(), args)
             }
+            ScalarExpr::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => write!(
+                f,
+                "Case({:?}, {:?}, {:?})",
+                operand.as_ref(),
+                when_then,
+                else_expr.as_ref()
+            ),
         }
     }
 }
@@ -398,6 +463,18 @@ impl PartialEq for ScalarExpr {
                 ScalarExpr::CallFunc { func: fa, args: aa },
                 ScalarExpr::CallFunc { func: fb, args: ab },
             ) => fa.name() == fb.name() && aa == ab,
+            (
+                ScalarExpr::Case {
+                    operand: oa,
+                    when_then: wa,
+                    else_expr: ea,
+                },
+                ScalarExpr::Case {
+                    operand: ob,
+                    when_then: wb,
+                    else_expr: eb,
+                },
+            ) => oa == ob && wa == wb && ea == eb,
             _ => false,
         }
     }
@@ -407,6 +484,8 @@ impl PartialEq for ScalarExpr {
 mod tests {
     use super::*;
     use datatypes::Int64Type;
+    use datatypes::StringType;
+    use std::sync::Arc;
 
     #[test]
     fn scalar_literal_creation() {
@@ -595,5 +674,136 @@ mod tests {
         assert!(!wc.is_literal());
         assert!(wc.as_column().is_none());
         assert!(wc.as_literal().is_none());
+    }
+
+    fn tuple_with_affiliate_i64(name: &str, value: i64) -> crate::model::Tuple {
+        let mut tuple = crate::model::Tuple::new(Vec::new());
+        tuple.add_affiliate_column(Arc::new(name.to_string()), Value::Int64(value));
+        tuple
+    }
+
+    #[test]
+    fn scalar_case_searched_when() {
+        let a = ScalarExpr::column_with_column_name("a");
+        let lit_150 = ScalarExpr::literal(Value::Int64(150), ConcreteDatatype::Int64(Int64Type));
+        let lit_170 = ScalarExpr::literal(Value::Int64(170), ConcreteDatatype::Int64(Int64Type));
+        let lit_175 = ScalarExpr::literal(Value::Int64(175), ConcreteDatatype::Int64(Int64Type));
+
+        let s = ScalarExpr::literal(
+            Value::String("S".to_string()),
+            ConcreteDatatype::String(StringType),
+        );
+        let m = ScalarExpr::literal(
+            Value::String("M".to_string()),
+            ConcreteDatatype::String(StringType),
+        );
+        let l = ScalarExpr::literal(
+            Value::String("L".to_string()),
+            ConcreteDatatype::String(StringType),
+        );
+        let xl = ScalarExpr::literal(
+            Value::String("XL".to_string()),
+            ConcreteDatatype::String(StringType),
+        );
+
+        let expr = ScalarExpr::Case {
+            operand: None,
+            when_then: vec![
+                (a.clone().call_binary(lit_150, BinaryFunc::Lt), s),
+                (a.clone().call_binary(lit_170, BinaryFunc::Lt), m),
+                (a.clone().call_binary(lit_175, BinaryFunc::Lt), l),
+            ],
+            else_expr: Some(Box::new(xl)),
+        };
+
+        let tuple = tuple_with_affiliate_i64("a", 149);
+        assert_eq!(
+            expr.eval_with_tuple(&tuple).expect("eval"),
+            Value::String("S".to_string())
+        );
+
+        let tuple = tuple_with_affiliate_i64("a", 160);
+        assert_eq!(
+            expr.eval_with_tuple(&tuple).expect("eval"),
+            Value::String("M".to_string())
+        );
+
+        let tuple = tuple_with_affiliate_i64("a", 174);
+        assert_eq!(
+            expr.eval_with_tuple(&tuple).expect("eval"),
+            Value::String("L".to_string())
+        );
+
+        let tuple = tuple_with_affiliate_i64("a", 175);
+        assert_eq!(
+            expr.eval_with_tuple(&tuple).expect("eval"),
+            Value::String("XL".to_string())
+        );
+    }
+
+    #[test]
+    fn scalar_case_simple_when() {
+        let a = ScalarExpr::column_with_column_name("a");
+        let one = ScalarExpr::literal(Value::Int64(1), ConcreteDatatype::Int64(Int64Type));
+        let two = ScalarExpr::literal(Value::Int64(2), ConcreteDatatype::Int64(Int64Type));
+
+        let s = ScalarExpr::literal(
+            Value::String("S".to_string()),
+            ConcreteDatatype::String(StringType),
+        );
+        let m = ScalarExpr::literal(
+            Value::String("M".to_string()),
+            ConcreteDatatype::String(StringType),
+        );
+        let other = ScalarExpr::literal(
+            Value::String("OTHER".to_string()),
+            ConcreteDatatype::String(StringType),
+        );
+
+        let expr = ScalarExpr::Case {
+            operand: Some(Box::new(a)),
+            when_then: vec![(one, s), (two, m)],
+            else_expr: Some(Box::new(other)),
+        };
+
+        let tuple = tuple_with_affiliate_i64("a", 1);
+        assert_eq!(
+            expr.eval_with_tuple(&tuple).expect("eval"),
+            Value::String("S".to_string())
+        );
+
+        let tuple = tuple_with_affiliate_i64("a", 2);
+        assert_eq!(
+            expr.eval_with_tuple(&tuple).expect("eval"),
+            Value::String("M".to_string())
+        );
+
+        let tuple = tuple_with_affiliate_i64("a", 3);
+        assert_eq!(
+            expr.eval_with_tuple(&tuple).expect("eval"),
+            Value::String("OTHER".to_string())
+        );
+    }
+
+    #[test]
+    fn scalar_case_short_circuits_then_eval() {
+        let a = ScalarExpr::column_with_column_name("a");
+        let zero = ScalarExpr::literal(Value::Int64(0), ConcreteDatatype::Int64(Int64Type));
+        let one = ScalarExpr::literal(Value::Int64(1), ConcreteDatatype::Int64(Int64Type));
+
+        let div_by_zero = one.clone().call_binary(zero.clone(), BinaryFunc::Div);
+
+        let expr = ScalarExpr::Case {
+            operand: None,
+            when_then: vec![(
+                a.clone().call_binary(one.clone(), BinaryFunc::Lt),
+                div_by_zero,
+            )],
+            else_expr: Some(Box::new(one)),
+        };
+
+        // a=10 => condition false => must not evaluate `1 / 0`.
+        let tuple = tuple_with_affiliate_i64("a", 10);
+        assert_eq!(expr.eval_with_tuple(&tuple).expect("eval"), Value::Int64(1));
     }
 }

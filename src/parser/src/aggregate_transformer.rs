@@ -194,6 +194,40 @@ fn replace_aggregates_in_expression(
             })
         }
 
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            let new_operand = match operand.as_ref() {
+                Some(inner) => Some(Box::new(replace_aggregates_in_expression(inner, mapping)?)),
+                None => None,
+            };
+
+            let new_conditions = conditions
+                .iter()
+                .map(|e| replace_aggregates_in_expression(e, mapping))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let new_results = results
+                .iter()
+                .map(|e| replace_aggregates_in_expression(e, mapping))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let new_else = match else_result.as_ref() {
+                Some(inner) => Some(Box::new(replace_aggregates_in_expression(inner, mapping)?)),
+                None => None,
+            };
+
+            Ok(Expr::Case {
+                operand: new_operand,
+                conditions: new_conditions,
+                results: new_results,
+                else_result: new_else,
+            })
+        }
+
         // For function calls that are not aggregates, check their arguments
         Expr::Function(func) => {
             let expr_str = format!("{:?}", expr);

@@ -478,6 +478,24 @@ fn plan_explain_table_driven() {
             expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1 as lag(a)]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
+            name: "searched_case_project",
+            sql: "SELECT CASE WHEN a < 150 THEN 'S' WHEN a < 170 THEN 'M' WHEN a < 175 THEN 'L' ELSE 'XL' END AS sizeLabel FROM stream",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[CASE WHEN a < 150 THEN 'S' WHEN a < 170 THEN 'M' WHEN a < 175 THEN 'L' ELSE 'XL' END as sizeLabel]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[CASE WHEN a < 150 THEN 'S' WHEN a < 170 THEN 'M' WHEN a < 175 THEN 'L' ELSE 'XL' END as sizeLabel]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "simple_case_project",
+            sql: "SELECT CASE a WHEN 1 THEN 'S' WHEN 2 THEN 'M' ELSE 'XL' END AS sizeLabel FROM stream",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[CASE a WHEN 1 THEN 'S' WHEN 2 THEN 'M' ELSE 'XL' END as sizeLabel]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[CASE a WHEN 1 THEN 'S' WHEN 2 THEN 'M' ELSE 'XL' END as sizeLabel]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "case_with_stateful_rewrite",
+            sql: "SELECT CASE WHEN lag(a) > 0 THEN 'pos' ELSE 'neg' END AS label FROM stream",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[CASE WHEN col_1 > 0 THEN 'pos' ELSE 'neg' END as label]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[CASE WHEN col_1 > 0 THEN 'pos' ELSE 'neg' END as label]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
             name: "order_by_single_key",
             sql: "SELECT a FROM stream ORDER BY a",
             options: PipelineOptions::default(),
