@@ -6,6 +6,7 @@ is intended for process-local integration and testing scenarios (no network I/O)
 ## Overview
 
 - Backing transport: in-process `tokio::sync::broadcast` channels (per topic).
+- Topics are scoped to the running **FlowInstance** (they are not shared across instances).
 - Topics are **strongly typed**: a topic is either `bytes` or `collection` (mixing is rejected).
 - Topics must be **predeclared** via the manager API before a memory stream can use them.
 - Message loss is possible when subscribers lag (drops are logged).

@@ -6,6 +6,7 @@ for process-local integration and testing scenarios (no network I/O).
 ## Overview
 
 - Backing transport: in-process `tokio::sync::broadcast` channels (per topic).
+- Topics are scoped to the running **FlowInstance** (they are not shared across instances).
 - Topics are **strongly typed**: a topic is either `bytes` or `collection` (mixing is rejected).
 - Topics must be **predeclared** via the manager API before a pipeline can publish to them.
 - Publishing when there are no subscribers is treated as success (delivered count is `0`).

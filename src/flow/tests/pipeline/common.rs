@@ -1,7 +1,7 @@
 use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
 use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::connector::{
-    memory_pubsub_registry, MemoryData, MemoryPubSubRegistry, MemoryTopicKind, SharedCollection,
+    MemoryData, MemoryPubSubRegistry, MemoryTopicKind, SharedCollection,
     DEFAULT_MEMORY_PUBSUB_CAPACITY,
 };
 use flow::model::Collection;
@@ -38,8 +38,8 @@ pub fn make_memory_topics(test_suite: &str, case_name: &str) -> (String, String)
     (format!("{base}.input"), format!("{base}.output"))
 }
 
-pub fn memory_registry() -> MemoryPubSubRegistry {
-    memory_pubsub_registry().clone()
+pub fn memory_registry(instance: &FlowInstance) -> MemoryPubSubRegistry {
+    instance.memory_pubsub_registry()
 }
 
 pub fn declare_memory_input_output_topics(

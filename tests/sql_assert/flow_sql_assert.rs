@@ -2,8 +2,7 @@ use datatypes::types::{BooleanType, Int64Type, StringType};
 use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
 use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::connector::{
-    memory_pubsub_registry, MemoryData, MemoryPubSubRegistry, MemoryTopicKind,
-    DEFAULT_MEMORY_PUBSUB_CAPACITY,
+    MemoryData, MemoryPubSubRegistry, MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY,
 };
 use flow::pipeline::{MemorySinkProps, PipelineDefinition};
 use flow::planner::plan_cache::PlanCacheInputs;
@@ -102,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (index, sql) in sqls.iter().enumerate() {
         truncate_sqlite_table(&conn, &table_name)?;
         let instance = FlowInstance::new();
-        let registry = memory_pubsub_registry().clone();
+        let registry = instance.memory_pubsub_registry();
 
         let input_topic = format!("tests.daily.sql_assert.input.{index}");
         let output_topic = format!("tests.daily.sql_assert.output.{index}");

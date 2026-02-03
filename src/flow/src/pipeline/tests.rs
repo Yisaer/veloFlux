@@ -3,7 +3,7 @@ use crate::catalog::{
     Catalog, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
 };
 use crate::codec::JsonDecoder;
-use crate::connector::{MockSourceConnector, MqttClientManager};
+use crate::connector::{MemoryPubSubRegistry, MockSourceConnector, MqttClientManager};
 use crate::shared_stream::SharedStreamConfig;
 use crate::shared_stream_registry;
 use crate::PipelineRegistries;
@@ -55,12 +55,14 @@ fn create_and_list_pipeline() {
     let catalog = Arc::new(Catalog::new());
     let registry = shared_stream_registry();
     let mqtt_manager = MqttClientManager::new();
+    let memory_pubsub_registry = MemoryPubSubRegistry::new();
     install_stream(&catalog, "test_stream");
     let registries = PipelineRegistries::new_with_builtin();
     let manager = PipelineManager::new(
         Arc::clone(&catalog),
         registry,
         mqtt_manager.clone(),
+        memory_pubsub_registry,
         registries,
     );
     let snapshot = manager
@@ -81,12 +83,14 @@ fn prevent_duplicate_pipeline() {
     let catalog = Arc::new(Catalog::new());
     let registry = shared_stream_registry();
     let mqtt_manager = MqttClientManager::new();
+    let memory_pubsub_registry = MemoryPubSubRegistry::new();
     install_stream(&catalog, "dup_stream");
     let registries = PipelineRegistries::new_with_builtin();
     let manager = PipelineManager::new(
         Arc::clone(&catalog),
         registry,
         mqtt_manager.clone(),
+        memory_pubsub_registry,
         registries,
     );
     manager
@@ -108,6 +112,7 @@ fn attach_sources_accepts_shared_stream_only_pipeline() {
         let catalog = Arc::new(Catalog::new());
         let registry = shared_stream_registry();
         let mqtt_manager = MqttClientManager::new();
+        let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let registries = PipelineRegistries::new_with_builtin();
 
         let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
@@ -151,8 +156,13 @@ fn attach_sources_accepts_shared_stream_only_pipeline() {
         .expect("create pipeline");
 
         let stream_defs = HashMap::new();
-        super::internal::attach_sources_from_catalog(&mut pipeline, &stream_defs, &mqtt_manager)
-            .expect("shared stream should not require datasource connectors");
+        super::internal::attach_sources_from_catalog(
+            &mut pipeline,
+            &stream_defs,
+            &mqtt_manager,
+            &memory_pubsub_registry,
+        )
+        .expect("shared stream should not require datasource connectors");
     });
 }
 
@@ -164,6 +174,7 @@ fn shared_stream_pipeline_uses_full_schema_for_column_indices() {
         let catalog = Arc::new(Catalog::new());
         let registry = shared_stream_registry();
         let mqtt_manager = MqttClientManager::new();
+        let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let registries = PipelineRegistries::new_with_builtin();
 
         let schema = Arc::new(Schema::new(vec![
@@ -215,7 +226,12 @@ fn shared_stream_pipeline_uses_full_schema_for_column_indices() {
         .expect("create pipeline");
 
         let stream_defs = HashMap::new();
-        super::internal::attach_sources_from_catalog(&mut pipeline, &stream_defs, &mqtt_manager)
-            .expect("shared stream should not require datasource connectors");
+        super::internal::attach_sources_from_catalog(
+            &mut pipeline,
+            &stream_defs,
+            &mqtt_manager,
+            &memory_pubsub_registry,
+        )
+        .expect("shared stream should not require datasource connectors");
     });
 }

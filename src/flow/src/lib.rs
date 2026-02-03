@@ -121,7 +121,7 @@ impl PipelineRegistries {
 
     pub fn new_with_builtin() -> Self {
         Self::new(
-            ConnectorRegistry::with_builtin_sinks(),
+            ConnectorRegistry::with_builtin_sinks(connector::MemoryPubSubRegistry::new()),
             EncoderRegistry::with_builtin_encoders(),
             DecoderRegistry::with_builtin_decoders(),
             AggregateFunctionRegistry::with_builtins(),

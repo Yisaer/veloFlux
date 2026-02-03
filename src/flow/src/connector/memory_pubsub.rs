@@ -2,7 +2,6 @@
 
 use crate::model::Collection;
 use bytes::Bytes;
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -363,12 +362,6 @@ impl Default for MemoryPubSubRegistry {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Accessor for the process-wide memory pub/sub registry.
-pub fn registry() -> &'static MemoryPubSubRegistry {
-    static REGISTRY: Lazy<MemoryPubSubRegistry> = Lazy::new(MemoryPubSubRegistry::new);
-    &REGISTRY
 }
 
 #[cfg(test)]
