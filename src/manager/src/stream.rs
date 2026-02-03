@@ -297,8 +297,14 @@ pub async fn create_stream_handler(
     if let Err(err) = validate_stream_decoder_config(&req, &decoder) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
+    let memory_pubsub_registry = state.instance.memory_pubsub_registry();
     if let StreamProps::Memory(memory_props) = &stream_props
-        && let Err(err) = validate_memory_stream_topic_declared(&req, memory_props, &decoder)
+        && let Err(err) = validate_memory_stream_topic_declared(
+            &req,
+            memory_props,
+            &decoder,
+            &memory_pubsub_registry,
+        )
     {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
@@ -772,6 +778,7 @@ pub(crate) fn validate_memory_stream_topic_declared(
     req: &CreateStreamRequest,
     props: &MemoryStreamProps,
     decoder: &StreamDecoderConfig,
+    memory_pubsub_registry: &flow::connector::MemoryPubSubRegistry,
 ) -> Result<(), String> {
     if !req.stream_type.eq_ignore_ascii_case("memory") {
         return Ok(());
@@ -789,7 +796,7 @@ pub(crate) fn validate_memory_stream_topic_declared(
     } else {
         MemoryTopicKind::Bytes
     };
-    let actual_kind = flow::connector::memory_pubsub_registry()
+    let actual_kind = memory_pubsub_registry
         .topic_kind(topic)
         .ok_or_else(|| format!("memory topic `{topic}` not declared"))?;
     if actual_kind != expected_kind {

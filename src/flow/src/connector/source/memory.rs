@@ -1,8 +1,6 @@
 //! Memory source connector that subscribes to in-process pub/sub topics.
 
-use crate::connector::memory_pubsub::{
-    registry as memory_pubsub_registry, MemoryData, MemoryPubSubRegistry, MemoryTopicKind,
-};
+use crate::connector::memory_pubsub::{MemoryData, MemoryPubSubRegistry, MemoryTopicKind};
 use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
 use crate::model::Collection;
 use futures::stream::StreamExt;
@@ -36,11 +34,7 @@ pub struct MemorySourceConnector {
 }
 
 impl MemorySourceConnector {
-    pub fn new(id: impl Into<String>, config: MemorySourceConfig) -> Self {
-        Self::with_registry(id, config, memory_pubsub_registry().clone())
-    }
-
-    pub fn with_registry(
+    pub fn new(
         id: impl Into<String>,
         config: MemorySourceConfig,
         registry: MemoryPubSubRegistry,

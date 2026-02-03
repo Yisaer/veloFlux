@@ -2,7 +2,8 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::catalog::{Catalog, CatalogError, StreamDefinition};
 use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry, MergerRegistry};
 use crate::connector::{
-    ConnectorError, ConnectorRegistry, MqttClientManager, SharedMqttClientConfig,
+    ConnectorError, ConnectorRegistry, MemoryPubSubRegistry, MqttClientManager,
+    SharedMqttClientConfig,
 };
 use crate::eventtime::EventtimeTypeRegistry;
 use crate::expr::custom_func::CustomFuncRegistry;
@@ -28,6 +29,7 @@ pub struct FlowInstance {
     catalog: Arc<Catalog>,
     shared_stream_registry: &'static SharedStreamRegistry,
     pipeline_manager: Arc<PipelineManager>,
+    memory_pubsub_registry: MemoryPubSubRegistry,
     // In-memory registry of shared MQTT client configs for discovery/listing.
     shared_mqtt_client_configs: Arc<Mutex<HashMap<String, SharedMqttClientConfig>>>,
     mqtt_client_manager: MqttClientManager,
@@ -42,14 +44,16 @@ pub struct FlowInstance {
 }
 
 impl FlowInstance {
-    /// Create a new Flow instance backed by global registries.
+    /// Create a new Flow instance with instance-scoped resources.
     pub fn new() -> Self {
         crate::deadlock::start_deadlock_detector_once();
 
         let catalog = Arc::new(Catalog::new());
         let shared_stream_registry = shared_stream_registry();
         let mqtt_client_manager = MqttClientManager::new();
-        let connector_registry = ConnectorRegistry::with_builtin_sinks();
+        let memory_pubsub_registry = MemoryPubSubRegistry::new();
+        let connector_registry =
+            ConnectorRegistry::with_builtin_sinks(memory_pubsub_registry.clone());
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
@@ -72,12 +76,14 @@ impl FlowInstance {
             Arc::clone(&catalog),
             shared_stream_registry,
             mqtt_client_manager.clone(),
+            memory_pubsub_registry.clone(),
             registries,
         ));
         Self {
             catalog,
             shared_stream_registry,
             pipeline_manager,
+            memory_pubsub_registry,
             shared_mqtt_client_configs: Arc::new(Mutex::new(HashMap::new())),
             mqtt_client_manager,
             connector_registry,
@@ -93,6 +99,10 @@ impl FlowInstance {
 
     pub fn merger_registry(&self) -> Arc<MergerRegistry> {
         Arc::clone(&self.merger_registry)
+    }
+
+    pub fn memory_pubsub_registry(&self) -> MemoryPubSubRegistry {
+        self.memory_pubsub_registry.clone()
     }
 }
 

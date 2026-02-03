@@ -78,8 +78,8 @@ pub enum ConnectorError {
 }
 
 pub use memory_pubsub::{
-    registry as memory_pubsub_registry, MemoryData, MemoryPubSubError, MemoryPubSubRegistry,
-    MemoryPublisher, MemoryTopicKind, SharedCollection, DEFAULT_MEMORY_PUBSUB_CAPACITY,
+    MemoryData, MemoryPubSubError, MemoryPubSubRegistry, MemoryPublisher, MemoryTopicKind,
+    SharedCollection, DEFAULT_MEMORY_PUBSUB_CAPACITY,
 };
 pub use mqtt_client::{
     MqttClientManager, SharedMqttClient, SharedMqttClientConfig, SharedMqttEvent,

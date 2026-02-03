@@ -1,9 +1,7 @@
 //! Memory sink connector that publishes to in-process pub/sub topics.
 
 use super::{SinkConnector, SinkConnectorError};
-use crate::connector::memory_pubsub::{
-    registry as memory_pubsub_registry, MemoryPubSubRegistry, MemoryTopicKind, SharedCollection,
-};
+use crate::connector::memory_pubsub::{MemoryPubSubRegistry, MemoryTopicKind, SharedCollection};
 use crate::model::Collection;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -36,11 +34,7 @@ pub enum MemorySinkConnector {
 }
 
 impl MemorySinkConnector {
-    pub fn new(id: impl Into<String>, config: MemorySinkConfig) -> Self {
-        Self::with_registry(id, config, memory_pubsub_registry().clone())
-    }
-
-    pub fn with_registry(
+    pub fn new(
         id: impl Into<String>,
         config: MemorySinkConfig,
         registry: MemoryPubSubRegistry,

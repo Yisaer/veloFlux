@@ -1579,7 +1579,8 @@ mod tests {
         )));
 
         // Try to create a processor from the PhysicalProject
-        let connector_registry = ConnectorRegistry::with_builtin_sinks();
+        let connector_registry =
+            ConnectorRegistry::with_builtin_sinks(crate::connector::MemoryPubSubRegistry::new());
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();

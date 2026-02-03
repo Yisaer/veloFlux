@@ -4,6 +4,7 @@ use super::sink::mqtt::MqttSinkConnector;
 use super::sink::nop::NopSinkConnector;
 use super::sink::SinkConnector;
 use super::ConnectorError;
+use crate::connector::MemoryPubSubRegistry;
 use crate::connector::MqttClientManager;
 use crate::planner::sink::SinkConnectorConfig;
 use parking_lot::RwLock;
@@ -23,25 +24,27 @@ type SinkConnectorFactory = Arc<
 /// Registry that resolves sink connector IDs to factory functions.
 pub struct ConnectorRegistry {
     sink_factories: RwLock<HashMap<String, SinkConnectorFactory>>,
+    memory_pubsub_registry: MemoryPubSubRegistry,
 }
 
 impl Default for ConnectorRegistry {
     fn default() -> Self {
-        let registry = Self::new();
+        let registry = Self::new(MemoryPubSubRegistry::new());
         registry.register_builtin_sinks();
         registry
     }
 }
 
 impl ConnectorRegistry {
-    pub fn new() -> Self {
+    pub fn new(memory_pubsub_registry: MemoryPubSubRegistry) -> Self {
         Self {
             sink_factories: RwLock::new(HashMap::new()),
+            memory_pubsub_registry,
         }
     }
 
-    pub fn with_builtin_sinks() -> Arc<Self> {
-        let registry = Arc::new(Self::new());
+    pub fn with_builtin_sinks(memory_pubsub_registry: MemoryPubSubRegistry) -> Arc<Self> {
+        let registry = Arc::new(Self::new(memory_pubsub_registry));
         registry.register_builtin_sinks();
         registry
     }
@@ -70,6 +73,8 @@ impl ConnectorRegistry {
     }
 
     fn register_builtin_sinks(&self) {
+        let memory_pubsub_registry = self.memory_pubsub_registry.clone();
+
         self.register_sink_factory(
             "mqtt",
             Arc::new(|sink_id, config, mqtt_clients| match config {
@@ -115,10 +120,11 @@ impl ConnectorRegistry {
 
         self.register_sink_factory(
             "memory",
-            Arc::new(|sink_id, config, _| match config {
+            Arc::new(move |sink_id, config, _| match config {
                 SinkConnectorConfig::Memory(cfg) => Ok(Box::new(MemorySinkConnector::new(
                     sink_id.to_string(),
                     cfg.clone(),
+                    memory_pubsub_registry.clone(),
                 ))),
                 other => Err(ConnectorError::Other(format!(
                     "connector `{sink_id}` expected Memory config but received {:?}",

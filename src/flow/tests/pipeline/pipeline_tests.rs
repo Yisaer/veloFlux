@@ -35,7 +35,7 @@ async fn run_test_case(test_case: TestCase) {
     println!("Running test: {}", test_case.name);
 
     let instance = FlowInstance::new();
-    let registry = memory_registry();
+    let registry = memory_registry(&instance);
     let (input_topic, output_topic) =
         make_memory_topics("pipeline_table_driven_queries", test_case.name);
     declare_memory_input_output_topics(&registry, &input_topic, &output_topic);
@@ -132,7 +132,7 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
     println!("Running test: {}", test_case.name);
 
     let instance = FlowInstance::new();
-    let registry = memory_registry();
+    let registry = memory_registry(&instance);
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_table_driven_memory_collection_sources_layout_normalize",
         test_case.name,
@@ -246,7 +246,7 @@ async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
     println!("Running test: {}", test_case.name);
 
     let instance = FlowInstance::new();
-    let registry = memory_registry();
+    let registry = memory_registry(&instance);
     let (input_topic, output_topic) =
         make_memory_topics("pipeline_table_driven_collection_sinks", test_case.name);
     declare_memory_input_output_topics_with_output_kind(

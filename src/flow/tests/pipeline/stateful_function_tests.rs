@@ -35,7 +35,7 @@ async fn run_stateful_case(case: StatefulCase) {
     println!("Running test: {}", case.name);
 
     let instance = FlowInstance::new();
-    let registry = memory_registry();
+    let registry = memory_registry(&instance);
     let (input_topic, output_topic) =
         make_memory_topics("stateful_function_table_driven", case.name);
     declare_memory_input_output_topics(&registry, &input_topic, &output_topic);

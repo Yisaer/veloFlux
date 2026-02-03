@@ -2,8 +2,9 @@ use super::*;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
     register_mock_source_handle, HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig,
-    MemorySinkConfig, MemorySourceConfig, MemorySourceConnector, MemoryTopicKind,
-    MockSourceConnector, MqttClientManager, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
+    MemoryPubSubRegistry, MemorySinkConfig, MemorySourceConfig, MemorySourceConnector,
+    MemoryTopicKind, MockSourceConnector, MqttClientManager, MqttSinkConfig, MqttSourceConfig,
+    MqttSourceConnector,
 };
 use crate::explain_shared_stream::shared_stream_decode_applied_snapshot;
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
@@ -84,6 +85,7 @@ impl PipelineManager {
         catalog: Arc<Catalog>,
         shared_stream_registry: &'static SharedStreamRegistry,
         mqtt_client_manager: MqttClientManager,
+        memory_pubsub_registry: MemoryPubSubRegistry,
         registries: PipelineRegistries,
     ) -> Self {
         Self {
@@ -91,6 +93,7 @@ impl PipelineManager {
             catalog,
             shared_stream_registry,
             mqtt_client_manager,
+            memory_pubsub_registry,
             registries,
         }
     }
@@ -106,6 +109,7 @@ impl PipelineManager {
             &self.catalog,
             self.shared_stream_registry,
             &self.mqtt_client_manager,
+            &self.memory_pubsub_registry,
             &self.registries,
         )
         .map_err(PipelineError::BuildFailure)?;
@@ -137,6 +141,7 @@ impl PipelineManager {
             &self.catalog,
             self.shared_stream_registry,
             &self.mqtt_client_manager,
+            &self.memory_pubsub_registry,
             &self.registries,
         )
         .map_err(PipelineError::BuildFailure)?;
@@ -222,6 +227,7 @@ impl PipelineManager {
             &self.catalog,
             self.shared_stream_registry,
             &self.mqtt_client_manager,
+            &self.memory_pubsub_registry,
             &self.registries,
         )
         .map_err(PipelineError::BuildFailure)?;
@@ -298,6 +304,7 @@ impl PipelineManager {
                 &self.catalog,
                 self.shared_stream_registry,
                 &self.mqtt_client_manager,
+                &self.memory_pubsub_registry,
                 &self.registries,
             )
             .map_err(PipelineError::BuildFailure)?;
@@ -397,6 +404,7 @@ fn build_pipeline_runtime(
     catalog: &Catalog,
     shared_stream_registry: &SharedStreamRegistry,
     mqtt_client_manager: &MqttClientManager,
+    memory_pubsub_registry: &MemoryPubSubRegistry,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
     let (pipeline, streams, _) = build_pipeline_runtime_with_logical_ir(
@@ -404,6 +412,7 @@ fn build_pipeline_runtime(
         catalog,
         shared_stream_registry,
         mqtt_client_manager,
+        memory_pubsub_registry,
         registries,
     )?;
     Ok((pipeline, streams))
@@ -414,6 +423,7 @@ fn build_pipeline_runtime_with_logical_ir(
     catalog: &Catalog,
     shared_stream_registry: &SharedStreamRegistry,
     mqtt_client_manager: &MqttClientManager,
+    memory_pubsub_registry: &MemoryPubSubRegistry,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>, Vec<u8>), String> {
     let select_stmt = parser::parse_sql_with_registries(
@@ -535,7 +545,12 @@ fn build_pipeline_runtime_with_logical_ir(
     )
     .map_err(|err| err.to_string())?;
     pipeline.set_pipeline_id(definition.id().to_string());
-    attach_sources_from_catalog(&mut pipeline, &stream_definitions, mqtt_client_manager)?;
+    attach_sources_from_catalog(
+        &mut pipeline,
+        &stream_definitions,
+        mqtt_client_manager,
+        memory_pubsub_registry,
+    )?;
     Ok((pipeline, streams, logical_ir))
 }
 
@@ -545,6 +560,7 @@ fn build_pipeline_runtime_from_logical_ir(
     catalog: &Catalog,
     shared_stream_registry: &SharedStreamRegistry,
     mqtt_client_manager: &MqttClientManager,
+    memory_pubsub_registry: &MemoryPubSubRegistry,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
     let logical_ir = LogicalPlanIR::decode(logical_plan_ir).map_err(|e| e.to_string())?;
@@ -656,7 +672,12 @@ fn build_pipeline_runtime_from_logical_ir(
     .map_err(|err| err.to_string())?;
 
     pipeline.set_pipeline_id(definition.id().to_string());
-    attach_sources_from_catalog(&mut pipeline, &stream_definitions, mqtt_client_manager)?;
+    attach_sources_from_catalog(
+        &mut pipeline,
+        &stream_definitions,
+        mqtt_client_manager,
+        memory_pubsub_registry,
+    )?;
 
     Ok((pipeline, streams))
 }
@@ -797,6 +818,7 @@ pub(super) fn attach_sources_from_catalog(
     pipeline: &mut ProcessorPipeline,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
     mqtt_client_manager: &MqttClientManager,
+    memory_pubsub_registry: &MemoryPubSubRegistry,
 ) -> Result<(), String> {
     let mut has_source_processor = false;
     let pipeline_id = pipeline.pipeline_id().to_string();
@@ -864,6 +886,7 @@ pub(super) fn attach_sources_from_catalog(
                     let connector = MemorySourceConnector::new(
                         format!("{processor_id}_memory_source_connector"),
                         config,
+                        memory_pubsub_registry.clone(),
                     );
                     ds.add_connector(Box::new(connector));
                 }

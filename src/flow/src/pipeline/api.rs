@@ -1,5 +1,5 @@
 use crate::catalog::Catalog;
-use crate::connector::MqttClientManager;
+use crate::connector::{MemoryPubSubRegistry, MqttClientManager};
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use crate::shared_stream::SharedStreamRegistry;
 use crate::PipelineRegistries;
@@ -252,5 +252,6 @@ pub struct PipelineManager {
     pub(super) catalog: Arc<Catalog>,
     pub(super) shared_stream_registry: &'static SharedStreamRegistry,
     pub(super) mqtt_client_manager: MqttClientManager,
+    pub(super) memory_pubsub_registry: MemoryPubSubRegistry,
     pub(super) registries: PipelineRegistries,
 }
