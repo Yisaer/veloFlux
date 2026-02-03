@@ -106,6 +106,43 @@ fn rewrite_expr_stateful(
                 negated: *negated,
             })
         }
+        Expr::Case {
+            operand,
+            conditions,
+            results,
+            else_result,
+        } => {
+            let rewritten_operand = match operand.as_ref() {
+                Some(inner) => Some(Box::new(rewrite_expr_stateful(
+                    inner, registry, allocator, seen, mappings,
+                )?)),
+                None => None,
+            };
+
+            let rewritten_conditions = conditions
+                .iter()
+                .map(|e| rewrite_expr_stateful(e, registry, allocator, seen, mappings))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let rewritten_results = results
+                .iter()
+                .map(|e| rewrite_expr_stateful(e, registry, allocator, seen, mappings))
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let rewritten_else = match else_result.as_ref() {
+                Some(inner) => Some(Box::new(rewrite_expr_stateful(
+                    inner, registry, allocator, seen, mappings,
+                )?)),
+                None => None,
+            };
+
+            Ok(Expr::Case {
+                operand: rewritten_operand,
+                conditions: rewritten_conditions,
+                results: rewritten_results,
+                else_result: rewritten_else,
+            })
+        }
         Expr::Function(func) => {
             let func_name = func
                 .name

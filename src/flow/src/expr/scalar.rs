@@ -48,6 +48,17 @@ pub enum ScalarExpr {
         /// The arguments to the function
         args: Vec<ScalarExpr>,
     },
+    /// A CASE expression.
+    ///
+    /// - When `operand` is `None`, this represents searched CASE:
+    ///   `CASE WHEN <cond> THEN <expr> ... ELSE <expr> END`.
+    /// - When `operand` is `Some`, this represents simple CASE:
+    ///   `CASE <operand> WHEN <value> THEN <expr> ... ELSE <expr> END`.
+    Case {
+        operand: Option<Box<ScalarExpr>>,
+        when_then: Vec<(ScalarExpr, ScalarExpr)>,
+        else_expr: Option<Box<ScalarExpr>>,
+    },
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -192,6 +203,49 @@ impl ScalarExpr {
                 func.validate_row(&row_args)?;
                 func.eval_row(&row_args)
             }
+            ScalarExpr::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                let operand_value = match operand.as_ref() {
+                    Some(expr) => Some(expr.eval_with_tuple(tuple)?),
+                    None => None,
+                };
+
+                for (when_expr, then_expr) in when_then {
+                    let matched = match operand_value.as_ref() {
+                        Some(operand_value) => {
+                            let when_value = when_expr.eval_with_tuple(tuple)?;
+                            let eq =
+                                BinaryFunc::Eq.eval_binary(operand_value.clone(), when_value)?;
+                            matches!(eq, Value::Bool(true))
+                        }
+                        None => {
+                            let cond = when_expr.eval_with_tuple(tuple)?;
+                            match cond {
+                                Value::Bool(true) => true,
+                                Value::Bool(false) | Value::Null => false,
+                                other => {
+                                    return Err(EvalError::TypeMismatch {
+                                        expected: "Bool".to_string(),
+                                        actual: format!("{:?}", other),
+                                    });
+                                }
+                            }
+                        }
+                    };
+
+                    if matched {
+                        return then_expr.eval_with_tuple(tuple);
+                    }
+                }
+
+                match else_expr.as_ref() {
+                    Some(expr) => expr.eval_with_tuple(tuple),
+                    None => Ok(Value::Null),
+                }
+            }
         }
     }
 
@@ -332,6 +386,17 @@ impl std::fmt::Debug for ScalarExpr {
             ScalarExpr::CallFunc { func, args } => {
                 write!(f, "CallFunc({}, {:?})", func.name(), args)
             }
+            ScalarExpr::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => write!(
+                f,
+                "Case({:?}, {:?}, {:?})",
+                operand.as_ref(),
+                when_then,
+                else_expr.as_ref()
+            ),
         }
     }
 }
@@ -398,6 +463,18 @@ impl PartialEq for ScalarExpr {
                 ScalarExpr::CallFunc { func: fa, args: aa },
                 ScalarExpr::CallFunc { func: fb, args: ab },
             ) => fa.name() == fb.name() && aa == ab,
+            (
+                ScalarExpr::Case {
+                    operand: oa,
+                    when_then: wa,
+                    else_expr: ea,
+                },
+                ScalarExpr::Case {
+                    operand: ob,
+                    when_then: wb,
+                    else_expr: eb,
+                },
+            ) => oa == ob && wa == wb && ea == eb,
             _ => false,
         }
     }
