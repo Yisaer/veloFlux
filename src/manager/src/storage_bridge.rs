@@ -1,7 +1,7 @@
 use crate::pipeline::{CreatePipelineRequest, build_pipeline_definition};
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
-    validate_memory_stream_topic_declared, validate_stream_decoder_config,
+    validate_memory_stream_topic, validate_stream_decoder_config,
 };
 use flow::catalog::EventtimeDefinition;
 use flow::catalog::StreamDefinition;
@@ -165,7 +165,7 @@ pub async fn load_from_storage(
         let shared = req.shared;
         validate_stream_decoder_config(&req, def.decoder())?;
         if let flow::catalog::StreamProps::Memory(memory_props) = def.props() {
-            validate_memory_stream_topic_declared(&req, memory_props, def.decoder(), instance)?;
+            validate_memory_stream_topic(&req, memory_props)?;
         }
         instance
             .create_stream(def, shared)
@@ -340,7 +340,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
 
-        let instance = FlowInstance::new();
+        let instance = FlowInstance::new(Arc::new(flow::Catalog::new()));
 
         let stream_req = sample_stream_request("s1");
         let stored_stream = stored_stream_from_request(&stream_req).unwrap();
@@ -353,7 +353,7 @@ mod tests {
 
         // Prepare a valid logical plan IR from a separate instance; this IR will be used to create
         // the pipeline without parsing stored_pipeline.sql.
-        let ir_instance = FlowInstance::new();
+        let ir_instance = FlowInstance::new(Arc::new(flow::Catalog::new()));
         let _ = install_stream_into_instance(&ir_instance, &stream_req).await;
         let valid_req = sample_pipeline_request("p_tmp", "SELECT value FROM s1", true);
         let valid_def = crate::pipeline::build_pipeline_definition(
@@ -383,7 +383,7 @@ mod tests {
             .expect("delete p_tmp");
 
         // Sanity: the cached IR must be sufficient to build a pipeline without parsing SQL.
-        let check_instance = FlowInstance::new();
+        let check_instance = FlowInstance::new(Arc::new(flow::Catalog::new()));
         let _ = install_stream_into_instance(&check_instance, &stream_req).await;
         let check_def = pipeline_definition_from_stored(
             &stored_pipeline,
@@ -438,7 +438,7 @@ mod tests {
     async fn plan_cache_miss_writes_snapshot() {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
-        let instance = FlowInstance::new();
+        let instance = FlowInstance::new(Arc::new(flow::Catalog::new()));
 
         let stream_req = sample_stream_request("s1");
         let stored_stream = stored_stream_from_request(&stream_req).unwrap();

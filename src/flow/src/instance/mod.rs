@@ -44,10 +44,9 @@ pub struct FlowInstance {
 
 impl FlowInstance {
     /// Create a new Flow instance with instance-scoped resources.
-    pub fn new() -> Self {
+    pub fn new(catalog: Arc<Catalog>) -> Self {
         crate::deadlock::start_deadlock_detector_once();
 
-        let catalog = Arc::new(Catalog::new());
         let shared_stream_registry = Arc::new(SharedStreamRegistry::new());
         let mqtt_client_manager = MqttClientManager::new();
         let memory_pubsub_registry = MemoryPubSubRegistry::new();
@@ -164,7 +163,7 @@ impl FlowInstance {
 
 impl Default for FlowInstance {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(Catalog::new()))
     }
 }
 
@@ -186,6 +185,8 @@ pub enum FlowInstanceError {
     Connector(#[from] ConnectorError),
     #[error(transparent)]
     Codec(#[from] CodecError),
+    #[error("stream {stream} still referenced by pipelines: {pipelines}")]
+    StreamInUse { stream: String, pipelines: String },
     #[error("{0}")]
     Invalid(String),
 }

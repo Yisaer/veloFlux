@@ -27,7 +27,7 @@ struct BatchCase {
 async fn run_batch_case(case: BatchCase) {
     println!("Running test: {}", case.name);
 
-    let instance = FlowInstance::new();
+    let instance = FlowInstance::default();
     let (input_topic, output_topic) = make_memory_topics("pipeline_batching", case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     install_memory_stream_schema(&instance, &input_topic, &case.input_data).await;

@@ -418,6 +418,50 @@ fn build_pipeline_runtime_with_logical_ir(
         let definition = catalog
             .get(&source.name)
             .ok_or_else(|| format!("stream '{}' not found in catalog", source.name))?;
+
+        if definition.stream_type() == crate::catalog::StreamType::Memory {
+            let StreamProps::Memory(props) = definition.props() else {
+                return Err(format!(
+                    "stream '{}' expected memory props but received {:?}",
+                    definition.id(),
+                    definition.stream_type()
+                ));
+            };
+
+            let topic = props.topic.trim();
+            if topic.is_empty() {
+                return Err(format!(
+                    "stream '{}' memory topic must not be empty",
+                    definition.id()
+                ));
+            }
+
+            let expected_kind = if definition.decoder().kind() == "none" {
+                MemoryTopicKind::Collection
+            } else {
+                MemoryTopicKind::Bytes
+            };
+            let actual_kind = context
+                .memory_pubsub_registry()
+                .topic_kind(topic)
+                .ok_or_else(|| {
+                    format!(
+                        "memory topic '{}' required by stream '{}' not declared in instance",
+                        topic,
+                        definition.id()
+                    )
+                })?;
+            if actual_kind != expected_kind {
+                return Err(format!(
+                    "memory topic '{}' kind mismatch for stream '{}': expected {}, got {}",
+                    topic,
+                    definition.id(),
+                    expected_kind,
+                    actual_kind
+                ));
+            }
+        }
+
         let schema = definition.schema();
         let kind =
             if futures::executor::block_on(shared_stream_registry.is_registered(&source.name)) {

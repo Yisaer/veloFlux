@@ -394,7 +394,7 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
 /// Prepare Flow registries/instance before initialization, so callers can
 /// register custom encoders/decoders/connectors prior to loading storage.
 pub fn prepare_registry() -> FlowInstance {
-    FlowInstance::new()
+    FlowInstance::new(std::sync::Arc::new(flow::Catalog::new()))
 }
 
 #[cfg(feature = "profiling")]

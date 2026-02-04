@@ -34,7 +34,7 @@ struct StatefulCase {
 async fn run_stateful_case(case: StatefulCase) {
     println!("Running test: {}", case.name);
 
-    let instance = FlowInstance::new();
+    let instance = FlowInstance::default();
     let (input_topic, output_topic) =
         make_memory_topics("stateful_function_table_driven", case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);

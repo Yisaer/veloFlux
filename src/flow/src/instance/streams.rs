@@ -70,6 +70,20 @@ impl FlowInstance {
 
     /// Delete a stream definition and its shared runtime (if registered).
     pub async fn delete_stream(&self, name: &str) -> Result<(), FlowInstanceError> {
+        let pipelines_using_stream = self
+            .pipeline_manager
+            .list()
+            .into_iter()
+            .filter(|snapshot| snapshot.streams.iter().any(|stream| stream == name))
+            .map(|snapshot| snapshot.definition.id().to_string())
+            .collect::<Vec<_>>();
+        if !pipelines_using_stream.is_empty() {
+            return Err(FlowInstanceError::StreamInUse {
+                stream: name.to_string(),
+                pipelines: pipelines_using_stream.join(", "),
+            });
+        }
+
         if self.shared_stream_registry.is_registered(name).await {
             self.shared_stream_registry.drop_stream(name).await?;
         }

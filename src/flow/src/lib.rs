@@ -257,7 +257,7 @@ fn build_schema_binding(
 /// };
 ///
 /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
-/// let instance = FlowInstance::new();
+/// let instance = FlowInstance::default();
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig { log: false }),
