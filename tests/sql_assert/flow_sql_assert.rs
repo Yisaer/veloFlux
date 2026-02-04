@@ -1,12 +1,12 @@
 use datatypes::types::{BooleanType, Int64Type, StringType};
 use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
 use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
-use flow::connector::{
-    MemoryData, MemoryPubSubRegistry, MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY,
-};
+use flow::connector::{MemoryData, MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY};
 use flow::pipeline::{MemorySinkProps, PipelineDefinition};
 use flow::planner::plan_cache::PlanCacheInputs;
-use flow::{FlowInstance, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
+use flow::{
+    CreatePipelineRequest, FlowInstance, PipelineStopMode, SinkDefinition, SinkProps, SinkType,
+};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params_from_iter, Connection, Row};
@@ -101,20 +101,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (index, sql) in sqls.iter().enumerate() {
         truncate_sqlite_table(&conn, &table_name)?;
         let instance = FlowInstance::new();
-        let registry = instance.memory_pubsub_registry();
 
         let input_topic = format!("tests.daily.sql_assert.input.{index}");
         let output_topic = format!("tests.daily.sql_assert.output.{index}");
         declare_memory_topics(
-            &registry,
+            &instance,
             &input_topic,
             MemoryTopicKind::Bytes,
             &output_topic,
         );
         install_stream_schema(&instance, &input_topic, &table_name, &columns).await;
 
-        let mut output = registry
-            .open_subscribe_bytes(&output_topic)
+        let mut output = instance
+            .open_memory_subscribe_bytes(&output_topic)
             .expect("subscribe output bytes");
 
         let pipeline_id = format!("pipe_{index}");
@@ -128,27 +127,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )],
         );
         instance
-            .create_pipeline_with_plan_cache(
-                pipeline,
+            .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
                 PlanCacheInputs {
                     pipeline_raw_json: String::new(),
                     streams_raw_json: Vec::new(),
                     snapshot: None,
                 },
-            )
+            ))
             .unwrap_or_else(|_| panic!("failed to create pipeline for SQL: {sql}"));
 
         instance
             .start_pipeline(&pipeline_id)
             .unwrap_or_else(|_| panic!("failed to start pipeline for SQL: {sql}"));
 
-        registry
-            .wait_for_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
+        instance
+            .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
             .await
             .expect("wait for memory source subscriber");
 
-        let publisher = registry
-            .open_publisher_bytes(&input_topic)
+        let publisher = instance
+            .open_memory_publisher_bytes(&input_topic)
             .expect("open memory publisher");
 
         let mut previous_results: HashMap<String, usize> = HashMap::new();
@@ -492,16 +490,16 @@ fn random_string(rng: &mut StdRng, min_len: usize, max_len: usize) -> String {
 }
 
 fn declare_memory_topics(
-    registry: &MemoryPubSubRegistry,
+    instance: &FlowInstance,
     input_topic: &str,
     input_kind: MemoryTopicKind,
     output_topic: &str,
 ) {
-    registry
-        .declare_topic(input_topic, input_kind, DEFAULT_MEMORY_PUBSUB_CAPACITY)
+    instance
+        .declare_memory_topic(input_topic, input_kind, DEFAULT_MEMORY_PUBSUB_CAPACITY)
         .expect("declare input memory topic");
-    registry
-        .declare_topic(
+    instance
+        .declare_memory_topic(
             output_topic,
             MemoryTopicKind::Bytes,
             DEFAULT_MEMORY_PUBSUB_CAPACITY,

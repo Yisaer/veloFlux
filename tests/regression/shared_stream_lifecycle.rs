@@ -72,15 +72,26 @@ fn random_suffix() -> String {
         .collect()
 }
 
+async fn bind_manager_listener_or_skip() -> Option<TcpListener> {
+    match TcpListener::bind("127.0.0.1:0").await {
+        Ok(listener) => Some(listener),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipping test: binding a local listener is not permitted: {err}");
+            None
+        }
+        Err(err) => panic!("bind manager listener: {err}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_stream_rapid_start_stop_cycles_via_rest() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
     let instance = flow::FlowInstance::new();
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind manager listener");
+    let Some(listener) = bind_manager_listener_or_skip().await else {
+        return;
+    };
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
@@ -236,9 +247,9 @@ async fn shared_stream_slow_unsubscribe_during_restart_via_rest() {
     let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
     let instance = flow::FlowInstance::new();
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind manager listener");
+    let Some(listener) = bind_manager_listener_or_skip().await else {
+        return;
+    };
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {

@@ -32,16 +32,11 @@ pub struct PlanSnapshotRecord {
     pub logical_plan_ir: Vec<u8>,
 }
 
+#[derive(Debug, Clone)]
 pub struct PlanCacheInputs {
     pub pipeline_raw_json: String,
     pub streams_raw_json: Vec<(String, String)>,
     pub snapshot: Option<PlanSnapshotRecord>,
-}
-
-pub struct PlanCacheBuildResult {
-    pub snapshot: crate::pipeline::PipelineSnapshot,
-    pub hit: bool,
-    pub logical_plan_ir: Option<Vec<u8>>,
 }
 
 fn fnv1a_64_hex(input: &str) -> String {

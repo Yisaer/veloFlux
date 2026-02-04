@@ -31,7 +31,7 @@ pub use datatypes::{
 pub use eventtime::{
     BuiltinEventtimeType, EventtimeParseError, EventtimeTypeParser, EventtimeTypeRegistry,
 };
-pub use expr::custom_func::{CustomFunc, CustomFuncRegistry, CustomFuncRegistryError};
+pub use expr::custom_func::{CustomFunc, CustomFuncRegistry};
 pub use expr::sql_conversion;
 pub use expr::{
     convert_expr_to_scalar, convert_select_stmt_to_scalar, extract_select_expressions, BinaryFunc,
@@ -40,9 +40,10 @@ pub use expr::{
 pub use instance::{FlowInstance, FlowInstanceError, StreamRuntimeInfo};
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
-    KuksaSinkProps, MqttSinkProps, PipelineDefinition, PipelineError, PipelineManager,
-    PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode, PlanCacheOptions,
-    SinkDefinition, SinkProps, SinkType,
+    CreatePipelinePlanCacheResult, CreatePipelineRequest, CreatePipelineResult,
+    ExplainPipelineTarget, KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps,
+    PipelineDefinition, PipelineError, PipelineOptions, PipelineSnapshot, PipelineStatus,
+    PipelineStopMode, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
 };
 pub use planner::create_physical_plan;
 pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};
@@ -60,8 +61,8 @@ pub use processor::{
     ResultCollectProcessor, SinkProcessor, StreamData,
 };
 pub use shared_stream::{
-    registry as shared_stream_registry, SharedSourceConnectorConfig, SharedStreamConfig,
-    SharedStreamError, SharedStreamInfo, SharedStreamStatus, SharedStreamSubscription,
+    SharedSourceConnectorConfig, SharedStreamConfig, SharedStreamError, SharedStreamInfo,
+    SharedStreamStatus, SharedStreamSubscription,
 };
 pub use stateful::StatefulFunctionRegistry;
 
@@ -184,7 +185,7 @@ fn build_physical_plan_from_sql(
         registries.stateful_registry(),
     )?;
     let (schema_binding, stream_defs) =
-        build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
+        build_schema_binding(&select_stmt, catalog, Some(shared_stream_registry))?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
     let (logical_plan, pruned_binding) =
         optimize_logical_plan(Arc::clone(&logical_plan), &schema_binding);
@@ -207,7 +208,7 @@ fn build_physical_plan_from_sql(
 fn build_schema_binding(
     select_stmt: &parser::SelectStmt,
     catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
+    shared_stream_registry: Option<&SharedStreamRegistry>,
 ) -> Result<SchemaBindingResult, Box<dyn std::error::Error>> {
     use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
     let mut entries = Vec::new();
@@ -217,17 +218,19 @@ fn build_schema_binding(
             .get(&source.name)
             .ok_or_else(|| format!("stream '{}' not found in catalog", source.name))?;
         let schema = definition.schema();
-        let kind =
-            if futures::executor::block_on(shared_stream_registry.is_registered(&source.name)) {
-                SourceBindingKind::Shared
-            } else if definition.stream_type() == crate::catalog::StreamType::Memory
-                && definition.decoder().kind() == "none"
-            {
-                // Memory collection sources must preserve the full schema for ByIndex correctness.
-                SourceBindingKind::MemoryCollection
-            } else {
-                SourceBindingKind::Regular
-            };
+        let is_shared = shared_stream_registry.is_some_and(|registry| {
+            futures::executor::block_on(registry.is_registered(&source.name))
+        });
+        let kind = if is_shared {
+            SourceBindingKind::Shared
+        } else if definition.stream_type() == crate::catalog::StreamType::Memory
+            && definition.decoder().kind() == "none"
+        {
+            // Memory collection sources must preserve the full schema for ByIndex correctness.
+            SourceBindingKind::MemoryCollection
+        } else {
+            SourceBindingKind::Regular
+        };
         entries.push(SchemaBindingEntry {
             source_name: source.name.clone(),
             alias: source.alias.clone(),
@@ -247,51 +250,47 @@ fn build_schema_binding(
 /// # Example
 /// ```no_run
 /// use flow::{
-///     catalog::Catalog,
-///     connector::MqttClientManager,
-///     create_pipeline,
+///     FlowInstance,
 ///     planner::sink::{
 ///         NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 ///     },
-///     shared_stream_registry,
-///     PipelineRegistries,
 /// };
 ///
 /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
-/// let catalog = Catalog::new();
-/// let registry = shared_stream_registry();
-/// let mqtt_clients = MqttClientManager::new();
-/// let registries = PipelineRegistries::new_with_builtin();
+/// let instance = FlowInstance::new();
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig { log: false }),
 ///     SinkEncoderConfig::json(),
 /// );
 /// let sink = PipelineSink::new("custom_sink", connector);
-/// let pipeline = create_pipeline(
-///     "SELECT a FROM stream",
-///     vec![sink],
-///     &catalog,
-///     registry,
-///     mqtt_clients,
-///     &registries,
-/// )?;
+/// let pipeline = instance.build_pipeline("SELECT a FROM stream", vec![sink])?;
 /// # Ok(()) }
 /// ```
-pub fn create_pipeline(
+pub(crate) fn create_pipeline(
     sql: &str,
     sinks: Vec<PipelineSink>,
     catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
+    shared_stream_registry: Arc<SharedStreamRegistry>,
     mqtt_client_manager: MqttClientManager,
     registries: &PipelineRegistries,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
     tracing::info!(sql = sql, "create pipeline");
-    let physical_plan =
-        build_physical_plan_from_sql(sql, sinks, catalog, shared_stream_registry, registries)?;
+    let physical_plan = build_physical_plan_from_sql(
+        sql,
+        sinks,
+        catalog,
+        shared_stream_registry.as_ref(),
+        registries,
+    )?;
     let pipeline = create_processor_pipeline(
         physical_plan,
-        ProcessorPipelineDependencies::new(mqtt_client_manager, registries, None),
+        ProcessorPipelineDependencies::new(
+            mqtt_client_manager,
+            Arc::clone(&shared_stream_registry),
+            registries,
+            None,
+        ),
         ProcessorPipelineOptions::default(),
     )?;
     Ok(pipeline)
@@ -336,7 +335,7 @@ pub fn explain_pipeline_with_options(
     sql: &str,
     sinks: Vec<PipelineSink>,
     catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
+    shared_stream_registry: Option<&SharedStreamRegistry>,
     registries: &PipelineRegistries,
     options: &crate::pipeline::PipelineOptions,
 ) -> Result<PipelineExplain, Box<dyn std::error::Error>> {
@@ -375,8 +374,9 @@ pub fn explain_pipeline_with_options(
         registries.aggregate_registry(),
     );
 
-    let shared_stream_decode_applied =
-        shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
+    let shared_stream_decode_applied = shared_stream_registry.map_or_else(HashMap::new, |r| {
+        shared_stream_decode_applied_snapshot(&optimized_plan, r)
+    });
 
     Ok(PipelineExplain::new(
         logical_plan,
@@ -389,29 +389,4 @@ pub fn explain_pipeline_with_options(
             shared_stream_decode_applied,
         },
     ))
-}
-
-/// Convenience helper for tests and demos that just need a logging mock sink.
-pub fn create_pipeline_with_log_sink(
-    sql: &str,
-    forward_to_result: bool,
-    catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
-    mqtt_client_manager: MqttClientManager,
-    registries: &PipelineRegistries,
-) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
-    let connector = PipelineSinkConnector::new(
-        "log_sink_connector",
-        SinkConnectorConfig::Nop(NopSinkConfig { log: true }),
-        SinkEncoderConfig::json(),
-    );
-    let sink = PipelineSink::new("log_sink", connector).with_forward_to_result(forward_to_result);
-    create_pipeline(
-        sql,
-        vec![sink],
-        catalog,
-        shared_stream_registry,
-        mqtt_client_manager,
-        registries,
-    )
 }

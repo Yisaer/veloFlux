@@ -6,14 +6,14 @@ use flow::pipeline::MemorySinkProps;
 use flow::pipeline::PipelineDefinition;
 use flow::planner::plan_cache::PlanCacheInputs;
 use flow::FlowInstance;
-use flow::{PipelineStopMode, SinkDefinition, SinkProps, SinkType};
+use flow::{CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
 use serde_json::Value as JsonValue;
 use tokio::time::Duration;
 
 use super::common::ColumnCheck;
 use super::common::{
     build_expected_json, declare_memory_input_output_topics, install_memory_stream_schema,
-    make_memory_topics, memory_registry, normalize_json, publish_input_collection, recv_next_json,
+    make_memory_topics, normalize_json, publish_input_collection, recv_next_json,
 };
 
 struct ExpectedCollection {
@@ -35,14 +35,13 @@ async fn run_stateful_case(case: StatefulCase) {
     println!("Running test: {}", case.name);
 
     let instance = FlowInstance::new();
-    let registry = memory_registry(&instance);
     let (input_topic, output_topic) =
         make_memory_topics("stateful_function_table_driven", case.name);
-    declare_memory_input_output_topics(&registry, &input_topic, &output_topic);
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     install_memory_stream_schema(&instance, &input_topic, &case.input_data).await;
 
-    let mut output = registry
-        .open_subscribe_bytes(&output_topic)
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
         .expect("subscribe output bytes");
     let pipeline_id = format!("pipe_{}", output_topic);
     let pipeline = PipelineDefinition::new(
@@ -55,14 +54,13 @@ async fn run_stateful_case(case: StatefulCase) {
         )],
     );
     instance
-        .create_pipeline_with_plan_cache(
-            pipeline,
+        .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
             PlanCacheInputs {
                 pipeline_raw_json: String::new(),
                 streams_raw_json: Vec::new(),
                 snapshot: None,
             },
-        )
+        ))
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
     instance
         .start_pipeline(&pipeline_id)
@@ -77,7 +75,7 @@ async fn run_stateful_case(case: StatefulCase) {
         .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", case.name));
 
     publish_input_collection(
-        &registry,
+        &instance,
         &input_topic,
         Box::new(test_batch),
         Duration::from_secs(5),

@@ -1,17 +1,22 @@
 use super::*;
 use crate::catalog::{
-    Catalog, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
+    Catalog, MockStreamProps, MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
 };
 use crate::codec::JsonDecoder;
 use crate::connector::{MemoryPubSubRegistry, MockSourceConnector, MqttClientManager};
-use crate::shared_stream::SharedStreamConfig;
-use crate::shared_stream_registry;
+use crate::planner::sink::{
+    NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
+};
+use crate::processor::StreamData;
+use crate::shared_stream::{SharedStreamConfig, SharedStreamRegistry};
 use crate::PipelineRegistries;
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use serde_json::Map as JsonMap;
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
+use tokio::time::{timeout, Duration};
 use uuid::Uuid;
 
 fn install_stream(catalog: &Arc<Catalog>, name: &str) {
@@ -50,24 +55,74 @@ fn sample_pipeline(id: &str, stream: &str) -> PipelineDefinition {
     )
 }
 
+fn create_pipeline_with_log_sink(
+    sql: &str,
+    forward_to_result: bool,
+    catalog: &Catalog,
+    shared_stream_registry: Arc<SharedStreamRegistry>,
+    mqtt_client_manager: MqttClientManager,
+    registries: &PipelineRegistries,
+) -> Result<crate::processor::ProcessorPipeline, Box<dyn std::error::Error>> {
+    let connector = PipelineSinkConnector::new(
+        "log_sink_connector",
+        SinkConnectorConfig::Nop(NopSinkConfig { log: true }),
+        SinkEncoderConfig::json(),
+    );
+    let sink = PipelineSink::new("log_sink", connector).with_forward_to_result(forward_to_result);
+    crate::create_pipeline(
+        sql,
+        vec![sink],
+        catalog,
+        shared_stream_registry,
+        mqtt_client_manager,
+        registries,
+    )
+}
+
+async fn recv_next_json(
+    output: &mut tokio::sync::mpsc::Receiver<StreamData>,
+    timeout_duration: Duration,
+) -> JsonValue {
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let item = timeout(remaining, output.recv())
+            .await
+            .expect("timeout waiting for pipeline output")
+            .expect("pipeline output channel closed");
+        match item {
+            StreamData::EncodedBytes { payload, .. } => {
+                return serde_json::from_slice(&payload).expect("invalid JSON payload")
+            }
+            StreamData::Control(_) => continue,
+            StreamData::Watermark(_) => continue,
+            StreamData::Error(err) => panic!("pipeline returned error: {}", err.message),
+            other => panic!("unexpected stream data: {}", other.description()),
+        }
+    }
+}
+
 #[test]
 fn create_and_list_pipeline() {
     let catalog = Arc::new(Catalog::new());
-    let registry = shared_stream_registry();
     let mqtt_manager = MqttClientManager::new();
     let memory_pubsub_registry = MemoryPubSubRegistry::new();
+    let registry = Arc::new(SharedStreamRegistry::new());
     install_stream(&catalog, "test_stream");
     let registries = PipelineRegistries::new_with_builtin();
-    let manager = PipelineManager::new(
-        Arc::clone(&catalog),
-        registry,
+    let context = crate::pipeline::PipelineContext::new(
+        Arc::clone(&registry),
         mqtt_manager.clone(),
-        memory_pubsub_registry,
-        registries,
+        memory_pubsub_registry.clone(),
     );
+    let manager = PipelineManager::new(Arc::clone(&catalog), context, registries);
     let snapshot = manager
-        .create_pipeline(sample_pipeline("pipe_a", "test_stream"))
-        .expect("create pipeline");
+        .create_pipeline(CreatePipelineRequest::new(sample_pipeline(
+            "pipe_a",
+            "test_stream",
+        )))
+        .expect("create pipeline")
+        .snapshot;
     assert_eq!(snapshot.status, PipelineStatus::Stopped);
     let list = manager.list();
     assert_eq!(list.len(), 1);
@@ -79,24 +134,144 @@ fn create_and_list_pipeline() {
 }
 
 #[test]
+fn shared_stream_two_pipelines_project_different_columns() {
+    let runtime = Runtime::new().expect("runtime");
+    runtime.block_on(async move {
+        let stream_name = format!("shared_stream_it_{}", Uuid::new_v4().simple());
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                stream_name.clone(),
+                "a".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                stream_name.clone(),
+                "b".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                stream_name.clone(),
+                "c".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+        ]));
+
+        let catalog = Arc::new(Catalog::new());
+        catalog.upsert(StreamDefinition::new(
+            stream_name.clone(),
+            Arc::clone(&schema),
+            StreamProps::Mock(MockStreamProps::default()),
+            StreamDecoderConfig::json(),
+        ));
+
+        let shared_stream_registry = Arc::new(SharedStreamRegistry::new());
+        let (connector, handle) = MockSourceConnector::new(format!("{stream_name}_connector"));
+        let decoder = Arc::new(JsonDecoder::new(
+            stream_name.clone(),
+            Arc::clone(&schema),
+            JsonMap::new(),
+        ));
+        let config = SharedStreamConfig::new(stream_name.clone(), Arc::clone(&schema))
+            .with_connector(Box::new(connector), decoder);
+        shared_stream_registry
+            .create_stream(config)
+            .await
+            .expect("create shared stream");
+
+        let mqtt_manager = MqttClientManager::new();
+        let registries = PipelineRegistries::new_with_builtin();
+
+        let mut pipeline_ab = create_pipeline_with_log_sink(
+            &format!("SELECT a, b FROM {stream_name}"),
+            true,
+            catalog.as_ref(),
+            Arc::clone(&shared_stream_registry),
+            mqtt_manager.clone(),
+            &registries,
+        )
+        .expect("create pipeline_ab");
+        pipeline_ab.set_pipeline_id(format!("pipeline_ab_{}", Uuid::new_v4().simple()));
+
+        let mut pipeline_bc = create_pipeline_with_log_sink(
+            &format!("SELECT b, c FROM {stream_name}"),
+            true,
+            catalog.as_ref(),
+            Arc::clone(&shared_stream_registry),
+            mqtt_manager.clone(),
+            &registries,
+        )
+        .expect("create pipeline_bc");
+        pipeline_bc.set_pipeline_id(format!("pipeline_bc_{}", Uuid::new_v4().simple()));
+
+        let mut out_ab = pipeline_ab
+            .take_output()
+            .expect("pipeline_ab should expose output receiver");
+        let mut out_bc = pipeline_bc
+            .take_output()
+            .expect("pipeline_bc should expose output receiver");
+
+        pipeline_ab.start();
+        pipeline_bc.start();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        handle
+            .send(r#"{"a": 1, "b": 2, "c": 3}"#)
+            .await
+            .expect("send mock payload");
+
+        let timeout_duration = Duration::from_secs(5);
+        let json_ab = recv_next_json(&mut out_ab, timeout_duration).await;
+        let json_bc = recv_next_json(&mut out_bc, timeout_duration).await;
+
+        assert_eq!(json_ab, serde_json::json!([{"a": 1, "b": 2}]));
+        assert_eq!(json_bc, serde_json::json!([{"b": 2, "c": 3}]));
+
+        let info = shared_stream_registry
+            .get_stream(&stream_name)
+            .await
+            .expect("shared stream info");
+        assert_eq!(info.decoding_columns, vec!["a", "b", "c"]);
+
+        pipeline_ab
+            .close(Duration::from_secs(5))
+            .await
+            .expect("close pipeline_ab");
+        pipeline_bc
+            .close(Duration::from_secs(5))
+            .await
+            .expect("close pipeline_bc");
+
+        shared_stream_registry
+            .drop_stream(&stream_name)
+            .await
+            .expect("drop shared stream");
+    });
+}
+
+#[test]
 fn prevent_duplicate_pipeline() {
     let catalog = Arc::new(Catalog::new());
-    let registry = shared_stream_registry();
     let mqtt_manager = MqttClientManager::new();
     let memory_pubsub_registry = MemoryPubSubRegistry::new();
+    let registry = Arc::new(SharedStreamRegistry::new());
     install_stream(&catalog, "dup_stream");
     let registries = PipelineRegistries::new_with_builtin();
-    let manager = PipelineManager::new(
-        Arc::clone(&catalog),
-        registry,
+    let context = crate::pipeline::PipelineContext::new(
+        Arc::clone(&registry),
         mqtt_manager.clone(),
-        memory_pubsub_registry,
-        registries,
+        memory_pubsub_registry.clone(),
     );
+    let manager = PipelineManager::new(Arc::clone(&catalog), context, registries);
     manager
-        .create_pipeline(sample_pipeline("dup_pipe", "dup_stream"))
+        .create_pipeline(CreatePipelineRequest::new(sample_pipeline(
+            "dup_pipe",
+            "dup_stream",
+        )))
         .expect("first creation");
-    let result = manager.create_pipeline(sample_pipeline("dup_pipe", "dup_stream"));
+    let result = manager.create_pipeline(CreatePipelineRequest::new(sample_pipeline(
+        "dup_pipe",
+        "dup_stream",
+    )));
     assert!(matches!(result, Err(PipelineError::AlreadyExists(_))));
     Runtime::new()
         .unwrap()
@@ -110,8 +285,8 @@ fn attach_sources_accepts_shared_stream_only_pipeline() {
     runtime.block_on(async move {
         let stream_name = format!("shared_stream_attach_test_{}", Uuid::new_v4().simple());
         let catalog = Arc::new(Catalog::new());
-        let registry = shared_stream_registry();
         let mqtt_manager = MqttClientManager::new();
+        let registry = Arc::new(SharedStreamRegistry::new());
         let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let registries = PipelineRegistries::new_with_builtin();
 
@@ -145,24 +320,24 @@ fn attach_sources_accepts_shared_stream_only_pipeline() {
             .await
             .expect("create shared stream");
 
-        let mut pipeline = crate::create_pipeline_with_log_sink(
+        let mut pipeline = create_pipeline_with_log_sink(
             &format!("SELECT sum(value) FROM {stream_name} GROUP BY slidingwindow('ss',10)"),
             false,
             &catalog,
-            registry,
+            Arc::clone(&registry),
             mqtt_manager.clone(),
             &registries,
         )
         .expect("create pipeline");
 
+        let context = crate::pipeline::PipelineContext::new(
+            Arc::clone(&registry),
+            mqtt_manager.clone(),
+            memory_pubsub_registry.clone(),
+        );
         let stream_defs = HashMap::new();
-        super::internal::attach_sources_from_catalog(
-            &mut pipeline,
-            &stream_defs,
-            &mqtt_manager,
-            &memory_pubsub_registry,
-        )
-        .expect("shared stream should not require datasource connectors");
+        super::internal::attach_sources_from_catalog(&mut pipeline, &stream_defs, &context)
+            .expect("shared stream should not require datasource connectors");
     });
 }
 
@@ -172,8 +347,8 @@ fn shared_stream_pipeline_uses_full_schema_for_column_indices() {
     runtime.block_on(async move {
         let stream_name = format!("shared_stream_schema_test_{}", Uuid::new_v4().simple());
         let catalog = Arc::new(Catalog::new());
-        let registry = shared_stream_registry();
         let mqtt_manager = MqttClientManager::new();
+        let registry = Arc::new(SharedStreamRegistry::new());
         let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let registries = PipelineRegistries::new_with_builtin();
 
@@ -215,23 +390,23 @@ fn shared_stream_pipeline_uses_full_schema_for_column_indices() {
             .await
             .expect("create shared stream");
 
-        let mut pipeline = crate::create_pipeline_with_log_sink(
+        let mut pipeline = create_pipeline_with_log_sink(
             &format!("SELECT sum(b) FROM {stream_name} GROUP BY slidingwindow('ss',10)"),
             false,
             &catalog,
-            registry,
+            Arc::clone(&registry),
             mqtt_manager.clone(),
             &registries,
         )
         .expect("create pipeline");
 
+        let context = crate::pipeline::PipelineContext::new(
+            Arc::clone(&registry),
+            mqtt_manager.clone(),
+            memory_pubsub_registry.clone(),
+        );
         let stream_defs = HashMap::new();
-        super::internal::attach_sources_from_catalog(
-            &mut pipeline,
-            &stream_defs,
-            &mqtt_manager,
-            &memory_pubsub_registry,
-        )
-        .expect("shared stream should not require datasource connectors");
+        super::internal::attach_sources_from_catalog(&mut pipeline, &stream_defs, &context)
+            .expect("shared stream should not require datasource connectors");
     });
 }

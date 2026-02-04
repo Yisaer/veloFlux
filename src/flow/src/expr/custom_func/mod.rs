@@ -4,7 +4,7 @@ pub mod string_func;
 use crate::catalog::FunctionDef;
 use crate::expr::func::EvalError;
 use datatypes::Value;
-pub use registry::{CustomFuncRegistry, CustomFuncRegistryError};
+pub use registry::CustomFuncRegistry;
 pub use string_func::ConcatFunc;
 
 /// Custom function that can be implemented by users

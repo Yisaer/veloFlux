@@ -83,8 +83,10 @@ pub async fn create_memory_topic_handler(
         }
     }
 
-    let registry = state.instance.memory_pubsub_registry();
-    if let Err(err) = registry.declare_topic(&topic, req.kind.as_flow_kind(), capacity) {
+    if let Err(err) = state
+        .instance
+        .declare_memory_topic(&topic, req.kind.as_flow_kind(), capacity)
+    {
         let _ = state.storage.delete_memory_topic(&topic);
         let (status, message) = match err {
             MemoryPubSubError::InvalidTopic => {

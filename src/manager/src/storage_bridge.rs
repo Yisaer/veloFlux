@@ -102,10 +102,10 @@ pub fn stored_pipeline_from_request(req: &CreatePipelineRequest) -> Result<Store
 pub fn pipeline_definition_from_stored(
     stored: &StoredPipeline,
     encoder_registry: &EncoderRegistry,
-    memory_pubsub_registry: &flow::connector::MemoryPubSubRegistry,
+    instance: &flow::FlowInstance,
 ) -> Result<PipelineDefinition, String> {
     let req = pipeline_request_from_stored(stored)?;
-    build_pipeline_definition(&req, encoder_registry, memory_pubsub_registry)
+    build_pipeline_definition(&req, encoder_registry, instance)
 }
 
 pub fn pipeline_request_from_stored(
@@ -140,15 +140,14 @@ pub async fn load_from_storage(
 ) -> Result<(), String> {
     let encoder_registry = instance.encoder_registry();
     let decoder_registry = instance.decoder_registry();
-    let memory_pubsub_registry = instance.memory_pubsub_registry();
 
     for topic in storage.list_memory_topics().map_err(|e| e.to_string())? {
         let kind = match topic.kind {
             StoredMemoryTopicKind::Bytes => flow::connector::MemoryTopicKind::Bytes,
             StoredMemoryTopicKind::Collection => flow::connector::MemoryTopicKind::Collection,
         };
-        memory_pubsub_registry
-            .declare_topic(&topic.topic, kind, topic.capacity)
+        instance
+            .declare_memory_topic(&topic.topic, kind, topic.capacity)
             .map_err(|err| err.to_string())?;
     }
 
@@ -166,12 +165,7 @@ pub async fn load_from_storage(
         let shared = req.shared;
         validate_stream_decoder_config(&req, def.decoder())?;
         if let flow::catalog::StreamProps::Memory(memory_props) = def.props() {
-            validate_memory_stream_topic_declared(
-                &req,
-                memory_props,
-                def.decoder(),
-                &memory_pubsub_registry,
-            )?;
+            validate_memory_stream_topic_declared(&req, memory_props, def.decoder(), instance)?;
         }
         instance
             .create_stream(def, shared)
@@ -181,11 +175,7 @@ pub async fn load_from_storage(
 
     for pipeline in storage.list_pipelines().map_err(|e| e.to_string())? {
         let _req = pipeline_request_from_stored(&pipeline)?;
-        let def = pipeline_definition_from_stored(
-            &pipeline,
-            encoder_registry.as_ref(),
-            &memory_pubsub_registry,
-        )?;
+        let def = pipeline_definition_from_stored(&pipeline, encoder_registry.as_ref(), instance)?;
 
         let stored_snapshot = storage
             .get_plan_snapshot(&pipeline.id)
@@ -214,17 +204,19 @@ pub async fn load_from_storage(
         };
 
         let result = instance
-            .create_pipeline_with_plan_cache(
-                def,
-                flow::planner::plan_cache::PlanCacheInputs {
-                    pipeline_raw_json: pipeline.raw_json.clone(),
-                    streams_raw_json,
-                    snapshot: plan_cache_snapshot,
-                },
+            .create_pipeline(
+                flow::CreatePipelineRequest::new(def).with_plan_cache_inputs(
+                    flow::planner::plan_cache::PlanCacheInputs {
+                        pipeline_raw_json: pipeline.raw_json.clone(),
+                        streams_raw_json,
+                        snapshot: plan_cache_snapshot,
+                    },
+                ),
             )
             .map_err(|e| e.to_string())?;
 
-        if let Some(logical_ir) = result.logical_plan_ir {
+        let logical_ir = result.plan_cache.and_then(|result| result.logical_plan_ir);
+        if let Some(logical_ir) = logical_ir {
             let stored_snapshot = build_plan_snapshot(
                 storage,
                 &pipeline.id,
@@ -367,12 +359,28 @@ mod tests {
         let valid_def = crate::pipeline::build_pipeline_definition(
             &valid_req,
             ir_instance.encoder_registry().as_ref(),
-            &ir_instance.memory_pubsub_registry(),
+            &ir_instance,
         )
         .unwrap();
-        let (_snapshot, logical_ir) = ir_instance
-            .create_pipeline_with_logical_ir(valid_def)
+        let ir_result = ir_instance
+            .create_pipeline(
+                flow::CreatePipelineRequest::new(valid_def).with_plan_cache_inputs(
+                    flow::planner::plan_cache::PlanCacheInputs {
+                        pipeline_raw_json: String::new(),
+                        streams_raw_json: Vec::new(),
+                        snapshot: None,
+                    },
+                ),
+            )
             .unwrap();
+        let logical_ir = ir_result
+            .plan_cache
+            .and_then(|result| result.logical_plan_ir)
+            .expect("plan cache miss should return logical IR");
+        ir_instance
+            .delete_pipeline("p_tmp")
+            .await
+            .expect("delete p_tmp");
 
         // Sanity: the cached IR must be sufficient to build a pipeline without parsing SQL.
         let check_instance = FlowInstance::new();
@@ -380,28 +388,29 @@ mod tests {
         let check_def = pipeline_definition_from_stored(
             &stored_pipeline,
             check_instance.encoder_registry().as_ref(),
-            &check_instance.memory_pubsub_registry(),
+            &check_instance,
         )
         .unwrap();
         check_instance
-            .create_pipeline_with_plan_cache(
-                check_def,
-                flow::planner::plan_cache::PlanCacheInputs {
-                    pipeline_raw_json: stored_pipeline.raw_json.clone(),
-                    streams_raw_json: vec![(
-                        stored_stream.id.clone(),
-                        stored_stream.raw_json.clone(),
-                    )],
-                    snapshot: Some(flow::planner::plan_cache::PlanSnapshotRecord {
-                        pipeline_json_hash: fnv1a_64_hex(&stored_pipeline.raw_json),
-                        stream_json_hashes: vec![(
+            .create_pipeline(
+                flow::CreatePipelineRequest::new(check_def).with_plan_cache_inputs(
+                    flow::planner::plan_cache::PlanCacheInputs {
+                        pipeline_raw_json: stored_pipeline.raw_json.clone(),
+                        streams_raw_json: vec![(
                             stored_stream.id.clone(),
-                            fnv1a_64_hex(&stored_stream.raw_json),
+                            stored_stream.raw_json.clone(),
                         )],
-                        flow_build_id: build_info::build_id(),
-                        logical_plan_ir: logical_ir.clone(),
-                    }),
-                },
+                        snapshot: Some(flow::planner::plan_cache::PlanSnapshotRecord {
+                            pipeline_json_hash: fnv1a_64_hex(&stored_pipeline.raw_json),
+                            stream_json_hashes: vec![(
+                                stored_stream.id.clone(),
+                                fnv1a_64_hex(&stored_stream.raw_json),
+                            )],
+                            flow_build_id: build_info::build_id(),
+                            logical_plan_ir: logical_ir.clone(),
+                        }),
+                    },
+                ),
             )
             .expect("rehydrate pipeline from logical IR");
 

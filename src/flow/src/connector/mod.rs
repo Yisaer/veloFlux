@@ -93,9 +93,6 @@ pub use sink::{SinkConnector, SinkConnectorError};
 /// History source connector implementation.
 pub use source::history::{HistorySourceConfig, HistorySourceConnector};
 pub use source::memory::{MemorySourceConfig, MemorySourceConnector};
-pub use source::mock::{
-    get_mock_source_handle, register_mock_source_handle, take_mock_source_handle,
-};
 pub use source::mock::{MockSourceConnector, MockSourceError, MockSourceHandle};
 /// MQTT-specific helpers and connector implementation.
 pub use source::mqtt::{MqttSourceConfig, MqttSourceConnector};

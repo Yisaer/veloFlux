@@ -25,7 +25,7 @@ use crate::processor::{
     StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
-use crate::shared_stream::AppliedDecodeState;
+use crate::shared_stream::{AppliedDecodeState, SharedStreamRegistry};
 use crate::stateful::StatefulFunctionRegistry;
 use crate::PipelineRegistries;
 use std::collections::HashSet;
@@ -103,6 +103,7 @@ pub struct ProcessorPipelineDependencies {
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     stateful_registry: Arc<StatefulFunctionRegistry>,
+    shared_stream_registry: Arc<SharedStreamRegistry>,
 
     eventtime: Option<EventtimePipelineContext>,
     merger_registry: Arc<MergerRegistry>,
@@ -111,6 +112,7 @@ pub struct ProcessorPipelineDependencies {
 impl ProcessorPipelineDependencies {
     pub fn new(
         mqtt_clients: MqttClientManager,
+        shared_stream_registry: Arc<SharedStreamRegistry>,
         registries: &PipelineRegistries,
         eventtime: Option<EventtimePipelineContext>,
     ) -> Self {
@@ -121,6 +123,7 @@ impl ProcessorPipelineDependencies {
             decoder_registry: registries.decoder_registry(),
             aggregate_registry: registries.aggregate_registry(),
             stateful_registry: registries.stateful_registry(),
+            shared_stream_registry,
             eventtime,
             merger_registry: registries.merger_registry(),
         }
@@ -162,6 +165,7 @@ struct ProcessorBuilderContext {
     decoder_registry: Option<Arc<DecoderRegistry>>,
     aggregate_registry: Option<Arc<AggregateFunctionRegistry>>,
     stateful_registry: Option<Arc<StatefulFunctionRegistry>>,
+    shared_stream_registry: Option<Arc<SharedStreamRegistry>>,
     eventtime: Option<EventtimePipelineContext>,
     merger_registry: Option<Arc<MergerRegistry>>,
     shared_stream: Option<SharedStreamPipelineOptions>,
@@ -221,6 +225,15 @@ impl ProcessorBuilderContext {
                 ProcessorError::InvalidConfiguration(
                     "stateful function registry unavailable".into(),
                 )
+            })
+    }
+
+    fn shared_stream_registry(&self) -> Result<Arc<SharedStreamRegistry>, ProcessorError> {
+        self.shared_stream_registry
+            .as_ref()
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration("shared stream registry unavailable".into())
             })
     }
 
@@ -883,9 +896,11 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::SharedStream(shared) => {
+            let shared_stream_registry = context.shared_stream_registry()?;
             let mut processor = SharedStreamProcessor::new_with_channel_capacities(
                 &processor_id,
                 shared.stream_name().to_string(),
+                shared_stream_registry,
                 channel_capacities,
             );
             processor.set_required_columns(shared.required_columns().to_vec());
@@ -1495,6 +1510,7 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
             decoder_registry: None,
             aggregate_registry: None,
             stateful_registry: None,
+            shared_stream_registry: None,
             eventtime: None,
             merger_registry: None,
             shared_stream: Some(options),
@@ -1520,6 +1536,7 @@ pub fn create_processor_pipeline(
             decoder_registry: Some(dependencies.decoder_registry),
             aggregate_registry: Some(dependencies.aggregate_registry),
             stateful_registry: Some(dependencies.stateful_registry),
+            shared_stream_registry: Some(dependencies.shared_stream_registry),
             eventtime: dependencies.eventtime,
             merger_registry: Some(dependencies.merger_registry),
             shared_stream: None,
@@ -1592,6 +1609,7 @@ mod tests {
             decoder_registry: Some(decoder_registry),
             aggregate_registry: Some(aggregate_registry),
             stateful_registry: Some(stateful_registry),
+            shared_stream_registry: None,
             eventtime: None,
             merger_registry: None,
             shared_stream: None,

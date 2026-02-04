@@ -5,7 +5,6 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::ConnectorRegistry;
 use crate::eventtime::EventtimeTypeRegistry;
-use crate::expr::custom_func::{CustomFunc, CustomFuncRegistry, CustomFuncRegistryError};
 use crate::stateful::{StatefulFunction, StatefulFunctionRegistry, StatefulRegistryError};
 use crate::PipelineRegistries;
 
@@ -29,17 +28,6 @@ impl FlowInstance {
 
     pub fn register_aggregate_function(&self, function: Arc<dyn AggregateFunction>) {
         self.aggregate_registry.register_function(function);
-    }
-
-    pub fn custom_func_registry(&self) -> Arc<CustomFuncRegistry> {
-        Arc::clone(&self.custom_func_registry)
-    }
-
-    pub fn register_custom_func(
-        &self,
-        function: Arc<dyn CustomFunc>,
-    ) -> Result<(), CustomFuncRegistryError> {
-        self.custom_func_registry.register_function(function)
     }
 
     pub fn connector_registry(&self) -> Arc<ConnectorRegistry> {

@@ -84,7 +84,7 @@ This feature stores snapshots in the existing metadata storage (`redb`) by addin
 When loading pipelines from storage on process startup:
 
 1. Manager reads pipeline `raw_json`, referenced stream `raw_json`, and optional snapshot record.
-2. Manager calls `flow` to build the pipeline via `create_pipeline_with_plan_cache(...)`.
+2. Manager calls `flow` to build the pipeline via `FlowInstance::create_pipeline(CreatePipelineRequest { plan_cache_inputs: Some(...) })`.
 3. In `flow`:
    - If `options.plan_cache.enabled == false`: always build from SQL.
    - If enabled and snapshot matches hashes + `flow_build_id`: build from logical plan IR (no SQL parse).

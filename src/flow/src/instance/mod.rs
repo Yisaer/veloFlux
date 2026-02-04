@@ -2,19 +2,18 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::catalog::{Catalog, CatalogError, StreamDefinition};
 use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry, MergerRegistry};
 use crate::connector::{
-    ConnectorError, ConnectorRegistry, MemoryPubSubRegistry, MqttClientManager,
-    SharedMqttClientConfig,
+    ConnectorError, ConnectorRegistry, MemoryData, MemoryPubSubError, MemoryPubSubRegistry,
+    MemoryPublisher, MemoryTopicKind, MqttClientManager, SharedMqttClientConfig,
 };
 use crate::eventtime::EventtimeTypeRegistry;
 use crate::expr::custom_func::CustomFuncRegistry;
 use crate::pipeline::PipelineManager;
-use crate::shared_stream::{
-    registry as shared_stream_registry, SharedStreamError, SharedStreamInfo, SharedStreamRegistry,
-};
+use crate::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamRegistry};
 use crate::stateful::StatefulFunctionRegistry;
 use crate::PipelineRegistries;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 use parking_lot::Mutex;
 
@@ -27,7 +26,7 @@ mod streams;
 #[derive(Clone)]
 pub struct FlowInstance {
     catalog: Arc<Catalog>,
-    shared_stream_registry: &'static SharedStreamRegistry,
+    shared_stream_registry: Arc<SharedStreamRegistry>,
     pipeline_manager: Arc<PipelineManager>,
     memory_pubsub_registry: MemoryPubSubRegistry,
     // In-memory registry of shared MQTT client configs for discovery/listing.
@@ -49,7 +48,7 @@ impl FlowInstance {
         crate::deadlock::start_deadlock_detector_once();
 
         let catalog = Arc::new(Catalog::new());
-        let shared_stream_registry = shared_stream_registry();
+        let shared_stream_registry = Arc::new(SharedStreamRegistry::new());
         let mqtt_client_manager = MqttClientManager::new();
         let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let connector_registry =
@@ -72,11 +71,14 @@ impl FlowInstance {
             Arc::clone(&eventtime_type_registry),
             Arc::clone(&merger_registry),
         );
-        let pipeline_manager = Arc::new(PipelineManager::new(
-            Arc::clone(&catalog),
-            shared_stream_registry,
+        let context = crate::pipeline::PipelineContext::new(
+            Arc::clone(&shared_stream_registry),
             mqtt_client_manager.clone(),
             memory_pubsub_registry.clone(),
+        );
+        let pipeline_manager = Arc::new(PipelineManager::new(
+            Arc::clone(&catalog),
+            context,
             registries,
         ));
         Self {
@@ -101,8 +103,62 @@ impl FlowInstance {
         Arc::clone(&self.merger_registry)
     }
 
-    pub fn memory_pubsub_registry(&self) -> MemoryPubSubRegistry {
-        self.memory_pubsub_registry.clone()
+    pub fn declare_memory_topic(
+        &self,
+        topic: &str,
+        kind: MemoryTopicKind,
+        capacity: usize,
+    ) -> Result<(), MemoryPubSubError> {
+        self.memory_pubsub_registry
+            .declare_topic(topic, kind, capacity)
+    }
+
+    pub fn open_memory_publisher_bytes(
+        &self,
+        topic: &str,
+    ) -> Result<MemoryPublisher, MemoryPubSubError> {
+        self.memory_pubsub_registry.open_publisher_bytes(topic)
+    }
+
+    pub fn open_memory_publisher_collection(
+        &self,
+        topic: &str,
+    ) -> Result<MemoryPublisher, MemoryPubSubError> {
+        self.memory_pubsub_registry.open_publisher_collection(topic)
+    }
+
+    pub fn memory_topic_kind(&self, topic: &str) -> Option<MemoryTopicKind> {
+        self.memory_pubsub_registry.topic_kind(topic)
+    }
+
+    pub fn memory_topic_capacity(&self, topic: &str) -> Option<usize> {
+        self.memory_pubsub_registry.topic_capacity(topic)
+    }
+
+    pub fn open_memory_subscribe_bytes(
+        &self,
+        topic: &str,
+    ) -> Result<broadcast::Receiver<MemoryData>, MemoryPubSubError> {
+        self.memory_pubsub_registry.open_subscribe_bytes(topic)
+    }
+
+    pub fn open_memory_subscribe_collection(
+        &self,
+        topic: &str,
+    ) -> Result<broadcast::Receiver<MemoryData>, MemoryPubSubError> {
+        self.memory_pubsub_registry.open_subscribe_collection(topic)
+    }
+
+    pub async fn wait_for_memory_subscribers(
+        &self,
+        topic: &str,
+        kind: MemoryTopicKind,
+        min: usize,
+        timeout: std::time::Duration,
+    ) -> Result<(), MemoryPubSubError> {
+        self.memory_pubsub_registry
+            .wait_for_subscribers(topic, kind, min, timeout)
+            .await
     }
 }
 

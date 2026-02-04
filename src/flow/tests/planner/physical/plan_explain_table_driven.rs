@@ -347,15 +347,9 @@ fn explain_json_string(sql: &str) -> String {
 fn explain_eventtime_json_string(sql: &str, options: &PipelineOptions) -> String {
     let catalog = setup_catalog_with_eventtime_stream();
     let registries = PipelineRegistries::new_with_builtin();
-    let explain = flow::explain_pipeline_with_options(
-        sql,
-        vec![],
-        &catalog,
-        flow::shared_stream_registry(),
-        &registries,
-        options,
-    )
-    .expect("explain pipeline");
+    let explain =
+        flow::explain_pipeline_with_options(sql, vec![], &catalog, None, &registries, options)
+            .expect("explain pipeline");
 
     println!("{sql}");
     println!("{}", explain.to_pretty_string());
