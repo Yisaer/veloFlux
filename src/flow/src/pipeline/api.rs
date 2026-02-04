@@ -1,7 +1,5 @@
 use crate::catalog::Catalog;
-use crate::connector::{MemoryPubSubRegistry, MqttClientManager};
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
-use crate::shared_stream::SharedStreamRegistry;
 use crate::PipelineRegistries;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -250,8 +248,6 @@ pub struct PipelineSnapshot {
 pub struct PipelineManager {
     pub(super) pipelines: RwLock<HashMap<String, super::internal::ManagedPipeline>>,
     pub(super) catalog: Arc<Catalog>,
-    pub(super) shared_stream_registry: &'static SharedStreamRegistry,
-    pub(super) mqtt_client_manager: MqttClientManager,
-    pub(super) memory_pubsub_registry: MemoryPubSubRegistry,
+    pub(super) context: super::PipelineContext,
     pub(super) registries: PipelineRegistries,
 }

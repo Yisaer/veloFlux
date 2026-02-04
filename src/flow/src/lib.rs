@@ -60,8 +60,8 @@ pub use processor::{
     ResultCollectProcessor, SinkProcessor, StreamData,
 };
 pub use shared_stream::{
-    registry as shared_stream_registry, SharedSourceConnectorConfig, SharedStreamConfig,
-    SharedStreamError, SharedStreamInfo, SharedStreamStatus, SharedStreamSubscription,
+    SharedSourceConnectorConfig, SharedStreamConfig, SharedStreamError, SharedStreamInfo,
+    SharedStreamStatus, SharedStreamSubscription,
 };
 pub use stateful::StatefulFunctionRegistry;
 
@@ -250,16 +250,17 @@ fn build_schema_binding(
 ///     catalog::Catalog,
 ///     connector::MqttClientManager,
 ///     create_pipeline,
+///     FlowInstance,
 ///     planner::sink::{
 ///         NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 ///     },
-///     shared_stream_registry,
 ///     PipelineRegistries,
 /// };
 ///
 /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
 /// let catalog = Catalog::new();
-/// let registry = shared_stream_registry();
+/// let instance = FlowInstance::new();
+/// let registry = instance.shared_stream_registry();
 /// let mqtt_clients = MqttClientManager::new();
 /// let registries = PipelineRegistries::new_with_builtin();
 /// let connector = PipelineSinkConnector::new(
@@ -282,16 +283,26 @@ pub fn create_pipeline(
     sql: &str,
     sinks: Vec<PipelineSink>,
     catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
+    shared_stream_registry: Arc<SharedStreamRegistry>,
     mqtt_client_manager: MqttClientManager,
     registries: &PipelineRegistries,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
     tracing::info!(sql = sql, "create pipeline");
-    let physical_plan =
-        build_physical_plan_from_sql(sql, sinks, catalog, shared_stream_registry, registries)?;
+    let physical_plan = build_physical_plan_from_sql(
+        sql,
+        sinks,
+        catalog,
+        shared_stream_registry.as_ref(),
+        registries,
+    )?;
     let pipeline = create_processor_pipeline(
         physical_plan,
-        ProcessorPipelineDependencies::new(mqtt_client_manager, registries, None),
+        ProcessorPipelineDependencies::new(
+            mqtt_client_manager,
+            Arc::clone(&shared_stream_registry),
+            registries,
+            None,
+        ),
         ProcessorPipelineOptions::default(),
     )?;
     Ok(pipeline)
@@ -396,7 +407,7 @@ pub fn create_pipeline_with_log_sink(
     sql: &str,
     forward_to_result: bool,
     catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
+    shared_stream_registry: Arc<SharedStreamRegistry>,
     mqtt_client_manager: MqttClientManager,
     registries: &PipelineRegistries,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {

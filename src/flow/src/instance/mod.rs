@@ -8,9 +8,7 @@ use crate::connector::{
 use crate::eventtime::EventtimeTypeRegistry;
 use crate::expr::custom_func::CustomFuncRegistry;
 use crate::pipeline::PipelineManager;
-use crate::shared_stream::{
-    registry as shared_stream_registry, SharedStreamError, SharedStreamInfo, SharedStreamRegistry,
-};
+use crate::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamRegistry};
 use crate::stateful::StatefulFunctionRegistry;
 use crate::PipelineRegistries;
 use std::collections::HashMap;
@@ -27,7 +25,7 @@ mod streams;
 #[derive(Clone)]
 pub struct FlowInstance {
     catalog: Arc<Catalog>,
-    shared_stream_registry: &'static SharedStreamRegistry,
+    shared_stream_registry: Arc<SharedStreamRegistry>,
     pipeline_manager: Arc<PipelineManager>,
     memory_pubsub_registry: MemoryPubSubRegistry,
     // In-memory registry of shared MQTT client configs for discovery/listing.
@@ -49,7 +47,7 @@ impl FlowInstance {
         crate::deadlock::start_deadlock_detector_once();
 
         let catalog = Arc::new(Catalog::new());
-        let shared_stream_registry = shared_stream_registry();
+        let shared_stream_registry = Arc::new(SharedStreamRegistry::new());
         let mqtt_client_manager = MqttClientManager::new();
         let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let connector_registry =
@@ -72,11 +70,14 @@ impl FlowInstance {
             Arc::clone(&eventtime_type_registry),
             Arc::clone(&merger_registry),
         );
-        let pipeline_manager = Arc::new(PipelineManager::new(
-            Arc::clone(&catalog),
-            shared_stream_registry,
+        let context = crate::pipeline::PipelineContext::new(
+            Arc::clone(&shared_stream_registry),
             mqtt_client_manager.clone(),
             memory_pubsub_registry.clone(),
+        );
+        let pipeline_manager = Arc::new(PipelineManager::new(
+            Arc::clone(&catalog),
+            context,
             registries,
         ));
         Self {
@@ -103,6 +104,10 @@ impl FlowInstance {
 
     pub fn memory_pubsub_registry(&self) -> MemoryPubSubRegistry {
         self.memory_pubsub_registry.clone()
+    }
+
+    pub fn shared_stream_registry(&self) -> Arc<SharedStreamRegistry> {
+        Arc::clone(&self.shared_stream_registry)
     }
 }
 

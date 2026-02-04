@@ -12,7 +12,6 @@ use crate::processor::processor_builder::{
 use crate::processor::SamplerConfig;
 use crate::processor::{ControlSignal, ProcessorPipeline, StreamData};
 use datatypes::Schema;
-use once_cell::sync::Lazy;
 use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -64,19 +63,13 @@ impl SharedStreamConnectorFactory for OneShotConnectorFactory {
     }
 }
 
-/// Accessor for the global shared stream registry.
-pub fn registry() -> &'static SharedStreamRegistry {
-    static REGISTRY: Lazy<SharedStreamRegistry> = Lazy::new(SharedStreamRegistry::new);
-    &REGISTRY
-}
-
 /// Central registry that tracks shared source streams that are owned by the process.
 pub struct SharedStreamRegistry {
     streams: RwLock<HashMap<String, Arc<SharedStreamInner>>>,
 }
 
 impl SharedStreamRegistry {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             streams: RwLock::new(HashMap::new()),
         }

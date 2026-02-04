@@ -88,7 +88,7 @@ impl FlowInstance {
             sql,
             sinks,
             &self.catalog,
-            self.shared_stream_registry,
+            self.shared_stream_registry.clone(),
             self.mqtt_client_manager.clone(),
             &registries,
         )
@@ -105,7 +105,7 @@ impl FlowInstance {
             sql,
             forward_to_result,
             &self.catalog,
-            self.shared_stream_registry,
+            self.shared_stream_registry.clone(),
             self.mqtt_client_manager.clone(),
             &registries,
         )

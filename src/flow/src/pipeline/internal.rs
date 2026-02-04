@@ -2,9 +2,8 @@ use super::*;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
     register_mock_source_handle, HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig,
-    MemoryPubSubRegistry, MemorySinkConfig, MemorySourceConfig, MemorySourceConnector,
-    MemoryTopicKind, MockSourceConnector, MqttClientManager, MqttSinkConfig, MqttSourceConfig,
-    MqttSourceConnector,
+    MemorySinkConfig, MemorySourceConfig, MemorySourceConnector, MemoryTopicKind,
+    MockSourceConnector, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::explain_shared_stream::shared_stream_decode_applied_snapshot;
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
@@ -18,7 +17,6 @@ use crate::processor::ProcessorStatsEntry;
 use crate::processor::{
     create_processor_pipeline, ProcessorPipelineDependencies, ProcessorPipelineOptions,
 };
-use crate::shared_stream::SharedStreamRegistry;
 use crate::{
     explain_pipeline_with_options, optimize_physical_plan, PipelineExplain, PipelineExplainConfig,
     PipelineRegistries, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
@@ -81,19 +79,15 @@ impl ManagedPipeline {
 }
 
 impl PipelineManager {
-    pub fn new(
+    pub(crate) fn new(
         catalog: Arc<Catalog>,
-        shared_stream_registry: &'static SharedStreamRegistry,
-        mqtt_client_manager: MqttClientManager,
-        memory_pubsub_registry: MemoryPubSubRegistry,
+        context: PipelineContext,
         registries: PipelineRegistries,
     ) -> Self {
         Self {
             pipelines: RwLock::new(HashMap::new()),
             catalog,
-            shared_stream_registry,
-            mqtt_client_manager,
-            memory_pubsub_registry,
+            context,
             registries,
         }
     }
@@ -104,15 +98,9 @@ impl PipelineManager {
         definition: PipelineDefinition,
     ) -> Result<PipelineSnapshot, PipelineError> {
         let pipeline_id = definition.id().to_string();
-        let (pipeline, streams) = build_pipeline_runtime(
-            &definition,
-            &self.catalog,
-            self.shared_stream_registry,
-            &self.mqtt_client_manager,
-            &self.memory_pubsub_registry,
-            &self.registries,
-        )
-        .map_err(PipelineError::BuildFailure)?;
+        let (pipeline, streams) =
+            build_pipeline_runtime(&definition, &self.catalog, &self.context, &self.registries)
+                .map_err(PipelineError::BuildFailure)?;
         let mut guard = self.pipelines.write();
         if guard.contains_key(&pipeline_id) {
             return Err(PipelineError::AlreadyExists(pipeline_id));
@@ -139,9 +127,7 @@ impl PipelineManager {
         let (pipeline, streams, logical_ir) = build_pipeline_runtime_with_logical_ir(
             &definition,
             &self.catalog,
-            self.shared_stream_registry,
-            &self.mqtt_client_manager,
-            &self.memory_pubsub_registry,
+            &self.context,
             &self.registries,
         )
         .map_err(PipelineError::BuildFailure)?;
@@ -225,9 +211,7 @@ impl PipelineManager {
             &definition,
             logical_plan_ir,
             &self.catalog,
-            self.shared_stream_registry,
-            &self.mqtt_client_manager,
-            &self.memory_pubsub_registry,
+            &self.context,
             &self.registries,
         )
         .map_err(PipelineError::BuildFailure)?;
@@ -280,7 +264,7 @@ impl PipelineManager {
             definition.sql(),
             sinks,
             &self.catalog,
-            self.shared_stream_registry,
+            self.context.shared_stream_registry().as_ref(),
             &self.registries,
             definition.options(),
         )
@@ -299,15 +283,9 @@ impl PipelineManager {
 
         if entry.pipeline.is_none() {
             let definition = Arc::clone(&entry.definition);
-            let (pipeline, streams) = build_pipeline_runtime(
-                &definition,
-                &self.catalog,
-                self.shared_stream_registry,
-                &self.mqtt_client_manager,
-                &self.memory_pubsub_registry,
-                &self.registries,
-            )
-            .map_err(PipelineError::BuildFailure)?;
+            let (pipeline, streams) =
+                build_pipeline_runtime(&definition, &self.catalog, &self.context, &self.registries)
+                    .map_err(PipelineError::BuildFailure)?;
             entry.pipeline = Some(pipeline);
             entry.streams = streams;
         }
@@ -402,28 +380,18 @@ async fn close_pipeline(
 fn build_pipeline_runtime(
     definition: &PipelineDefinition,
     catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
-    mqtt_client_manager: &MqttClientManager,
-    memory_pubsub_registry: &MemoryPubSubRegistry,
+    context: &PipelineContext,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
-    let (pipeline, streams, _) = build_pipeline_runtime_with_logical_ir(
-        definition,
-        catalog,
-        shared_stream_registry,
-        mqtt_client_manager,
-        memory_pubsub_registry,
-        registries,
-    )?;
+    let (pipeline, streams, _) =
+        build_pipeline_runtime_with_logical_ir(definition, catalog, context, registries)?;
     Ok((pipeline, streams))
 }
 
 fn build_pipeline_runtime_with_logical_ir(
     definition: &PipelineDefinition,
     catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
-    mqtt_client_manager: &MqttClientManager,
-    memory_pubsub_registry: &MemoryPubSubRegistry,
+    context: &PipelineContext,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>, Vec<u8>), String> {
     let select_stmt = parser::parse_sql_with_registries(
@@ -437,6 +405,9 @@ fn build_pipeline_runtime_with_logical_ir(
         .iter()
         .map(|info| info.name.clone())
         .collect();
+
+    let shared_stream_registry = context.shared_stream_registry();
+    let mqtt_client_manager = context.mqtt_client_manager();
 
     let mut stream_definitions = HashMap::new();
     let mut binding_entries = Vec::new();
@@ -502,7 +473,7 @@ fn build_pipeline_runtime_with_logical_ir(
     #[cfg(debug_assertions)]
     {
         let shared_stream_decode_applied =
-            shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
+            shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry.as_ref());
         let explain = PipelineExplain::new(
             Arc::clone(&logical_plan),
             Arc::clone(&optimized_plan),
@@ -539,18 +510,18 @@ fn build_pipeline_runtime_with_logical_ir(
 
     let mut pipeline = create_processor_pipeline(
         optimized_plan,
-        ProcessorPipelineDependencies::new(mqtt_client_manager.clone(), registries, eventtime),
+        ProcessorPipelineDependencies::new(
+            mqtt_client_manager.clone(),
+            Arc::clone(&shared_stream_registry),
+            registries,
+            eventtime,
+        ),
         ProcessorPipelineOptions::default()
             .with_data_channel_capacity(definition.options().data_channel_capacity),
     )
     .map_err(|err| err.to_string())?;
     pipeline.set_pipeline_id(definition.id().to_string());
-    attach_sources_from_catalog(
-        &mut pipeline,
-        &stream_definitions,
-        mqtt_client_manager,
-        memory_pubsub_registry,
-    )?;
+    attach_sources_from_catalog(&mut pipeline, &stream_definitions, context)?;
     Ok((pipeline, streams, logical_ir))
 }
 
@@ -558,12 +529,13 @@ fn build_pipeline_runtime_from_logical_ir(
     definition: &PipelineDefinition,
     logical_plan_ir: &[u8],
     catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
-    mqtt_client_manager: &MqttClientManager,
-    memory_pubsub_registry: &MemoryPubSubRegistry,
+    context: &PipelineContext,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
     let logical_ir = LogicalPlanIR::decode(logical_plan_ir).map_err(|e| e.to_string())?;
+
+    let shared_stream_registry = context.shared_stream_registry();
+    let mqtt_client_manager = context.mqtt_client_manager();
 
     let sources = sources_from_logical_ir(&logical_ir);
     let mut streams: Vec<String> = sources.iter().map(|(s, _)| s.clone()).collect();
@@ -629,7 +601,7 @@ fn build_pipeline_runtime_from_logical_ir(
         validate_eventtime_enabled(&stream_definitions, registries)?;
     }
     let shared_stream_decode_applied =
-        shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
+        shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry.as_ref());
     let explain = PipelineExplain::new(
         Arc::clone(&logical_plan),
         Arc::clone(&optimized_plan),
@@ -665,19 +637,19 @@ fn build_pipeline_runtime_from_logical_ir(
 
     let mut pipeline = create_processor_pipeline(
         optimized_plan,
-        ProcessorPipelineDependencies::new(mqtt_client_manager.clone(), registries, eventtime),
+        ProcessorPipelineDependencies::new(
+            mqtt_client_manager.clone(),
+            Arc::clone(&shared_stream_registry),
+            registries,
+            eventtime,
+        ),
         ProcessorPipelineOptions::default()
             .with_data_channel_capacity(definition.options().data_channel_capacity),
     )
     .map_err(|err| err.to_string())?;
 
     pipeline.set_pipeline_id(definition.id().to_string());
-    attach_sources_from_catalog(
-        &mut pipeline,
-        &stream_definitions,
-        mqtt_client_manager,
-        memory_pubsub_registry,
-    )?;
+    attach_sources_from_catalog(&mut pipeline, &stream_definitions, context)?;
 
     Ok((pipeline, streams))
 }
@@ -817,12 +789,13 @@ fn build_sinks_from_definition(
 pub(super) fn attach_sources_from_catalog(
     pipeline: &mut ProcessorPipeline,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
-    mqtt_client_manager: &MqttClientManager,
-    memory_pubsub_registry: &MemoryPubSubRegistry,
+    context: &PipelineContext,
 ) -> Result<(), String> {
     let mut has_source_processor = false;
     let pipeline_id = pipeline.pipeline_id().to_string();
     let data_channel_capacity = pipeline.data_channel_capacity();
+    let mqtt_client_manager = context.mqtt_client_manager();
+    let memory_pubsub_registry = context.memory_pubsub_registry();
     for processor in pipeline.middle_processors.iter_mut() {
         if let PlanProcessor::DataSource(ds) = processor {
             has_source_processor = true;

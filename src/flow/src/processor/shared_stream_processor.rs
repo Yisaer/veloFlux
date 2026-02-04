@@ -3,7 +3,7 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
-use crate::shared_stream_registry;
+use crate::shared_stream::SharedStreamRegistry;
 use futures::stream::StreamExt;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ pub struct SharedStreamProcessor {
     stream_name: String,
     pipeline_id: Option<String>,
     required_columns: Vec<String>,
+    registry: Arc<SharedStreamRegistry>,
     inputs: Vec<broadcast::Receiver<StreamData>>,
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
     output: broadcast::Sender<StreamData>,
@@ -27,13 +28,23 @@ pub struct SharedStreamProcessor {
 }
 
 impl SharedStreamProcessor {
-    pub fn new(plan_name: &str, stream_name: impl Into<String>) -> Self {
-        Self::new_with_channel_capacities(plan_name, stream_name, default_channel_capacities())
+    pub fn new(
+        plan_name: &str,
+        stream_name: impl Into<String>,
+        registry: Arc<SharedStreamRegistry>,
+    ) -> Self {
+        Self::new_with_channel_capacities(
+            plan_name,
+            stream_name,
+            registry,
+            default_channel_capacities(),
+        )
     }
 
     pub(crate) fn new_with_channel_capacities(
         plan_name: &str,
         stream_name: impl Into<String>,
+        registry: Arc<SharedStreamRegistry>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
         let stream_name = stream_name.into();
@@ -45,6 +56,7 @@ impl SharedStreamProcessor {
             stream_name,
             pipeline_id: None,
             required_columns: Vec::new(),
+            registry,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -89,6 +101,7 @@ impl Processor for SharedStreamProcessor {
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
         let required_columns = std::mem::take(&mut self.required_columns);
+        let registry = Arc::clone(&self.registry);
         let pipeline_id = self
             .pipeline_id
             .clone()
@@ -100,7 +113,6 @@ impl Processor for SharedStreamProcessor {
                 pipeline_id = %pipeline_id,
                 "subscribing to shared stream"
             );
-            let registry = shared_stream_registry();
             let consumer_id = format!("{pipeline_id}-{processor_id}");
             let mut subscription = registry
                 .subscribe(&stream_name, consumer_id.clone())

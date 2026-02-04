@@ -3,7 +3,7 @@ use flow::catalog::{Catalog, MockStreamProps, StreamDecoderConfig, StreamDefinit
 use flow::codec::JsonDecoder;
 use flow::connector::{MockSourceConnector, MqttClientManager};
 use flow::processor::StreamData;
-use flow::{shared_stream_registry, PipelineRegistries, SharedStreamConfig};
+use flow::{FlowInstance, PipelineRegistries, SharedStreamConfig};
 use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -62,7 +62,8 @@ async fn shared_stream_two_pipelines_project_different_columns() {
         StreamDecoderConfig::json(),
     ));
 
-    let registry = shared_stream_registry();
+    let instance = FlowInstance::new();
+    let registry = instance.shared_stream_registry();
     if registry.is_registered(&stream_name).await {
         registry
             .drop_stream(&stream_name)
@@ -90,7 +91,7 @@ async fn shared_stream_two_pipelines_project_different_columns() {
         &format!("SELECT a, b FROM {stream_name}"),
         true,
         &catalog,
-        registry,
+        registry.clone(),
         mqtt_manager.clone(),
         &registries,
     )
@@ -101,7 +102,7 @@ async fn shared_stream_two_pipelines_project_different_columns() {
         &format!("SELECT b, c FROM {stream_name}"),
         true,
         &catalog,
-        registry,
+        registry.clone(),
         mqtt_manager.clone(),
         &registries,
     )

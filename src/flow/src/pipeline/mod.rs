@@ -12,9 +12,11 @@
 //!   public API.
 
 mod api;
+mod context;
 mod internal;
 
 pub use api::*;
+pub(crate) use context::PipelineContext;
 
 #[cfg(test)]
 mod tests;
