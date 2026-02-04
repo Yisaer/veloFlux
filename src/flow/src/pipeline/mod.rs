@@ -5,7 +5,7 @@
 //!
 //! **Public API**
 //! - Definition types: `PipelineDefinition`, `SinkDefinition`, `PipelineOptions`
-//! - Runtime manager: `PipelineManager` (create/start/stop/delete/list/explain)
+//! - Runtime lifecycle is managed via `FlowInstance` (create/start/stop/delete/list/explain)
 //!
 //! **Internal**
 //! - Plan-cache helpers and runtime build plumbing live in `internal` and are not part of the
@@ -15,7 +15,13 @@ mod api;
 mod context;
 mod internal;
 
-pub use api::*;
+pub(crate) use api::PipelineManager;
+pub use api::{
+    CreatePipelinePlanCacheResult, CreatePipelineRequest, CreatePipelineResult, EventtimeOptions,
+    ExplainPipelineTarget, KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps,
+    PipelineDefinition, PipelineError, PipelineOptions, PipelineSnapshot, PipelineStatus,
+    PipelineStopMode, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
+};
 pub(crate) use context::PipelineContext;
 
 #[cfg(test)]

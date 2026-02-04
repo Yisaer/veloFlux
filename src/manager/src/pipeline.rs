@@ -318,13 +318,14 @@ pub async fn create_pipeline_handler(
         }
     }
 
-    let build_result = match state.instance.create_pipeline_with_plan_cache(
-        definition,
-        flow::planner::plan_cache::PlanCacheInputs {
-            pipeline_raw_json: stored.raw_json.clone(),
-            streams_raw_json: Vec::new(),
-            snapshot: None,
-        },
+    let build_result = match state.instance.create_pipeline(
+        flow::CreatePipelineRequest::new(definition).with_plan_cache_inputs(
+            flow::planner::plan_cache::PlanCacheInputs {
+                pipeline_raw_json: stored.raw_json.clone(),
+                streams_raw_json: Vec::new(),
+                snapshot: None,
+            },
+        ),
     ) {
         Ok(result) => result,
         Err(PipelineError::AlreadyExists(_)) => {
@@ -345,7 +346,10 @@ pub async fn create_pipeline_handler(
         }
     };
 
-    if let Some(logical_ir) = build_result.logical_plan_ir {
+    let logical_ir = build_result
+        .plan_cache
+        .and_then(|result| result.logical_plan_ir);
+    if let Some(logical_ir) = logical_ir {
         match storage_bridge::build_plan_snapshot(
             state.storage.as_ref(),
             &stored.id,
@@ -447,7 +451,10 @@ pub async fn upsert_pipeline_handler(
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
 
-    if let Err(err) = state.instance.explain_pipeline_definition(&definition) {
+    if let Err(err) = state
+        .instance
+        .explain_pipeline(flow::ExplainPipelineTarget::Definition(&definition))
+    {
         return (
             StatusCode::BAD_REQUEST,
             format!("invalid pipeline spec: {err}"),
@@ -500,13 +507,14 @@ pub async fn upsert_pipeline_handler(
         }
     }
 
-    let build_result = match state.instance.create_pipeline_with_plan_cache(
-        definition,
-        flow::planner::plan_cache::PlanCacheInputs {
-            pipeline_raw_json: stored.raw_json.clone(),
-            streams_raw_json: Vec::new(),
-            snapshot: None,
-        },
+    let build_result = match state.instance.create_pipeline(
+        flow::CreatePipelineRequest::new(definition).with_plan_cache_inputs(
+            flow::planner::plan_cache::PlanCacheInputs {
+                pipeline_raw_json: stored.raw_json.clone(),
+                streams_raw_json: Vec::new(),
+                snapshot: None,
+            },
+        ),
     ) {
         Ok(result) => result,
         Err(err) => {
@@ -519,7 +527,10 @@ pub async fn upsert_pipeline_handler(
         }
     };
 
-    if let Some(logical_ir) = build_result.logical_plan_ir {
+    let logical_ir = build_result
+        .plan_cache
+        .and_then(|result| result.logical_plan_ir);
+    if let Some(logical_ir) = logical_ir {
         match storage_bridge::build_plan_snapshot(
             state.storage.as_ref(),
             &stored.id,
@@ -648,7 +659,10 @@ pub async fn explain_pipeline_handler(
         }
     }
 
-    let explain = match state.instance.explain_pipeline(&id) {
+    let explain = match state
+        .instance
+        .explain_pipeline(flow::ExplainPipelineTarget::Id(&id))
+    {
         Ok(explain) => explain,
         Err(PipelineError::NotFound(_)) => {
             return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();

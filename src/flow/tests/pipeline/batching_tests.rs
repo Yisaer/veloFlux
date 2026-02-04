@@ -7,7 +7,7 @@ use flow::pipeline::PipelineDefinition;
 use flow::planner::plan_cache::PlanCacheInputs;
 use flow::planner::sink::CommonSinkProps;
 use flow::FlowInstance;
-use flow::{PipelineStopMode, SinkDefinition, SinkProps, SinkType};
+use flow::{CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
 use serde_json::Value as JsonValue;
 use tokio::time::Duration;
 
@@ -45,14 +45,13 @@ async fn run_batch_case(case: BatchCase) {
     .with_common_props(case.sink_common);
     let pipeline = PipelineDefinition::new(pipeline_id.clone(), case.sql, vec![sink]);
     instance
-        .create_pipeline_with_plan_cache(
-            pipeline,
+        .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
             PlanCacheInputs {
                 pipeline_raw_json: String::new(),
                 streams_raw_json: Vec::new(),
                 snapshot: None,
             },
-        )
+        ))
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
     instance
         .start_pipeline(&pipeline_id)

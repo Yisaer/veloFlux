@@ -9,7 +9,7 @@ use flow::planner::plan_cache::PlanCacheInputs;
 use flow::Collection;
 use flow::FlowInstance;
 use flow::SinkEncoderConfig;
-use flow::{PipelineStopMode, SinkDefinition, SinkProps, SinkType};
+use flow::{CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
 use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -55,14 +55,13 @@ async fn run_test_case(test_case: TestCase) {
         )],
     );
     instance
-        .create_pipeline_with_plan_cache(
-            pipeline,
+        .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
             PlanCacheInputs {
                 pipeline_raw_json: String::new(),
                 streams_raw_json: Vec::new(),
                 snapshot: None,
             },
-        )
+        ))
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", test_case.name));
 
     instance
@@ -153,14 +152,13 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
         )],
     );
     instance
-        .create_pipeline_with_plan_cache(
-            pipeline,
+        .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
             PlanCacheInputs {
                 pipeline_raw_json: String::new(),
                 streams_raw_json: Vec::new(),
                 snapshot: None,
             },
-        )
+        ))
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", test_case.name));
 
     instance
@@ -270,14 +268,13 @@ async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
         .with_encoder(SinkEncoderConfig::new("none", JsonMap::new()))],
     );
     instance
-        .create_pipeline_with_plan_cache(
-            pipeline,
+        .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
             PlanCacheInputs {
                 pipeline_raw_json: String::new(),
                 streams_raw_json: Vec::new(),
                 snapshot: None,
             },
-        )
+        ))
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", test_case.name));
 
     instance

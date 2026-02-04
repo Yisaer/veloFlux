@@ -40,9 +40,10 @@ pub use expr::{
 pub use instance::{FlowInstance, FlowInstanceError, StreamRuntimeInfo};
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
-    KuksaSinkProps, MqttSinkProps, PipelineDefinition, PipelineError, PipelineManager,
-    PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode, PlanCacheOptions,
-    SinkDefinition, SinkProps, SinkType,
+    CreatePipelinePlanCacheResult, CreatePipelineRequest, CreatePipelineResult,
+    ExplainPipelineTarget, KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps,
+    PipelineDefinition, PipelineError, PipelineOptions, PipelineSnapshot, PipelineStatus,
+    PipelineStopMode, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
 };
 pub use planner::create_physical_plan;
 pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};
@@ -388,29 +389,4 @@ pub fn explain_pipeline_with_options(
             shared_stream_decode_applied,
         },
     ))
-}
-
-/// Convenience helper for tests and demos that just need a logging mock sink.
-pub(crate) fn create_pipeline_with_log_sink(
-    sql: &str,
-    forward_to_result: bool,
-    catalog: &Catalog,
-    shared_stream_registry: Arc<SharedStreamRegistry>,
-    mqtt_client_manager: MqttClientManager,
-    registries: &PipelineRegistries,
-) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
-    let connector = PipelineSinkConnector::new(
-        "log_sink_connector",
-        SinkConnectorConfig::Nop(NopSinkConfig { log: true }),
-        SinkEncoderConfig::json(),
-    );
-    let sink = PipelineSink::new("log_sink", connector).with_forward_to_result(forward_to_result);
-    create_pipeline(
-        sql,
-        vec![sink],
-        catalog,
-        shared_stream_registry,
-        mqtt_client_manager,
-        registries,
-    )
 }

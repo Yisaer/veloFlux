@@ -4,7 +4,9 @@ use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, St
 use flow::connector::{MemoryData, MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY};
 use flow::pipeline::{MemorySinkProps, PipelineDefinition};
 use flow::planner::plan_cache::PlanCacheInputs;
-use flow::{FlowInstance, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
+use flow::{
+    CreatePipelineRequest, FlowInstance, PipelineStopMode, SinkDefinition, SinkProps, SinkType,
+};
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params_from_iter, Connection, Row};
@@ -125,14 +127,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )],
         );
         instance
-            .create_pipeline_with_plan_cache(
-                pipeline,
+            .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
                 PlanCacheInputs {
                     pipeline_raw_json: String::new(),
                     streams_raw_json: Vec::new(),
                     snapshot: None,
                 },
-            )
+            ))
             .unwrap_or_else(|_| panic!("failed to create pipeline for SQL: {sql}"));
 
         instance

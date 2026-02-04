@@ -92,8 +92,65 @@ impl PipelineManager {
         }
     }
 
-    /// Create a pipeline runtime from definition and store it.
-    pub fn create_pipeline(
+    pub(crate) fn create_pipeline(
+        &self,
+        request: CreatePipelineRequest,
+    ) -> Result<CreatePipelineResult, PipelineError> {
+        let definition = request.definition;
+        let pipeline_id = definition.id().to_string();
+
+        {
+            let guard = self.pipelines.read();
+            if guard.contains_key(&pipeline_id) {
+                return Err(PipelineError::AlreadyExists(pipeline_id));
+            }
+        }
+
+        if definition.options().plan_cache.enabled {
+            let inputs = request.plan_cache_inputs.ok_or_else(|| {
+                PipelineError::BuildFailure(
+                    "plan_cache.enabled=true but CreatePipelineRequest.plan_cache_inputs is None"
+                        .to_string(),
+                )
+            })?;
+
+            if crate::planner::plan_cache::snapshot_matches_inputs(&inputs) {
+                if let Some(snapshot_record) = inputs.snapshot {
+                    if let Ok(snapshot) = self.create_pipeline_from_logical_ir(
+                        definition.clone(),
+                        &snapshot_record.logical_plan_ir,
+                    ) {
+                        tracing::debug!(pipeline_id = %definition.id(), "plan_cache hit");
+                        return Ok(CreatePipelineResult {
+                            snapshot,
+                            plan_cache: Some(CreatePipelinePlanCacheResult {
+                                hit: true,
+                                logical_plan_ir: None,
+                            }),
+                        });
+                    }
+                }
+            }
+
+            tracing::debug!(pipeline_id = %definition.id(), "plan_cache miss");
+            let (snapshot, logical_ir) = self.create_pipeline_with_logical_ir(definition)?;
+            return Ok(CreatePipelineResult {
+                snapshot,
+                plan_cache: Some(CreatePipelinePlanCacheResult {
+                    hit: false,
+                    logical_plan_ir: Some(logical_ir),
+                }),
+            });
+        }
+
+        let snapshot = self.create_pipeline_from_sql(definition)?;
+        Ok(CreatePipelineResult {
+            snapshot,
+            plan_cache: None,
+        })
+    }
+
+    fn create_pipeline_from_sql(
         &self,
         definition: PipelineDefinition,
     ) -> Result<PipelineSnapshot, PipelineError> {
@@ -116,10 +173,7 @@ impl PipelineManager {
         Ok(snapshot)
     }
 
-    /// Internal API used by the plan cache write-back path.
-    ///
-    /// Prefer `create_pipeline_with_plan_cache` for user-facing pipeline creation.
-    pub(crate) fn create_pipeline_with_logical_ir(
+    fn create_pipeline_with_logical_ir(
         &self,
         definition: PipelineDefinition,
     ) -> Result<(PipelineSnapshot, Vec<u8>), PipelineError> {
@@ -144,50 +198,6 @@ impl PipelineManager {
         let snapshot = entry.snapshot();
         guard.insert(pipeline_id, entry);
         Ok((snapshot, logical_ir))
-    }
-
-    /// Create a pipeline with optional plan-cache support.
-    ///
-    /// When `options.plan_cache.enabled` is `true`, this tries to reuse a persisted logical-plan
-    /// snapshot (hit) and falls back to building from SQL (miss). On miss, it returns
-    /// `logical_plan_ir` for the caller to persist as a plan snapshot.
-    pub fn create_pipeline_with_plan_cache(
-        &self,
-        definition: PipelineDefinition,
-        inputs: crate::planner::plan_cache::PlanCacheInputs,
-    ) -> Result<crate::planner::plan_cache::PlanCacheBuildResult, PipelineError> {
-        if !definition.options().plan_cache.enabled {
-            let snapshot = self.create_pipeline(definition)?;
-            return Ok(crate::planner::plan_cache::PlanCacheBuildResult {
-                snapshot,
-                hit: false,
-                logical_plan_ir: None,
-            });
-        }
-
-        if crate::planner::plan_cache::snapshot_matches_inputs(&inputs) {
-            if let Some(snapshot_record) = inputs.snapshot {
-                if let Ok(snapshot) = self.create_pipeline_from_logical_ir(
-                    definition.clone(),
-                    &snapshot_record.logical_plan_ir,
-                ) {
-                    tracing::debug!(pipeline_id = %definition.id(), "plan_cache hit");
-                    return Ok(crate::planner::plan_cache::PlanCacheBuildResult {
-                        snapshot,
-                        hit: true,
-                        logical_plan_ir: None,
-                    });
-                }
-            }
-        }
-
-        tracing::debug!(pipeline_id = %definition.id(), "plan_cache miss");
-        let (snapshot, logical_ir) = self.create_pipeline_with_logical_ir(definition)?;
-        Ok(crate::planner::plan_cache::PlanCacheBuildResult {
-            snapshot,
-            hit: false,
-            logical_plan_ir: Some(logical_ir),
-        })
     }
 
     /// Internal API used by the plan cache hit path.
@@ -228,37 +238,29 @@ impl PipelineManager {
         Ok(snapshot)
     }
 
-    /// Retrieve a snapshot for a specific pipeline.
-    pub fn get(&self, pipeline_id: &str) -> Option<PipelineSnapshot> {
-        let guard = self.pipelines.read();
-        guard.get(pipeline_id).map(|entry| entry.snapshot())
-    }
-
     /// List all managed pipelines.
     pub fn list(&self) -> Vec<PipelineSnapshot> {
         let guard = self.pipelines.read();
         guard.values().map(|entry| entry.snapshot()).collect()
     }
 
-    /// Explain an existing pipeline by id (logical + physical plans).
-    pub fn explain_pipeline(&self, pipeline_id: &str) -> Result<PipelineExplain, PipelineError> {
-        let definition = {
-            let guard = self.pipelines.read();
-            let entry = guard
-                .get(pipeline_id)
-                .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
-            Arc::clone(&entry.definition)
+    pub(crate) fn explain_pipeline(
+        &self,
+        target: ExplainPipelineTarget<'_>,
+    ) -> Result<PipelineExplain, PipelineError> {
+        let definition = match target {
+            ExplainPipelineTarget::Id(pipeline_id) => {
+                let guard = self.pipelines.read();
+                let entry = guard
+                    .get(pipeline_id)
+                    .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
+                Arc::clone(&entry.definition)
+            }
+            ExplainPipelineTarget::Definition(definition) => Arc::new(definition.clone()),
         };
 
-        self.explain_pipeline_definition(definition.as_ref())
-    }
-
-    /// Explain a pipeline definition without registering it.
-    pub fn explain_pipeline_definition(
-        &self,
-        definition: &PipelineDefinition,
-    ) -> Result<PipelineExplain, PipelineError> {
-        let sinks = build_sinks_from_definition(definition).map_err(PipelineError::BuildFailure)?;
+        let sinks = build_sinks_from_definition(definition.as_ref())
+            .map_err(PipelineError::BuildFailure)?;
 
         explain_pipeline_with_options(
             definition.sql(),

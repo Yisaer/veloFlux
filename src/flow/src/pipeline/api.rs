@@ -53,6 +53,46 @@ pub enum PipelineStatus {
     Running,
 }
 
+#[derive(Debug, Clone)]
+pub struct CreatePipelineRequest {
+    pub definition: PipelineDefinition,
+    pub plan_cache_inputs: Option<crate::planner::plan_cache::PlanCacheInputs>,
+}
+
+impl CreatePipelineRequest {
+    pub fn new(definition: PipelineDefinition) -> Self {
+        Self {
+            definition,
+            plan_cache_inputs: None,
+        }
+    }
+
+    pub fn with_plan_cache_inputs(
+        mut self,
+        inputs: crate::planner::plan_cache::PlanCacheInputs,
+    ) -> Self {
+        self.plan_cache_inputs = Some(inputs);
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatePipelinePlanCacheResult {
+    pub hit: bool,
+    pub logical_plan_ir: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatePipelineResult {
+    pub snapshot: PipelineSnapshot,
+    pub plan_cache: Option<CreatePipelinePlanCacheResult>,
+}
+
+pub enum ExplainPipelineTarget<'a> {
+    Id(&'a str),
+    Definition(&'a PipelineDefinition),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineStopMode {
     Graceful,
@@ -237,7 +277,7 @@ pub struct PlanCacheOptions {
 }
 
 /// User-facing view of a pipeline entry.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PipelineSnapshot {
     pub definition: Arc<PipelineDefinition>,
     pub streams: Vec<String>,
@@ -245,7 +285,7 @@ pub struct PipelineSnapshot {
 }
 
 /// Stores all registered pipelines and manages their lifecycle.
-pub struct PipelineManager {
+pub(crate) struct PipelineManager {
     pub(super) pipelines: RwLock<HashMap<String, super::internal::ManagedPipeline>>,
     pub(super) catalog: Arc<Catalog>,
     pub(super) context: super::PipelineContext,
