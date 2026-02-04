@@ -842,8 +842,14 @@ mod tests {
     use crate::connector::MockSourceConnector;
     use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
     use serde_json::Map as JsonMap;
+    use std::sync::OnceLock;
     use tokio::time::{timeout, Duration};
     use uuid::Uuid;
+
+    fn registry() -> &'static SharedStreamRegistry {
+        static REGISTRY: OnceLock<SharedStreamRegistry> = OnceLock::new();
+        REGISTRY.get_or_init(SharedStreamRegistry::new)
+    }
 
     fn test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![ColumnSchema::new(

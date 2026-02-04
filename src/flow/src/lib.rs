@@ -31,7 +31,7 @@ pub use datatypes::{
 pub use eventtime::{
     BuiltinEventtimeType, EventtimeParseError, EventtimeTypeParser, EventtimeTypeRegistry,
 };
-pub use expr::custom_func::{CustomFunc, CustomFuncRegistry, CustomFuncRegistryError};
+pub use expr::custom_func::{CustomFunc, CustomFuncRegistry};
 pub use expr::sql_conversion;
 pub use expr::{
     convert_expr_to_scalar, convert_select_stmt_to_scalar, extract_select_expressions, BinaryFunc,
@@ -184,7 +184,7 @@ fn build_physical_plan_from_sql(
         registries.stateful_registry(),
     )?;
     let (schema_binding, stream_defs) =
-        build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
+        build_schema_binding(&select_stmt, catalog, Some(shared_stream_registry))?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
     let (logical_plan, pruned_binding) =
         optimize_logical_plan(Arc::clone(&logical_plan), &schema_binding);
@@ -207,7 +207,7 @@ fn build_physical_plan_from_sql(
 fn build_schema_binding(
     select_stmt: &parser::SelectStmt,
     catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
+    shared_stream_registry: Option<&SharedStreamRegistry>,
 ) -> Result<SchemaBindingResult, Box<dyn std::error::Error>> {
     use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
     let mut entries = Vec::new();
@@ -217,17 +217,19 @@ fn build_schema_binding(
             .get(&source.name)
             .ok_or_else(|| format!("stream '{}' not found in catalog", source.name))?;
         let schema = definition.schema();
-        let kind =
-            if futures::executor::block_on(shared_stream_registry.is_registered(&source.name)) {
-                SourceBindingKind::Shared
-            } else if definition.stream_type() == crate::catalog::StreamType::Memory
-                && definition.decoder().kind() == "none"
-            {
-                // Memory collection sources must preserve the full schema for ByIndex correctness.
-                SourceBindingKind::MemoryCollection
-            } else {
-                SourceBindingKind::Regular
-            };
+        let is_shared = shared_stream_registry.is_some_and(|registry| {
+            futures::executor::block_on(registry.is_registered(&source.name))
+        });
+        let kind = if is_shared {
+            SourceBindingKind::Shared
+        } else if definition.stream_type() == crate::catalog::StreamType::Memory
+            && definition.decoder().kind() == "none"
+        {
+            // Memory collection sources must preserve the full schema for ByIndex correctness.
+            SourceBindingKind::MemoryCollection
+        } else {
+            SourceBindingKind::Regular
+        };
         entries.push(SchemaBindingEntry {
             source_name: source.name.clone(),
             alias: source.alias.clone(),
@@ -279,7 +281,7 @@ fn build_schema_binding(
 /// )?;
 /// # Ok(()) }
 /// ```
-pub fn create_pipeline(
+pub(crate) fn create_pipeline(
     sql: &str,
     sinks: Vec<PipelineSink>,
     catalog: &Catalog,
@@ -347,7 +349,7 @@ pub fn explain_pipeline_with_options(
     sql: &str,
     sinks: Vec<PipelineSink>,
     catalog: &Catalog,
-    shared_stream_registry: &SharedStreamRegistry,
+    shared_stream_registry: Option<&SharedStreamRegistry>,
     registries: &PipelineRegistries,
     options: &crate::pipeline::PipelineOptions,
 ) -> Result<PipelineExplain, Box<dyn std::error::Error>> {
@@ -386,8 +388,9 @@ pub fn explain_pipeline_with_options(
         registries.aggregate_registry(),
     );
 
-    let shared_stream_decode_applied =
-        shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry);
+    let shared_stream_decode_applied = shared_stream_registry.map_or_else(HashMap::new, |r| {
+        shared_stream_decode_applied_snapshot(&optimized_plan, r)
+    });
 
     Ok(PipelineExplain::new(
         logical_plan,
@@ -403,7 +406,7 @@ pub fn explain_pipeline_with_options(
 }
 
 /// Convenience helper for tests and demos that just need a logging mock sink.
-pub fn create_pipeline_with_log_sink(
+pub(crate) fn create_pipeline_with_log_sink(
     sql: &str,
     forward_to_result: bool,
     catalog: &Catalog,

@@ -18,7 +18,7 @@ use tokio::time::Duration;
 use super::common::ColumnCheck;
 use super::common::{
     build_expected_json, declare_memory_input_output_topics, install_memory_stream_schema,
-    make_memory_topics, memory_registry, normalize_json, publish_input_collection, recv_next_json,
+    make_memory_topics, normalize_json, publish_input_collection, recv_next_json,
 };
 use super::common::{declare_memory_input_output_topics_with_output_kind, recv_next_collection};
 
@@ -35,14 +35,13 @@ async fn run_test_case(test_case: TestCase) {
     println!("Running test: {}", test_case.name);
 
     let instance = FlowInstance::new();
-    let registry = memory_registry(&instance);
     let (input_topic, output_topic) =
         make_memory_topics("pipeline_table_driven_queries", test_case.name);
-    declare_memory_input_output_topics(&registry, &input_topic, &output_topic);
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     install_memory_stream_schema(&instance, &input_topic, &test_case.input_data).await;
 
-    let mut output = registry
-        .open_subscribe_bytes(&output_topic)
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
         .expect("subscribe output bytes");
 
     let pipeline_id = format!("pipe_{}", output_topic);
@@ -81,7 +80,7 @@ async fn run_test_case(test_case: TestCase) {
 
     let timeout_duration = Duration::from_secs(5);
     publish_input_collection(
-        &registry,
+        &instance,
         &input_topic,
         Box::new(test_batch),
         timeout_duration,
@@ -132,16 +131,15 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
     println!("Running test: {}", test_case.name);
 
     let instance = FlowInstance::new();
-    let registry = memory_registry(&instance);
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_table_driven_memory_collection_sources_layout_normalize",
         test_case.name,
     );
-    declare_memory_input_output_topics(&registry, &input_topic, &output_topic);
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     install_memory_stream_schema(&instance, &input_topic, &test_case.stream_schema_hint).await;
 
-    let mut output = registry
-        .open_subscribe_bytes(&output_topic)
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
         .expect("subscribe output bytes");
 
     let pipeline_id = format!("pipe_{}", output_topic);
@@ -199,7 +197,7 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
 
     let timeout_duration = Duration::from_secs(5);
     publish_input_collection(
-        &registry,
+        &instance,
         &input_topic,
         Box::new(test_batch),
         timeout_duration,
@@ -246,19 +244,18 @@ async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
     println!("Running test: {}", test_case.name);
 
     let instance = FlowInstance::new();
-    let registry = memory_registry(&instance);
     let (input_topic, output_topic) =
         make_memory_topics("pipeline_table_driven_collection_sinks", test_case.name);
     declare_memory_input_output_topics_with_output_kind(
-        &registry,
+        &instance,
         &input_topic,
         &output_topic,
         MemoryTopicKind::Collection,
     );
     install_memory_stream_schema(&instance, &input_topic, &test_case.input_data).await;
 
-    let mut output = registry
-        .open_subscribe_collection(&output_topic)
+    let mut output = instance
+        .open_memory_subscribe_collection(&output_topic)
         .expect("subscribe output collection");
 
     let pipeline_id = format!("pipe_{}", output_topic);
@@ -299,7 +296,7 @@ async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
 
     let timeout_duration = Duration::from_secs(5);
     publish_input_collection(
-        &registry,
+        &instance,
         &input_topic,
         Box::new(test_batch),
         timeout_duration,

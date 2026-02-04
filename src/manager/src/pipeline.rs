@@ -291,9 +291,8 @@ pub async fn create_pipeline_handler(
         }
     };
     let encoder_registry = state.instance.encoder_registry();
-    let memory_pubsub_registry = state.instance.memory_pubsub_registry();
     let definition =
-        match build_pipeline_definition(&req, encoder_registry.as_ref(), &memory_pubsub_registry) {
+        match build_pipeline_definition(&req, encoder_registry.as_ref(), &state.instance) {
             Ok(def) => def,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
@@ -442,15 +441,11 @@ pub async fn upsert_pipeline_handler(
     };
 
     let encoder_registry = state.instance.encoder_registry();
-    let memory_pubsub_registry = state.instance.memory_pubsub_registry();
-    let definition = match build_pipeline_definition(
-        &create_req,
-        encoder_registry.as_ref(),
-        &memory_pubsub_registry,
-    ) {
-        Ok(definition) => definition,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-    };
+    let definition =
+        match build_pipeline_definition(&create_req, encoder_registry.as_ref(), &state.instance) {
+            Ok(definition) => definition,
+            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        };
 
     if let Err(err) = state.instance.explain_pipeline_definition(&definition) {
         return (
@@ -975,7 +970,7 @@ fn validate_create_request(req: &CreatePipelineRequest) -> Result<(), String> {
 pub(crate) fn build_pipeline_definition(
     req: &CreatePipelineRequest,
     encoder_registry: &EncoderRegistry,
-    memory_pubsub_registry: &flow::connector::MemoryPubSubRegistry,
+    instance: &flow::FlowInstance,
 ) -> Result<PipelineDefinition, String> {
     let mut sinks = Vec::with_capacity(req.sinks.len());
     for (index, sink_req) in req.sinks.iter().enumerate() {
@@ -1052,8 +1047,8 @@ pub(crate) fn build_pipeline_definition(
                 } else {
                     flow::connector::MemoryTopicKind::Bytes
                 };
-                let actual_kind = memory_pubsub_registry
-                    .topic_kind(&topic)
+                let actual_kind = instance
+                    .memory_topic_kind(&topic)
                     .ok_or_else(|| format!("memory topic `{topic}` not declared"))?;
                 if actual_kind != expected_kind {
                     return Err(format!(

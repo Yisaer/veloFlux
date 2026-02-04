@@ -1,9 +1,9 @@
 use super::*;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
-    register_mock_source_handle, HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig,
-    MemorySinkConfig, MemorySourceConfig, MemorySourceConnector, MemoryTopicKind,
-    MockSourceConnector, MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
+    HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig, MemorySinkConfig,
+    MemorySourceConfig, MemorySourceConnector, MemoryTopicKind, MockSourceConnector,
+    MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::explain_shared_stream::shared_stream_decode_applied_snapshot;
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
@@ -264,7 +264,7 @@ impl PipelineManager {
             definition.sql(),
             sinks,
             &self.catalog,
-            self.context.shared_stream_registry().as_ref(),
+            Some(self.context.shared_stream_registry().as_ref()),
             &self.registries,
             definition.options(),
         )
@@ -846,7 +846,7 @@ pub(super) fn attach_sources_from_catalog(
                         data_channel_capacity,
                     );
                     let key = format!("{pipeline_id}:{stream_name}:{processor_id}");
-                    register_mock_source_handle(key, handle);
+                    context.mock_source_handle_registry().register(key, handle);
                     ds.add_connector(Box::new(connector));
                 }
                 StreamProps::Memory(props) => {

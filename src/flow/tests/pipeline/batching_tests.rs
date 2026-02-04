@@ -13,7 +13,7 @@ use tokio::time::Duration;
 
 use super::common::{
     declare_memory_input_output_topics, install_memory_stream_schema, make_memory_topics,
-    memory_registry, publish_input_collection, recv_next_json,
+    publish_input_collection, recv_next_json,
 };
 
 struct BatchCase {
@@ -28,13 +28,12 @@ async fn run_batch_case(case: BatchCase) {
     println!("Running test: {}", case.name);
 
     let instance = FlowInstance::new();
-    let registry = memory_registry(&instance);
     let (input_topic, output_topic) = make_memory_topics("pipeline_batching", case.name);
-    declare_memory_input_output_topics(&registry, &input_topic, &output_topic);
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     install_memory_stream_schema(&instance, &input_topic, &case.input_data).await;
 
-    let mut output = registry
-        .open_subscribe_bytes(&output_topic)
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
         .expect("subscribe output bytes");
 
     let pipeline_id = format!("pipe_{}", output_topic);
@@ -68,7 +67,7 @@ async fn run_batch_case(case: BatchCase) {
         .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", case.name));
 
     let timeout_duration = Duration::from_secs(5);
-    publish_input_collection(&registry, &input_topic, Box::new(batch), timeout_duration).await;
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
 
     for expected in case.expected_batches {
         let actual = recv_next_json(&mut output, timeout_duration).await;

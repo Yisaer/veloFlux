@@ -102,10 +102,10 @@ pub fn stored_pipeline_from_request(req: &CreatePipelineRequest) -> Result<Store
 pub fn pipeline_definition_from_stored(
     stored: &StoredPipeline,
     encoder_registry: &EncoderRegistry,
-    memory_pubsub_registry: &flow::connector::MemoryPubSubRegistry,
+    instance: &flow::FlowInstance,
 ) -> Result<PipelineDefinition, String> {
     let req = pipeline_request_from_stored(stored)?;
-    build_pipeline_definition(&req, encoder_registry, memory_pubsub_registry)
+    build_pipeline_definition(&req, encoder_registry, instance)
 }
 
 pub fn pipeline_request_from_stored(
@@ -140,15 +140,14 @@ pub async fn load_from_storage(
 ) -> Result<(), String> {
     let encoder_registry = instance.encoder_registry();
     let decoder_registry = instance.decoder_registry();
-    let memory_pubsub_registry = instance.memory_pubsub_registry();
 
     for topic in storage.list_memory_topics().map_err(|e| e.to_string())? {
         let kind = match topic.kind {
             StoredMemoryTopicKind::Bytes => flow::connector::MemoryTopicKind::Bytes,
             StoredMemoryTopicKind::Collection => flow::connector::MemoryTopicKind::Collection,
         };
-        memory_pubsub_registry
-            .declare_topic(&topic.topic, kind, topic.capacity)
+        instance
+            .declare_memory_topic(&topic.topic, kind, topic.capacity)
             .map_err(|err| err.to_string())?;
     }
 
@@ -166,12 +165,7 @@ pub async fn load_from_storage(
         let shared = req.shared;
         validate_stream_decoder_config(&req, def.decoder())?;
         if let flow::catalog::StreamProps::Memory(memory_props) = def.props() {
-            validate_memory_stream_topic_declared(
-                &req,
-                memory_props,
-                def.decoder(),
-                &memory_pubsub_registry,
-            )?;
+            validate_memory_stream_topic_declared(&req, memory_props, def.decoder(), instance)?;
         }
         instance
             .create_stream(def, shared)
@@ -181,11 +175,7 @@ pub async fn load_from_storage(
 
     for pipeline in storage.list_pipelines().map_err(|e| e.to_string())? {
         let _req = pipeline_request_from_stored(&pipeline)?;
-        let def = pipeline_definition_from_stored(
-            &pipeline,
-            encoder_registry.as_ref(),
-            &memory_pubsub_registry,
-        )?;
+        let def = pipeline_definition_from_stored(&pipeline, encoder_registry.as_ref(), instance)?;
 
         let stored_snapshot = storage
             .get_plan_snapshot(&pipeline.id)
@@ -367,7 +357,7 @@ mod tests {
         let valid_def = crate::pipeline::build_pipeline_definition(
             &valid_req,
             ir_instance.encoder_registry().as_ref(),
-            &ir_instance.memory_pubsub_registry(),
+            &ir_instance,
         )
         .unwrap();
         let (_snapshot, logical_ir) = ir_instance
@@ -380,7 +370,7 @@ mod tests {
         let check_def = pipeline_definition_from_stored(
             &stored_pipeline,
             check_instance.encoder_registry().as_ref(),
-            &check_instance.memory_pubsub_registry(),
+            &check_instance,
         )
         .unwrap();
         check_instance

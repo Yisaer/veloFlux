@@ -1,8 +1,7 @@
 use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
 use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::connector::{
-    MemoryData, MemoryPubSubRegistry, MemoryTopicKind, SharedCollection,
-    DEFAULT_MEMORY_PUBSUB_CAPACITY,
+    MemoryData, MemoryTopicKind, SharedCollection, DEFAULT_MEMORY_PUBSUB_CAPACITY,
 };
 use flow::model::Collection;
 use flow::FlowInstance;
@@ -38,24 +37,20 @@ pub fn make_memory_topics(test_suite: &str, case_name: &str) -> (String, String)
     (format!("{base}.input"), format!("{base}.output"))
 }
 
-pub fn memory_registry(instance: &FlowInstance) -> MemoryPubSubRegistry {
-    instance.memory_pubsub_registry()
-}
-
 pub fn declare_memory_input_output_topics(
-    registry: &MemoryPubSubRegistry,
+    instance: &FlowInstance,
     input_topic: &str,
     output_topic: &str,
 ) {
-    registry
-        .declare_topic(
+    instance
+        .declare_memory_topic(
             input_topic,
             MemoryTopicKind::Collection,
             DEFAULT_MEMORY_PUBSUB_CAPACITY,
         )
         .expect("declare input memory topic");
-    registry
-        .declare_topic(
+    instance
+        .declare_memory_topic(
             output_topic,
             MemoryTopicKind::Bytes,
             DEFAULT_MEMORY_PUBSUB_CAPACITY,
@@ -64,20 +59,20 @@ pub fn declare_memory_input_output_topics(
 }
 
 pub fn declare_memory_input_output_topics_with_output_kind(
-    registry: &MemoryPubSubRegistry,
+    instance: &FlowInstance,
     input_topic: &str,
     output_topic: &str,
     output_kind: MemoryTopicKind,
 ) {
-    registry
-        .declare_topic(
+    instance
+        .declare_memory_topic(
             input_topic,
             MemoryTopicKind::Collection,
             DEFAULT_MEMORY_PUBSUB_CAPACITY,
         )
         .expect("declare input memory topic");
-    registry
-        .declare_topic(output_topic, output_kind, DEFAULT_MEMORY_PUBSUB_CAPACITY)
+    instance
+        .declare_memory_topic(output_topic, output_kind, DEFAULT_MEMORY_PUBSUB_CAPACITY)
         .expect("declare output memory topic");
 }
 
@@ -165,13 +160,13 @@ pub async fn recv_next_collection(
 }
 
 pub async fn publish_input_collection(
-    registry: &MemoryPubSubRegistry,
+    instance: &FlowInstance,
     input_topic: &str,
     collection: Box<dyn Collection>,
     timeout_duration: Duration,
 ) {
-    registry
-        .wait_for_subscribers(
+    instance
+        .wait_for_memory_subscribers(
             input_topic,
             MemoryTopicKind::Collection,
             1,
@@ -180,8 +175,8 @@ pub async fn publish_input_collection(
         .await
         .expect("wait for memory source subscriber");
 
-    let publisher = registry
-        .open_publisher_collection(input_topic)
+    let publisher = instance
+        .open_memory_publisher_collection(input_topic)
         .expect("open memory publisher");
     publisher
         .publish_collection(SharedCollection::from_box(collection))
