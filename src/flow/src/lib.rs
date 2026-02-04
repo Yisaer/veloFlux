@@ -249,36 +249,21 @@ fn build_schema_binding(
 /// # Example
 /// ```no_run
 /// use flow::{
-///     catalog::Catalog,
-///     connector::MqttClientManager,
-///     create_pipeline,
 ///     FlowInstance,
 ///     planner::sink::{
 ///         NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 ///     },
-///     PipelineRegistries,
 /// };
 ///
 /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
-/// let catalog = Catalog::new();
 /// let instance = FlowInstance::new();
-/// let registry = instance.shared_stream_registry();
-/// let mqtt_clients = MqttClientManager::new();
-/// let registries = PipelineRegistries::new_with_builtin();
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig { log: false }),
 ///     SinkEncoderConfig::json(),
 /// );
 /// let sink = PipelineSink::new("custom_sink", connector);
-/// let pipeline = create_pipeline(
-///     "SELECT a FROM stream",
-///     vec![sink],
-///     &catalog,
-///     registry,
-///     mqtt_clients,
-///     &registries,
-/// )?;
+/// let pipeline = instance.build_pipeline("SELECT a FROM stream", vec![sink])?;
 /// # Ok(()) }
 /// ```
 pub(crate) fn create_pipeline(
