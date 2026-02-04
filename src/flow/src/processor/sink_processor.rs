@@ -7,6 +7,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -354,7 +355,10 @@ impl Processor for SinkProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
@@ -366,7 +370,7 @@ impl Processor for SinkProcessor {
         let stats = Arc::clone(&self.stats);
 
         let Some(mut connector) = self.connector.take() else {
-            return tokio::spawn(async {
+            return spawner.spawn(async {
                 Err(ProcessorError::InvalidConfiguration(
                     "sink connector missing".to_string(),
                 ))
@@ -375,7 +379,7 @@ impl Processor for SinkProcessor {
         let processor_id = self.id.clone();
         tracing::info!(processor_id = %processor_id, "sink processor starting");
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut ready_state = ReadyState::new();
             let mut ready_interval = Self::new_ready_interval();
             loop {

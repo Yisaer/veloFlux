@@ -13,6 +13,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -140,7 +141,10 @@ impl Processor for SamplerProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
@@ -162,7 +166,7 @@ impl Processor for SamplerProcessor {
 
         let merger_registry = self.merger_registry.clone();
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut ticker = interval(emit_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -354,11 +358,21 @@ mod tests {
     use super::*;
     use crate::model::{Message, RecordBatch, Tuple};
     use crate::processor::StreamData;
+    use crate::runtime::TaskSpawner;
     use datatypes::Value;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::broadcast;
     use tokio::time::sleep;
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
 
     fn create_test_data(value: i64) -> StreamData {
         let message = Arc::new(Message::new(
@@ -373,13 +387,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_sampler_emits_latest_value() {
+        let spawner = test_spawner();
         let mut sampler = SamplerProcessor::latest("latest_test", Duration::from_millis(200));
 
         let (input_tx, input_rx) = broadcast::channel::<StreamData>(16);
         sampler.add_input(input_rx);
 
         let mut output_rx = sampler.subscribe_output().unwrap();
-        let _handle = sampler.start();
+        let _handle = sampler.start(&spawner);
 
         sleep(Duration::from_millis(10)).await;
 

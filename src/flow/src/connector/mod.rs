@@ -81,18 +81,19 @@ pub use memory_pubsub::{
     MemoryData, MemoryPubSubError, MemoryPubSubRegistry, MemoryPublisher, MemoryTopicKind,
     SharedCollection, DEFAULT_MEMORY_PUBSUB_CAPACITY,
 };
-pub use mqtt_client::{
-    MqttClientManager, SharedMqttClient, SharedMqttClientConfig, SharedMqttEvent,
-};
+pub(crate) use mqtt_client::MqttClientManager;
+pub use mqtt_client::SharedMqttClientConfig;
 pub use registry::ConnectorRegistry;
-pub use sink::kuksa::{KuksaSinkConfig, KuksaSinkConnector};
+pub use sink::kuksa::KuksaSinkConfig;
 pub use sink::memory::{MemorySinkConfig, MemorySinkConnector};
 pub use sink::mock::{MockSinkConnector, MockSinkHandle};
-pub use sink::mqtt::{MqttSinkConfig, MqttSinkConnector};
+pub use sink::mqtt::MqttSinkConfig;
 pub use sink::{SinkConnector, SinkConnectorError};
 /// History source connector implementation.
-pub use source::history::{HistorySourceConfig, HistorySourceConnector};
+pub use source::history::HistorySourceConfig;
+pub(crate) use source::history::HistorySourceConnector;
 pub use source::memory::{MemorySourceConfig, MemorySourceConnector};
 pub use source::mock::{MockSourceConnector, MockSourceError, MockSourceHandle};
 /// MQTT-specific helpers and connector implementation.
-pub use source::mqtt::{MqttSourceConfig, MqttSourceConnector};
+pub use source::mqtt::MqttSourceConfig;
+pub(crate) use source::mqtt::MqttSourceConnector;

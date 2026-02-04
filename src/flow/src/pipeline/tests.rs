@@ -8,6 +8,7 @@ use crate::planner::sink::{
     NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 };
 use crate::processor::StreamData;
+use crate::runtime::TaskSpawner;
 use crate::shared_stream::{SharedStreamConfig, SharedStreamRegistry};
 use crate::PipelineRegistries;
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
@@ -38,6 +39,15 @@ fn install_stream(catalog: &Arc<Catalog>, name: &str) {
     catalog.upsert(definition);
 }
 
+fn test_spawner() -> TaskSpawner {
+    TaskSpawner::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build test tokio runtime"),
+    )
+}
+
 fn sample_pipeline(id: &str, stream: &str) -> PipelineDefinition {
     let sink = SinkDefinition::new(
         format!("{id}_sink"),
@@ -61,6 +71,7 @@ fn create_pipeline_with_log_sink(
     catalog: &Catalog,
     shared_stream_registry: Arc<SharedStreamRegistry>,
     mqtt_client_manager: MqttClientManager,
+    spawner: TaskSpawner,
     registries: &PipelineRegistries,
 ) -> Result<crate::processor::ProcessorPipeline, Box<dyn std::error::Error>> {
     let connector = PipelineSinkConnector::new(
@@ -75,6 +86,7 @@ fn create_pipeline_with_log_sink(
         catalog,
         shared_stream_registry,
         mqtt_client_manager,
+        spawner,
         registries,
     )
 }
@@ -105,15 +117,17 @@ async fn recv_next_json(
 #[test]
 fn create_and_list_pipeline() {
     let catalog = Arc::new(Catalog::new());
-    let mqtt_manager = MqttClientManager::new();
+    let spawner = test_spawner();
+    let mqtt_manager = MqttClientManager::new(spawner.clone());
     let memory_pubsub_registry = MemoryPubSubRegistry::new();
-    let registry = Arc::new(SharedStreamRegistry::new());
+    let registry = Arc::new(SharedStreamRegistry::new(spawner.clone()));
     install_stream(&catalog, "test_stream");
     let registries = PipelineRegistries::new_with_builtin();
     let context = crate::pipeline::PipelineContext::new(
         Arc::clone(&registry),
         mqtt_manager.clone(),
         memory_pubsub_registry.clone(),
+        spawner.clone(),
     );
     let manager = PipelineManager::new(Arc::clone(&catalog), context, registries);
     let snapshot = manager
@@ -164,7 +178,8 @@ fn shared_stream_two_pipelines_project_different_columns() {
             StreamDecoderConfig::json(),
         ));
 
-        let shared_stream_registry = Arc::new(SharedStreamRegistry::new());
+        let spawner = test_spawner();
+        let shared_stream_registry = Arc::new(SharedStreamRegistry::new(spawner.clone()));
         let (connector, handle) = MockSourceConnector::new(format!("{stream_name}_connector"));
         let decoder = Arc::new(JsonDecoder::new(
             stream_name.clone(),
@@ -178,7 +193,7 @@ fn shared_stream_two_pipelines_project_different_columns() {
             .await
             .expect("create shared stream");
 
-        let mqtt_manager = MqttClientManager::new();
+        let mqtt_manager = MqttClientManager::new(spawner.clone());
         let registries = PipelineRegistries::new_with_builtin();
 
         let mut pipeline_ab = create_pipeline_with_log_sink(
@@ -187,6 +202,7 @@ fn shared_stream_two_pipelines_project_different_columns() {
             catalog.as_ref(),
             Arc::clone(&shared_stream_registry),
             mqtt_manager.clone(),
+            spawner.clone(),
             &registries,
         )
         .expect("create pipeline_ab");
@@ -198,6 +214,7 @@ fn shared_stream_two_pipelines_project_different_columns() {
             catalog.as_ref(),
             Arc::clone(&shared_stream_registry),
             mqtt_manager.clone(),
+            spawner.clone(),
             &registries,
         )
         .expect("create pipeline_bc");
@@ -251,15 +268,17 @@ fn shared_stream_two_pipelines_project_different_columns() {
 #[test]
 fn prevent_duplicate_pipeline() {
     let catalog = Arc::new(Catalog::new());
-    let mqtt_manager = MqttClientManager::new();
+    let spawner = test_spawner();
+    let mqtt_manager = MqttClientManager::new(spawner.clone());
     let memory_pubsub_registry = MemoryPubSubRegistry::new();
-    let registry = Arc::new(SharedStreamRegistry::new());
+    let registry = Arc::new(SharedStreamRegistry::new(spawner.clone()));
     install_stream(&catalog, "dup_stream");
     let registries = PipelineRegistries::new_with_builtin();
     let context = crate::pipeline::PipelineContext::new(
         Arc::clone(&registry),
         mqtt_manager.clone(),
         memory_pubsub_registry.clone(),
+        spawner.clone(),
     );
     let manager = PipelineManager::new(Arc::clone(&catalog), context, registries);
     manager
@@ -285,8 +304,9 @@ fn attach_sources_accepts_shared_stream_only_pipeline() {
     runtime.block_on(async move {
         let stream_name = format!("shared_stream_attach_test_{}", Uuid::new_v4().simple());
         let catalog = Arc::new(Catalog::new());
-        let mqtt_manager = MqttClientManager::new();
-        let registry = Arc::new(SharedStreamRegistry::new());
+        let spawner = test_spawner();
+        let mqtt_manager = MqttClientManager::new(spawner.clone());
+        let registry = Arc::new(SharedStreamRegistry::new(spawner.clone()));
         let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let registries = PipelineRegistries::new_with_builtin();
 
@@ -326,6 +346,7 @@ fn attach_sources_accepts_shared_stream_only_pipeline() {
             &catalog,
             Arc::clone(&registry),
             mqtt_manager.clone(),
+            spawner.clone(),
             &registries,
         )
         .expect("create pipeline");
@@ -334,6 +355,7 @@ fn attach_sources_accepts_shared_stream_only_pipeline() {
             Arc::clone(&registry),
             mqtt_manager.clone(),
             memory_pubsub_registry.clone(),
+            spawner.clone(),
         );
         let stream_defs = HashMap::new();
         super::internal::attach_sources_from_catalog(&mut pipeline, &stream_defs, &context)
@@ -347,8 +369,9 @@ fn shared_stream_pipeline_uses_full_schema_for_column_indices() {
     runtime.block_on(async move {
         let stream_name = format!("shared_stream_schema_test_{}", Uuid::new_v4().simple());
         let catalog = Arc::new(Catalog::new());
-        let mqtt_manager = MqttClientManager::new();
-        let registry = Arc::new(SharedStreamRegistry::new());
+        let spawner = test_spawner();
+        let mqtt_manager = MqttClientManager::new(spawner.clone());
+        let registry = Arc::new(SharedStreamRegistry::new(spawner.clone()));
         let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let registries = PipelineRegistries::new_with_builtin();
 
@@ -396,6 +419,7 @@ fn shared_stream_pipeline_uses_full_schema_for_column_indices() {
             &catalog,
             Arc::clone(&registry),
             mqtt_manager.clone(),
+            spawner.clone(),
             &registries,
         )
         .expect("create pipeline");
@@ -404,6 +428,7 @@ fn shared_stream_pipeline_uses_full_schema_for_column_indices() {
             Arc::clone(&registry),
             mqtt_manager.clone(),
             memory_pubsub_registry.clone(),
+            spawner.clone(),
         );
         let stream_defs = HashMap::new();
         super::internal::attach_sources_from_catalog(&mut pipeline, &stream_defs, &context)

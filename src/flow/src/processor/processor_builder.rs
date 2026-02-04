@@ -25,6 +25,7 @@ use crate::processor::{
     StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
+use crate::runtime::TaskSpawner;
 use crate::shared_stream::{AppliedDecodeState, SharedStreamRegistry};
 use crate::stateful::StatefulFunctionRegistry;
 use crate::PipelineRegistries;
@@ -46,7 +47,7 @@ pub(crate) struct SharedStreamPipelineOptions {
 ///
 /// This enum allows storing different types of processors in a unified way.
 /// All processors are created through PhysicalPlan.
-pub enum PlanProcessor {
+pub(crate) enum PlanProcessor {
     /// AggregationProcessor created from PhysicalAggregation
     Aggregation(AggregationProcessor),
     /// DataSourceProcessor created from PhysicalDatasource
@@ -96,7 +97,7 @@ pub enum PlanProcessor {
 }
 
 #[derive(Clone)]
-pub struct ProcessorPipelineDependencies {
+pub(crate) struct ProcessorPipelineDependencies {
     mqtt_clients: MqttClientManager,
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
@@ -104,17 +105,19 @@ pub struct ProcessorPipelineDependencies {
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     stateful_registry: Arc<StatefulFunctionRegistry>,
     shared_stream_registry: Arc<SharedStreamRegistry>,
+    spawner: TaskSpawner,
 
     eventtime: Option<EventtimePipelineContext>,
     merger_registry: Arc<MergerRegistry>,
 }
 
 impl ProcessorPipelineDependencies {
-    pub fn new(
+    pub(crate) fn new(
         mqtt_clients: MqttClientManager,
         shared_stream_registry: Arc<SharedStreamRegistry>,
         registries: &PipelineRegistries,
         eventtime: Option<EventtimePipelineContext>,
+        spawner: TaskSpawner,
     ) -> Self {
         Self {
             mqtt_clients,
@@ -124,6 +127,7 @@ impl ProcessorPipelineDependencies {
             aggregate_registry: registries.aggregate_registry(),
             stateful_registry: registries.stateful_registry(),
             shared_stream_registry,
+            spawner,
             eventtime,
             merger_registry: registries.merger_registry(),
         }
@@ -131,8 +135,8 @@ impl ProcessorPipelineDependencies {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ProcessorPipelineOptions {
-    pub data_channel_capacity: usize,
+pub(crate) struct ProcessorPipelineOptions {
+    pub(crate) data_channel_capacity: usize,
 }
 
 impl Default for ProcessorPipelineOptions {
@@ -144,7 +148,7 @@ impl Default for ProcessorPipelineOptions {
 }
 
 impl ProcessorPipelineOptions {
-    pub fn with_data_channel_capacity(mut self, capacity: usize) -> Self {
+    pub(crate) fn with_data_channel_capacity(mut self, capacity: usize) -> Self {
         self.data_channel_capacity = normalize_channel_capacity(capacity);
         self
     }
@@ -170,9 +174,14 @@ struct ProcessorBuilderContext {
     merger_registry: Option<Arc<MergerRegistry>>,
     shared_stream: Option<SharedStreamPipelineOptions>,
     channel_capacities: ProcessorChannelCapacities,
+    spawner: TaskSpawner,
 }
 
 impl ProcessorBuilderContext {
+    fn spawner(&self) -> &TaskSpawner {
+        &self.spawner
+    }
+
     fn mqtt_clients_ref(&self) -> Result<&MqttClientManager, ProcessorError> {
         self.mqtt_clients.as_ref().ok_or_else(|| {
             ProcessorError::InvalidConfiguration("mqtt client manager unavailable".into())
@@ -348,31 +357,34 @@ impl PlanProcessor {
     }
 
     /// Start the processor
-    pub fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    pub fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         match self {
-            PlanProcessor::Aggregation(p) => p.start(),
-            PlanProcessor::DataSource(p) => p.start(),
-            PlanProcessor::Decoder(p) => p.start(),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.start(),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.start(),
-            PlanProcessor::SharedSource(p) => p.start(),
-            PlanProcessor::Compute(p) => p.start(),
-            PlanProcessor::Order(p) => p.start(),
-            PlanProcessor::Project(p) => p.start(),
-            PlanProcessor::StatefulFunction(p) => p.start(),
-            PlanProcessor::Filter(p) => p.start(),
-            PlanProcessor::Batch(p) => p.start(),
-            PlanProcessor::Encoder(p) => p.start(),
-            PlanProcessor::StreamingEncoder(p) => p.start(),
-            PlanProcessor::StreamingAggregation(p) => p.start(),
-            PlanProcessor::Watermark(p) => p.start(),
-            PlanProcessor::TumblingWindow(p) => p.start(),
-            PlanProcessor::SlidingWindow(p) => p.start(),
-            PlanProcessor::StateWindow(p) => p.start(),
-            PlanProcessor::Sink(p) => p.start(),
-            PlanProcessor::ResultCollect(p) => p.start(),
-            PlanProcessor::Barrier(p) => p.start(),
-            PlanProcessor::Sampler(p) => p.start(),
+            PlanProcessor::Aggregation(p) => p.start(spawner),
+            PlanProcessor::DataSource(p) => p.start(spawner),
+            PlanProcessor::Decoder(p) => p.start(spawner),
+            PlanProcessor::CollectionLayoutNormalize(p) => p.start(spawner),
+            PlanProcessor::MemoryCollectionMaterialize(p) => p.start(spawner),
+            PlanProcessor::SharedSource(p) => p.start(spawner),
+            PlanProcessor::Compute(p) => p.start(spawner),
+            PlanProcessor::Order(p) => p.start(spawner),
+            PlanProcessor::Project(p) => p.start(spawner),
+            PlanProcessor::StatefulFunction(p) => p.start(spawner),
+            PlanProcessor::Filter(p) => p.start(spawner),
+            PlanProcessor::Batch(p) => p.start(spawner),
+            PlanProcessor::Encoder(p) => p.start(spawner),
+            PlanProcessor::StreamingEncoder(p) => p.start(spawner),
+            PlanProcessor::StreamingAggregation(p) => p.start(spawner),
+            PlanProcessor::Watermark(p) => p.start(spawner),
+            PlanProcessor::TumblingWindow(p) => p.start(spawner),
+            PlanProcessor::SlidingWindow(p) => p.start(spawner),
+            PlanProcessor::StateWindow(p) => p.start(spawner),
+            PlanProcessor::Sink(p) => p.start(spawner),
+            PlanProcessor::ResultCollect(p) => p.start(spawner),
+            PlanProcessor::Barrier(p) => p.start(spawner),
+            PlanProcessor::Sampler(p) => p.start(spawner),
         }
     }
 
@@ -501,15 +513,15 @@ impl PlanProcessor {
 /// - ResultCollectProcessor: data flow ending point
 pub struct ProcessorPipeline {
     /// Pipeline ingress channel (send data/control into ControlSourceProcessor)
-    pub ingress: mpsc::Sender<Ingress>,
+    pub(crate) ingress: mpsc::Sender<Ingress>,
     /// Pipeline output channel (receive data from ResultCollectProcessor)
-    pub output: Option<mpsc::Receiver<StreamData>>,
+    pub(crate) output: Option<mpsc::Receiver<StreamData>>,
     /// Control source processor (data head)
-    pub control_source: ControlSourceProcessor,
+    pub(crate) control_source: ControlSourceProcessor,
     /// Middle processors created from PhysicalPlan (various types)
-    pub middle_processors: Vec<PlanProcessor>,
+    pub(crate) middle_processors: Vec<PlanProcessor>,
     /// Result sink processor (data tail) if downstream forwarding is enabled
-    pub result_sink: Option<ResultCollectProcessor>,
+    pub(crate) result_sink: Option<ResultCollectProcessor>,
     /// Join handles for all running processors
     handles: Vec<JoinHandle<Result<(), ProcessorError>>>,
     /// Logical pipeline identifier used for diagnostics/subscriptions
@@ -519,6 +531,7 @@ pub struct ProcessorPipeline {
     /// Processor-local stats handles (one per processor instance).
     processor_stats: Vec<ProcessorStatsHandle>,
     channel_capacities: ProcessorChannelCapacities,
+    spawner: TaskSpawner,
 }
 
 impl ProcessorPipeline {
@@ -529,20 +542,22 @@ impl ProcessorPipeline {
         }
         // Start from downstream to upstream so that consumers are ready before producers.
         if let Some(result_sink) = &mut self.result_sink {
-            self.handles.push(result_sink.start());
+            self.handles.push(result_sink.start(&self.spawner));
         }
         let len = self.middle_processors.len();
         for idx in (0..len).rev() {
             if !matches!(self.middle_processors[idx], PlanProcessor::DataSource(_)) {
-                self.handles.push(self.middle_processors[idx].start());
+                self.handles
+                    .push(self.middle_processors[idx].start(&self.spawner));
             }
         }
         for idx in (0..len).rev() {
             if matches!(self.middle_processors[idx], PlanProcessor::DataSource(_)) {
-                self.handles.push(self.middle_processors[idx].start());
+                self.handles
+                    .push(self.middle_processors[idx].start(&self.spawner));
             }
         }
-        self.handles.push(self.control_source.start());
+        self.handles.push(self.control_source.start(&self.spawner));
     }
 
     pub async fn send_ingress(&self, item: Ingress) -> Result<(), ProcessorError> {
@@ -1125,6 +1140,7 @@ fn create_processor_from_plan_node(
                     &sink_plan.connector.sink_id,
                     &sink_plan.connector.connector,
                     context.mqtt_clients_ref()?,
+                    context.spawner(),
                 )
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
             processor.add_connector(connector_impl);
@@ -1494,12 +1510,14 @@ fn create_processor_pipeline_with_context(
         ack_manager,
         processor_stats,
         channel_capacities,
+        spawner: context.spawner.clone(),
     })
 }
 
 pub(crate) fn create_processor_pipeline_for_shared_stream(
     physical_plan: Arc<PhysicalPlan>,
     options: SharedStreamPipelineOptions,
+    spawner: TaskSpawner,
 ) -> Result<ProcessorPipeline, ProcessorError> {
     create_processor_pipeline_with_context(
         physical_plan,
@@ -1518,11 +1536,12 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
                 DEFAULT_DATA_CHANNEL_CAPACITY,
                 DEFAULT_CONTROL_CHANNEL_CAPACITY,
             ),
+            spawner,
         },
     )
 }
 
-pub fn create_processor_pipeline(
+pub(crate) fn create_processor_pipeline(
     physical_plan: Arc<PhysicalPlan>,
     dependencies: ProcessorPipelineDependencies,
     options: ProcessorPipelineOptions,
@@ -1541,6 +1560,7 @@ pub fn create_processor_pipeline(
             merger_registry: Some(dependencies.merger_registry),
             shared_stream: None,
             channel_capacities: options.channel_capacities(),
+            spawner: dependencies.spawner,
         },
     )
 }
@@ -1596,6 +1616,12 @@ mod tests {
         )));
 
         // Try to create a processor from the PhysicalProject
+        let spawner = crate::runtime::TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime"),
+        );
         let connector_registry =
             ConnectorRegistry::with_builtin_sinks(crate::connector::MemoryPubSubRegistry::new());
         let encoder_registry = EncoderRegistry::with_builtin_encoders();
@@ -1603,7 +1629,7 @@ mod tests {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let context = ProcessorBuilderContext {
-            mqtt_clients: Some(MqttClientManager::new()),
+            mqtt_clients: Some(MqttClientManager::new(spawner.clone())),
             connector_registry: Some(connector_registry),
             encoder_registry: Some(encoder_registry),
             decoder_registry: Some(decoder_registry),
@@ -1617,6 +1643,7 @@ mod tests {
                 DEFAULT_DATA_CHANNEL_CAPACITY,
                 DEFAULT_CONTROL_CHANNEL_CAPACITY,
             ),
+            spawner,
         };
         let result = create_processor_from_plan_node(&physical_project, &context)
             .expect("processor creation failed");

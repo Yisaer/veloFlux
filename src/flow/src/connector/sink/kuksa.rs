@@ -19,6 +19,7 @@ use std::fs;
 use std::sync::Arc;
 
 use crate::model::Collection;
+use crate::runtime::TaskSpawner;
 
 /// Kuksa sink configuration.
 #[derive(Debug, Clone)]
@@ -30,7 +31,7 @@ pub struct KuksaSinkConfig {
     pub vss_path: String,
 }
 
-pub struct KuksaSinkConnector {
+pub(crate) struct KuksaSinkConnector {
     id: String,
     config: KuksaSinkConfig,
     mapping: Option<Arc<HashMap<String, String>>>,
@@ -40,10 +41,11 @@ pub struct KuksaSinkConnector {
     path_cache: HashMap<String, PathInfo>,
     provided_signal_ids: HashSet<i32>,
     request_id_counter: u32,
+    spawner: TaskSpawner,
 }
 
 impl KuksaSinkConnector {
-    pub fn new(id: impl Into<String>, config: KuksaSinkConfig) -> Self {
+    pub fn new(id: impl Into<String>, config: KuksaSinkConfig, spawner: TaskSpawner) -> Self {
         Self {
             id: id.into(),
             config,
@@ -54,6 +56,7 @@ impl KuksaSinkConnector {
             path_cache: HashMap::new(),
             provided_signal_ids: HashSet::new(),
             request_id_counter: 0,
+            spawner,
         }
     }
 
@@ -136,7 +139,7 @@ impl KuksaSinkConnector {
         })?;
 
         let connector_id = self.id.clone();
-        let response_task = tokio::spawn(async move {
+        let response_task = self.spawner.spawn(async move {
             loop {
                 match receiver_stream.message().await {
                     Ok(Some(response)) => {

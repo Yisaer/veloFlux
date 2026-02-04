@@ -7,6 +7,7 @@ use super::ConnectorError;
 use crate::connector::MemoryPubSubRegistry;
 use crate::connector::MqttClientManager;
 use crate::planner::sink::SinkConnectorConfig;
+use crate::runtime::TaskSpawner;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ type SinkConnectorFactory = Arc<
             &str,
             &SinkConnectorConfig,
             &MqttClientManager,
+            &TaskSpawner,
         ) -> Result<Box<dyn SinkConnector>, ConnectorError>
         + Send
         + Sync,
@@ -49,7 +51,11 @@ impl ConnectorRegistry {
         registry
     }
 
-    pub fn register_sink_factory(&self, kind: impl Into<String>, factory: SinkConnectorFactory) {
+    pub(crate) fn register_sink_factory(
+        &self,
+        kind: impl Into<String>,
+        factory: SinkConnectorFactory,
+    ) {
         self.sink_factories.write().insert(kind.into(), factory);
     }
 
@@ -58,18 +64,19 @@ impl ConnectorRegistry {
         guard.contains_key(kind)
     }
 
-    pub fn instantiate_sink(
+    pub(crate) fn instantiate_sink(
         &self,
         kind: &str,
         sink_id: &str,
         config: &SinkConnectorConfig,
         mqtt_clients: &MqttClientManager,
+        spawner: &TaskSpawner,
     ) -> Result<Box<dyn SinkConnector>, ConnectorError> {
         let guard = self.sink_factories.read();
         let factory = guard.get(kind).ok_or_else(|| {
             ConnectorError::NotFound(format!("sink connector kind `{kind}` not registered"))
         })?;
-        factory(sink_id, config, mqtt_clients)
+        factory(sink_id, config, mqtt_clients, spawner)
     }
 
     fn register_builtin_sinks(&self) {
@@ -77,11 +84,12 @@ impl ConnectorRegistry {
 
         self.register_sink_factory(
             "mqtt",
-            Arc::new(|sink_id, config, mqtt_clients| match config {
+            Arc::new(|sink_id, config, mqtt_clients, spawner| match config {
                 SinkConnectorConfig::Mqtt(mqtt_cfg) => Ok(Box::new(MqttSinkConnector::new(
                     sink_id.to_string(),
                     mqtt_cfg.clone(),
                     mqtt_clients.clone(),
+                    spawner.clone(),
                 ))),
                 other => Err(ConnectorError::Other(format!(
                     "connector `{sink_id}` expected MQTT config but received {:?}",
@@ -92,7 +100,7 @@ impl ConnectorRegistry {
 
         self.register_sink_factory(
             "nop",
-            Arc::new(|sink_id, config, _| match config {
+            Arc::new(|sink_id, config, _, _| match config {
                 SinkConnectorConfig::Nop(cfg) => Ok(Box::new(NopSinkConnector::new(
                     sink_id.to_string(),
                     cfg.clone(),
@@ -106,10 +114,11 @@ impl ConnectorRegistry {
 
         self.register_sink_factory(
             "kuksa",
-            Arc::new(|sink_id, config, _| match config {
+            Arc::new(|sink_id, config, _, spawner| match config {
                 SinkConnectorConfig::Kuksa(cfg) => Ok(Box::new(KuksaSinkConnector::new(
                     sink_id.to_string(),
                     cfg.clone(),
+                    spawner.clone(),
                 ))),
                 other => Err(ConnectorError::Other(format!(
                     "connector `{sink_id}` expected Kuksa config but received {:?}",
@@ -120,7 +129,7 @@ impl ConnectorRegistry {
 
         self.register_sink_factory(
             "memory",
-            Arc::new(move |sink_id, config, _| match config {
+            Arc::new(move |sink_id, config, _, _| match config {
                 SinkConnectorConfig::Memory(cfg) => Ok(Box::new(MemorySinkConnector::new(
                     sink_id.to_string(),
                     cfg.clone(),

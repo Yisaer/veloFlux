@@ -40,7 +40,8 @@ pub mod watermark_processor;
 
 pub use aggregation_processor::AggregationProcessor;
 pub use barrier_processor::BarrierProcessor;
-pub use base::{Processor, ProcessorError};
+pub(crate) use base::Processor;
+pub use base::ProcessorError;
 pub use batch_processor::BatchProcessor;
 pub use collection_layout_normalize_processor::CollectionLayoutNormalizeProcessor;
 pub use compute_processor::ComputeProcessor;
@@ -52,9 +53,9 @@ pub use eventtime::EventtimePipelineContext;
 pub use filter_processor::FilterProcessor;
 pub use memory_collection_materialize_processor::MemoryCollectionMaterializeProcessor;
 pub use order_processor::OrderProcessor;
-pub use processor_builder::{
-    create_processor_pipeline, ProcessorPipeline, ProcessorPipelineDependencies,
-    ProcessorPipelineOptions,
+pub use processor_builder::ProcessorPipeline;
+pub(crate) use processor_builder::{
+    create_processor_pipeline, ProcessorPipelineDependencies, ProcessorPipelineOptions,
 };
 pub use project_processor::ProjectProcessor;
 pub use result_collect_processor::ResultCollectProcessor;

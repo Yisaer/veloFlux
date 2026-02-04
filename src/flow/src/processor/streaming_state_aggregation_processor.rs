@@ -6,6 +6,7 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use futures::stream::StreamExt;
 use std::collections::HashMap;
@@ -83,7 +84,10 @@ impl Processor for StreamingStateAggregationProcessor {
         self.id()
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -116,7 +120,7 @@ impl Processor for StreamingStateAggregationProcessor {
                 other => unreachable!("state processor requires state window spec, got {other:?}"),
             };
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut partitions: HashMap<Option<String>, PartitionAggState> = HashMap::new();
             loop {
                 tokio::select! {
@@ -347,10 +351,20 @@ mod tests {
     use crate::planner::physical::AggregateCall;
     use crate::planner::physical::PhysicalStreamingAggregation;
     use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
+    use crate::runtime::TaskSpawner;
     use datatypes::{BooleanType, ConcreteDatatype, Value};
     use sqlparser::ast::{Expr, Ident};
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
 
     fn lit_bool(v: bool) -> ScalarExpr {
         ScalarExpr::Literal(Value::Bool(v), ConcreteDatatype::Bool(BooleanType))
@@ -424,6 +438,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_state_agg_open_then_emit_outputs_sum() {
+        let spawner = test_spawner();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let physical = make_physical(lit_bool(true), lit_bool(true), Vec::new());
 
@@ -435,7 +450,7 @@ mod tests {
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         // First tuple opens (emit ignored because it was inactive).
         let batch = crate::model::RecordBatch::new(vec![tuple_with(&[("a", Value::Int64(1))])])
@@ -461,6 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_state_agg_partitioned_by_key_isolated() {
+        let spawner = test_spawner();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let physical = make_physical(lit_bool(true), lit_bool(true), vec![col("k")]);
 
@@ -472,7 +488,7 @@ mod tests {
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         // Interleaved keys; each needs its own open+emit cycle.
         let batch = crate::model::RecordBatch::new(vec![

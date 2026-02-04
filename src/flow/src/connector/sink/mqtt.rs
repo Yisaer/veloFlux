@@ -16,6 +16,7 @@ use tokio::time::sleep;
 use url::Url;
 
 use crate::connector::mqtt_client::{MqttClientManager, SharedMqttClient};
+use crate::runtime::TaskSpawner;
 
 /// Basic MQTT configuration for sinks.
 #[derive(Debug, Clone)]
@@ -69,11 +70,12 @@ impl MqttSinkConfig {
     }
 }
 
-pub struct MqttSinkConnector {
+pub(crate) struct MqttSinkConnector {
     id: String,
     config: MqttSinkConfig,
     client: Option<SinkClient>,
     mqtt_clients: MqttClientManager,
+    spawner: TaskSpawner,
 }
 
 static MQTT_SINK_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
@@ -161,11 +163,14 @@ impl MqttConnectionState {
 }
 
 impl StandaloneMqttClient {
-    async fn new(config: &MqttSinkConfig) -> Result<Self, SinkConnectorError> {
+    async fn new(
+        config: &MqttSinkConfig,
+        spawner: &TaskSpawner,
+    ) -> Result<Self, SinkConnectorError> {
         let options = build_mqtt_options(config)?;
         let (client, event_loop) = AsyncClient::new(options, 32);
         let state = MqttConnectionState::default();
-        let event_loop_handle = tokio::spawn(run_event_loop(event_loop, state.clone()));
+        let event_loop_handle = spawner.spawn(run_event_loop(event_loop, state.clone()));
         Ok(Self {
             client,
             event_loop_handle,
@@ -242,12 +247,14 @@ impl MqttSinkConnector {
         id: impl Into<String>,
         config: MqttSinkConfig,
         mqtt_clients: MqttClientManager,
+        spawner: TaskSpawner,
     ) -> Self {
         Self {
             id: id.into(),
             config,
             client: None,
             mqtt_clients,
+            spawner,
         }
     }
 
@@ -269,7 +276,7 @@ impl MqttSinkConnector {
             );
             self.client = Some(SinkClient::Shared(client));
         } else {
-            let standalone = StandaloneMqttClient::new(&self.config).await?;
+            let standalone = StandaloneMqttClient::new(&self.config, &self.spawner).await?;
             tracing::info!(connector_id = %self.id, "mqtt sink starting standalone client");
             self.client = Some(SinkClient::Standalone(standalone));
         }

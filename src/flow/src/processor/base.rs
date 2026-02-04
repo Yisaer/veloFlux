@@ -6,6 +6,7 @@
 //! - ResultCollectProcessor: Final destination, prints received data
 
 use crate::processor::{ControlSignal, StreamData};
+use crate::runtime::TaskSpawner;
 use futures::stream::SelectAll;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
@@ -120,13 +121,16 @@ pub(crate) fn default_channel_capacities() -> ProcessorChannelCapacities {
 /// Processors are the building blocks of the stream processing pipeline.
 /// Each processor can have multiple inputs and multiple outputs, communicating
 /// via tokio mpsc channels with StreamData.
-pub trait Processor: Send + Sync {
+pub(crate) trait Processor: Send + Sync {
     /// Get the processor identifier
     fn id(&self) -> &str;
 
     /// Start the processor asynchronously
     /// Returns a handle that can be used to await completion
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>>;
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>>;
 
     /// Get output channel senders (for connecting downstream processors)
     fn subscribe_output(&self) -> Option<broadcast::Receiver<StreamData>>;

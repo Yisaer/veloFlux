@@ -13,6 +13,7 @@ use tokio::time::sleep;
 use url::Url;
 
 use crate::connector::ConnectorError;
+use crate::runtime::TaskSpawner;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,7 +133,11 @@ impl MqttClientEntry {
         ))
     }
 
-    fn start_event_loop(entry: &Arc<MqttClientEntry>, mut event_loop: EventLoop) {
+    fn start_event_loop(
+        spawner: &TaskSpawner,
+        entry: &Arc<MqttClientEntry>,
+        mut event_loop: EventLoop,
+    ) {
         let entry_for_task = Arc::clone(entry);
         let mut shutdown_rx = entry.shutdown_tx.subscribe();
         let events_tx = entry.events_tx.clone();
@@ -140,7 +145,7 @@ impl MqttClientEntry {
         let qos = entry.qos;
         let client = entry.client.clone();
 
-        let handle = tokio::spawn(async move {
+        let handle = spawner.spawn(async move {
             let mut backoff = Duration::from_millis(100);
             let max_backoff = Duration::from_secs(5);
 
@@ -188,8 +193,8 @@ impl MqttClientEntry {
         *entry.join_handle.lock() = Some(handle);
     }
 
-    fn spawn_shutdown(entry: Arc<Self>) {
-        tokio::spawn(async move {
+    fn spawn_shutdown(spawner: &TaskSpawner, entry: Arc<Self>) {
+        spawner.spawn(async move {
             let _ = entry.shutdown_tx.send(true);
             let _ = entry.client.disconnect().await;
             if let Some(handle) = entry.join_handle.lock().take() {
@@ -200,19 +205,21 @@ impl MqttClientEntry {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct MqttClientManager {
+#[derive(Clone)]
+pub(crate) struct MqttClientManager {
     entries: Arc<Mutex<HashMap<String, Arc<MqttClientEntry>>>>,
+    spawner: TaskSpawner,
 }
 
 impl MqttClientManager {
-    pub fn new() -> Self {
+    pub(crate) fn new(spawner: TaskSpawner) -> Self {
         Self {
             entries: Arc::new(Mutex::new(HashMap::new())),
+            spawner,
         }
     }
 
-    pub async fn create_client(
+    pub(crate) async fn create_client(
         &self,
         config: SharedMqttClientConfig,
     ) -> Result<(), ConnectorError> {
@@ -225,20 +232,23 @@ impl MqttClientManager {
 
         let (entry, event_loop) = MqttClientEntry::new(&config).await?;
         let entry = Arc::new(entry);
-        MqttClientEntry::start_event_loop(&entry, event_loop);
+        MqttClientEntry::start_event_loop(&self.spawner, &entry, event_loop);
 
         self.entries.lock().insert(key, entry);
         Ok(())
     }
 
-    pub async fn acquire_client(&self, key: &str) -> Result<SharedMqttClient, ConnectorError> {
+    pub(crate) async fn acquire_client(
+        &self,
+        key: &str,
+    ) -> Result<SharedMqttClient, ConnectorError> {
         if let Some(entry) = self.entries.lock().get(key).cloned() {
             return Ok(SharedMqttClient::new(key.to_string(), entry, self.clone()));
         }
         Err(ConnectorError::NotFound(key.to_string()))
     }
 
-    pub fn drop_client(&self, key: &str) -> Result<(), ConnectorError> {
+    pub(crate) fn drop_client(&self, key: &str) -> Result<(), ConnectorError> {
         let mut guard = self.entries.lock();
         let entry = guard
             .get(key)
@@ -250,11 +260,11 @@ impl MqttClientManager {
         }
 
         guard.remove(key);
-        MqttClientEntry::spawn_shutdown(entry);
+        MqttClientEntry::spawn_shutdown(&self.spawner, entry);
         Ok(())
     }
 
-    pub fn release(&self, key: &str) {
+    pub(crate) fn release(&self, key: &str) {
         if let Some(entry) = self.entries.lock().get(key) {
             entry.ref_count.fetch_sub(1, Ordering::AcqRel);
         }

@@ -21,6 +21,7 @@ pub(crate) struct PipelineContext {
     mqtt_client_manager: MqttClientManager,
     memory_pubsub_registry: MemoryPubSubRegistry,
     mock_source_handle_registry: MockSourceHandleRegistry,
+    spawner: crate::runtime::TaskSpawner,
 }
 
 impl PipelineContext {
@@ -28,12 +29,14 @@ impl PipelineContext {
         shared_stream_registry: Arc<SharedStreamRegistry>,
         mqtt_client_manager: MqttClientManager,
         memory_pubsub_registry: MemoryPubSubRegistry,
+        spawner: crate::runtime::TaskSpawner,
     ) -> Self {
         Self {
             shared_stream_registry,
             mqtt_client_manager,
             memory_pubsub_registry,
             mock_source_handle_registry: MockSourceHandleRegistry::default(),
+            spawner,
         }
     }
 
@@ -51,5 +54,9 @@ impl PipelineContext {
 
     pub(crate) fn mock_source_handle_registry(&self) -> &MockSourceHandleRegistry {
         &self.mock_source_handle_registry
+    }
+
+    pub(crate) fn spawner(&self) -> &crate::runtime::TaskSpawner {
+        &self.spawner
     }
 }

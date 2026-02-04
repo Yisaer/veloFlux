@@ -561,6 +561,7 @@ fn build_pipeline_runtime_with_logical_ir(
             Arc::clone(&shared_stream_registry),
             registries,
             eventtime,
+            context.spawner().clone(),
         ),
         ProcessorPipelineOptions::default()
             .with_data_channel_capacity(definition.options().data_channel_capacity),
@@ -688,6 +689,7 @@ fn build_pipeline_runtime_from_logical_ir(
             Arc::clone(&shared_stream_registry),
             registries,
             eventtime,
+            context.spawner().clone(),
         ),
         ProcessorPipelineOptions::default()
             .with_data_channel_capacity(definition.options().data_channel_capacity),
@@ -869,6 +871,7 @@ pub(super) fn attach_sources_from_catalog(
                         format!("{processor_id}_source_connector"),
                         config,
                         mqtt_client_manager.clone(),
+                        context.spawner().clone(),
                     )
                     .with_channel_capacity(data_channel_capacity);
                     ds.add_connector(Box::new(connector));
@@ -882,8 +885,12 @@ pub(super) fn attach_sources_from_catalog(
                     }
                     config.send_interval = props.send_interval;
 
-                    let connector = HistorySourceConnector::new(processor_id.clone(), config)
-                        .with_channel_capacity(data_channel_capacity);
+                    let connector = HistorySourceConnector::new(
+                        processor_id.clone(),
+                        config,
+                        context.spawner().clone(),
+                    )
+                    .with_channel_capacity(data_channel_capacity);
                     ds.add_connector(Box::new(connector));
                 }
                 StreamProps::Mock(_) => {

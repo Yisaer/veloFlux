@@ -10,6 +10,7 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -77,7 +78,10 @@ impl Processor for SlidingWindowProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -99,7 +103,7 @@ impl Processor for SlidingWindowProcessor {
             Arc::clone(&stats),
         );
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -462,7 +466,18 @@ impl ProcessingWithLookaheadState {
 mod tests {
     use super::*;
     use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
+    use crate::runtime::TaskSpawner;
+    use std::sync::Arc;
     use std::time::UNIX_EPOCH;
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
 
     fn tuple_at(sec: u64) -> crate::model::Tuple {
         crate::model::Tuple::with_timestamp(
@@ -473,12 +488,13 @@ mod tests {
 
     #[tokio::test]
     async fn sliding_window_without_lookahead_emits_on_data() {
+        let spawner = test_spawner();
         let physical = PhysicalSlidingWindow::new(TimeUnit::Seconds, 10, None, Vec::new(), 0);
         let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         let batch =
             crate::model::RecordBatch::new(vec![tuple_at(100), tuple_at(105)]).expect("batch");
@@ -500,12 +516,13 @@ mod tests {
 
     #[tokio::test]
     async fn sliding_window_with_lookahead_waits_for_watermark() {
+        let spawner = test_spawner();
         let physical = PhysicalSlidingWindow::new(TimeUnit::Seconds, 10, Some(15), Vec::new(), 0);
         let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         let batch =
             crate::model::RecordBatch::new(vec![tuple_at(100), tuple_at(110), tuple_at(115)])

@@ -11,6 +11,7 @@ pub mod model;
 pub mod pipeline;
 pub mod planner;
 pub mod processor;
+mod runtime;
 pub mod shared_stream;
 pub mod stateful;
 
@@ -56,10 +57,7 @@ pub use planner::sink::{
     CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
     SinkEncoderConfig,
 };
-pub use processor::{
-    ControlSignal, ControlSourceProcessor, DataSourceProcessor, Processor, ProcessorError,
-    ResultCollectProcessor, SinkProcessor, StreamData,
-};
+pub use processor::{ControlSignal, ProcessorError, StreamData};
 pub use shared_stream::{
     SharedSourceConnectorConfig, SharedStreamConfig, SharedStreamError, SharedStreamInfo,
     SharedStreamStatus, SharedStreamSubscription,
@@ -69,7 +67,7 @@ pub use stateful::StatefulFunctionRegistry;
 use connector::{ConnectorRegistry, MqttClientManager};
 use explain_shared_stream::shared_stream_decode_applied_snapshot;
 use planner::logical::create_logical_plan;
-use processor::{
+use processor::processor_builder::{
     create_processor_pipeline, ProcessorPipeline, ProcessorPipelineDependencies,
     ProcessorPipelineOptions,
 };
@@ -273,6 +271,7 @@ pub(crate) fn create_pipeline(
     catalog: &Catalog,
     shared_stream_registry: Arc<SharedStreamRegistry>,
     mqtt_client_manager: MqttClientManager,
+    spawner: crate::runtime::TaskSpawner,
     registries: &PipelineRegistries,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
     tracing::info!(sql = sql, "create pipeline");
@@ -290,6 +289,7 @@ pub(crate) fn create_pipeline(
             Arc::clone(&shared_stream_registry),
             registries,
             None,
+            spawner,
         ),
         ProcessorPipelineOptions::default(),
     )?;
