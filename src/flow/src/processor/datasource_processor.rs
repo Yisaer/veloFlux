@@ -10,6 +10,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use datatypes::Schema;
 use futures::stream::StreamExt;
 use std::sync::Arc;
@@ -52,6 +53,7 @@ impl ConnectorBinding {
         processor_id: &str,
         data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
+        spawner: &TaskSpawner,
     ) -> broadcast::Receiver<StreamData> {
         let (sender, receiver) = broadcast::channel(data_channel_capacity);
         let processor_id = processor_id.to_string();
@@ -77,7 +79,7 @@ impl ConnectorBinding {
             "data source connector starting"
         );
         let sender_clone = sender.clone();
-        self.handle = Some(tokio::spawn(async move {
+        self.handle = Some(spawner.spawn(async move {
             let sender = sender_clone;
             while let Some(event) = stream.next().await {
                 match event {
@@ -223,10 +225,18 @@ impl DataSourceProcessor {
         processor_id: &str,
         data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
+        spawner: &TaskSpawner,
     ) -> Vec<broadcast::Receiver<StreamData>> {
         connectors
             .iter_mut()
-            .map(|binding| binding.activate(processor_id, data_channel_capacity, Arc::clone(stats)))
+            .map(|binding| {
+                binding.activate(
+                    processor_id,
+                    data_channel_capacity,
+                    Arc::clone(stats),
+                    spawner,
+                )
+            })
             .collect()
     }
 
@@ -245,7 +255,10 @@ impl Processor for DataSourceProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let processor_id = self.id.clone();
@@ -263,6 +276,7 @@ impl Processor for DataSourceProcessor {
             &processor_id,
             channel_capacities.data,
             &stats,
+            spawner,
         );
         base_inputs.extend(connector_inputs);
         let mut input_streams = fan_in_streams(base_inputs);
@@ -275,7 +289,7 @@ impl Processor for DataSourceProcessor {
             stream = %stream_name,
             "data source starting"
         );
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut connectors = connectors;
             loop {
                 tokio::select! {

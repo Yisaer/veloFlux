@@ -3,6 +3,7 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use crate::shared_stream::SharedStreamRegistry;
 use futures::stream::StreamExt;
 use std::collections::HashSet;
@@ -87,7 +88,10 @@ impl Processor for SharedStreamProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let has_data_inputs = !self.inputs.is_empty();
         let mut inputs = fan_in_streams(std::mem::take(&mut self.inputs));
         let mut input_active = has_data_inputs;
@@ -106,7 +110,7 @@ impl Processor for SharedStreamProcessor {
             .pipeline_id
             .clone()
             .unwrap_or_else(|| format!("pipeline-{}", Uuid::new_v4()));
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             tracing::info!(
                 processor_id = %processor_id,
                 stream = %stream_name,

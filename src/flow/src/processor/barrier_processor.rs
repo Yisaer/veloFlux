@@ -11,6 +11,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -62,7 +63,10 @@ impl Processor for BarrierProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let expected_upstreams = self.expected_upstreams;
 
@@ -86,7 +90,7 @@ impl Processor for BarrierProcessor {
             "barrier processor starting"
         );
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             if expected_upstreams == 0 {
                 return Err(ProcessorError::InvalidConfiguration(
                     "BarrierProcessor expected_upstreams must be > 0".to_string(),
@@ -212,7 +216,17 @@ mod tests {
     use super::*;
     use crate::processor::base::{DEFAULT_CONTROL_CHANNEL_CAPACITY, DEFAULT_DATA_CHANNEL_CAPACITY};
     use crate::processor::{BarrierControlSignal, InstantControlSignal};
+    use crate::runtime::TaskSpawner;
     use tokio::time::{timeout, Duration};
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
 
     struct Upstreams {
         data: Vec<broadcast::Sender<StreamData>>,
@@ -250,8 +264,9 @@ mod tests {
 
     #[tokio::test]
     async fn data_channel_barrier_waits_until_all_upstreams_arrive() {
+        let spawner = test_spawner();
         let (mut processor, upstreams, mut out, _control_out) = setup_processor(2);
-        let handle = processor.start();
+        let handle = processor.start(&spawner);
 
         let barrier = ControlSignal::Barrier(BarrierControlSignal::SyncTest { barrier_id: 1 });
         upstreams
@@ -311,8 +326,9 @@ mod tests {
 
     #[tokio::test]
     async fn control_channel_barrier_waits_until_all_upstreams_arrive() {
+        let spawner = test_spawner();
         let (mut processor, upstreams, mut out, mut control_out) = setup_processor(2);
-        let handle = processor.start();
+        let handle = processor.start(&spawner);
 
         let barrier = ControlSignal::Barrier(BarrierControlSignal::SyncTest { barrier_id: 1 });
         upstreams

@@ -11,6 +11,7 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -77,7 +78,10 @@ impl Processor for StateWindowProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -92,7 +96,7 @@ impl Processor for StateWindowProcessor {
         let emit_expr = self.physical.emit_scalar.clone();
         let partition_by_exprs = self.physical.partition_by_scalars.clone();
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut partitions: HashMap<Option<String>, PartitionState> = HashMap::new();
 
             loop {
@@ -310,9 +314,20 @@ mod tests {
     use crate::expr::scalar::ColumnRef;
     use crate::expr::ScalarExpr;
     use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
+    use crate::runtime::TaskSpawner;
     use datatypes::{BooleanType, ConcreteDatatype, Value};
     use sqlparser::ast::{Expr, Ident};
+    use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
 
     fn tuple_at(sec: u64) -> crate::model::Tuple {
         crate::model::Tuple::with_timestamp(
@@ -333,6 +348,7 @@ mod tests {
 
     #[tokio::test]
     async fn statewindow_open_then_emit_buffers_and_flushes() {
+        let spawner = test_spawner();
         let physical = PhysicalStateWindow::new(
             Expr::Identifier(Ident::new("open")),
             Expr::Identifier(Ident::new("emit")),
@@ -347,7 +363,7 @@ mod tests {
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         // First tuple opens the window (emit ignored because it was inactive).
         let batch = crate::model::RecordBatch::new(vec![tuple_at(1)]).expect("batch");
@@ -369,6 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn statewindow_emit_ignored_when_inactive() {
+        let spawner = test_spawner();
         let physical = PhysicalStateWindow::new(
             Expr::Identifier(Ident::new("open")),
             Expr::Identifier(Ident::new("emit")),
@@ -383,7 +400,7 @@ mod tests {
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         let batch = crate::model::RecordBatch::new(vec![tuple_at(1)]).expect("batch");
         assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
@@ -393,6 +410,7 @@ mod tests {
 
     #[tokio::test]
     async fn statewindow_partition_by_independent_buffers() {
+        let spawner = test_spawner();
         let key_expr = ScalarExpr::Column(ColumnRef::ByName {
             column_name: "k".to_string(),
         });
@@ -412,7 +430,7 @@ mod tests {
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         let batch = crate::model::RecordBatch::new(vec![
             tuple_with_key_at(1, 1),
@@ -458,6 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn statewindow_partition_by_graceful_end_flushes_all_partitions() {
+        let spawner = test_spawner();
         let key_expr = ScalarExpr::Column(ColumnRef::ByName {
             column_name: "k".to_string(),
         });
@@ -477,7 +496,7 @@ mod tests {
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         let batch =
             crate::model::RecordBatch::new(vec![tuple_with_key_at(1, 1), tuple_with_key_at(2, 2)])

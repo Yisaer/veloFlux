@@ -70,6 +70,20 @@ impl FlowInstance {
 
     /// Delete a stream definition and its shared runtime (if registered).
     pub async fn delete_stream(&self, name: &str) -> Result<(), FlowInstanceError> {
+        let pipelines_using_stream = self
+            .pipeline_manager
+            .list()
+            .into_iter()
+            .filter(|snapshot| snapshot.streams.iter().any(|stream| stream == name))
+            .map(|snapshot| snapshot.definition.id().to_string())
+            .collect::<Vec<_>>();
+        if !pipelines_using_stream.is_empty() {
+            return Err(FlowInstanceError::StreamInUse {
+                stream: name.to_string(),
+                pipelines: pipelines_using_stream.join(", "),
+            });
+        }
+
         if self.shared_stream_registry.is_registered(name).await {
             self.shared_stream_registry.drop_stream(name).await?;
         }
@@ -96,6 +110,7 @@ impl FlowInstance {
                     connector_key: Option<String>,
                     mqtt_client_manager: crate::connector::MqttClientManager,
                     decoder_registry: Arc<crate::codec::DecoderRegistry>,
+                    spawner: crate::runtime::TaskSpawner,
                 }
 
                 impl crate::shared_stream::SharedStreamConnectorFactory for MqttSharedStreamConnectorFactory {
@@ -128,6 +143,7 @@ impl FlowInstance {
                             self.connector_id(),
                             source_config,
                             self.mqtt_client_manager.clone(),
+                            self.spawner.clone(),
                         );
                         let decoder = self.decoder_registry.instantiate(
                             &self.decoder,
@@ -152,6 +168,7 @@ impl FlowInstance {
                     connector_key: props.connector_key.clone(),
                     mqtt_client_manager: self.mqtt_client_manager.clone(),
                     decoder_registry: Arc::clone(&self.decoder_registry),
+                    spawner: self.spawner.clone(),
                 });
 
                 config.set_connector_factory(factory);

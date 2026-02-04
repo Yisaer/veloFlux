@@ -15,6 +15,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use futures::stream::StreamExt;
 use sqlparser::ast::Expr;
@@ -236,7 +237,10 @@ impl Processor for AggregationProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -249,7 +253,7 @@ impl Processor for AggregationProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "aggregation processor starting");
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut control_streams = fan_in_control_streams(control_receivers);
             let mut stream_ended = false;
 

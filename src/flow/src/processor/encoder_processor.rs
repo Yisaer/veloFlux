@@ -11,6 +11,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -63,7 +64,10 @@ impl Processor for EncoderProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
@@ -76,7 +80,7 @@ impl Processor for EncoderProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "encoder processor starting");
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;

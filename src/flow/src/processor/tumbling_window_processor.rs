@@ -11,6 +11,7 @@ use crate::processor::{
     ControlSignal, GaugeHandle, MetricKind, MetricSpec, Processor, ProcessorError, ProcessorStats,
     StreamData,
 };
+use crate::runtime::TaskSpawner;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -73,7 +74,10 @@ impl Processor for TumblingWindowProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -93,7 +97,7 @@ impl Processor for TumblingWindowProcessor {
             Arc::clone(&stats),
         );
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;

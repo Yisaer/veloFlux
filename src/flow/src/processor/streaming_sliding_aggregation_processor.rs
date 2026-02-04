@@ -7,6 +7,7 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use futures::stream::StreamExt;
 use std::collections::hash_map::Entry;
@@ -140,9 +141,12 @@ impl Processor for StreamingSlidingAggregationProcessor {
         self.id()
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         if let Err(e) = self.validate_supported_aggregates() {
-            return tokio::spawn(async move { Err(e) });
+            return spawner.spawn(async move { Err(e) });
         }
 
         let id = self.id.clone();
@@ -160,7 +164,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
         let delay_secs = self.delay_secs;
         let stats = Arc::clone(&self.stats);
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut windows: VecDeque<IncAggWindow> = VecDeque::new();
 
             fn to_epoch_secs(ts: SystemTime) -> Result<u64, ProcessorError> {

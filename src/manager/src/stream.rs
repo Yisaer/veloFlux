@@ -12,7 +12,6 @@ use flow::catalog::{
     CatalogError, EventtimeDefinition, HistoryStreamProps, MemoryStreamProps, MockStreamProps,
     MqttStreamProps, StreamDecoderConfig,
 };
-use flow::connector::MemoryTopicKind;
 use flow::processor::SamplerConfig;
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
@@ -298,8 +297,7 @@ pub async fn create_stream_handler(
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
     if let StreamProps::Memory(memory_props) = &stream_props
-        && let Err(err) =
-            validate_memory_stream_topic_declared(&req, memory_props, &decoder, &state.instance)
+        && let Err(err) = validate_memory_stream_topic(&req, memory_props)
     {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
@@ -551,6 +549,10 @@ fn map_flow_instance_error(err: FlowInstanceError) -> axum::response::Response {
             StatusCode::NOT_FOUND,
             format!("shared stream {name} not found"),
         ),
+        FlowInstanceError::StreamInUse { stream, pipelines } => (
+            StatusCode::CONFLICT,
+            format!("stream {stream} still referenced by pipelines: {pipelines}"),
+        ),
         other => (StatusCode::BAD_REQUEST, other.to_string()),
     };
 
@@ -769,11 +771,9 @@ pub(crate) fn validate_stream_decoder_config(
     Ok(())
 }
 
-pub(crate) fn validate_memory_stream_topic_declared(
+pub(crate) fn validate_memory_stream_topic(
     req: &CreateStreamRequest,
     props: &MemoryStreamProps,
-    decoder: &StreamDecoderConfig,
-    instance: &flow::FlowInstance,
 ) -> Result<(), String> {
     if !req.stream_type.eq_ignore_ascii_case("memory") {
         return Ok(());
@@ -786,20 +786,6 @@ pub(crate) fn validate_memory_stream_topic_declared(
         ));
     }
 
-    let expected_kind = if decoder.kind() == "none" {
-        MemoryTopicKind::Collection
-    } else {
-        MemoryTopicKind::Bytes
-    };
-    let actual_kind = instance
-        .memory_topic_kind(topic)
-        .ok_or_else(|| format!("memory topic `{topic}` not declared"))?;
-    if actual_kind != expected_kind {
-        return Err(format!(
-            "memory topic `{topic}` kind mismatch: expected {}, got {}",
-            expected_kind, actual_kind
-        ));
-    }
     Ok(())
 }
 

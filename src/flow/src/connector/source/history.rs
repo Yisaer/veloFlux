@@ -1,5 +1,6 @@
 use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
 use crate::processor::base::normalize_channel_capacity;
+use crate::runtime::TaskSpawner;
 use arrow::array::{Array, BinaryArray, Int64Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -33,32 +34,30 @@ impl HistorySourceConfig {
     }
 }
 
-pub struct HistorySourceConnector {
+pub(crate) struct HistorySourceConnector {
     id: String,
     config: HistorySourceConfig,
     channel_capacity: usize,
     receiver: Option<mpsc::Receiver<Result<ConnectorEvent, ConnectorError>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
+    spawner: TaskSpawner,
 }
 
 impl HistorySourceConnector {
-    pub fn new(id: impl Into<String>, config: HistorySourceConfig) -> Self {
+    pub fn new(id: impl Into<String>, config: HistorySourceConfig, spawner: TaskSpawner) -> Self {
         Self {
             id: id.into(),
             config,
             channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
             receiver: None,
             shutdown_tx: None,
+            spawner,
         }
     }
 
     pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
         self.channel_capacity = normalize_channel_capacity(capacity);
         self
-    }
-
-    pub fn set_channel_capacity(&mut self, capacity: usize) {
-        self.channel_capacity = normalize_channel_capacity(capacity);
     }
 }
 
@@ -77,8 +76,9 @@ impl SourceConnector for HistorySourceConnector {
         let connector_id = self.id.clone();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         self.shutdown_tx = Some(shutdown_tx);
+        let spawner = self.spawner.clone();
 
-        tokio::spawn(async move {
+        let _task = self.spawner.spawn(async move {
             info!(connector_id = %connector_id, "starting history replay");
 
             // 1. Discover and Sort Files
@@ -124,9 +124,10 @@ impl SourceConnector for HistorySourceConnector {
                 let sender = sender.clone();
                 let send_interval = config.send_interval;
 
-                // Blocking reading via spawn_blocking
-                let result =
-                    tokio::task::spawn_blocking(move || read_parquet_file(path, batch_size)).await;
+                // Blocking reading via instance-scoped spawn_blocking.
+                let result = spawner
+                    .spawn_blocking(move || read_parquet_file(path, batch_size))
+                    .await;
 
                 match result {
                     Ok(Ok(batches)) => {
@@ -431,7 +432,13 @@ mod tests {
             send_interval: None,
         };
 
-        let mut connector = HistorySourceConnector::new("test", config);
+        let spawner = crate::runtime::TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime"),
+        );
+        let mut connector = HistorySourceConnector::new("test", config, spawner);
         let mut stream = connector.subscribe().unwrap();
 
         let mut row_count = 0;
@@ -541,7 +548,13 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_already_subscribed() {
         let config = HistorySourceConfig::new("path", "topic");
-        let mut connector = HistorySourceConnector::new("test", config);
+        let spawner = crate::runtime::TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime"),
+        );
+        let mut connector = HistorySourceConnector::new("test", config, spawner);
 
         // First subscribe OK
         assert!(connector.subscribe().is_ok());

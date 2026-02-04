@@ -11,13 +11,13 @@ use crate::processor::processor_builder::{
 };
 use crate::processor::SamplerConfig;
 use crate::processor::{ControlSignal, ProcessorPipeline, StreamData};
+use crate::runtime::TaskSpawner;
 use datatypes::Schema;
 use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 use thiserror::Error;
-use tokio::runtime::Handle;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
@@ -66,12 +66,14 @@ impl SharedStreamConnectorFactory for OneShotConnectorFactory {
 /// Central registry that tracks shared source streams that are owned by the process.
 pub struct SharedStreamRegistry {
     streams: RwLock<HashMap<String, Arc<SharedStreamInner>>>,
+    spawner: TaskSpawner,
 }
 
 impl SharedStreamRegistry {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(spawner: TaskSpawner) -> Self {
         Self {
             streams: RwLock::new(HashMap::new()),
+            spawner,
         }
     }
 
@@ -90,7 +92,7 @@ impl SharedStreamRegistry {
             return Err(SharedStreamError::AlreadyExists(config.stream_name));
         }
 
-        let inner = SharedStreamInner::new(config)?;
+        let inner = SharedStreamInner::new(config, self.spawner.clone())?;
         let info = inner.snapshot().await;
         streams.insert(info.name.clone(), inner);
         Ok(info)
@@ -139,7 +141,7 @@ impl SharedStreamRegistry {
         }
 
         let stream_name = entry.name().to_string();
-        tokio::spawn(async move {
+        let _task = self.spawner.spawn(async move {
             if let Err(err) = entry.stop_runtime().await {
                 tracing::error!(stream_name = %stream_name, error = %err, "shared stream shutdown error");
             }
@@ -354,6 +356,7 @@ pub struct SharedStreamSubscription {
     stream: Arc<SharedStreamInner>,
     consumer_id: String,
     receivers_taken: bool,
+    spawner: TaskSpawner,
 }
 
 impl SharedStreamSubscription {
@@ -385,12 +388,10 @@ impl SharedStreamSubscription {
 
 impl Drop for SharedStreamSubscription {
     fn drop(&mut self) {
-        if Handle::try_current().is_err() {
-            return;
-        }
         let stream = Arc::clone(&self.stream);
         let consumer_id = self.consumer_id.clone();
-        tokio::spawn(async move {
+        let spawner = self.spawner.clone();
+        let _task = spawner.spawn(async move {
             stream.unregister_consumer(&consumer_id).await;
         });
     }
@@ -407,6 +408,7 @@ struct SharedStreamInner {
     sampler: Option<SamplerConfig>,
     data_channel_capacity: usize,
     control_channel_capacity: usize,
+    spawner: TaskSpawner,
     runtime_lock: Mutex<()>,
     applied_decode_state: Arc<SyncRwLock<AppliedDecodeState>>,
     data_sender: broadcast::Sender<StreamData>,
@@ -432,7 +434,10 @@ struct SharedStreamState {
 }
 
 impl SharedStreamInner {
-    fn new(config: SharedStreamConfig) -> Result<Arc<Self>, SharedStreamError> {
+    fn new(
+        config: SharedStreamConfig,
+        spawner: TaskSpawner,
+    ) -> Result<Arc<Self>, SharedStreamError> {
         let SharedStreamConfig {
             stream_name,
             schema,
@@ -488,6 +493,7 @@ impl SharedStreamInner {
             sampler,
             data_channel_capacity,
             control_channel_capacity,
+            spawner,
             runtime_lock: Mutex::new(()),
             applied_decode_state: Arc::clone(&applied_decode_state),
             data_sender,
@@ -570,8 +576,12 @@ impl SharedStreamInner {
             decoder,
             applied_decode_state: Arc::clone(&self.applied_decode_state),
         };
-        let mut pipeline = create_processor_pipeline_for_shared_stream(physical_plan, options)
-            .map_err(|err| SharedStreamError::Internal(err.to_string()))?;
+        let mut pipeline = create_processor_pipeline_for_shared_stream(
+            physical_plan,
+            options,
+            self.spawner.clone(),
+        )
+        .map_err(|err| SharedStreamError::Internal(err.to_string()))?;
         pipeline.set_pipeline_id(format!("shared:{}", self.name));
 
         let mut attached = false;
@@ -598,7 +608,7 @@ impl SharedStreamInner {
         let control_tx = self.control_sender.clone();
         let data_channel_capacity = self.data_channel_capacity;
         let control_channel_capacity = self.control_channel_capacity;
-        let forward = tokio::spawn(async move {
+        let forward = self.spawner.spawn(async move {
             while let Some(item) = output_rx.recv().await {
                 match item {
                     StreamData::Control(signal) => {
@@ -701,6 +711,7 @@ impl SharedStreamInner {
             stream: Arc::clone(self),
             consumer_id,
             receivers_taken: false,
+            spawner: self.spawner.clone(),
         })
     }
 
@@ -840,15 +851,20 @@ mod tests {
     use super::*;
     use crate::codec::JsonDecoder;
     use crate::connector::MockSourceConnector;
+    use crate::runtime::TaskSpawner;
     use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
     use serde_json::Map as JsonMap;
-    use std::sync::OnceLock;
+    use std::sync::Arc;
     use tokio::time::{timeout, Duration};
     use uuid::Uuid;
 
-    fn registry() -> &'static SharedStreamRegistry {
-        static REGISTRY: OnceLock<SharedStreamRegistry> = OnceLock::new();
-        REGISTRY.get_or_init(SharedStreamRegistry::new)
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
     }
 
     fn test_schema() -> Arc<Schema> {
@@ -861,6 +877,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_list_drop_shared_stream() {
+        let registry = SharedStreamRegistry::new(test_spawner());
         let name = format!("shared_stream_test_{}", Uuid::new_v4());
         let schema = test_schema();
         let (connector, _handle) = MockSourceConnector::new(format!("{name}_connector"));
@@ -873,16 +890,16 @@ mod tests {
         let mut config = SharedStreamConfig::new(name.clone(), Arc::clone(&schema));
         config.set_connector(Box::new(connector), decoder);
 
-        let info = registry().create_stream(config).await.unwrap();
+        let info = registry.create_stream(config).await.unwrap();
         assert_eq!(info.name, name);
         assert_eq!(info.connector_id, format!("{name}_connector"));
 
-        let listed = registry().list_streams().await;
+        let listed = registry.list_streams().await;
         assert!(listed.iter().any(|entry| entry.name == name));
 
-        registry().drop_stream(&name).await.unwrap();
+        registry.drop_stream(&name).await.unwrap();
 
-        let listed = registry().list_streams().await;
+        let listed = registry.list_streams().await;
         assert!(
             listed.iter().all(|entry| entry.name != name),
             "shared stream should be removed after drop"
@@ -891,6 +908,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_stream_tracks_consumer_required_columns_union() {
+        let registry = SharedStreamRegistry::new(test_spawner());
         let name = format!("shared_stream_req_cols_test_{}", Uuid::new_v4().simple());
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
@@ -913,52 +931,53 @@ mod tests {
 
         let config = SharedStreamConfig::new(name.clone(), Arc::clone(&schema))
             .with_connector(Box::new(connector), decoder);
-        let info = registry().create_stream(config).await.unwrap();
+        let info = registry.create_stream(config).await.unwrap();
         assert_eq!(info.name, name);
 
-        let sub_a = registry()
+        let sub_a = registry
             .subscribe(&name, "consumer_a")
             .await
             .expect("subscribe consumer_a");
-        let sub_b = registry()
+        let sub_b = registry
             .subscribe(&name, "consumer_b")
             .await
             .expect("subscribe consumer_b");
 
-        registry()
+        registry
             .set_consumer_required_columns(&name, "consumer_a", vec!["a".to_string()])
             .await
             .expect("set required columns for a");
-        registry()
+        registry
             .set_consumer_required_columns(&name, "consumer_b", vec!["b".to_string()])
             .await
             .expect("set required columns for b");
 
-        let union = registry()
+        let union = registry
             .union_required_columns(&name)
             .await
             .expect("union required columns");
         assert_eq!(union, vec!["a".to_string(), "b".to_string()]);
 
         sub_a.release().await;
-        let union = registry()
+        let union = registry
             .union_required_columns(&name)
             .await
             .expect("union required columns");
         assert_eq!(union, vec!["b".to_string()]);
 
         sub_b.release().await;
-        let union = registry()
+        let union = registry
             .union_required_columns(&name)
             .await
             .expect("union required columns");
         assert!(union.is_empty());
 
-        registry().drop_stream(&name).await.unwrap();
+        registry.drop_stream(&name).await.unwrap();
     }
 
     #[tokio::test]
     async fn shared_stream_decodes_only_union_required_columns() {
+        let registry = SharedStreamRegistry::new(test_spawner());
         let name = format!("shared_stream_projection_test_{}", Uuid::new_v4().simple());
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
@@ -987,27 +1006,27 @@ mod tests {
 
         let config = SharedStreamConfig::new(name.clone(), Arc::clone(&schema))
             .with_connector(Box::new(connector), decoder);
-        registry().create_stream(config).await.unwrap();
+        registry.create_stream(config).await.unwrap();
 
-        let mut sub_a = registry()
+        let mut sub_a = registry
             .subscribe(&name, "consumer_a")
             .await
             .expect("subscribe consumer_a");
-        let mut sub_b = registry()
+        let mut sub_b = registry
             .subscribe(&name, "consumer_b")
             .await
             .expect("subscribe consumer_b");
 
-        registry()
+        registry
             .set_consumer_required_columns(&name, "consumer_a", vec!["a".to_string()])
             .await
             .expect("set required columns for a");
-        registry()
+        registry
             .set_consumer_required_columns(&name, "consumer_b", vec!["b".to_string()])
             .await
             .expect("set required columns for b");
 
-        let info = registry().get_stream(&name).await.expect("get stream");
+        let info = registry.get_stream(&name).await.expect("get stream");
         assert_eq!(
             info.decoding_columns,
             vec!["a".to_string(), "b".to_string()]
@@ -1058,6 +1077,6 @@ mod tests {
         sub_a.release().await;
         sub_b.release().await;
         handle.close().await.ok();
-        registry().drop_stream(&name).await.unwrap();
+        registry.drop_stream(&name).await.unwrap();
     }
 }

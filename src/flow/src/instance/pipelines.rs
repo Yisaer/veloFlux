@@ -71,6 +71,7 @@ impl FlowInstance {
             &self.catalog,
             self.shared_stream_registry.clone(),
             self.mqtt_client_manager.clone(),
+            self.spawner.clone(),
             &registries,
         )
     }

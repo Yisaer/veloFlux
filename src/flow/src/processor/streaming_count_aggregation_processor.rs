@@ -8,6 +8,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -124,7 +125,10 @@ impl Processor for StreamingCountAggregationProcessor {
         self.id()
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -139,7 +143,7 @@ impl Processor for StreamingCountAggregationProcessor {
         let target = self.target;
         let stats = Arc::clone(&self.stats);
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut worker = AggregationWorker::new(physical, aggregate_registry, group_by_meta);
             let mut window_state = CountWindowState::new(target);
 

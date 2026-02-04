@@ -7,6 +7,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 #[cfg(test)]
 use datatypes::Value;
 use futures::stream::StreamExt;
@@ -167,7 +168,10 @@ impl Processor for BatchProcessor {
         &self.id
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
         let mut control_streams = fan_in_control_streams(control_receivers);
@@ -186,7 +190,7 @@ impl Processor for BatchProcessor {
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut buffer: Vec<Tuple> = Vec::new();
             let mut timer: Option<Pin<Box<Sleep>>> = None;
             loop {
@@ -362,10 +366,21 @@ mod tests {
     use super::*;
     use crate::model::batch_from_columns_simple;
     use crate::processor::base::{DEFAULT_CONTROL_CHANNEL_CAPACITY, DEFAULT_DATA_CHANNEL_CAPACITY};
+    use crate::runtime::TaskSpawner;
     use tokio::time::Duration;
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
 
     #[tokio::test]
     async fn test_batch_processor_count_only() {
+        let spawner = test_spawner();
         let mut processor = BatchProcessor::new("batch_count", Some(2), None);
         let (tx, rx) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(rx);
@@ -375,7 +390,7 @@ mod tests {
         let mut output = processor
             .subscribe_output()
             .expect("output available to subscribe");
-        processor.start();
+        processor.start(&spawner);
 
         let data = batch_from_columns_simple(vec![(
             "stream".to_string(),
@@ -414,6 +429,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_batch_processor_duration_only() {
+        let spawner = test_spawner();
         let mut processor =
             BatchProcessor::new("batch_duration", None, Some(Duration::from_millis(50)));
         let (tx, rx) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
@@ -421,7 +437,7 @@ mod tests {
         let (control_tx, control_rx) = broadcast::channel(DEFAULT_CONTROL_CHANNEL_CAPACITY);
         processor.add_control_input(control_rx);
         let mut output = processor.subscribe_output().expect("output");
-        processor.start();
+        processor.start(&spawner);
 
         let data = batch_from_columns_simple(vec![(
             "stream".to_string(),

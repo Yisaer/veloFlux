@@ -7,6 +7,7 @@ use crate::processor::base::{
     ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -80,7 +81,10 @@ impl Processor for StreamingTumblingAggregationProcessor {
         self.id()
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -101,7 +105,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
             _ => unreachable!("tumbling processor requires tumbling window spec"),
         };
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut window_state = ProcessingWindowState::new(
                 len_secs,
                 Arc::clone(&physical),

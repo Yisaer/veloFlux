@@ -9,6 +9,7 @@ use crate::processor::base::{
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -117,10 +118,13 @@ impl Processor for WatermarkProcessor {
         }
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         match self {
-            WatermarkProcessor::ProcessTime(p) => p.start(),
-            WatermarkProcessor::Eventtime(p) => p.start(),
+            WatermarkProcessor::ProcessTime(p) => p.start(spawner),
+            WatermarkProcessor::Eventtime(p) => p.start(spawner),
         }
     }
 
@@ -161,10 +165,13 @@ impl Processor for ProcessTimeWatermarkProcessor {
         }
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         match self {
-            ProcessTimeWatermarkProcessor::Tumbling(p) => p.start(),
-            ProcessTimeWatermarkProcessor::Sliding(p) => p.start(),
+            ProcessTimeWatermarkProcessor::Tumbling(p) => p.start(spawner),
+            ProcessTimeWatermarkProcessor::Sliding(p) => p.start(spawner),
         }
     }
 
@@ -255,7 +262,10 @@ impl Processor for TumblingWatermarkProcessor {
         self.id()
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -268,7 +278,7 @@ impl Processor for TumblingWatermarkProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "watermark processor starting");
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -482,7 +492,10 @@ impl Processor for SlidingWatermarkProcessor {
         self.id()
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let lookahead = self.lookahead;
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
@@ -495,7 +508,7 @@ impl Processor for SlidingWatermarkProcessor {
         let mut ticker = self.ticker.take();
         let stats = Arc::clone(&self.stats);
 
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             let mut pending_deadlines: BinaryHeap<Reverse<u128>> = BinaryHeap::new();
             let mut next_sleep: Option<Pin<Box<Sleep>>> = None;
             let mut last_emitted_nanos: Option<u128> = None;
@@ -762,7 +775,10 @@ impl Processor for EventtimeWatermarkProcessor {
         self.id()
     }
 
-    fn start(&mut self) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
+    fn start(
+        &mut self,
+        spawner: &TaskSpawner,
+    ) -> tokio::task::JoinHandle<Result<(), ProcessorError>> {
         let id = self.id.clone();
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
         let control_receivers = std::mem::take(&mut self.control_inputs);
@@ -775,7 +791,7 @@ impl Processor for EventtimeWatermarkProcessor {
         let stats = Arc::clone(&self.stats);
 
         tracing::info!(processor_id = %id, "eventtime watermark processor starting");
-        tokio::spawn(async move {
+        spawner.spawn(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -1067,7 +1083,18 @@ mod tests {
     use crate::planner::logical::TimeUnit;
     use crate::planner::physical::WatermarkConfig;
     use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
+    use crate::runtime::TaskSpawner;
+    use std::sync::Arc;
     use tokio::time::timeout;
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
 
     fn tuple_at(sec: u64) -> crate::model::Tuple {
         crate::model::Tuple::with_timestamp(
@@ -1078,6 +1105,7 @@ mod tests {
 
     #[tokio::test]
     async fn sliding_watermark_emits_deadline_per_tuple_in_processing_time() {
+        let spawner = test_spawner();
         let physical = PhysicalProcessTimeWatermark::new(
             WatermarkConfig::Sliding {
                 time_unit: TimeUnit::Seconds,
@@ -1097,7 +1125,7 @@ mod tests {
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         // Use "now-ish" timestamps to match processing-time assumptions.
         let base = SystemTime::now()
@@ -1135,6 +1163,7 @@ mod tests {
 
     #[tokio::test]
     async fn sliding_watermark_without_lookahead_still_emits_tick_watermarks() {
+        let spawner = test_spawner();
         let physical = PhysicalProcessTimeWatermark::new(
             WatermarkConfig::Sliding {
                 time_unit: TimeUnit::Seconds,
@@ -1152,7 +1181,7 @@ mod tests {
         let (_input, _) = broadcast::channel::<StreamData>(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(_input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         // The ticker may fire immediately; just assert we see a watermark promptly.
         loop {
@@ -1168,6 +1197,7 @@ mod tests {
 
     #[tokio::test]
     async fn eventtime_watermark_sorts_and_emits_monotonic_watermarks() {
+        let spawner = test_spawner();
         let physical = PhysicalEventtimeWatermark::new(
             WatermarkConfig::Tumbling {
                 time_unit: TimeUnit::Seconds,
@@ -1184,7 +1214,7 @@ mod tests {
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
-        let _handle = processor.start();
+        let _handle = processor.start(&spawner);
 
         // Out-of-order input: 3, 1, 2 (late_tolerance=1 => candidate=2)
         let batch = crate::model::RecordBatch::new(vec![tuple_at(3), tuple_at(1), tuple_at(2)])

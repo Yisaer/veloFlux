@@ -26,6 +26,7 @@ mod streams;
 #[derive(Clone)]
 pub struct FlowInstance {
     catalog: Arc<Catalog>,
+    spawner: crate::runtime::TaskSpawner,
     shared_stream_registry: Arc<SharedStreamRegistry>,
     pipeline_manager: Arc<PipelineManager>,
     memory_pubsub_registry: MemoryPubSubRegistry,
@@ -44,12 +45,19 @@ pub struct FlowInstance {
 
 impl FlowInstance {
     /// Create a new Flow instance with instance-scoped resources.
-    pub fn new() -> Self {
+    pub fn new(catalog: Arc<Catalog>) -> Self {
         crate::deadlock::start_deadlock_detector_once();
 
-        let catalog = Arc::new(Catalog::new());
-        let shared_stream_registry = Arc::new(SharedStreamRegistry::new());
-        let mqtt_client_manager = MqttClientManager::new();
+        let spawner = crate::runtime::TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .thread_name("flow-instance")
+                .enable_all()
+                .build()
+                .expect("build flow instance tokio runtime"),
+        );
+
+        let shared_stream_registry = Arc::new(SharedStreamRegistry::new(spawner.clone()));
+        let mqtt_client_manager = MqttClientManager::new(spawner.clone());
         let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let connector_registry =
             ConnectorRegistry::with_builtin_sinks(memory_pubsub_registry.clone());
@@ -75,6 +83,7 @@ impl FlowInstance {
             Arc::clone(&shared_stream_registry),
             mqtt_client_manager.clone(),
             memory_pubsub_registry.clone(),
+            spawner.clone(),
         );
         let pipeline_manager = Arc::new(PipelineManager::new(
             Arc::clone(&catalog),
@@ -83,6 +92,7 @@ impl FlowInstance {
         ));
         Self {
             catalog,
+            spawner,
             shared_stream_registry,
             pipeline_manager,
             memory_pubsub_registry,
@@ -164,7 +174,7 @@ impl FlowInstance {
 
 impl Default for FlowInstance {
     fn default() -> Self {
-        Self::new()
+        Self::new(Arc::new(Catalog::new()))
     }
 }
 
@@ -186,6 +196,8 @@ pub enum FlowInstanceError {
     Connector(#[from] ConnectorError),
     #[error(transparent)]
     Codec(#[from] CodecError),
+    #[error("stream {stream} still referenced by pipelines: {pipelines}")]
+    StreamInUse { stream: String, pipelines: String },
     #[error("{0}")]
     Invalid(String),
 }
