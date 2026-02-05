@@ -64,6 +64,14 @@ pub use shared_stream::{
 };
 pub use stateful::StatefulFunctionRegistry;
 
+/// Initialize process-global utilities used by the `flow` crate.
+///
+/// This should be called once during process startup (e.g. from the application's `main`),
+/// especially when running multiple [`FlowInstance`] runtimes inside the same process.
+pub fn init_process_once() {
+    deadlock::start_deadlock_detector_once();
+}
+
 use connector::{ConnectorRegistry, MqttClientManager};
 use explain_shared_stream::shared_stream_decode_applied_snapshot;
 use planner::logical::create_logical_plan;
@@ -104,8 +112,6 @@ impl PipelineRegistries {
         eventtime_type_registry: Arc<EventtimeTypeRegistry>,
         merger_registry: Arc<MergerRegistry>,
     ) -> Self {
-        crate::deadlock::start_deadlock_detector_once();
-
         Self {
             connector_registry,
             encoder_registry,

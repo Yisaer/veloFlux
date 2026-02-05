@@ -122,6 +122,7 @@ pub async fn init(
     opts: ServerOptions,
     instance: FlowInstance,
 ) -> Result<ServerContext, Box<dyn std::error::Error + Send + Sync>> {
+    flow::init_process_once();
     log_allocator();
     let profiling_enabled = opts.profiling_enabled.unwrap_or(false);
     if profiling_enabled {

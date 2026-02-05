@@ -46,8 +46,6 @@ pub struct FlowInstance {
 impl FlowInstance {
     /// Create a new Flow instance with instance-scoped resources.
     pub fn new(catalog: Arc<Catalog>) -> Self {
-        crate::deadlock::start_deadlock_detector_once();
-
         let spawner = crate::runtime::TaskSpawner::new(
             tokio::runtime::Builder::new_multi_thread()
                 .thread_name("flow-instance")
