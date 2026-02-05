@@ -87,7 +87,7 @@ async fn bind_manager_listener_or_skip() -> Option<TcpListener> {
 async fn shared_stream_rapid_start_stop_cycles_via_rest() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
-    let instance = flow::FlowInstance::default();
+    let instance = manager::new_default_flow_instance();
 
     let Some(listener) = bind_manager_listener_or_skip().await else {
         return;
@@ -245,7 +245,7 @@ async fn shared_stream_rapid_start_stop_cycles_via_rest() {
 async fn shared_stream_slow_unsubscribe_during_restart_via_rest() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
-    let instance = flow::FlowInstance::default();
+    let instance = manager::new_default_flow_instance();
 
     let Some(listener) = bind_manager_listener_or_skip().await else {
         return;

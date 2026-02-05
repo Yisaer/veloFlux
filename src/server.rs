@@ -1,5 +1,4 @@
 use flow::FlowInstance;
-use manager::storage_bridge;
 #[cfg(all(
     feature = "profiling",
     feature = "allocator-jemalloc",
@@ -146,10 +145,6 @@ pub async fn init(
         storage_dir = %storage.base_dir().display(),
         "storage initialized"
     );
-
-    storage_bridge::load_from_storage(&storage, &instance)
-        .await
-        .map_err(|err| format!("failed to load from storage: {err}"))?;
 
     Ok(ServerContext {
         instance,
@@ -395,7 +390,7 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
 /// Prepare Flow registries/instance before initialization, so callers can
 /// register custom encoders/decoders/connectors prior to loading storage.
 pub fn prepare_registry() -> FlowInstance {
-    FlowInstance::new(std::sync::Arc::new(flow::Catalog::new()))
+    manager::new_default_flow_instance()
 }
 
 #[cfg(feature = "profiling")]

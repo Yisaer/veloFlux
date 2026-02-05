@@ -1,3 +1,4 @@
+use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstances};
 use crate::pipeline::{CreatePipelineRequest, build_pipeline_definition};
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
@@ -10,7 +11,8 @@ use flow::pipeline::PipelineDefinition;
 use flow::{DecoderRegistry, EncoderRegistry};
 use std::sync::Arc;
 use storage::{
-    StorageManager, StoredMemoryTopicKind, StoredMqttClientConfig, StoredPipeline, StoredStream,
+    StorageError, StorageManager, StoredFlowInstance, StoredMemoryTopicKind,
+    StoredMqttClientConfig, StoredPipeline, StoredStream,
 };
 
 fn fnv1a_64_hex(input: &str) -> String {
@@ -111,8 +113,16 @@ pub fn pipeline_definition_from_stored(
 pub fn pipeline_request_from_stored(
     stored: &StoredPipeline,
 ) -> Result<CreatePipelineRequest, String> {
-    serde_json::from_str(&stored.raw_json)
-        .map_err(|err| format!("decode stored pipeline {}: {err}", stored.id))
+    let mut req: CreatePipelineRequest = serde_json::from_str(&stored.raw_json)
+        .map_err(|err| format!("decode stored pipeline {}: {err}", stored.id))?;
+    let instance_id = req
+        .flow_instance_id
+        .as_deref()
+        .map(|val| val.trim().to_string())
+        .filter(|val| !val.is_empty())
+        .unwrap_or_else(|| DEFAULT_FLOW_INSTANCE_ID.to_string());
+    req.flow_instance_id = Some(instance_id);
+    Ok(req)
 }
 
 pub fn mqtt_config_from_stored(stored: &StoredMqttClientConfig) -> SharedMqttClientConfig {
@@ -134,11 +144,10 @@ pub fn stored_mqtt_from_config(cfg: &SharedMqttClientConfig) -> StoredMqttClient
 }
 
 /// Load persisted resources into the running FlowInstance.
-pub async fn load_from_storage(
+async fn hydrate_instance_globals_from_storage(
     storage: &StorageManager,
     instance: &flow::FlowInstance,
 ) -> Result<(), String> {
-    let encoder_registry = instance.encoder_registry();
     let decoder_registry = instance.decoder_registry();
 
     for topic in storage.list_memory_topics().map_err(|e| e.to_string())? {
@@ -172,11 +181,49 @@ pub async fn load_from_storage(
             .await
             .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
 
+async fn hydrate_pipelines_into_instances_from_storage(
+    storage: &StorageManager,
+    instances: &FlowInstances,
+) -> Result<(), String> {
     for pipeline in storage.list_pipelines().map_err(|e| e.to_string())? {
-        let _req = pipeline_request_from_stored(&pipeline)?;
-        let def = pipeline_definition_from_stored(&pipeline, encoder_registry.as_ref(), instance)?;
+        let req = pipeline_request_from_stored(&pipeline)?;
+        let flow_instance_id = req
+            .flow_instance_id
+            .as_deref()
+            .unwrap_or(DEFAULT_FLOW_INSTANCE_ID);
 
+        let instance = match instances.get(flow_instance_id) {
+            Some(instance) => instance,
+            None => {
+                let instance = instances.create_dedicated_instance(flow_instance_id);
+                hydrate_instance_globals_from_storage(storage, &instance).await?;
+                match storage.create_flow_instance(StoredFlowInstance {
+                    id: flow_instance_id.to_string(),
+                }) {
+                    Ok(()) | Err(StorageError::AlreadyExists(_)) => {}
+                    Err(err) => {
+                        return Err(format!("persist flow instance {flow_instance_id}: {err}"));
+                    }
+                }
+                instances
+                    .insert(flow_instance_id.to_string(), instance)
+                    .unwrap_or_else(|_| {
+                        instances
+                            .get(flow_instance_id)
+                            .expect("flow instance inserted")
+                    })
+            }
+        };
+
+        let encoder_registry = instance.encoder_registry();
+        let def = pipeline_definition_from_stored(
+            &pipeline,
+            encoder_registry.as_ref(),
+            instance.as_ref(),
+        )?;
         let stored_snapshot = storage
             .get_plan_snapshot(&pipeline.id)
             .map_err(|e| e.to_string())?;
@@ -253,9 +300,27 @@ pub async fn load_from_storage(
     Ok(())
 }
 
+pub(crate) async fn hydrate_instance_from_storage(
+    storage: &StorageManager,
+    instance: &flow::FlowInstance,
+) -> Result<(), String> {
+    hydrate_instance_globals_from_storage(storage, instance).await
+}
+
+pub(crate) async fn hydrate_runtime_from_storage(
+    storage: &StorageManager,
+    instances: &FlowInstances,
+) -> Result<(), String> {
+    for (_, instance) in instances.instances_snapshot() {
+        hydrate_instance_globals_from_storage(storage, instance.as_ref()).await?;
+    }
+    hydrate_pipelines_into_instances_from_storage(storage, instances).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instances::FlowInstances;
     use crate::pipeline::CreatePipelineRequest;
     use crate::stream::CreateStreamRequest;
     use flow::FlowInstance;
@@ -340,7 +405,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
 
-        let instance = FlowInstance::new(Arc::new(flow::Catalog::new()));
+        let instance = FlowInstance::new_with_id("test-default", None);
+        let instances = FlowInstances::new(instance);
 
         let stream_req = sample_stream_request("s1");
         let stored_stream = stored_stream_from_request(&stream_req).unwrap();
@@ -353,7 +419,7 @@ mod tests {
 
         // Prepare a valid logical plan IR from a separate instance; this IR will be used to create
         // the pipeline without parsing stored_pipeline.sql.
-        let ir_instance = FlowInstance::new(Arc::new(flow::Catalog::new()));
+        let ir_instance = FlowInstance::new_with_id("test-ir", None);
         let _ = install_stream_into_instance(&ir_instance, &stream_req).await;
         let valid_req = sample_pipeline_request("p_tmp", "SELECT value FROM s1", true);
         let valid_def = crate::pipeline::build_pipeline_definition(
@@ -383,7 +449,7 @@ mod tests {
             .expect("delete p_tmp");
 
         // Sanity: the cached IR must be sufficient to build a pipeline without parsing SQL.
-        let check_instance = FlowInstance::new(Arc::new(flow::Catalog::new()));
+        let check_instance = FlowInstance::new_with_id("test-check", None);
         let _ = install_stream_into_instance(&check_instance, &stream_req).await;
         let check_def = pipeline_definition_from_stored(
             &stored_pipeline,
@@ -425,9 +491,12 @@ mod tests {
         storage.put_plan_snapshot(cached).unwrap();
 
         // This should succeed even though the stored SQL is invalid, proving we did not parse it.
-        load_from_storage(&storage, &instance).await.unwrap();
+        hydrate_runtime_from_storage(&storage, &instances)
+            .await
+            .unwrap();
         assert!(
-            instance
+            instances
+                .default_instance()
                 .list_pipelines()
                 .iter()
                 .any(|p| p.definition.id() == "p1")
@@ -438,7 +507,8 @@ mod tests {
     async fn plan_cache_miss_writes_snapshot() {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
-        let instance = FlowInstance::new(Arc::new(flow::Catalog::new()));
+        let instance = FlowInstance::new_with_id("test-miss", None);
+        let instances = FlowInstances::new(instance);
 
         let stream_req = sample_stream_request("s1");
         let stored_stream = stored_stream_from_request(&stream_req).unwrap();
@@ -450,7 +520,9 @@ mod tests {
 
         assert!(storage.get_plan_snapshot("p1").unwrap().is_none());
 
-        load_from_storage(&storage, &instance).await.unwrap();
+        hydrate_runtime_from_storage(&storage, &instances)
+            .await
+            .unwrap();
 
         let snapshot = storage
             .get_plan_snapshot("p1")
@@ -463,7 +535,8 @@ mod tests {
         );
         assert!(!snapshot.logical_plan_ir.is_empty());
         assert!(
-            instance
+            instances
+                .default_instance()
                 .list_pipelines()
                 .iter()
                 .any(|p| p.definition.id() == "p1")

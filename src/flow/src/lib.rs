@@ -38,7 +38,9 @@ pub use expr::{
     convert_expr_to_scalar, convert_select_stmt_to_scalar, extract_select_expressions, BinaryFunc,
     ConcatFunc, ConversionError, EvalContext, ScalarExpr, StreamSqlConverter, UnaryFunc,
 };
-pub use instance::{FlowInstance, FlowInstanceError, StreamRuntimeInfo};
+pub use instance::{
+    FlowInstance, FlowInstanceError, FlowInstanceSharedRegistries, StreamRuntimeInfo,
+};
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
     CreatePipelinePlanCacheResult, CreatePipelineRequest, CreatePipelineResult,
@@ -261,7 +263,7 @@ fn build_schema_binding(
 /// };
 ///
 /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
-/// let instance = FlowInstance::default();
+/// let instance = FlowInstance::new_default();
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig { log: false }),

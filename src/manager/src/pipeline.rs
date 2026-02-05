@@ -20,23 +20,57 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
-use storage::{StorageError, StorageManager, StoredPipelineDesiredState, StoredPipelineRunState};
+use storage::{
+    StorageError, StorageManager, StoredFlowInstance, StoredPipelineDesiredState,
+    StoredPipelineRunState,
+};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
+
+use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstances};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub instance: Arc<FlowInstance>,
+    pub instances: FlowInstances,
     pub storage: Arc<StorageManager>,
     pipeline_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
 impl AppState {
     pub fn new(instance: FlowInstance, storage: StorageManager) -> Self {
+        let instances = FlowInstances::new(instance);
+        let storage = Arc::new(storage);
+        let _ = storage.create_flow_instance(StoredFlowInstance {
+            id: DEFAULT_FLOW_INSTANCE_ID.to_string(),
+        });
         Self {
-            instance: Arc::new(instance),
-            storage: Arc::new(storage),
+            instances,
+            storage,
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub async fn bootstrap_from_storage(&self) -> Result<(), String> {
+        let _ = self.storage.create_flow_instance(StoredFlowInstance {
+            id: DEFAULT_FLOW_INSTANCE_ID.to_string(),
+        });
+
+        let stored_instances = self
+            .storage
+            .list_flow_instances()
+            .map_err(|e| e.to_string())?;
+        for stored in stored_instances {
+            if stored.id == DEFAULT_FLOW_INSTANCE_ID {
+                continue;
+            }
+            if self.instances.get(&stored.id).is_some() {
+                continue;
+            }
+            let instance = self.instances.create_dedicated_instance(&stored.id);
+            let _ = self.instances.insert(stored.id, instance);
+        }
+
+        crate::storage_bridge::hydrate_runtime_from_storage(self.storage.as_ref(), &self.instances)
+            .await
     }
 
     pub async fn try_acquire_pipeline_op(
@@ -57,6 +91,8 @@ impl AppState {
 #[derive(Deserialize, Serialize)]
 pub struct CreatePipelineRequest {
     pub id: String,
+    #[serde(default)]
+    pub flow_instance_id: Option<String>,
     pub sql: String,
     #[serde(default)]
     pub sinks: Vec<CreatePipelineSinkRequest>,
@@ -117,6 +153,7 @@ pub struct CreatePipelineResponse {
 pub struct ListPipelineItem {
     pub id: String,
     pub status: String,
+    pub flow_instance_id: String,
 }
 
 #[derive(Serialize)]
@@ -182,6 +219,107 @@ fn stored_state_label(state: Option<StoredPipelineRunState>) -> String {
         Some(StoredPipelineDesiredState::Running) => "running".to_string(),
         _ => "stopped".to_string(),
     }
+}
+
+fn canonical_flow_instance_id(value: Option<&str>) -> Result<String, String> {
+    let id = value.unwrap_or(DEFAULT_FLOW_INSTANCE_ID).trim();
+    if id.is_empty() {
+        return Err("flow_instance_id must not be empty".to_string());
+    }
+    Ok(id.to_string())
+}
+
+async fn ensure_runtime_instance(
+    state: &AppState,
+    flow_instance_id: &str,
+) -> Result<Arc<FlowInstance>, axum::response::Response> {
+    if let Some(instance) = state.instances.get(flow_instance_id) {
+        return Ok(instance);
+    }
+
+    match state.storage.get_flow_instance(flow_instance_id) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("pipeline references missing flow instance {flow_instance_id} in storage"),
+            )
+                .into_response());
+        }
+        Err(err) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read flow instance {flow_instance_id} from storage: {err}"),
+            )
+                .into_response());
+        }
+    }
+
+    let instance = state.instances.create_dedicated_instance(flow_instance_id);
+    if let Err(err) =
+        crate::storage_bridge::hydrate_instance_from_storage(state.storage.as_ref(), &instance)
+            .await
+    {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to initialize flow instance {flow_instance_id}: {err}"),
+        )
+            .into_response());
+    }
+
+    match state
+        .instances
+        .insert(flow_instance_id.to_string(), instance)
+    {
+        Ok(instance) => Ok(instance),
+        Err(()) => state.instances.get(flow_instance_id).ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("flow instance {flow_instance_id} missing from runtime"),
+            )
+                .into_response()
+        }),
+    }
+}
+
+async fn resolve_pipeline_instance(
+    state: &AppState,
+    pipeline_id: &str,
+) -> Result<(Arc<FlowInstance>, CreatePipelineRequest), axum::response::Response> {
+    let stored = match state.storage.get_pipeline(pipeline_id) {
+        Ok(Some(pipeline)) => pipeline,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("pipeline {pipeline_id} not found"),
+            )
+                .into_response());
+        }
+        Err(err) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read pipeline {pipeline_id} from storage: {err}"),
+            )
+                .into_response());
+        }
+    };
+
+    let mut req = match storage_bridge::pipeline_request_from_stored(&stored) {
+        Ok(req) => req,
+        Err(err) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to decode stored pipeline {pipeline_id}: {err}"),
+            )
+                .into_response());
+        }
+    };
+    let flow_instance_id = canonical_flow_instance_id(req.flow_instance_id.as_deref())
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err).into_response())?;
+    req.flow_instance_id = Some(flow_instance_id.clone());
+
+    let instance = ensure_runtime_instance(state, &flow_instance_id).await?;
+    Ok((instance, req))
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -285,6 +423,13 @@ pub async fn create_pipeline_handler(
     State(state): State<AppState>,
     Json(req): Json<CreatePipelineRequest>,
 ) -> impl IntoResponse {
+    let mut req = req;
+    let flow_instance_id = match canonical_flow_instance_id(req.flow_instance_id.as_deref()) {
+        Ok(id) => id,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+    req.flow_instance_id = Some(flow_instance_id.clone());
+
     if let Err(err) = validate_create_request(&req) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
@@ -299,9 +444,33 @@ pub async fn create_pipeline_handler(
                 .into_response();
         }
     };
-    let encoder_registry = state.instance.encoder_registry();
+    let instance = match state.instances.get(&flow_instance_id) {
+        Some(instance) => instance,
+        None => match state.storage.get_flow_instance(&flow_instance_id) {
+            Ok(Some(_)) => match ensure_runtime_instance(&state, &flow_instance_id).await {
+                Ok(instance) => instance,
+                Err(resp) => return resp,
+            },
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("flow instance {flow_instance_id} not found"),
+                )
+                    .into_response();
+            }
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to read flow instance {flow_instance_id} from storage: {err}"),
+                )
+                    .into_response();
+            }
+        },
+    };
+
+    let encoder_registry = instance.encoder_registry();
     let definition =
-        match build_pipeline_definition(&req, encoder_registry.as_ref(), &state.instance) {
+        match build_pipeline_definition(&req, encoder_registry.as_ref(), instance.as_ref()) {
             Ok(def) => def,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
@@ -327,7 +496,7 @@ pub async fn create_pipeline_handler(
         }
     }
 
-    let build_result = match state.instance.create_pipeline(
+    let build_result = match instance.create_pipeline(
         flow::CreatePipelineRequest::new(definition).with_plan_cache_inputs(
             flow::planner::plan_cache::PlanCacheInputs {
                 pipeline_raw_json: stored.raw_json.clone(),
@@ -374,7 +543,7 @@ pub async fn create_pipeline_handler(
         }) {
             Ok(()) => {}
             Err(err) => {
-                let _ = state.instance.delete_pipeline(&stored.id).await;
+                let _ = instance.delete_pipeline(&stored.id).await;
                 let _ = state.storage.delete_pipeline(&stored.id);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -408,16 +577,6 @@ pub async fn upsert_pipeline_handler(
     Json(req): Json<UpsertPipelineRequest>,
 ) -> impl IntoResponse {
     let id = id.trim().to_string();
-    let create_req = CreatePipelineRequest {
-        id: id.clone(),
-        sql: req.sql,
-        sinks: req.sinks,
-        options: req.options,
-    };
-    if let Err(err) = validate_create_request(&create_req) {
-        return (StatusCode::BAD_REQUEST, err).into_response();
-    }
-
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&id),
@@ -441,6 +600,45 @@ pub async fn upsert_pipeline_handler(
         }
     };
 
+    let flow_instance_id = match old_pipeline.as_ref() {
+        Some(stored) => match storage_bridge::pipeline_request_from_stored(stored) {
+            Ok(req) => match canonical_flow_instance_id(req.flow_instance_id.as_deref()) {
+                Ok(id) => id,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("invalid stored flow_instance_id for pipeline {id}: {err}"),
+                    )
+                        .into_response();
+                }
+            },
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to decode stored pipeline {id}: {err}"),
+                )
+                    .into_response();
+            }
+        },
+        None => DEFAULT_FLOW_INSTANCE_ID.to_string(),
+    };
+
+    let instance = match ensure_runtime_instance(&state, &flow_instance_id).await {
+        Ok(instance) => instance,
+        Err(resp) => return resp,
+    };
+
+    let create_req = CreatePipelineRequest {
+        id: id.clone(),
+        flow_instance_id: Some(flow_instance_id),
+        sql: req.sql,
+        sinks: req.sinks,
+        options: req.options,
+    };
+    if let Err(err) = validate_create_request(&create_req) {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+
     let old_desired_state = match state.storage.get_pipeline_run_state(&id) {
         Ok(Some(state)) => state.desired_state,
         Ok(None) => StoredPipelineDesiredState::Stopped,
@@ -453,16 +651,18 @@ pub async fn upsert_pipeline_handler(
         }
     };
 
-    let encoder_registry = state.instance.encoder_registry();
-    let definition =
-        match build_pipeline_definition(&create_req, encoder_registry.as_ref(), &state.instance) {
-            Ok(definition) => definition,
-            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-        };
+    let encoder_registry = instance.encoder_registry();
+    let definition = match build_pipeline_definition(
+        &create_req,
+        encoder_registry.as_ref(),
+        instance.as_ref(),
+    ) {
+        Ok(definition) => definition,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
 
-    if let Err(err) = state
-        .instance
-        .explain_pipeline(flow::ExplainPipelineTarget::Definition(&definition))
+    if let Err(err) =
+        instance.explain_pipeline(flow::ExplainPipelineTarget::Definition(&definition))
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -472,7 +672,7 @@ pub async fn upsert_pipeline_handler(
     }
 
     if old_pipeline.is_some() {
-        match state.instance.delete_pipeline(&id).await {
+        match instance.delete_pipeline(&id).await {
             Ok(_) | Err(PipelineError::NotFound(_)) => {}
             Err(err) => {
                 return (
@@ -516,7 +716,7 @@ pub async fn upsert_pipeline_handler(
         }
     }
 
-    let build_result = match state.instance.create_pipeline(
+    let build_result = match instance.create_pipeline(
         flow::CreatePipelineRequest::new(definition).with_plan_cache_inputs(
             flow::planner::plan_cache::PlanCacheInputs {
                 pipeline_raw_json: stored.raw_json.clone(),
@@ -555,7 +755,7 @@ pub async fn upsert_pipeline_handler(
         }) {
             Ok(()) => {}
             Err(err) => {
-                let _ = state.instance.delete_pipeline(&id).await;
+                let _ = instance.delete_pipeline(&id).await;
                 let _ = state.storage.delete_pipeline(&id);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -574,7 +774,7 @@ pub async fn upsert_pipeline_handler(
                 desired_state: StoredPipelineDesiredState::Running,
             })
         {
-            let _ = state.instance.delete_pipeline(&id).await;
+            let _ = instance.delete_pipeline(&id).await;
             let _ = state.storage.delete_pipeline(&id);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -583,7 +783,7 @@ pub async fn upsert_pipeline_handler(
                 .into_response();
         }
 
-        if let Err(err) = state.instance.start_pipeline(&id) {
+        if let Err(err) = instance.start_pipeline(&id) {
             tracing::error!(
                 pipeline_id = %id,
                 error = %err,
@@ -630,6 +830,18 @@ pub async fn get_pipeline_handler(
                 .into_response();
         }
     };
+    let mut spec = spec;
+    let flow_instance_id = match canonical_flow_instance_id(spec.flow_instance_id.as_deref()) {
+        Ok(id) => id,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("invalid stored flow_instance_id for pipeline {id}: {err}"),
+            )
+                .into_response();
+        }
+    };
+    spec.flow_instance_id = Some(flow_instance_id);
 
     let run_state = match state.storage.get_pipeline_run_state(&id) {
         Ok(state) => state,
@@ -701,32 +913,12 @@ pub async fn build_pipeline_context_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let stored_pipeline = match state.storage.get_pipeline(&id) {
-        Ok(Some(pipeline)) => pipeline,
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read pipeline {id} from storage: {err}"),
-            )
-                .into_response();
-        }
+    let (instance, pipeline_req) = match resolve_pipeline_instance(&state, &id).await {
+        Ok(result) => result,
+        Err(resp) => return resp,
     };
 
-    let pipeline_req = match storage_bridge::pipeline_request_from_stored(&stored_pipeline) {
-        Ok(req) => req,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to decode stored pipeline {id}: {err}"),
-            )
-                .into_response();
-        }
-    };
-
-    let select_stmt = match select_stmt_from_sql(state.instance.as_ref(), &id, &pipeline_req.sql) {
+    let select_stmt = match select_stmt_from_sql(instance.as_ref(), &id, &pipeline_req.sql) {
         Ok(stmt) => stmt,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
@@ -841,24 +1033,12 @@ pub async fn explain_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.storage.get_pipeline(&id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read pipeline {id} from storage: {err}"),
-            )
-                .into_response();
-        }
-    }
+    let (instance, _) = match resolve_pipeline_instance(&state, &id).await {
+        Ok(result) => result,
+        Err(resp) => return resp,
+    };
 
-    let explain = match state
-        .instance
-        .explain_pipeline(flow::ExplainPipelineTarget::Id(&id))
-    {
+    let explain = match instance.explain_pipeline(flow::ExplainPipelineTarget::Id(&id)) {
         Ok(explain) => explain,
         Err(PipelineError::NotFound(_)) => {
             return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
@@ -897,22 +1077,13 @@ pub async fn collect_pipeline_stats_handler(
         }
     };
 
-    match state.storage.get_pipeline(&id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read pipeline {id} from storage: {err}"),
-            )
-                .into_response();
-        }
-    }
+    let (instance, _) = match resolve_pipeline_instance(&state, &id).await {
+        Ok(result) => result,
+        Err(resp) => return resp,
+    };
 
     let timeout = Duration::from_millis(query.timeout_ms);
-    match state.instance.collect_pipeline_stats(&id, timeout).await {
+    match instance.collect_pipeline_stats(&id, timeout).await {
         Ok(stats) => {
             // Filter out internal pipeline nodes that are not meaningful for API consumers.
             let stats = stats
@@ -955,19 +1126,10 @@ pub async fn start_pipeline_handler(
                 .into_response();
         }
     };
-    match state.storage.get_pipeline(&id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read pipeline {id} from storage: {err}"),
-            )
-                .into_response();
-        }
-    }
+    let (instance, _) = match resolve_pipeline_instance(&state, &id).await {
+        Ok(result) => result,
+        Err(resp) => return resp,
+    };
 
     if let Err(err) = state
         .storage
@@ -983,7 +1145,7 @@ pub async fn start_pipeline_handler(
             .into_response();
     }
 
-    match state.instance.start_pipeline(&id) {
+    match instance.start_pipeline(&id) {
         Ok(_) => {
             tracing::info!(pipeline_id = %id, "pipeline started");
             (StatusCode::OK, format!("pipeline {id} started")).into_response()
@@ -1029,19 +1191,10 @@ pub async fn stop_pipeline_handler(
                 .into_response();
         }
     };
-    match state.storage.get_pipeline(&id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read pipeline {id} from storage: {err}"),
-            )
-                .into_response();
-        }
-    }
+    let (instance, _) = match resolve_pipeline_instance(&state, &id).await {
+        Ok(result) => result,
+        Err(resp) => return resp,
+    };
 
     let mode = match parse_stop_mode(&query.mode) {
         Ok(mode) => mode,
@@ -1063,7 +1216,7 @@ pub async fn stop_pipeline_handler(
             .into_response();
     }
 
-    match state.instance.stop_pipeline(&id, mode, timeout).await {
+    match instance.stop_pipeline(&id, mode, timeout).await {
         Ok(_) => {
             tracing::info!(
                 pipeline_id = %id,
@@ -1099,7 +1252,12 @@ pub async fn delete_pipeline_handler(
                 .into_response();
         }
     };
-    match state.instance.delete_pipeline(&id).await {
+    let (instance, _) = match resolve_pipeline_instance(&state, &id).await {
+        Ok(result) => result,
+        Err(resp) => return resp,
+    };
+
+    match instance.delete_pipeline(&id).await {
         Ok(_) => {
             if let Err(err) = state.storage.delete_pipeline(&id) {
                 return (
@@ -1124,33 +1282,57 @@ pub async fn delete_pipeline_handler(
 }
 
 pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse {
-    let runtime_status: HashMap<String, String> = state
-        .instance
-        .list_pipelines()
-        .into_iter()
-        .map(|snapshot| {
-            (
+    let mut runtime_status = HashMap::new();
+    for (_, instance) in state.instances.instances_snapshot() {
+        for snapshot in instance.list_pipelines() {
+            runtime_status.insert(
                 snapshot.definition.id().to_string(),
                 status_label(snapshot.status),
-            )
-        })
-        .collect();
+            );
+        }
+    }
 
     match state.storage.list_pipelines() {
         Ok(entries) => {
-            let list = entries
-                .into_iter()
-                .map(|entry| {
-                    let status = runtime_status
-                        .get(&entry.id)
-                        .cloned()
-                        .unwrap_or_else(|| "stopped".to_string());
-                    ListPipelineItem {
-                        id: entry.id,
-                        status,
+            let mut list = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let mut spec = match storage_bridge::pipeline_request_from_stored(&entry) {
+                    Ok(req) => req,
+                    Err(err) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("decode stored pipeline {}: {err}", entry.id),
+                        )
+                            .into_response();
                     }
-                })
-                .collect::<Vec<_>>();
+                };
+                let flow_instance_id =
+                    match canonical_flow_instance_id(spec.flow_instance_id.as_deref()) {
+                        Ok(id) => id,
+                        Err(err) => {
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                format!(
+                                    "invalid stored flow_instance_id for pipeline {}: {err}",
+                                    entry.id
+                                ),
+                            )
+                                .into_response();
+                        }
+                    };
+                spec.flow_instance_id = Some(flow_instance_id.clone());
+
+                let status = runtime_status
+                    .get(&entry.id)
+                    .cloned()
+                    .unwrap_or_else(|| "stopped".to_string());
+                list.push(ListPipelineItem {
+                    id: entry.id,
+                    status,
+                    flow_instance_id,
+                });
+            }
+            list.sort_by(|a, b| a.id.cmp(&b.id));
             Json(list).into_response()
         }
         Err(err) => (
