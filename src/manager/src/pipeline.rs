@@ -7,15 +7,17 @@ use axum::{
 };
 use flow::EncoderRegistry;
 use flow::FlowInstance;
+use flow::connector::SharedMqttClientConfig;
 use flow::pipeline::{
     KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
     PipelineError, PipelineOptions, PipelineStatus, PipelineStopMode, PlanCacheOptions,
     SinkDefinition, SinkProps, SinkType,
 };
 use flow::planner::sink::{CommonSinkProps, SinkEncoderConfig};
+use parser::SelectStmt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use storage::{StorageError, StorageManager, StoredPipelineDesiredState, StoredPipelineRunState};
@@ -122,6 +124,13 @@ pub struct GetPipelineResponse {
     pub id: String,
     pub status: String,
     pub spec: CreatePipelineRequest,
+}
+
+#[derive(Serialize)]
+pub struct BuildPipelineContextResponse {
+    pub pipeline: CreatePipelineRequest,
+    pub streams: BTreeMap<String, crate::stream::CreateStreamRequest>,
+    pub shared_mqtt_clients: Vec<SharedMqttClientConfig>,
 }
 
 #[derive(Deserialize)]
@@ -639,6 +648,193 @@ pub async fn get_pipeline_handler(
         spec,
     })
     .into_response()
+}
+
+fn select_stmt_from_sql(
+    instance: &FlowInstance,
+    pipeline_id: &str,
+    sql: &str,
+) -> Result<SelectStmt, String> {
+    parser::parse_sql_with_registries(
+        sql,
+        instance.aggregate_registry(),
+        instance.stateful_registry(),
+    )
+    .map_err(|err| format!("parse pipeline {pipeline_id} sql: {err}"))
+}
+
+fn connector_keys_from_pipeline_sinks(
+    pipeline_id: &str,
+    sinks: &[CreatePipelineSinkRequest],
+) -> Result<BTreeSet<String>, String> {
+    let mut keys = BTreeSet::new();
+    for sink in sinks {
+        if !sink.sink_type.eq_ignore_ascii_case("mqtt") {
+            continue;
+        }
+        let mqtt_props: MqttSinkPropsRequest = serde_json::from_value(sink.props.to_value())
+            .map_err(|err| format!("decode pipeline {pipeline_id} mqtt sink props: {err}"))?;
+        if let Some(key) = mqtt_props.connector_key
+            && !key.trim().is_empty()
+        {
+            keys.insert(key);
+        }
+    }
+    Ok(keys)
+}
+
+fn connector_key_from_stream(
+    req: &crate::stream::CreateStreamRequest,
+) -> Result<Option<String>, String> {
+    if !req.stream_type.eq_ignore_ascii_case("mqtt") {
+        return Ok(None);
+    }
+    let mqtt_props: crate::stream::MqttStreamPropsRequest =
+        serde_json::from_value(JsonValue::Object(req.props.fields.clone()))
+            .map_err(|err| format!("decode mqtt stream {} props: {err}", req.name))?;
+    Ok(mqtt_props
+        .connector_key
+        .filter(|key| !key.trim().is_empty()))
+}
+
+pub async fn build_pipeline_context_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let stored_pipeline = match state.storage.get_pipeline(&id) {
+        Ok(Some(pipeline)) => pipeline,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to read pipeline {id} from storage: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let pipeline_req = match storage_bridge::pipeline_request_from_stored(&stored_pipeline) {
+        Ok(req) => req,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to decode stored pipeline {id}: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let select_stmt = match select_stmt_from_sql(state.instance.as_ref(), &id, &pipeline_req.sql) {
+        Ok(stmt) => stmt,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
+
+    let mut stream_names = select_stmt
+        .source_infos
+        .iter()
+        .map(|source| source.name.clone())
+        .collect::<Vec<_>>();
+    stream_names.sort();
+    stream_names.dedup();
+
+    let mut connector_keys = match connector_keys_from_pipeline_sinks(&id, &pipeline_req.sinks) {
+        Ok(keys) => keys,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to inspect pipeline {id} sink props: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let mut streams = BTreeMap::new();
+    for stream_name in stream_names {
+        let stored_stream = match state.storage.get_stream(&stream_name) {
+            Ok(Some(stream)) => stream,
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("stream {stream_name} missing from storage"),
+                )
+                    .into_response();
+            }
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to read stream {stream_name} from storage: {err}"),
+                )
+                    .into_response();
+            }
+        };
+
+        let stream_req: crate::stream::CreateStreamRequest =
+            match serde_json::from_str(&stored_stream.raw_json) {
+                Ok(req) => req,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("decode stored stream {stream_name}: {err}"),
+                    )
+                        .into_response();
+                }
+            };
+
+        match connector_key_from_stream(&stream_req) {
+            Ok(Some(key)) => {
+                connector_keys.insert(key);
+            }
+            Ok(None) => {}
+            Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+        }
+
+        streams.insert(stream_name, stream_req);
+    }
+
+    let mut shared_mqtt_clients = Vec::with_capacity(connector_keys.len());
+    for key in connector_keys {
+        let stored = match state.storage.get_mqtt_config(&key) {
+            Ok(Some(cfg)) => cfg,
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!("shared mqtt client config {key} missing from storage"),
+                )
+                    .into_response();
+            }
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to read shared mqtt client config {key} from storage: {err}"),
+                )
+                    .into_response();
+            }
+        };
+
+        let cfg: SharedMqttClientConfig = match serde_json::from_str(&stored.raw_json) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("decode stored shared mqtt client config {key}: {err}"),
+                )
+                    .into_response();
+            }
+        };
+        shared_mqtt_clients.push(cfg);
+    }
+
+    (
+        StatusCode::OK,
+        Json(BuildPipelineContextResponse {
+            pipeline: pipeline_req,
+            streams,
+            shared_mqtt_clients,
+        }),
+    )
+        .into_response()
 }
 
 pub async fn explain_pipeline_handler(
