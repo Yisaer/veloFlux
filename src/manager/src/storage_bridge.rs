@@ -405,7 +405,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
 
-        let instance = FlowInstance::new_with_id("test-default", None);
+        let instance = FlowInstance::new_default();
         let instances = FlowInstances::new(instance);
 
         let stream_req = sample_stream_request("s1");
@@ -507,7 +507,7 @@ mod tests {
     async fn plan_cache_miss_writes_snapshot() {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
-        let instance = FlowInstance::new_with_id("test-miss", None);
+        let instance = FlowInstance::new_default();
         let instances = FlowInstances::new(instance);
 
         let stream_req = sample_stream_request("s1");
