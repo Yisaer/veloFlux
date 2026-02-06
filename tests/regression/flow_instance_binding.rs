@@ -93,26 +93,16 @@ async fn flow_instance_pipeline_binding_lifecycle() {
     };
     let addr = listener.local_addr().expect("read listener addr");
 
+    let flow_instance_id = format!("fi_{}", random_suffix());
+    let extra_flow_instances = vec![manager::FlowInstanceSpec {
+        id: flow_instance_id.clone(),
+    }];
+
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(listener, instance, storage)
+        manager::start_server_with_listener(listener, instance, storage, extra_flow_instances)
             .await
             .expect("start manager server");
     });
-
-    let flow_instance_id = format!("fi_{}", random_suffix());
-    let (code, body) = http_request(
-        addr,
-        "POST",
-        "/flow_instances",
-        Some(&json!({ "id": flow_instance_id.clone() })),
-    )
-    .await;
-    assert_eq!(
-        code,
-        201,
-        "create flow instance failed (HTTP {code}): {}",
-        String::from_utf8_lossy(&body)
-    );
 
     let stream_name = format!("bind_stream_{}", random_suffix());
     let create_stream = json!({
@@ -201,44 +191,12 @@ async fn flow_instance_pipeline_binding_lifecycle() {
         Some(flow_instance_id.as_str())
     );
 
-    let (code, _) = http_request(
-        addr,
-        "DELETE",
-        &format!(
-            "/flow_instances/{}",
-            create_pipeline["flow_instance_id"].as_str().unwrap()
-        ),
-        None,
-    )
-    .await;
-    assert_eq!(
-        code, 409,
-        "deleting flow instance with pipelines should conflict"
-    );
-
     let (code, body) =
         http_request(addr, "DELETE", &format!("/pipelines/{pipeline_id}"), None).await;
     assert_eq!(
         code,
         200,
         "delete pipeline failed (HTTP {code}): {}",
-        String::from_utf8_lossy(&body)
-    );
-
-    let (code, body) = http_request(
-        addr,
-        "DELETE",
-        &format!(
-            "/flow_instances/{}",
-            create_pipeline["flow_instance_id"].as_str().unwrap()
-        ),
-        None,
-    )
-    .await;
-    assert_eq!(
-        code,
-        200,
-        "delete flow instance failed (HTTP {code}): {}",
         String::from_utf8_lossy(&body)
     );
 

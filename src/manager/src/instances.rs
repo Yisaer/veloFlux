@@ -1,9 +1,15 @@
 use flow::{FlowInstance, FlowInstanceSharedRegistries};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub const DEFAULT_FLOW_INSTANCE_ID: &str = "default";
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FlowInstanceSpec {
+    pub id: String,
+}
 
 #[derive(Clone)]
 pub struct FlowInstanceFactory {
@@ -85,10 +91,6 @@ impl FlowInstances {
         let instance = Arc::new(instance);
         guard.insert(id, Arc::clone(&instance));
         Ok(instance)
-    }
-
-    pub fn remove(&self, id: &str) -> Option<Arc<FlowInstance>> {
-        self.instances.write().remove(id)
     }
 
     pub fn create_dedicated_instance(&self, id: &str) -> FlowInstance {

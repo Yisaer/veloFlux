@@ -80,6 +80,8 @@ pub struct ServerOptions {
     pub metrics_addr: Option<String>,
     /// Metrics polling interval in seconds (feature-gated); if None, uses default.
     pub metrics_poll_interval_secs: Option<u64>,
+    /// Extra flow instances (excluding `default`) declared by config.
+    pub extra_flow_instances: Vec<manager::FlowInstanceSpec>,
 }
 
 /// Runtime context returned by [`init`] and consumed by [`start`].
@@ -88,6 +90,7 @@ pub struct ServerContext {
     storage: StorageManager,
     manager_addr: String,
     profiling_enabled: bool,
+    extra_flow_instances: Vec<manager::FlowInstanceSpec>,
 }
 
 impl ServerContext {
@@ -113,6 +116,10 @@ impl ServerContext {
             self.manager_addr,
             self.profiling_enabled,
         )
+    }
+
+    fn extra_flow_instances(&self) -> &[manager::FlowInstanceSpec] {
+        &self.extra_flow_instances
     }
 }
 
@@ -151,14 +158,17 @@ pub async fn init(
         storage,
         manager_addr,
         profiling_enabled,
+        extra_flow_instances: opts.extra_flow_instances,
     })
 }
 
 /// Start the manager server and await termination (Ctrl+C or server error).
 pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let extra_instances = ctx.extra_flow_instances().to_vec();
     let (instance, storage, manager_addr, _profiling_enabled) = ctx.into_parts();
     tracing::info!(manager_addr = %manager_addr, "starting manager");
-    let manager_future = manager::start_server(manager_addr.clone(), instance, storage);
+    let manager_future =
+        manager::start_server(manager_addr.clone(), instance, storage, extra_instances);
 
     tokio::select! {
         result = manager_future => {
