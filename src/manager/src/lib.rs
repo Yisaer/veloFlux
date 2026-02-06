@@ -1,5 +1,7 @@
 mod capabilities;
+mod flow_instance;
 mod function;
+mod instances;
 mod memory_topic;
 mod pipeline;
 pub mod storage_bridge;
@@ -13,12 +15,22 @@ use storage::StorageManager;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
+pub use instances::new_default_flow_instance;
 pub use stream::{SchemaParser, register_schema, schema_registry};
 
 pub(crate) static MQTT_QOS: u8 = 0;
 
 fn build_app(state: AppState) -> Router {
     Router::new()
+        .route(
+            "/flow_instances",
+            post(flow_instance::create_flow_instance_handler)
+                .get(flow_instance::list_flow_instances_handler),
+        )
+        .route(
+            "/flow_instances/:id",
+            delete(flow_instance::delete_flow_instance_handler),
+        )
         .route(
             "/pipelines",
             post(pipeline::create_pipeline_handler).get(pipeline::list_pipelines),
@@ -82,6 +94,9 @@ pub async fn start_server_with_listener(
     storage: StorageManager,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = AppState::new(instance, storage);
+    if let Err(err) = state.bootstrap_from_storage().await {
+        return Err(format!("failed to bootstrap from storage: {err}").into());
+    }
     let app = build_app(state);
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())

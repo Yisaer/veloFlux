@@ -1,4 +1,5 @@
 use crate::MQTT_QOS;
+use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::pipeline::AppState;
 use crate::storage_bridge;
 use axum::{
@@ -288,7 +289,7 @@ pub async fn create_stream_handler(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    let decoder_registry = state.instance.decoder_registry();
+    let decoder_registry = state.instances.default_instance().decoder_registry();
     let decoder = match build_stream_decoder(&req, decoder_registry.as_ref()) {
         Ok(config) => config,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -337,16 +338,35 @@ pub async fn create_stream_handler(
         definition = definition.with_sampler(sampler.clone());
     }
 
-    match state.instance.create_stream(definition, req.shared).await {
-        Ok(info) => {
-            tracing::info!(stream_name = %req.name, "stream created");
-            (StatusCode::CREATED, Json(build_stream_info(info))).into_response()
-        }
-        Err(err) => {
-            let _ = state.storage.delete_stream(&req.name);
-            map_flow_instance_error(err)
+    let mut created = Vec::new();
+    let mut first_info = None;
+    let mut default_info = None;
+    for (instance_id, instance) in state.instances.instances_snapshot() {
+        match instance.create_stream(definition.clone(), req.shared).await {
+            Ok(info) => {
+                if first_info.is_none() {
+                    first_info = Some(info.clone());
+                }
+                if instance_id == DEFAULT_FLOW_INSTANCE_ID {
+                    default_info = Some(info);
+                }
+                created.push(instance);
+            }
+            Err(err) => {
+                for instance in created {
+                    let _ = instance.delete_stream(&req.name).await;
+                }
+                let _ = state.storage.delete_stream(&req.name);
+                return map_flow_instance_error(err);
+            }
         }
     }
+
+    tracing::info!(stream_name = %req.name, "stream created");
+    let info = default_info
+        .or(first_info)
+        .expect("stream created in at least one instance");
+    (StatusCode::CREATED, Json(build_stream_info(info))).into_response()
 }
 
 pub async fn list_streams(State(state): State<AppState>) -> impl IntoResponse {
@@ -425,7 +445,7 @@ pub async fn describe_stream_handler(
         }
     };
 
-    let decoder_registry = state.instance.decoder_registry();
+    let decoder_registry = state.instances.default_instance().decoder_registry();
     let definition =
         match storage_bridge::stream_definition_from_stored(&stored, decoder_registry.as_ref()) {
             Ok(definition) => definition,
@@ -477,14 +497,18 @@ pub async fn delete_stream_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let pipelines_using_stream = state
-        .instance
-        .list_pipelines()
-        .into_iter()
-        .filter(|snapshot| snapshot.streams.iter().any(|stream| stream == &name))
-        .map(|snapshot| snapshot.definition.id().to_string())
-        .collect::<Vec<_>>();
+    let mut pipelines_using_stream = Vec::new();
+    for (_, instance) in state.instances.instances_snapshot() {
+        pipelines_using_stream.extend(
+            instance
+                .list_pipelines()
+                .into_iter()
+                .filter(|snapshot| snapshot.streams.iter().any(|stream| stream == &name))
+                .map(|snapshot| snapshot.definition.id().to_string()),
+        );
+    }
     if !pipelines_using_stream.is_empty() {
+        pipelines_using_stream.sort();
         return (
             StatusCode::CONFLICT,
             format!(
@@ -495,21 +519,22 @@ pub async fn delete_stream_handler(
             .into_response();
     }
 
-    match state.instance.delete_stream(&name).await {
-        Ok(_) => {
-            if let Err(err) = state.storage.delete_stream(&name) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!(
-                        "stream {name} deleted in runtime but failed to remove from storage: {err}"
-                    ),
-                )
-                    .into_response();
-            }
-            (StatusCode::OK, format!("stream {name} deleted")).into_response()
+    for (_, instance) in state.instances.instances_snapshot() {
+        match instance.delete_stream(&name).await {
+            Ok(()) => {}
+            Err(FlowInstanceError::Catalog(CatalogError::NotFound(_))) => {}
+            Err(err) => return map_flow_instance_error(err),
         }
-        Err(err) => map_flow_instance_error(err),
     }
+
+    if let Err(err) = state.storage.delete_stream(&name) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("stream {name} deleted in runtime but failed to remove from storage: {err}"),
+        )
+            .into_response();
+    }
+    (StatusCode::OK, format!("stream {name} deleted")).into_response()
 }
 
 fn build_stream_info(info: StreamRuntimeInfo) -> StreamInfo {

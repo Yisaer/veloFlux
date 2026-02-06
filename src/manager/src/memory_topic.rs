@@ -59,6 +59,33 @@ pub async fn create_memory_topic_handler(
         .unwrap_or(DEFAULT_MEMORY_PUBSUB_CAPACITY)
         .max(1);
 
+    for (_, instance) in state.instances.instances_snapshot() {
+        if let Some(kind) = instance.memory_topic_kind(&topic) {
+            if kind != req.kind.as_flow_kind() {
+                return (
+                    StatusCode::CONFLICT,
+                    format!(
+                        "memory topic {topic} kind mismatch: expected {}, got {}",
+                        kind,
+                        req.kind.as_flow_kind()
+                    ),
+                )
+                    .into_response();
+            }
+            if let Some(actual_capacity) = instance.memory_topic_capacity(&topic)
+                && actual_capacity != capacity
+            {
+                return (
+                    StatusCode::CONFLICT,
+                    format!(
+                        "memory topic {topic} capacity mismatch: expected {actual_capacity}, got {capacity}"
+                    ),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let stored = StoredMemoryTopic {
         topic: topic.clone(),
         kind: req.kind.as_storage_kind(),
@@ -83,29 +110,28 @@ pub async fn create_memory_topic_handler(
         }
     }
 
-    if let Err(err) = state
-        .instance
-        .declare_memory_topic(&topic, req.kind.as_flow_kind(), capacity)
-    {
-        let _ = state.storage.delete_memory_topic(&topic);
-        let (status, message) = match err {
-            MemoryPubSubError::InvalidTopic => {
-                (StatusCode::BAD_REQUEST, format!("invalid topic {topic}"))
-            }
-            MemoryPubSubError::NotFound { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("unexpected memory pubsub error: {err}"),
-            ),
-            MemoryPubSubError::TimeoutWaitingForSubscribers { .. } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("unexpected memory pubsub error: {err}"),
-            ),
-            MemoryPubSubError::TopicKindMismatch { .. }
-            | MemoryPubSubError::TopicCapacityMismatch { .. } => {
-                (StatusCode::CONFLICT, err.to_string())
-            }
-        };
-        return (status, message).into_response();
+    for (_, instance) in state.instances.instances_snapshot() {
+        if let Err(err) = instance.declare_memory_topic(&topic, req.kind.as_flow_kind(), capacity) {
+            let _ = state.storage.delete_memory_topic(&topic);
+            let (status, message) = match err {
+                MemoryPubSubError::InvalidTopic => {
+                    (StatusCode::BAD_REQUEST, format!("invalid topic {topic}"))
+                }
+                MemoryPubSubError::NotFound { .. } => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("unexpected memory pubsub error: {err}"),
+                ),
+                MemoryPubSubError::TimeoutWaitingForSubscribers { .. } => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("unexpected memory pubsub error: {err}"),
+                ),
+                MemoryPubSubError::TopicKindMismatch { .. }
+                | MemoryPubSubError::TopicCapacityMismatch { .. } => {
+                    (StatusCode::CONFLICT, err.to_string())
+                }
+            };
+            return (status, message).into_response();
+        }
     }
 
     (

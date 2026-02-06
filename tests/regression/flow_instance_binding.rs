@@ -83,7 +83,7 @@ async fn bind_manager_listener_or_skip() -> Option<TcpListener> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pipeline_build_context_returns_200_and_404() {
+async fn flow_instance_pipeline_binding_lifecycle() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
     let instance = manager::new_default_flow_instance();
@@ -99,17 +99,22 @@ async fn pipeline_build_context_returns_200_and_404() {
             .expect("start manager server");
     });
 
-    let missing = format!("missing_{}", random_suffix());
-    let (code, _) = http_request(
+    let flow_instance_id = format!("fi_{}", random_suffix());
+    let (code, body) = http_request(
         addr,
-        "GET",
-        &format!("/pipelines/{missing}/buildContext"),
-        None,
+        "POST",
+        "/flow_instances",
+        Some(&json!({ "id": flow_instance_id.clone() })),
     )
     .await;
-    assert_eq!(code, 404);
+    assert_eq!(
+        code,
+        201,
+        "create flow instance failed (HTTP {code}): {}",
+        String::from_utf8_lossy(&body)
+    );
 
-    let stream_name = format!("ctx_stream_{}", random_suffix());
+    let stream_name = format!("bind_stream_{}", random_suffix());
     let create_stream = json!({
         "name": stream_name,
         "type": "mock",
@@ -133,9 +138,14 @@ async fn pipeline_build_context_returns_200_and_404() {
         String::from_utf8_lossy(&body)
     );
 
-    let pipeline_id = format!("ctx_pipe_{}", random_suffix());
+    let pipeline_id = format!("bind_pipe_{}", random_suffix());
     let sql = format!("SELECT value FROM {stream_name}");
-    let create_pipeline = json!({ "id": pipeline_id, "sql": sql, "sinks": [ { "type": "nop" } ] });
+    let create_pipeline = json!({
+        "id": pipeline_id,
+        "flow_instance_id": flow_instance_id.clone(),
+        "sql": sql,
+        "sinks": [ { "type": "nop" } ]
+    });
     let (code, body) = http_request(addr, "POST", "/pipelines", Some(&create_pipeline)).await;
     assert_eq!(
         code,
@@ -146,10 +156,81 @@ async fn pipeline_build_context_returns_200_and_404() {
 
     let (code, body) = http_request(
         addr,
-        "GET",
+        "POST",
+        &format!("/pipelines/{pipeline_id}/start"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        code,
+        200,
+        "start pipeline failed (HTTP {code}): {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let (code, body) = http_request(addr, "GET", "/pipelines", None).await;
+    assert_eq!(
+        code,
+        200,
+        "list pipelines failed (HTTP {code}): {}",
+        String::from_utf8_lossy(&body)
+    );
+    let list: JsonValue = serde_json::from_slice(&body).expect("decode pipelines list JSON");
+    assert!(
+        list.as_array()
+            .expect("pipelines list is array")
+            .iter()
+            .any(|item| {
+                item["id"].as_str() == Some(pipeline_id.as_str())
+                    && item["flow_instance_id"].as_str() == Some(flow_instance_id.as_str())
+            }),
+        "pipelines list missing flow_instance_id binding"
+    );
+
+    let (code, body) = http_request(addr, "GET", &format!("/pipelines/{pipeline_id}"), None).await;
+    assert_eq!(
+        code,
+        200,
+        "get pipeline failed (HTTP {code}): {}",
+        String::from_utf8_lossy(&body)
+    );
+    let get_resp: JsonValue = serde_json::from_slice(&body).expect("decode pipeline JSON");
+    assert_eq!(get_resp["spec"]["id"].as_str(), Some(pipeline_id.as_str()));
+    assert_eq!(
+        get_resp["spec"]["flow_instance_id"].as_str(),
+        Some(flow_instance_id.as_str())
+    );
+
+    let (code, _) = http_request(
+        addr,
+        "DELETE",
         &format!(
-            "/pipelines/{}/buildContext",
-            create_pipeline["id"].as_str().unwrap()
+            "/flow_instances/{}",
+            create_pipeline["flow_instance_id"].as_str().unwrap()
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(
+        code, 409,
+        "deleting flow instance with pipelines should conflict"
+    );
+
+    let (code, body) =
+        http_request(addr, "DELETE", &format!("/pipelines/{pipeline_id}"), None).await;
+    assert_eq!(
+        code,
+        200,
+        "delete pipeline failed (HTTP {code}): {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let (code, body) = http_request(
+        addr,
+        "DELETE",
+        &format!(
+            "/flow_instances/{}",
+            create_pipeline["flow_instance_id"].as_str().unwrap()
         ),
         None,
     )
@@ -157,16 +238,9 @@ async fn pipeline_build_context_returns_200_and_404() {
     assert_eq!(
         code,
         200,
-        "buildContext failed (HTTP {code}): {}",
+        "delete flow instance failed (HTTP {code}): {}",
         String::from_utf8_lossy(&body)
     );
-    let ctx: JsonValue = serde_json::from_slice(&body).expect("decode buildContext JSON");
-    assert_eq!(ctx["pipeline"]["id"], create_pipeline["id"]);
-    assert_eq!(
-        ctx["streams"][&stream_name]["name"],
-        JsonValue::String(stream_name)
-    );
-    assert!(ctx["shared_mqtt_clients"].is_array());
 
     server.abort();
     let _ = server.await;

@@ -1,45 +1,50 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use tokio::runtime::Runtime;
+use tokio::runtime::{Handle, Runtime};
 use tokio::task::JoinHandle;
 
-struct ManagedRuntime {
-    runtime: Option<Runtime>,
+enum ManagedRuntimeInner {
+    Owned(Option<Runtime>),
+    Shared(Handle),
 }
 
-impl ManagedRuntime {
-    fn new(runtime: Runtime) -> Self {
-        Self {
-            runtime: Some(runtime),
+impl ManagedRuntimeInner {
+    fn handle(&self) -> &Handle {
+        match self {
+            ManagedRuntimeInner::Owned(runtime) => {
+                runtime.as_ref().expect("managed runtime missing").handle()
+            }
+            ManagedRuntimeInner::Shared(handle) => handle,
         }
     }
-
-    fn handle(&self) -> &tokio::runtime::Handle {
-        self.runtime
-            .as_ref()
-            .expect("managed runtime missing")
-            .handle()
-    }
 }
 
-impl Drop for ManagedRuntime {
+impl Drop for ManagedRuntimeInner {
     fn drop(&mut self) {
-        if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
+        if let ManagedRuntimeInner::Owned(runtime) = self {
+            if let Some(runtime) = runtime.take() {
+                runtime.shutdown_background();
+            }
         }
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct TaskSpawner {
-    runtime: Arc<ManagedRuntime>,
+    runtime: Arc<ManagedRuntimeInner>,
 }
 
 impl TaskSpawner {
     pub(crate) fn new(runtime: Runtime) -> Self {
         Self {
-            runtime: Arc::new(ManagedRuntime::new(runtime)),
+            runtime: Arc::new(ManagedRuntimeInner::Owned(Some(runtime))),
+        }
+    }
+
+    pub(crate) fn from_handle(handle: Handle) -> Self {
+        Self {
+            runtime: Arc::new(ManagedRuntimeInner::Shared(handle)),
         }
     }
 

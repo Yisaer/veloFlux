@@ -8,6 +8,7 @@ use thiserror::Error;
 
 const STREAMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("streams");
 const PIPELINES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("pipelines");
+const FLOW_INSTANCES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("flow_instances");
 const PLAN_SNAPSHOTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("plan_snapshots");
 const PIPELINE_RUN_STATES_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("pipeline_run_states");
@@ -62,6 +63,11 @@ pub struct StoredPipeline {
     pub id: String,
     /// Original create-pipeline request serialized as JSON.
     pub raw_json: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredFlowInstance {
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -172,6 +178,22 @@ impl MetadataStorage {
 
     pub fn create_pipeline(&self, pipeline: StoredPipeline) -> Result<(), StorageError> {
         self.insert_if_absent(PIPELINES_TABLE, &pipeline.id, &pipeline)
+    }
+
+    pub fn create_flow_instance(&self, instance: StoredFlowInstance) -> Result<(), StorageError> {
+        self.insert_if_absent(FLOW_INSTANCES_TABLE, &instance.id, &instance)
+    }
+
+    pub fn get_flow_instance(&self, id: &str) -> Result<Option<StoredFlowInstance>, StorageError> {
+        self.get_entry(FLOW_INSTANCES_TABLE, id)
+    }
+
+    pub fn list_flow_instances(&self) -> Result<Vec<StoredFlowInstance>, StorageError> {
+        self.list_entries(FLOW_INSTANCES_TABLE)
+    }
+
+    pub fn delete_flow_instance(&self, id: &str) -> Result<(), StorageError> {
+        self.delete_entry(FLOW_INSTANCES_TABLE, id)
     }
 
     pub fn get_pipeline(&self, id: &str) -> Result<Option<StoredPipeline>, StorageError> {
@@ -307,6 +329,8 @@ impl MetadataStorage {
             .map_err(StorageError::backend)?;
         txn.open_table(PIPELINES_TABLE)
             .map_err(StorageError::backend)?;
+        txn.open_table(FLOW_INSTANCES_TABLE)
+            .map_err(StorageError::backend)?;
         txn.open_table(PLAN_SNAPSHOTS_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(PIPELINE_RUN_STATES_TABLE)
@@ -429,6 +453,22 @@ impl StorageManager {
 
     pub fn create_pipeline(&self, pipeline: StoredPipeline) -> Result<(), StorageError> {
         self.metadata.create_pipeline(pipeline)
+    }
+
+    pub fn create_flow_instance(&self, instance: StoredFlowInstance) -> Result<(), StorageError> {
+        self.metadata.create_flow_instance(instance)
+    }
+
+    pub fn get_flow_instance(&self, id: &str) -> Result<Option<StoredFlowInstance>, StorageError> {
+        self.metadata.get_flow_instance(id)
+    }
+
+    pub fn list_flow_instances(&self) -> Result<Vec<StoredFlowInstance>, StorageError> {
+        self.metadata.list_flow_instances()
+    }
+
+    pub fn delete_flow_instance(&self, id: &str) -> Result<(), StorageError> {
+        self.metadata.delete_flow_instance(id)
     }
 
     pub fn get_pipeline(&self, id: &str) -> Result<Option<StoredPipeline>, StorageError> {
