@@ -11,8 +11,7 @@ use flow::pipeline::PipelineDefinition;
 use flow::{DecoderRegistry, EncoderRegistry};
 use std::sync::Arc;
 use storage::{
-    StorageError, StorageManager, StoredFlowInstance, StoredMemoryTopicKind,
-    StoredMqttClientConfig, StoredPipeline, StoredStream,
+    StorageManager, StoredMemoryTopicKind, StoredMqttClientConfig, StoredPipeline, StoredStream,
 };
 
 fn fnv1a_64_hex(input: &str) -> String {
@@ -195,28 +194,12 @@ async fn hydrate_pipelines_into_instances_from_storage(
             .as_deref()
             .unwrap_or(DEFAULT_FLOW_INSTANCE_ID);
 
-        let instance = match instances.get(flow_instance_id) {
-            Some(instance) => instance,
-            None => {
-                let instance = instances.create_dedicated_instance(flow_instance_id);
-                hydrate_instance_globals_from_storage(storage, &instance).await?;
-                match storage.create_flow_instance(StoredFlowInstance {
-                    id: flow_instance_id.to_string(),
-                }) {
-                    Ok(()) | Err(StorageError::AlreadyExists(_)) => {}
-                    Err(err) => {
-                        return Err(format!("persist flow instance {flow_instance_id}: {err}"));
-                    }
-                }
-                instances
-                    .insert(flow_instance_id.to_string(), instance)
-                    .unwrap_or_else(|_| {
-                        instances
-                            .get(flow_instance_id)
-                            .expect("flow instance inserted")
-                    })
-            }
-        };
+        let instance = instances.get(flow_instance_id).ok_or_else(|| {
+            format!(
+                "pipeline {} references undeclared flow instance {}",
+                pipeline.id, flow_instance_id
+            )
+        })?;
 
         let encoder_registry = instance.encoder_registry();
         let def = pipeline_definition_from_stored(
@@ -298,13 +281,6 @@ async fn hydrate_pipelines_into_instances_from_storage(
         }
     }
     Ok(())
-}
-
-pub(crate) async fn hydrate_instance_from_storage(
-    storage: &StorageManager,
-    instance: &flow::FlowInstance,
-) -> Result<(), String> {
-    hydrate_instance_globals_from_storage(storage, instance).await
 }
 
 pub(crate) async fn hydrate_runtime_from_storage(

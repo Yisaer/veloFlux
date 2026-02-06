@@ -94,7 +94,7 @@ async fn pipeline_build_context_returns_200_and_404() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(listener, instance, storage)
+        manager::start_server_with_listener(listener, instance, storage, Vec::new())
             .await
             .expect("start manager server");
     });

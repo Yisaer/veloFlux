@@ -1,5 +1,4 @@
 mod capabilities;
-mod flow_instance;
 mod function;
 mod instances;
 mod memory_topic;
@@ -15,6 +14,7 @@ use storage::StorageManager;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
+pub use instances::FlowInstanceSpec;
 pub use instances::new_default_flow_instance;
 pub use stream::{SchemaParser, register_schema, schema_registry};
 
@@ -22,15 +22,6 @@ pub(crate) static MQTT_QOS: u8 = 0;
 
 fn build_app(state: AppState) -> Router {
     Router::new()
-        .route(
-            "/flow_instances",
-            post(flow_instance::create_flow_instance_handler)
-                .get(flow_instance::list_flow_instances_handler),
-        )
-        .route(
-            "/flow_instances/:id",
-            delete(flow_instance::delete_flow_instance_handler),
-        )
         .route(
             "/pipelines",
             post(pipeline::create_pipeline_handler).get(pipeline::list_pipelines),
@@ -92,8 +83,14 @@ pub async fn start_server_with_listener(
     listener: TcpListener,
     instance: flow::FlowInstance,
     storage: StorageManager,
+    extra_flow_instances: Vec<FlowInstanceSpec>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = AppState::new(instance, storage);
+    let state = AppState::new(instance, storage, extra_flow_instances).map_err(|err| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid config: {err}"),
+        )
+    })?;
     if let Err(err) = state.bootstrap_from_storage().await {
         return Err(format!("failed to bootstrap from storage: {err}").into());
     }
@@ -106,9 +103,10 @@ pub async fn start_server(
     addr: String,
     instance: flow::FlowInstance,
     storage: StorageManager,
+    extra_flow_instances: Vec<FlowInstanceSpec>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = addr.parse()?;
     tracing::info!(manager_addr = %addr, "manager listening");
     let listener = TcpListener::bind(addr).await?;
-    start_server_with_listener(listener, instance, storage).await
+    start_server_with_listener(listener, instance, storage, extra_flow_instances).await
 }

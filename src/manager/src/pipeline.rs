@@ -20,12 +20,10 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
-use storage::{
-    StorageError, StorageManager, StoredFlowInstance, StoredPipelineDesiredState,
-    StoredPipelineRunState,
-};
+use storage::{StorageError, StorageManager, StoredPipelineDesiredState, StoredPipelineRunState};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
+use crate::FlowInstanceSpec;
 use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstances};
 
 #[derive(Clone)]
@@ -36,39 +34,43 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(instance: FlowInstance, storage: StorageManager) -> Self {
+    pub fn new(
+        instance: FlowInstance,
+        storage: StorageManager,
+        extra_flow_instances: Vec<FlowInstanceSpec>,
+    ) -> Result<Self, String> {
         let instances = FlowInstances::new(instance);
         let storage = Arc::new(storage);
-        let _ = storage.create_flow_instance(StoredFlowInstance {
-            id: DEFAULT_FLOW_INSTANCE_ID.to_string(),
-        });
-        Self {
+        let state = Self {
             instances,
             storage,
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let mut seen = BTreeSet::new();
+        for spec in extra_flow_instances {
+            let id = spec.id.trim();
+            if id.is_empty() {
+                return Err("extra_flow_instances contains an empty id".to_string());
+            }
+            if id == DEFAULT_FLOW_INSTANCE_ID {
+                return Err("extra_flow_instances must not include default".to_string());
+            }
+            if !seen.insert(id.to_string()) {
+                return Err(format!("duplicate flow instance id in config: {id}"));
+            }
+
+            let instance = state.instances.create_dedicated_instance(id);
+            state
+                .instances
+                .insert(id.to_string(), instance)
+                .map_err(|()| format!("flow instance {id} already exists"))?;
         }
+
+        Ok(state)
     }
 
     pub async fn bootstrap_from_storage(&self) -> Result<(), String> {
-        let _ = self.storage.create_flow_instance(StoredFlowInstance {
-            id: DEFAULT_FLOW_INSTANCE_ID.to_string(),
-        });
-
-        let stored_instances = self
-            .storage
-            .list_flow_instances()
-            .map_err(|e| e.to_string())?;
-        for stored in stored_instances {
-            if stored.id == DEFAULT_FLOW_INSTANCE_ID {
-                continue;
-            }
-            if self.instances.get(&stored.id).is_some() {
-                continue;
-            }
-            let instance = self.instances.create_dedicated_instance(&stored.id);
-            let _ = self.instances.insert(stored.id, instance);
-        }
-
         crate::storage_bridge::hydrate_runtime_from_storage(self.storage.as_ref(), &self.instances)
             .await
     }
@@ -229,59 +231,6 @@ fn canonical_flow_instance_id(value: Option<&str>) -> Result<String, String> {
     Ok(id.to_string())
 }
 
-async fn ensure_runtime_instance(
-    state: &AppState,
-    flow_instance_id: &str,
-) -> Result<Arc<FlowInstance>, axum::response::Response> {
-    if let Some(instance) = state.instances.get(flow_instance_id) {
-        return Ok(instance);
-    }
-
-    match state.storage.get_flow_instance(flow_instance_id) {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("pipeline references missing flow instance {flow_instance_id} in storage"),
-            )
-                .into_response());
-        }
-        Err(err) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read flow instance {flow_instance_id} from storage: {err}"),
-            )
-                .into_response());
-        }
-    }
-
-    let instance = state.instances.create_dedicated_instance(flow_instance_id);
-    if let Err(err) =
-        crate::storage_bridge::hydrate_instance_from_storage(state.storage.as_ref(), &instance)
-            .await
-    {
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to initialize flow instance {flow_instance_id}: {err}"),
-        )
-            .into_response());
-    }
-
-    match state
-        .instances
-        .insert(flow_instance_id.to_string(), instance)
-    {
-        Ok(instance) => Ok(instance),
-        Err(()) => state.instances.get(flow_instance_id).ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("flow instance {flow_instance_id} missing from runtime"),
-            )
-                .into_response()
-        }),
-    }
-}
-
 async fn resolve_pipeline_instance(
     state: &AppState,
     pipeline_id: &str,
@@ -318,7 +267,15 @@ async fn resolve_pipeline_instance(
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err).into_response())?;
     req.flow_instance_id = Some(flow_instance_id.clone());
 
-    let instance = ensure_runtime_instance(state, &flow_instance_id).await?;
+    let instance = state.instances.get(&flow_instance_id).ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "pipeline {pipeline_id} references undeclared flow instance {flow_instance_id}"
+            ),
+        )
+            .into_response()
+    })?;
     Ok((instance, req))
 }
 
@@ -446,26 +403,13 @@ pub async fn create_pipeline_handler(
     };
     let instance = match state.instances.get(&flow_instance_id) {
         Some(instance) => instance,
-        None => match state.storage.get_flow_instance(&flow_instance_id) {
-            Ok(Some(_)) => match ensure_runtime_instance(&state, &flow_instance_id).await {
-                Ok(instance) => instance,
-                Err(resp) => return resp,
-            },
-            Ok(None) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("flow instance {flow_instance_id} not found"),
-                )
-                    .into_response();
-            }
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to read flow instance {flow_instance_id} from storage: {err}"),
-                )
-                    .into_response();
-            }
-        },
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("flow instance {flow_instance_id} is not declared by config"),
+            )
+                .into_response();
+        }
     };
 
     let encoder_registry = instance.encoder_registry();
@@ -623,9 +567,15 @@ pub async fn upsert_pipeline_handler(
         None => DEFAULT_FLOW_INSTANCE_ID.to_string(),
     };
 
-    let instance = match ensure_runtime_instance(&state, &flow_instance_id).await {
-        Ok(instance) => instance,
-        Err(resp) => return resp,
+    let instance = match state.instances.get(&flow_instance_id) {
+        Some(instance) => instance,
+        None => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("pipeline {id} references undeclared flow instance {flow_instance_id}"),
+            )
+                .into_response();
+        }
     };
 
     let create_req = CreatePipelineRequest {
