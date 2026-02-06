@@ -147,38 +147,29 @@ async fn hydrate_instance_globals_from_storage(
     storage: &StorageManager,
     instance: &flow::FlowInstance,
 ) -> Result<(), String> {
-    let decoder_registry = instance.decoder_registry();
-
     for topic in storage.list_memory_topics().map_err(|e| e.to_string())? {
         let kind = match topic.kind {
             StoredMemoryTopicKind::Bytes => flow::connector::MemoryTopicKind::Bytes,
             StoredMemoryTopicKind::Collection => flow::connector::MemoryTopicKind::Collection,
         };
-        instance
-            .declare_memory_topic(&topic.topic, kind, topic.capacity)
-            .map_err(|err| err.to_string())?;
+        if let Err(err) = instance.declare_memory_topic(&topic.topic, kind, topic.capacity) {
+            tracing::error!(topic = %topic.topic, error = %err, "failed to restore memory topic");
+        }
     }
 
     for cfg in storage.list_mqtt_configs().map_err(|e| e.to_string())? {
-        instance
+        if let Err(err) = instance
             .create_shared_mqtt_client(mqtt_config_from_stored(&cfg))
             .await
-            .map_err(|e| e.to_string())?;
+        {
+            tracing::error!(key = %cfg.key, error = %err, "failed to restore shared mqtt client");
+        }
     }
 
     for stream in storage.list_streams().map_err(|e| e.to_string())? {
-        let def = stream_definition_from_stored(&stream, decoder_registry.as_ref())?;
-        let req = serde_json::from_str::<CreateStreamRequest>(&stream.raw_json)
-            .map_err(|err| format!("decode stored stream {}: {err}", stream.id))?;
-        let shared = req.shared;
-        validate_stream_decoder_config(&req, def.decoder())?;
-        if let flow::catalog::StreamProps::Memory(memory_props) = def.props() {
-            validate_memory_stream_topic(&req, memory_props)?;
+        if let Err(err) = restore_stream(stream.clone(), instance).await {
+            tracing::error!(stream_id = %stream.id, error = %err, "failed to restore stream");
         }
-        instance
-            .create_stream(def, shared)
-            .await
-            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -188,97 +179,123 @@ async fn hydrate_pipelines_into_instances_from_storage(
     instances: &FlowInstances,
 ) -> Result<(), String> {
     for pipeline in storage.list_pipelines().map_err(|e| e.to_string())? {
-        let req = pipeline_request_from_stored(&pipeline)?;
-        let flow_instance_id = req
-            .flow_instance_id
-            .as_deref()
-            .unwrap_or(DEFAULT_FLOW_INSTANCE_ID);
+        if let Err(err) = restore_pipeline(pipeline.clone(), storage, instances).await {
+            tracing::error!(pipeline_id = %pipeline.id, error = %err, "failed to restore pipeline");
+        }
+    }
+    Ok(())
+}
 
-        let instance = instances.get(flow_instance_id).ok_or_else(|| {
-            format!(
-                "pipeline {} references undeclared flow instance {}",
-                pipeline.id, flow_instance_id
+async fn restore_stream(stream: StoredStream, instance: &flow::FlowInstance) -> Result<(), String> {
+    let decoder_registry = instance.decoder_registry();
+    let def = stream_definition_from_stored(&stream, decoder_registry.as_ref())?;
+    let req = serde_json::from_str::<CreateStreamRequest>(&stream.raw_json)
+        .map_err(|err| format!("decode stored stream {}: {err}", stream.id))?;
+    let shared = req.shared;
+    validate_stream_decoder_config(&req, def.decoder())?;
+    if let flow::catalog::StreamProps::Memory(memory_props) = def.props() {
+        validate_memory_stream_topic(&req, memory_props)?;
+    }
+    instance
+        .create_stream(def, shared)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn restore_pipeline(
+    pipeline: StoredPipeline,
+    storage: &StorageManager,
+    instances: &FlowInstances,
+) -> Result<(), String> {
+    let req = pipeline_request_from_stored(&pipeline)?;
+    let flow_instance_id = req
+        .flow_instance_id
+        .as_deref()
+        .unwrap_or(DEFAULT_FLOW_INSTANCE_ID);
+
+    let instance = instances.get(flow_instance_id).ok_or_else(|| {
+        format!(
+            "pipeline {} references undeclared flow instance {}",
+            pipeline.id, flow_instance_id
+        )
+    })?;
+
+    let encoder_registry = instance.encoder_registry();
+    let def =
+        pipeline_definition_from_stored(&pipeline, encoder_registry.as_ref(), instance.as_ref())?;
+
+    let stored_snapshot = storage
+        .get_plan_snapshot(&pipeline.id)
+        .map_err(|e| e.to_string())?;
+    let (plan_cache_snapshot, streams_raw_json) = match stored_snapshot.as_ref() {
+        Some(snapshot) => {
+            let mut streams_raw_json = Vec::with_capacity(snapshot.stream_json_hashes.len());
+            for (stream_id, _) in &snapshot.stream_json_hashes {
+                let stream = storage
+                    .get_stream(stream_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("stream {stream_id} missing from storage"))?;
+                streams_raw_json.push((stream_id.clone(), stream.raw_json));
+            }
+            (
+                Some(flow::planner::plan_cache::PlanSnapshotRecord {
+                    pipeline_json_hash: snapshot.pipeline_json_hash.clone(),
+                    stream_json_hashes: snapshot.stream_json_hashes.clone(),
+                    flow_build_id: snapshot.flow_build_id.clone(),
+                    logical_plan_ir: snapshot.logical_plan_ir.clone(),
+                }),
+                streams_raw_json,
             )
-        })?;
+        }
+        None => (None, Vec::new()),
+    };
 
-        let encoder_registry = instance.encoder_registry();
-        let def = pipeline_definition_from_stored(
-            &pipeline,
-            encoder_registry.as_ref(),
-            instance.as_ref(),
-        )?;
-        let stored_snapshot = storage
-            .get_plan_snapshot(&pipeline.id)
-            .map_err(|e| e.to_string())?;
-        let (plan_cache_snapshot, streams_raw_json) = match stored_snapshot.as_ref() {
-            Some(snapshot) => {
-                let mut streams_raw_json = Vec::with_capacity(snapshot.stream_json_hashes.len());
-                for (stream_id, _) in &snapshot.stream_json_hashes {
-                    let stream = storage
-                        .get_stream(stream_id)
-                        .map_err(|e| e.to_string())?
-                        .ok_or_else(|| format!("stream {stream_id} missing from storage"))?;
-                    streams_raw_json.push((stream_id.clone(), stream.raw_json));
-                }
-                (
-                    Some(flow::planner::plan_cache::PlanSnapshotRecord {
-                        pipeline_json_hash: snapshot.pipeline_json_hash.clone(),
-                        stream_json_hashes: snapshot.stream_json_hashes.clone(),
-                        flow_build_id: snapshot.flow_build_id.clone(),
-                        logical_plan_ir: snapshot.logical_plan_ir.clone(),
-                    }),
+    let result = instance
+        .create_pipeline(
+            flow::CreatePipelineRequest::new(def).with_plan_cache_inputs(
+                flow::planner::plan_cache::PlanCacheInputs {
+                    pipeline_raw_json: pipeline.raw_json.clone(),
                     streams_raw_json,
-                )
-            }
-            None => (None, Vec::new()),
-        };
+                    snapshot: plan_cache_snapshot,
+                },
+            ),
+        )
+        .map_err(|e| e.to_string())?;
 
-        let result = instance
-            .create_pipeline(
-                flow::CreatePipelineRequest::new(def).with_plan_cache_inputs(
-                    flow::planner::plan_cache::PlanCacheInputs {
-                        pipeline_raw_json: pipeline.raw_json.clone(),
-                        streams_raw_json,
-                        snapshot: plan_cache_snapshot,
-                    },
-                ),
-            )
+    let logical_ir = result.plan_cache.and_then(|result| result.logical_plan_ir);
+    if let Some(logical_ir) = logical_ir {
+        let stored_snapshot = build_plan_snapshot(
+            storage,
+            &pipeline.id,
+            &pipeline.raw_json,
+            &result.snapshot.streams,
+            logical_ir,
+        )?;
+        storage
+            .put_plan_snapshot(stored_snapshot)
             .map_err(|e| e.to_string())?;
+    }
 
-        let logical_ir = result.plan_cache.and_then(|result| result.logical_plan_ir);
-        if let Some(logical_ir) = logical_ir {
-            let stored_snapshot = build_plan_snapshot(
-                storage,
-                &pipeline.id,
-                &pipeline.raw_json,
-                &result.snapshot.streams,
-                logical_ir,
-            )?;
-            storage
-                .put_plan_snapshot(stored_snapshot)
-                .map_err(|e| e.to_string())?;
-        }
-
-        match storage
-            .get_pipeline_run_state(&pipeline.id)
-            .map_err(|e| e.to_string())?
+    match storage
+        .get_pipeline_run_state(&pipeline.id)
+        .map_err(|e| e.to_string())?
+    {
+        Some(state)
+            if matches!(
+                state.desired_state,
+                storage::StoredPipelineDesiredState::Running
+            ) =>
         {
-            Some(state)
-                if matches!(
-                    state.desired_state,
-                    storage::StoredPipelineDesiredState::Running
-                ) =>
-            {
-                if let Err(err) = instance.start_pipeline(&pipeline.id) {
-                    tracing::error!(
-                        pipeline_id = %pipeline.id,
-                        error = %err,
-                        "failed to auto-start pipeline"
-                    );
-                }
+            if let Err(err) = instance.start_pipeline(&pipeline.id) {
+                tracing::error!(
+                    pipeline_id = %pipeline.id,
+                    error = %err,
+                    "failed to auto-start pipeline"
+                );
             }
-            _ => {}
         }
+        _ => {}
     }
     Ok(())
 }
@@ -517,5 +534,33 @@ mod tests {
                 .iter()
                 .any(|p| p.definition.id() == "p1")
         );
+    }
+    #[tokio::test]
+    async fn load_storage_skips_invalid_streams() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let instance = FlowInstance::new_default();
+
+        // 1. Create a GOOD stream
+        let good_req = sample_stream_request("good_stream");
+        let good_stored = stored_stream_from_request(&good_req).unwrap();
+        storage.create_stream(good_stored.clone()).unwrap();
+
+        // 2. Create a BAD stream (manually insert invalid JSON)
+        let bad_stored = StoredStream {
+            id: "bad_stream".to_string(),
+            raw_json: "{ invalid json".to_string(),
+        };
+        storage.create_stream(bad_stored).unwrap();
+
+        // 3. Load. This should NOT return Err because stream restore errors are logged and skipped.
+        hydrate_instance_globals_from_storage(&storage, &instance)
+            .await
+            .expect("hydrate instance globals from storage");
+
+        // 4. Verify GOOD stream exists, BAD stream does not
+        let streams = instance.list_streams().await.unwrap();
+        assert!(streams.iter().any(|s| s.definition.id() == "good_stream"));
+        assert!(!streams.iter().any(|s| s.definition.id() == "bad_stream"));
     }
 }

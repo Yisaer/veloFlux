@@ -25,6 +25,7 @@ test:
 	@echo "Running tests for sub-crates..."
 	@cd src/datatypes && cargo test --features deadlock_detection
 	@cd src/flow && cargo test --features deadlock_detection
+	@cd src/manager && cargo test --features deadlock_detection
 	@cd src/parser && cargo test --features deadlock_detection
 
 bump-version:
