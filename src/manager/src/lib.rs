@@ -5,9 +5,7 @@ mod memory_topic;
 mod pipeline;
 pub mod storage_bridge;
 mod stream;
-mod worker_client;
-mod worker_protocol;
-mod worker_server;
+mod worker;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
@@ -20,12 +18,12 @@ use tower_http::cors::CorsLayer;
 pub use instances::FlowInstanceSpec;
 pub use instances::new_default_flow_instance;
 pub use stream::{SchemaParser, register_schema, schema_registry};
-pub use worker_client::FlowWorkerClient;
-pub use worker_protocol::{
+pub use worker::FlowWorkerClient;
+pub use worker::{FlowWorkerState, build_worker_app};
+pub use worker::{
     WorkerApplyPipelineRequest, WorkerApplyPipelineResponse, WorkerDesiredState,
     WorkerMemoryTopicSpec, WorkerPipelineListItem, WorkerPlanCacheResult,
 };
-pub use worker_server::{FlowWorkerState, build_worker_app};
 
 pub(crate) static MQTT_QOS: u8 = 0;
 

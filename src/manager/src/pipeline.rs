@@ -26,10 +26,8 @@ use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
 use crate::FlowInstanceSpec;
 use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstances};
-use crate::worker_client::FlowWorkerClient;
-use crate::worker_protocol::{
-    WorkerApplyPipelineRequest, WorkerDesiredState, WorkerMemoryTopicSpec,
-};
+use crate::worker::FlowWorkerClient;
+use crate::worker::{WorkerApplyPipelineRequest, WorkerDesiredState, WorkerMemoryTopicSpec};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -136,7 +134,7 @@ async fn response_to_message(resp: axum::response::Response) -> String {
 async fn apply_pipeline_to_worker_with_retry(
     worker: &FlowWorkerClient,
     req: &WorkerApplyPipelineRequest,
-) -> Result<crate::worker_protocol::WorkerApplyPipelineResponse, String> {
+) -> Result<crate::worker::WorkerApplyPipelineResponse, String> {
     let mut backoff_ms = 50u64;
     let mut last_err = None;
     for attempt in 1..=8 {
@@ -1456,7 +1454,7 @@ async fn apply_pipeline_in_worker(
     pipeline_req: &CreatePipelineRequest,
     pipeline_raw_json: &str,
     desired_state: WorkerDesiredState,
-) -> Result<crate::worker_protocol::WorkerApplyPipelineResponse, axum::response::Response> {
+) -> Result<crate::worker::WorkerApplyPipelineResponse, axum::response::Response> {
     let worker = state.worker(flow_instance_id).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,

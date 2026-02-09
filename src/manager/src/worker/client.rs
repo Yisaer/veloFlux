@@ -1,4 +1,4 @@
-use crate::worker_protocol::{
+use super::protocol::{
     WorkerApplyPipelineRequest, WorkerApplyPipelineResponse, WorkerPipelineListItem,
 };
 use flow::processor::ProcessorStatsEntry;

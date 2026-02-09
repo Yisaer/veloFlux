@@ -1,11 +1,11 @@
+use super::protocol::{
+    WorkerApplyPipelineRequest, WorkerApplyPipelineResponse, WorkerDesiredState,
+    WorkerPipelineListItem,
+};
 use crate::pipeline::{build_pipeline_definition, status_label, validate_create_request};
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
     validate_memory_stream_topic, validate_stream_decoder_config,
-};
-use crate::worker_protocol::{
-    WorkerApplyPipelineRequest, WorkerApplyPipelineResponse, WorkerDesiredState,
-    WorkerPipelineListItem,
 };
 use axum::{
     Json, Router,
@@ -163,7 +163,7 @@ async fn apply_pipeline(
         let logical_ir_b64 = plan_cache
             .logical_plan_ir
             .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
-        crate::worker_protocol::WorkerPlanCacheResult {
+        super::protocol::WorkerPlanCacheResult {
             hit: plan_cache.hit,
             logical_plan_ir_b64: logical_ir_b64,
             streams: result.snapshot.streams.clone(),
