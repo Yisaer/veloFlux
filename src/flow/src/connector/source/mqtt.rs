@@ -5,7 +5,7 @@ use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceCo
 use crate::processor::base::normalize_channel_capacity;
 use crate::runtime::TaskSpawner;
 use once_cell::sync::Lazy;
-use prometheus::{register_int_counter_vec, IntCounterVec};
+use prometheus::{IntCounterVec, Opts};
 use rumqttc::{AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -69,21 +69,39 @@ pub(crate) struct MqttSourceConnector {
 }
 
 static MQTT_SOURCE_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "mqtt_source_records_in_total",
-        "Number of records received from MQTT sources",
-        &["connector"]
+    let vec = IntCounterVec::new(
+        Opts::new(
+            "mqtt_source_records_in_total",
+            "Number of records received from MQTT sources",
+        )
+        .const_label(
+            "flow_instance",
+            crate::metrics::flow_instance_id().to_string(),
+        ),
+        &["connector"],
     )
-    .expect("create mqtt source records_in counter vec")
+    .expect("create mqtt source records_in counter vec");
+    prometheus::register(Box::new(vec.clone()))
+        .expect("register mqtt source records_in counter vec");
+    vec
 });
 
 static MQTT_SOURCE_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "mqtt_source_records_out_total",
-        "Number of records emitted downstream by MQTT sources",
-        &["connector"]
+    let vec = IntCounterVec::new(
+        Opts::new(
+            "mqtt_source_records_out_total",
+            "Number of records emitted downstream by MQTT sources",
+        )
+        .const_label(
+            "flow_instance",
+            crate::metrics::flow_instance_id().to_string(),
+        ),
+        &["connector"],
     )
-    .expect("create mqtt source records_out counter vec")
+    .expect("create mqtt source records_out counter vec");
+    prometheus::register(Box::new(vec.clone()))
+        .expect("register mqtt source records_out counter vec");
+    vec
 });
 
 impl MqttSourceConnector {

@@ -39,6 +39,9 @@ async fn run_worker(args: Vec<String>) -> Result<(), Box<dyn std::error::Error +
     let config_path = config_path.ok_or("--config is required in --worker mode")?;
 
     flow::init_process_once();
+    flow::metrics::set_flow_instance_id(&instance_id);
+    #[cfg(feature = "metrics")]
+    telemetry::set_flow_instance_id(&instance_id);
     let mut cfg = veloflux::config::AppConfig::load_required(&config_path)?;
 
     let spec = cfg

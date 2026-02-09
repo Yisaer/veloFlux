@@ -137,6 +137,9 @@ pub async fn init(
     instance: FlowInstance,
 ) -> Result<ServerContext, Box<dyn std::error::Error + Send + Sync>> {
     flow::init_process_once();
+    flow::metrics::set_flow_instance_id("default");
+    #[cfg(feature = "metrics")]
+    telemetry::set_flow_instance_id("default");
     log_allocator();
     let profiling_enabled = opts.profiling_enabled.unwrap_or(false);
     if profiling_enabled {

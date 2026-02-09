@@ -1,5 +1,5 @@
 use once_cell::sync::Lazy;
-use prometheus::{register_int_counter_vec, register_int_gauge_vec, IntCounterVec, IntGaugeVec};
+use prometheus::{IntCounterVec, IntGaugeVec, Opts};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -7,49 +7,68 @@ use std::sync::{Arc, OnceLock};
 
 use parking_lot::RwLock;
 
-static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "processor_records_in_total",
-        "Rows received by processors",
-        &["pipeline_id", "kind"]
+fn opts_with_flow_instance(name: &str, help: &str) -> Opts {
+    Opts::new(name, help).const_label(
+        "flow_instance",
+        crate::metrics::flow_instance_id().to_string(),
     )
-    .expect("create processor records_in counter vec")
+}
+
+static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let vec = IntCounterVec::new(
+        opts_with_flow_instance("processor_records_in_total", "Rows received by processors"),
+        &["pipeline_id", "kind"],
+    )
+    .expect("create processor records_in counter vec");
+    prometheus::register(Box::new(vec.clone())).expect("register processor records_in counter vec");
+    vec
 });
 
 static PROCESSOR_RECORDS_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "processor_records_out_total",
-        "Rows emitted by processors",
-        &["pipeline_id", "kind"]
+    let vec = IntCounterVec::new(
+        opts_with_flow_instance("processor_records_out_total", "Rows emitted by processors"),
+        &["pipeline_id", "kind"],
     )
-    .expect("create processor records_out counter vec")
+    .expect("create processor records_out counter vec");
+    prometheus::register(Box::new(vec.clone()))
+        .expect("register processor records_out counter vec");
+    vec
 });
 
 static PROCESSOR_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "processor_errors_total",
-        "Errors observed by processors",
-        &["pipeline_id", "kind"]
+    let vec = IntCounterVec::new(
+        opts_with_flow_instance("processor_errors_total", "Errors observed by processors"),
+        &["pipeline_id", "kind"],
     )
-    .expect("create processor errors counter vec")
+    .expect("create processor errors counter vec");
+    prometheus::register(Box::new(vec.clone())).expect("register processor errors counter vec");
+    vec
 });
 
 static PROCESSOR_METRIC_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    register_int_gauge_vec!(
-        "processor_metric_gauge",
-        "Gauge metrics reported by processors",
-        &["pipeline_id", "processor_id", "kind", "metric"]
+    let vec = IntGaugeVec::new(
+        opts_with_flow_instance(
+            "processor_metric_gauge",
+            "Gauge metrics reported by processors",
+        ),
+        &["pipeline_id", "processor_id", "kind", "metric"],
     )
-    .expect("create processor metric gauge vec")
+    .expect("create processor metric gauge vec");
+    prometheus::register(Box::new(vec.clone())).expect("register processor metric gauge vec");
+    vec
 });
 
 static PROCESSOR_METRIC_COUNTER_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "processor_metric_counter_total",
-        "Counter metrics reported by processors",
-        &["pipeline_id", "processor_id", "kind", "metric"]
+    let vec = IntCounterVec::new(
+        opts_with_flow_instance(
+            "processor_metric_counter_total",
+            "Counter metrics reported by processors",
+        ),
+        &["pipeline_id", "processor_id", "kind", "metric"],
     )
-    .expect("create processor metric counter vec")
+    .expect("create processor metric counter vec");
+    prometheus::register(Box::new(vec.clone())).expect("register processor metric counter vec");
+    vec
 });
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

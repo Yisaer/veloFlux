@@ -7,6 +7,7 @@ pub mod eventtime;
 mod explain_shared_stream;
 pub mod expr;
 pub mod instance;
+pub mod metrics;
 pub mod model;
 pub mod pipeline;
 pub mod planner;
