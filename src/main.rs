@@ -39,9 +39,7 @@ async fn run_worker(args: Vec<String>) -> Result<(), Box<dyn std::error::Error +
     let config_path = config_path.ok_or("--config is required in --worker mode")?;
 
     flow::init_process_once();
-    let cfg = veloflux::config::AppConfig::load_required(&config_path)?;
-    let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
-    let _logging_guard = logging_guard;
+    let mut cfg = veloflux::config::AppConfig::load_required(&config_path)?;
 
     let spec = cfg
         .server
@@ -49,9 +47,24 @@ async fn run_worker(args: Vec<String>) -> Result<(), Box<dyn std::error::Error +
         .iter()
         .find(|spec| spec.id.trim() == instance_id)
         .ok_or_else(|| {
-            format!("worker instance {instance_id} is not declared in config server.extra_flow_instances")
+            format!(
+                "worker instance {instance_id} is not declared in config server.extra_flow_instances"
+            )
         })?
         .clone();
+
+    match cfg.logging.output {
+        veloflux::config::LoggingOutput::File => {
+            cfg.logging.file.dir = std::path::Path::new(&cfg.logging.file.dir)
+                .join(instance_id.as_str())
+                .to_string_lossy()
+                .to_string();
+        }
+        veloflux::config::LoggingOutput::Stdout => {}
+    }
+
+    let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
+    let _logging_guard = logging_guard;
 
     let worker_addr: std::net::SocketAddr = spec
         .worker_addr

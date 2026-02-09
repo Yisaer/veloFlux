@@ -55,7 +55,6 @@ impl Default for LoggingConfig {
 #[serde(rename_all = "lowercase")]
 pub enum LoggingOutput {
     Stdout,
-    Stderr,
     File,
 }
 
