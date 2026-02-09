@@ -39,20 +39,76 @@ async fn run_worker(args: Vec<String>) -> Result<(), Box<dyn std::error::Error +
     let config_path = config_path.ok_or("--config is required in --worker mode")?;
 
     flow::init_process_once();
-    let mut cfg = veloflux::config::AppConfig::load_required(&config_path)?;
-    cfg.logging.output = veloflux::config::LoggingOutput::Stderr;
+    let cfg = veloflux::config::AppConfig::load_required(&config_path)?;
     let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
     let _logging_guard = logging_guard;
+
+    let spec = cfg
+        .server
+        .extra_flow_instances
+        .iter()
+        .find(|spec| spec.id.trim() == instance_id)
+        .ok_or_else(|| {
+            format!("worker instance {instance_id} is not declared in config server.extra_flow_instances")
+        })?
+        .clone();
+
+    let worker_addr: std::net::SocketAddr = spec
+        .worker_addr
+        .parse()
+        .map_err(|e| format!("invalid worker_addr for {instance_id}: {e}"))?;
+    if !worker_addr.ip().is_loopback() {
+        return Err(format!(
+            "worker_addr for {instance_id} must be loopback, got {}",
+            spec.worker_addr
+        )
+        .into());
+    }
+
+    let metrics_addr: std::net::SocketAddr = spec
+        .metrics_addr
+        .parse()
+        .map_err(|e| format!("invalid metrics_addr for {instance_id}: {e}"))?;
+    if !metrics_addr.ip().is_loopback() {
+        return Err(format!(
+            "metrics_addr for {instance_id} must be loopback, got {}",
+            spec.metrics_addr
+        )
+        .into());
+    }
+
+    let profile_addr: std::net::SocketAddr = spec
+        .profile_addr
+        .parse()
+        .map_err(|e| format!("invalid profile_addr for {instance_id}: {e}"))?;
+    if !profile_addr.ip().is_loopback() {
+        return Err(format!(
+            "profile_addr for {instance_id} must be loopback, got {}",
+            spec.profile_addr
+        )
+        .into());
+    }
+
+    let mut opts = cfg.to_server_options();
+    opts.metrics_addr = Some(metrics_addr.to_string());
+    opts.profile_addr = Some(profile_addr.to_string());
+    veloflux::server::init_metrics_exporter(&opts).await?;
+    if opts.profiling_enabled.unwrap_or(false) {
+        veloflux::server::start_profile_server(&opts);
+    }
 
     let default_instance = server::prepare_registry();
     let shared = default_instance.shared_registries();
     let instance = flow::FlowInstance::new_with_id(&instance_id, Some(shared));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    println!("{addr}");
-    use std::io::Write;
-    std::io::stdout().flush().ok();
+    let listener = tokio::net::TcpListener::bind(worker_addr).await?;
+    tracing::info!(
+        flow_instance_id = %instance_id,
+        worker_addr = %worker_addr,
+        metrics_addr = %metrics_addr,
+        profile_addr = %profile_addr,
+        "flow worker listening"
+    );
 
     manager::start_flow_worker_with_listener(listener, instance).await?;
     Ok(())

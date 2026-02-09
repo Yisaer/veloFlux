@@ -5,7 +5,7 @@ use flow::FlowInstance;
     not(target_env = "msvc")
 ))]
 use parking_lot::Mutex;
-use std::io::BufRead;
+use std::io::{BufRead, BufReader};
 #[cfg(feature = "profiling")]
 use std::io::{Read, Write};
 #[cfg(any(feature = "metrics", feature = "profiling"))]
@@ -177,7 +177,7 @@ pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error +
     let config_path = ctx.config_path().map(|s| s.to_string());
     let (instance, storage, manager_addr, _profiling_enabled) = ctx.into_parts();
     let (worker_endpoints, mut worker_children) =
-        spawn_flow_workers(&extra_instances, config_path.as_deref())?;
+        spawn_flow_workers(&extra_instances, config_path.as_deref()).await?;
     tracing::info!(manager_addr = %manager_addr, "starting manager");
     let manager_future = manager::start_server(
         manager_addr.clone(),
@@ -214,7 +214,40 @@ pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error +
 type FlowWorkerEndpoints = Vec<(String, String)>;
 type FlowWorkerChildren = Vec<std::process::Child>;
 
-fn spawn_flow_workers(
+fn forward_worker_output(
+    instance_id: String,
+    reader: impl std::io::Read + Send + 'static,
+    to_stderr: bool,
+) {
+    std::thread::spawn(move || {
+        let prefix = format!("[worker:{instance_id}] ");
+        let mut reader = BufReader::new(reader);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let mut s = line.as_str();
+                    if let Some(stripped) = s.strip_suffix('\n') {
+                        s = stripped;
+                    }
+                    if let Some(stripped) = s.strip_suffix('\r') {
+                        s = stripped;
+                    }
+                    if to_stderr {
+                        eprintln!("{prefix}{s}");
+                    } else {
+                        println!("{prefix}{s}");
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+async fn spawn_flow_workers(
     extra_instances: &[manager::FlowInstanceSpec],
     config_path: Option<&str>,
 ) -> Result<(FlowWorkerEndpoints, FlowWorkerChildren), Box<dyn std::error::Error + Send + Sync>> {
@@ -225,33 +258,148 @@ fn spawn_flow_workers(
         config_path.ok_or("extra_flow_instances configured but --config not provided")?;
 
     let exe = std::env::current_exe()?;
-    let mut endpoints: FlowWorkerEndpoints = Vec::with_capacity(extra_instances.len());
-    let mut children: FlowWorkerChildren = Vec::with_capacity(extra_instances.len());
+    #[derive(Debug, Clone)]
+    struct ParsedSpec {
+        id: String,
+        worker_addr: std::net::SocketAddr,
+        metrics_addr: std::net::SocketAddr,
+        profile_addr: std::net::SocketAddr,
+    }
 
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut seen_worker_addrs = std::collections::HashSet::new();
+    let mut parsed = Vec::with_capacity(extra_instances.len());
     for spec in extra_instances {
         let id = spec.id.trim();
+        if id.is_empty() {
+            return Err("extra_flow_instances contains an empty id".into());
+        }
+        if id == "default" {
+            return Err("extra_flow_instances must not include default".into());
+        }
+        if !seen_ids.insert(id.to_string()) {
+            return Err(format!("duplicate flow instance id in config: {id}").into());
+        }
+
+        let worker_addr: std::net::SocketAddr = spec
+            .worker_addr
+            .parse()
+            .map_err(|e| format!("invalid worker_addr for {id}: {e}"))?;
+        if !worker_addr.ip().is_loopback() {
+            return Err(format!(
+                "worker_addr for {id} must be loopback, got {}",
+                spec.worker_addr
+            )
+            .into());
+        }
+        if !seen_worker_addrs.insert(worker_addr) {
+            return Err(format!("duplicate worker_addr in config: {worker_addr}").into());
+        }
+
+        let metrics_addr: std::net::SocketAddr = spec
+            .metrics_addr
+            .parse()
+            .map_err(|e| format!("invalid metrics_addr for {id}: {e}"))?;
+        if !metrics_addr.ip().is_loopback() {
+            return Err(format!(
+                "metrics_addr for {id} must be loopback, got {}",
+                spec.metrics_addr
+            )
+            .into());
+        }
+
+        let profile_addr: std::net::SocketAddr = spec
+            .profile_addr
+            .parse()
+            .map_err(|e| format!("invalid profile_addr for {id}: {e}"))?;
+        if !profile_addr.ip().is_loopback() {
+            return Err(format!(
+                "profile_addr for {id} must be loopback, got {}",
+                spec.profile_addr
+            )
+            .into());
+        }
+
+        parsed.push(ParsedSpec {
+            id: id.to_string(),
+            worker_addr,
+            metrics_addr,
+            profile_addr,
+        });
+    }
+
+    let mut endpoints: FlowWorkerEndpoints = Vec::with_capacity(parsed.len());
+    let mut children: FlowWorkerChildren = Vec::with_capacity(parsed.len());
+    for spec in parsed {
+        tracing::info!(
+            flow_instance_id = %spec.id,
+            worker_addr = %spec.worker_addr,
+            metrics_addr = %spec.metrics_addr,
+            profile_addr = %spec.profile_addr,
+            "spawning flow worker"
+        );
+
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("--worker")
             .arg("--flow-instance-id")
-            .arg(id)
+            .arg(&spec.id)
             .arg("--config")
             .arg(config_path)
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit());
+            .stderr(std::process::Stdio::piped());
 
         let mut child = cmd.spawn()?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or("failed to capture worker stdout")?;
-        let mut reader = std::io::BufReader::new(stdout);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let addr = line.trim();
-        if addr.is_empty() {
-            return Err(format!("worker {id} did not report listen addr").into());
+        let pid = child.id();
+        endpoints.push((spec.id.to_string(), format!("http://{}", spec.worker_addr)));
+
+        if let Some(stdout) = child.stdout.take() {
+            forward_worker_output(spec.id.clone(), stdout, false);
         }
-        endpoints.push((id.to_string(), format!("http://{addr}")));
+        if let Some(stderr) = child.stderr.take() {
+            forward_worker_output(spec.id.clone(), stderr, true);
+        }
+
+        let mut ready = false;
+        for _ in 1..=60 {
+            match tokio::net::TcpStream::connect(spec.worker_addr).await {
+                Ok(_) => {
+                    ready = true;
+                    break;
+                }
+                Err(_) => {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        for mut prior in children {
+                            let _ = prior.kill();
+                            let _ = prior.wait();
+                        }
+                        return Err(format!("worker {} exited early: {status}", spec.id).into());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        }
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            for mut prior in children {
+                let _ = prior.kill();
+                let _ = prior.wait();
+            }
+            return Err(format!(
+                "worker {} did not become ready on {}",
+                spec.id, spec.worker_addr
+            )
+            .into());
+        }
+
+        tracing::info!(
+            flow_instance_id = %spec.id,
+            pid = ?pid,
+            worker_addr = %spec.worker_addr,
+            "flow worker ready"
+        );
         children.push(child);
     }
 
@@ -274,7 +422,7 @@ fn log_allocator() {
 }
 
 #[cfg(feature = "profiling")]
-fn start_profile_server(opts: &ServerOptions) {
+pub fn start_profile_server(opts: &ServerOptions) {
     let addr_str = opts
         .profile_addr
         .clone()
@@ -300,7 +448,7 @@ fn start_profile_server(opts: &ServerOptions) {
 }
 
 #[cfg(not(feature = "profiling"))]
-fn start_profile_server(_opts: &ServerOptions) {}
+pub fn start_profile_server(_opts: &ServerOptions) {}
 
 #[cfg(feature = "profiling")]
 fn run_profile_server(addr: SocketAddr, default_freq_hz: i32) -> std::io::Result<()> {
@@ -582,7 +730,7 @@ fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> 
 }
 
 #[cfg(feature = "metrics")]
-async fn init_metrics_exporter(
+pub async fn init_metrics_exporter(
     opts: &ServerOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = opts
@@ -623,7 +771,7 @@ async fn init_metrics_exporter(
 }
 
 #[cfg(not(feature = "metrics"))]
-async fn init_metrics_exporter(
+pub async fn init_metrics_exporter(
     _opts: &ServerOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())

@@ -9,6 +9,9 @@ pub const DEFAULT_FLOW_INSTANCE_ID: &str = "default";
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FlowInstanceSpec {
     pub id: String,
+    pub worker_addr: String,
+    pub metrics_addr: String,
+    pub profile_addr: String,
 }
 
 pub fn new_default_flow_instance() -> FlowInstance {
