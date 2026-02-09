@@ -12,12 +12,14 @@ pub use rolling_file::RollingFileWriter;
 
 pub enum LogOutput {
     Stdout,
+    Stderr,
     File(RollingFileWriter),
 }
 
 pub fn open_output(cfg: &LoggingConfig) -> io::Result<LogOutput> {
     match cfg.output {
         crate::config::LoggingOutput::Stdout => Ok(LogOutput::Stdout),
+        crate::config::LoggingOutput::Stderr => Ok(LogOutput::Stderr),
         crate::config::LoggingOutput::File => {
             let writer = RollingFileWriter::open(cfg.file.clone())?;
             Ok(LogOutput::File(writer))
@@ -50,6 +52,19 @@ pub fn init_logging(
                 .with_file(cfg.include_source)
                 .with_line_number(cfg.include_source)
                 .with_ansi(true)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)?;
+            Ok(LoggingGuard { _worker: None })
+        }
+        LogOutput::Stderr => {
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(level)
+                .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339())
+                .with_target(true)
+                .with_file(cfg.include_source)
+                .with_line_number(cfg.include_source)
+                .with_ansi(true)
+                .with_writer(std::io::stderr)
                 .finish();
             tracing::subscriber::set_global_default(subscriber)?;
             Ok(LoggingGuard { _worker: None })

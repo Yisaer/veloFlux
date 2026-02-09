@@ -5,6 +5,9 @@ mod memory_topic;
 mod pipeline;
 pub mod storage_bridge;
 mod stream;
+mod worker_client;
+mod worker_protocol;
+mod worker_server;
 
 use axum::Router;
 use axum::routing::{delete, get, post};
@@ -17,6 +20,12 @@ use tower_http::cors::CorsLayer;
 pub use instances::FlowInstanceSpec;
 pub use instances::new_default_flow_instance;
 pub use stream::{SchemaParser, register_schema, schema_registry};
+pub use worker_client::FlowWorkerClient;
+pub use worker_protocol::{
+    WorkerApplyPipelineRequest, WorkerApplyPipelineResponse, WorkerDesiredState,
+    WorkerMemoryTopicSpec, WorkerPipelineListItem, WorkerPlanCacheResult,
+};
+pub use worker_server::{FlowWorkerState, build_worker_app};
 
 pub(crate) static MQTT_QOS: u8 = 0;
 
@@ -84,8 +93,15 @@ pub async fn start_server_with_listener(
     instance: flow::FlowInstance,
     storage: StorageManager,
     extra_flow_instances: Vec<FlowInstanceSpec>,
+    extra_flow_worker_endpoints: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = AppState::new(instance, storage, extra_flow_instances).map_err(|err| {
+    let state = AppState::new(
+        instance,
+        storage,
+        extra_flow_instances,
+        extra_flow_worker_endpoints,
+    )
+    .map_err(|err| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("invalid config: {err}"),
@@ -104,9 +120,27 @@ pub async fn start_server(
     instance: flow::FlowInstance,
     storage: StorageManager,
     extra_flow_instances: Vec<FlowInstanceSpec>,
+    extra_flow_worker_endpoints: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = addr.parse()?;
     tracing::info!(manager_addr = %addr, "manager listening");
     let listener = TcpListener::bind(addr).await?;
-    start_server_with_listener(listener, instance, storage, extra_flow_instances).await
+    start_server_with_listener(
+        listener,
+        instance,
+        storage,
+        extra_flow_instances,
+        extra_flow_worker_endpoints,
+    )
+    .await
+}
+
+pub async fn start_flow_worker_with_listener(
+    listener: TcpListener,
+    instance: flow::FlowInstance,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let state = FlowWorkerState::new(instance);
+    let app = build_worker_app(state);
+    axum::serve(listener, app.into_make_service()).await?;
+    Ok(())
 }

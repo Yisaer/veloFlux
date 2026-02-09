@@ -55,6 +55,7 @@ impl Default for LoggingConfig {
 #[serde(rename_all = "lowercase")]
 pub enum LoggingOutput {
     Stdout,
+    Stderr,
     File,
 }
 
@@ -277,7 +278,7 @@ metrics:
         let cfg = AppConfig::default();
         match cfg.logging.output {
             LoggingOutput::Stdout => {}
-            LoggingOutput::File => panic!("expected default logging.output=stdout"),
+            _ => panic!("expected default logging.output=stdout"),
         }
         assert!(cfg.logging.include_source);
         match cfg.logging.level {

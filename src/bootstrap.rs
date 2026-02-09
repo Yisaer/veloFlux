@@ -93,6 +93,7 @@ pub fn default_init() -> Result<BootstrapResult, Box<dyn std::error::Error + Sen
     if let Some(dir) = cli_flags.data_dir.as_deref() {
         options.data_dir = Some(dir.to_string());
     }
+    options.config_path = loaded_config_path.clone();
 
     let instance = server::prepare_registry();
 

@@ -1,4 +1,4 @@
-use flow::{FlowInstance, FlowInstanceSharedRegistries};
+use flow::FlowInstance;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,35 +11,13 @@ pub struct FlowInstanceSpec {
     pub id: String,
 }
 
-#[derive(Clone)]
-pub struct FlowInstanceFactory {
-    shared_registries: FlowInstanceSharedRegistries,
-}
-
-impl FlowInstanceFactory {
-    pub fn new_default() -> FlowInstance {
-        FlowInstance::new_default()
-    }
-
-    pub fn from_default_instance(default_instance: &FlowInstance) -> Self {
-        Self {
-            shared_registries: default_instance.shared_registries(),
-        }
-    }
-
-    pub fn new_with_id(&self, id: &str) -> FlowInstance {
-        FlowInstance::new_with_id(id, Some(self.shared_registries.clone()))
-    }
-}
-
 pub fn new_default_flow_instance() -> FlowInstance {
-    FlowInstanceFactory::new_default()
+    FlowInstance::new_default()
 }
 
 #[derive(Clone)]
 pub struct FlowInstances {
     instances: Arc<RwLock<HashMap<String, Arc<FlowInstance>>>>,
-    factory: FlowInstanceFactory,
 }
 
 impl FlowInstances {
@@ -49,7 +27,6 @@ impl FlowInstances {
             DEFAULT_FLOW_INSTANCE_ID,
             "default FlowInstance must have id=default"
         );
-        let factory = FlowInstanceFactory::from_default_instance(&default_instance);
         let mut map = HashMap::new();
         map.insert(
             DEFAULT_FLOW_INSTANCE_ID.to_string(),
@@ -57,7 +34,6 @@ impl FlowInstances {
         );
         Self {
             instances: Arc::new(RwLock::new(map)),
-            factory,
         }
     }
 
@@ -80,20 +56,6 @@ impl FlowInstances {
         out
     }
 
-    pub fn insert(&self, id: String, instance: FlowInstance) -> Result<Arc<FlowInstance>, ()> {
-        if instance.id() != id {
-            return Err(());
-        }
-        let mut guard = self.instances.write();
-        if guard.contains_key(&id) {
-            return Err(());
-        }
-        let instance = Arc::new(instance);
-        guard.insert(id, Arc::clone(&instance));
-        Ok(instance)
-    }
-
-    pub fn create_dedicated_instance(&self, id: &str) -> FlowInstance {
-        self.factory.new_with_id(id)
-    }
+    // Note: extra instances are hosted in worker subprocesses, so this type only stores the
+    // in-process default instance.
 }

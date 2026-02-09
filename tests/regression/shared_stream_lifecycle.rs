@@ -95,7 +95,7 @@ async fn shared_stream_rapid_start_stop_cycles_via_rest() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(listener, instance, storage, Vec::new())
+        manager::start_server_with_listener(listener, instance, storage, Vec::new(), Vec::new())
             .await
             .expect("start manager server");
     });
@@ -253,7 +253,7 @@ async fn shared_stream_slow_unsubscribe_during_restart_via_rest() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(listener, instance, storage, Vec::new())
+        manager::start_server_with_listener(listener, instance, storage, Vec::new(), Vec::new())
             .await
             .expect("start manager server");
     });

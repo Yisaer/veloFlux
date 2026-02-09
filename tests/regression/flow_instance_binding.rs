@@ -93,15 +93,19 @@ async fn flow_instance_pipeline_binding_lifecycle() {
     };
     let addr = listener.local_addr().expect("read listener addr");
 
-    let flow_instance_id = format!("fi_{}", random_suffix());
-    let extra_flow_instances = vec![manager::FlowInstanceSpec {
-        id: flow_instance_id.clone(),
-    }];
+    let extra_flow_instances = Vec::new();
+    let worker_endpoints = Vec::new();
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(listener, instance, storage, extra_flow_instances)
-            .await
-            .expect("start manager server");
+        manager::start_server_with_listener(
+            listener,
+            instance,
+            storage,
+            extra_flow_instances,
+            worker_endpoints,
+        )
+        .await
+        .expect("start manager server");
     });
 
     let stream_name = format!("bind_stream_{}", random_suffix());
@@ -132,7 +136,6 @@ async fn flow_instance_pipeline_binding_lifecycle() {
     let sql = format!("SELECT value FROM {stream_name}");
     let create_pipeline = json!({
         "id": pipeline_id,
-        "flow_instance_id": flow_instance_id.clone(),
         "sql": sql,
         "sinks": [ { "type": "nop" } ]
     });
@@ -172,9 +175,9 @@ async fn flow_instance_pipeline_binding_lifecycle() {
             .iter()
             .any(|item| {
                 item["id"].as_str() == Some(pipeline_id.as_str())
-                    && item["flow_instance_id"].as_str() == Some(flow_instance_id.as_str())
+                    && item["flow_instance_id"].as_str() == Some("default")
             }),
-        "pipelines list missing flow_instance_id binding"
+        "pipelines list missing default flow_instance_id binding"
     );
 
     let (code, body) = http_request(addr, "GET", &format!("/pipelines/{pipeline_id}"), None).await;
@@ -188,7 +191,28 @@ async fn flow_instance_pipeline_binding_lifecycle() {
     assert_eq!(get_resp["spec"]["id"].as_str(), Some(pipeline_id.as_str()));
     assert_eq!(
         get_resp["spec"]["flow_instance_id"].as_str(),
-        Some(flow_instance_id.as_str())
+        Some("default")
+    );
+
+    let pipeline_id2 = format!("bind_pipe2_{}", random_suffix());
+    let create_pipeline_undeclared = json!({
+        "id": pipeline_id2,
+        "flow_instance_id": "extra_undeclared",
+        "sql": format!("SELECT value FROM {stream_name}"),
+        "sinks": [ { "type": "nop" } ]
+    });
+    let (code, body) = http_request(
+        addr,
+        "POST",
+        "/pipelines",
+        Some(&create_pipeline_undeclared),
+    )
+    .await;
+    assert_eq!(
+        code,
+        400,
+        "create pipeline with undeclared flow_instance_id should fail (HTTP {code}): {}",
+        String::from_utf8_lossy(&body)
     );
 
     let (code, body) =

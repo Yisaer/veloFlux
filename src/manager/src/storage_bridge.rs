@@ -214,12 +214,14 @@ async fn restore_pipeline(
         .as_deref()
         .unwrap_or(DEFAULT_FLOW_INSTANCE_ID);
 
-    let instance = instances.get(flow_instance_id).ok_or_else(|| {
-        format!(
-            "pipeline {} references undeclared flow instance {}",
-            pipeline.id, flow_instance_id
-        )
-    })?;
+    let Some(instance) = instances.get(flow_instance_id) else {
+        tracing::warn!(
+            pipeline_id = %pipeline.id,
+            flow_instance_id = %flow_instance_id,
+            "skipping pipeline restore: flow instance not available in this process"
+        );
+        return Ok(());
+    };
 
     let encoder_registry = instance.encoder_registry();
     let def =

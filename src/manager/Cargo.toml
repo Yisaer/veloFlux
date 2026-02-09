@@ -15,6 +15,8 @@ parser = { path = "../parser" }
 storage = { path = "../storage" }
 build_info = { path = "../build_info" }
 parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"
