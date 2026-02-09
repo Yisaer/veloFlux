@@ -1,0 +1,163 @@
+name: Perf PR Wide MQTT (default + extra worker)
+
+on:
+  pull_request: {}
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  perf-pr:
+    name: Wide MQTT (2 pipelines)
+    runs-on: ubuntu-latest
+    services:
+      emqx:
+        image: emqx/emqx:5.6.1
+        ports:
+          - 1883:1883
+        env:
+          EMQX_ALLOW_ANONYMOUS: "true"
+          EMQX_LISTENER__TCP__DEFAULT__BIND: "0.0.0.0:1883"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build veloflux (release, jemalloc)
+        run: |
+          set -euo pipefail
+          CARGO_TARGET_DIR=target-jemalloc cargo build --release
+
+      - name: Write config (with extra worker)
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/perf_pr_ci
+          cat > tmp/perf_pr_ci/config.yaml <<'YAML'
+          logging:
+            output: stdout
+            level: info
+            include_source: true
+            file:
+              dir: "./logs"
+              file_name: "app.log"
+              rotation:
+                keep_days: 7
+                max_num: 30
+                max_size_mb: 256
+
+          profiling:
+            enabled: true
+            addr: "127.0.0.1:6060"
+            cpu_profile_freq_hz: 100
+
+          metrics:
+            addr: "127.0.0.1:9898"
+            poll_interval_secs: 5
+
+          server:
+            manager_addr: "127.0.0.1:8080"
+            extra_flow_instances:
+              - id: "fi_1"
+                worker_addr: "127.0.0.1:18081"
+                metrics_addr: "127.0.0.1:19891"
+                profile_addr: "127.0.0.1:16061"
+          YAML
+
+      - name: Start veloflux (jemalloc)
+        env:
+          _RJEM_MALLOC_CONF: "background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
+        run: |
+          set -euo pipefail
+          mkdir -p tmp/perf_pr_ci
+          target-jemalloc/release/veloflux --config tmp/perf_pr_ci/config.yaml --data-dir tmp/perf_pr_ci/data > tmp/perf_pr_ci/veloflux.log 2>&1 &
+          echo $! > tmp/perf_pr_ci/veloflux.pid
+
+      - name: Run perf scenario (2 pipelines, half rate)
+        env:
+          PERF_OUT_DIR: tmp/perf_pr_ci/out
+          PERF_DURATION_SECS: "120"
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_pr_multi_instance.py \
+            --force \
+            --base-url http://127.0.0.1:8080 \
+            --metrics-url-default http://127.0.0.1:9898/metrics \
+            --metrics-url-extra http://127.0.0.1:19891/metrics \
+            --extra-instance-id fi_1 \
+            --broker-url tcp://127.0.0.1:1883 \
+            --topic /perf/daily \
+            --qos 1 \
+            --columns 15000 \
+            --sql-mode explicit \
+            --pipeline-id-default perf_pr_pipeline_default \
+            --pipeline-id-extra perf_pr_pipeline_extra \
+            --cases 20 \
+            --str-len 10 \
+            --duration-secs "${PERF_DURATION_SECS}" \
+            --rate 25 \
+            --scrape-interval-ms 15000 \
+            --out-dir "${PERF_OUT_DIR}" \
+            run
+
+      - name: Render report (default)
+        if: always()
+        env:
+          PERF_OUT_DIR: tmp/perf_pr_ci/out
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily_report.py \
+            --result-json "${PERF_OUT_DIR}/result.json" \
+            --openmetrics "${PERF_OUT_DIR}/metrics.openmetrics" \
+            --instance default \
+            --out-html "${PERF_OUT_DIR}/report.default.html" \
+            --summary-path "${GITHUB_STEP_SUMMARY}" \
+            --title "Perf PR Wide MQTT - default (2 pipelines, 2m) (${{ github.sha }})"
+
+      - name: Render report (extra fi_1)
+        if: always()
+        env:
+          PERF_OUT_DIR: tmp/perf_pr_ci/out
+        run: |
+          set -euo pipefail
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 tests/perf_daily/perf_daily_report.py \
+            --result-json "${PERF_OUT_DIR}/result.json" \
+            --openmetrics "${PERF_OUT_DIR}/metrics.openmetrics" \
+            --instance fi_1 \
+            --out-html "${PERF_OUT_DIR}/report.fi_1.html" \
+            --summary-path "${GITHUB_STEP_SUMMARY}" \
+            --title "Perf PR Wide MQTT - fi_1 (2 pipelines, 2m) (${{ github.sha }})"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-pr-wide-mqtt-multi-instance-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            tmp/perf_pr_ci/out/result.json
+            tmp/perf_pr_ci/out/metrics.openmetrics
+            tmp/perf_pr_ci/out/report.default.html
+            tmp/perf_pr_ci/out/report.fi_1.html
+            tmp/perf_pr_ci/config.yaml
+            tmp/perf_pr_ci/veloflux.log
+
+      - name: Stop veloflux
+        if: always()
+        run: |
+          set +e
+          if [ -f tmp/perf_pr_ci/veloflux.pid ]; then
+            kill "$(cat tmp/perf_pr_ci/veloflux.pid)" 2>/dev/null || true
+          fi
+

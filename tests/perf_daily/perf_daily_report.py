@@ -187,6 +187,7 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
     sent = result.get("sent_messages")
     eff = result.get("effective_rate_mps")
     payload_bytes = result.get("payload_bytes")
+    pipeline_ids = cfg.get("pipeline_ids")
 
     start_ms = int(result.get("publish_start_ts_ms") or 0)
     end_ms = int(result.get("publish_end_ts_ms") or 0)
@@ -207,6 +208,8 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
         f"rate={cfg.get('rate','n/a')} msg/s duration={cfg.get('duration_secs','n/a')}s "
         f"payload_bytes={payload_s} sent={sent_s} effective_rate={eff_s} msg/s"
     )
+    if isinstance(pipeline_ids, list) and pipeline_ids:
+        lines.append(f"- pipelines: {', '.join(str(x) for x in pipeline_ids)}")
     if start_ms_eff and end_ms_eff:
         lines.append(f"- window: {_format_ts_ms(start_ms_eff)} .. {_format_ts_ms(end_ms_eff)}")
     else:
