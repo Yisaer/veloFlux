@@ -8,8 +8,7 @@
 //! - Runtime lifecycle is managed via `FlowInstance` (create/start/stop/delete/list/explain)
 //!
 //! **Internal**
-//! - Plan-cache helpers and runtime build plumbing live in `internal` and are not part of the
-//!   public API.
+//! - Runtime build plumbing lives in `internal` and is not part of the public API.
 
 mod api;
 mod context;
@@ -17,10 +16,10 @@ mod internal;
 
 pub(crate) use api::PipelineManager;
 pub use api::{
-    CreatePipelinePlanCacheResult, CreatePipelineRequest, CreatePipelineResult, EventtimeOptions,
-    ExplainPipelineTarget, KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps,
-    PipelineDefinition, PipelineError, PipelineOptions, PipelineSnapshot, PipelineStatus,
-    PipelineStopMode, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
+    CreatePipelineRequest, CreatePipelineResult, EventtimeOptions, ExplainPipelineTarget,
+    KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
+    PipelineError, PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode,
+    SinkDefinition, SinkProps, SinkType,
 };
 pub(crate) use context::PipelineContext;
 

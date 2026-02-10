@@ -22,7 +22,7 @@ pub use worker::FlowWorkerClient;
 pub use worker::{FlowWorkerState, build_worker_app};
 pub use worker::{
     WorkerApplyPipelineRequest, WorkerApplyPipelineResponse, WorkerDesiredState,
-    WorkerMemoryTopicSpec, WorkerPipelineListItem, WorkerPlanCacheResult,
+    WorkerMemoryTopicSpec, WorkerPipelineListItem,
 };
 
 pub(crate) static MQTT_QOS: u8 = 0;

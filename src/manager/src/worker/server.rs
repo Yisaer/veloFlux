@@ -14,7 +14,6 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post},
 };
-use base64::Engine;
 use flow::pipeline::{PipelineError, PipelineStopMode};
 use serde::Deserialize;
 use serde_json::json;
@@ -126,17 +125,7 @@ async fn apply_pipeline(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
 
-    let create_req = if definition.options().plan_cache.enabled {
-        flow::CreatePipelineRequest::new(definition).with_plan_cache_inputs(
-            flow::planner::plan_cache::PlanCacheInputs {
-                pipeline_raw_json: req.pipeline_raw_json.clone(),
-                streams_raw_json: Vec::new(),
-                snapshot: None,
-            },
-        )
-    } else {
-        flow::CreatePipelineRequest::new(definition)
-    };
+    let create_req = flow::CreatePipelineRequest::new(definition);
 
     let result = match state.instance.create_pipeline(create_req) {
         Ok(result) => result,
@@ -159,23 +148,8 @@ async fn apply_pipeline(
             .into_response();
     }
 
-    let plan_cache = result.plan_cache.map(|plan_cache| {
-        let logical_ir_b64 = plan_cache
-            .logical_plan_ir
-            .map(|bytes| base64::engine::general_purpose::STANDARD.encode(bytes));
-        super::protocol::WorkerPlanCacheResult {
-            hit: plan_cache.hit,
-            logical_plan_ir_b64: logical_ir_b64,
-            streams: result.snapshot.streams.clone(),
-        }
-    });
-
     let status = status_label(result.snapshot.status);
-    (
-        StatusCode::OK,
-        Json(WorkerApplyPipelineResponse { status, plan_cache }),
-    )
-        .into_response()
+    (StatusCode::OK, Json(WorkerApplyPipelineResponse { status })).into_response()
 }
 
 async fn ensure_stream_installed(

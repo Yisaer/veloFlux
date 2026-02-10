@@ -26,7 +26,6 @@ Request body: `CreatePipelineRequest`
     }
   ],
   "options": {
-    "plan_cache": { "enabled": true },
     "eventtime": { "enabled": false, "late_tolerance_ms": 0 }
   }
 }
@@ -68,7 +67,7 @@ Note: `status` is derived from the **stored desired state**, not from the runtim
 Replaces pipeline spec by id:
 
 - If present, manager deletes the existing pipeline in runtime and storage.
-- Manager persists the new spec, rebuilds plan cache, and registers the new pipeline.
+- Manager persists the new spec and registers the new pipeline.
 - If the old desired state was `running`, manager attempts to start the new pipeline.
 
 Request body: `UpsertPipelineRequest` (same shape as create but without `id`).
@@ -164,7 +163,6 @@ Response:
 
 ### `PipelineOptionsRequest`
 
-- `plan_cache: { enabled: boolean }` (default `false`)
 - `eventtime: { enabled: boolean, late_tolerance_ms: number }`
   - `late_tolerance_ms` is milliseconds (default `0`)
 

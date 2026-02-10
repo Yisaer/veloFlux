@@ -108,7 +108,6 @@ The tool creates a pipeline definition shaped like:
     }
   ],
   "options": {
-    "plan_cache": { "enabled": false },
     "eventtime": { "enabled": false }
   }
 }
@@ -135,7 +134,7 @@ curl -sS -X POST http://127.0.0.1:8080/streams \
 ```bash
 curl -sS -X POST http://127.0.0.1:8080/pipelines \
   -H 'Content-Type: application/json' \
-  -d '{"id":"demo_pipeline","sql":"select a1,a2,a3,a4,a5 from demo_stream","sinks":[{"type":"nop","commonSinkProps":{"batch_duration":100,"batch_count":50}}],"options":{"plan_cache":{"enabled":false},"eventtime":{"enabled":false}}}'
+  -d '{"id":"demo_pipeline","sql":"select a1,a2,a3,a4,a5 from demo_stream","sinks":[{"type":"nop","commonSinkProps":{"batch_duration":100,"batch_count":50}}],"options":{"eventtime":{"enabled":false}}}'
 ```
 
 ```bash

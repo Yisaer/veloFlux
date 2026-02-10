@@ -5,14 +5,13 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
 };
-use base64::Engine;
 use flow::EncoderRegistry;
 use flow::FlowInstance;
 use flow::connector::SharedMqttClientConfig;
 use flow::pipeline::{
     KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
-    PipelineError, PipelineOptions, PipelineStatus, PipelineStopMode, PlanCacheOptions,
-    SinkDefinition, SinkProps, SinkType,
+    PipelineError, PipelineOptions, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps,
+    SinkType,
 };
 use flow::planner::sink::{CommonSinkProps, SinkEncoderConfig};
 use parser::SelectStmt;
@@ -289,8 +288,6 @@ pub struct UpsertPipelineRequest {
 pub struct PipelineOptionsRequest {
     #[serde(rename = "data_channel_capacity")]
     pub data_channel_capacity: usize,
-    #[serde(rename = "plan_cache")]
-    pub plan_cache: PlanCacheOptionsRequest,
     #[serde(default)]
     pub eventtime: EventtimeOptionsRequest,
 }
@@ -299,7 +296,6 @@ impl Default for PipelineOptionsRequest {
     fn default() -> Self {
         Self {
             data_channel_capacity: 16,
-            plan_cache: PlanCacheOptionsRequest::default(),
             eventtime: EventtimeOptionsRequest::default(),
         }
     }
@@ -310,12 +306,6 @@ impl Default for PipelineOptionsRequest {
 pub struct EventtimeOptionsRequest {
     pub enabled: bool,
     pub late_tolerance_ms: u64,
-}
-
-#[derive(Deserialize, Serialize, Default, Clone)]
-#[serde(default)]
-pub struct PlanCacheOptionsRequest {
-    pub enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -630,43 +620,6 @@ pub async fn create_pipeline_handler(
             }
         };
 
-        if let Some(plan_cache) = apply_result.plan_cache.as_ref()
-            && !plan_cache.hit
-            && let Some(b64) = plan_cache.logical_plan_ir_b64.as_deref()
-        {
-            match base64::engine::general_purpose::STANDARD.decode(b64) {
-                Ok(bytes) => match storage_bridge::build_plan_snapshot(
-                    state.storage.as_ref(),
-                    &stored.id,
-                    &stored.raw_json,
-                    &plan_cache.streams,
-                    bytes,
-                )
-                .and_then(|record| {
-                    state
-                        .storage
-                        .put_plan_snapshot(record)
-                        .map_err(|e| e.to_string())
-                }) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        tracing::error!(
-                            pipeline_id = %stored.id,
-                            error = %err,
-                            "failed to persist plan cache snapshot for remote pipeline"
-                        );
-                    }
-                },
-                Err(err) => {
-                    tracing::error!(
-                        pipeline_id = %stored.id,
-                        error = %err,
-                        "failed to decode worker plan cache logical IR"
-                    );
-                }
-            }
-        }
-
         tracing::info!(pipeline_id = %stored.id, flow_instance_id = %flow_instance_id, "pipeline created (remote)");
         return (
             StatusCode::CREATED,
@@ -696,15 +649,8 @@ pub async fn create_pipeline_handler(
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
 
-    let build_result = match instance.create_pipeline(
-        flow::CreatePipelineRequest::new(definition).with_plan_cache_inputs(
-            flow::planner::plan_cache::PlanCacheInputs {
-                pipeline_raw_json: stored.raw_json.clone(),
-                streams_raw_json: Vec::new(),
-                snapshot: None,
-            },
-        ),
-    ) {
+    let build_result = match instance.create_pipeline(flow::CreatePipelineRequest::new(definition))
+    {
         Ok(result) => result,
         Err(PipelineError::AlreadyExists(_)) => {
             let _ = state.storage.delete_pipeline(&stored.id);
@@ -723,39 +669,6 @@ pub async fn create_pipeline_handler(
                 .into_response();
         }
     };
-
-    let logical_ir = build_result
-        .plan_cache
-        .and_then(|result| result.logical_plan_ir);
-    if let Some(logical_ir) = logical_ir {
-        match storage_bridge::build_plan_snapshot(
-            state.storage.as_ref(),
-            &stored.id,
-            &stored.raw_json,
-            &build_result.snapshot.streams,
-            logical_ir,
-        )
-        .and_then(|record| {
-            state
-                .storage
-                .put_plan_snapshot(record)
-                .map_err(|e| e.to_string())
-        }) {
-            Ok(()) => {}
-            Err(err) => {
-                let _ = instance.delete_pipeline(&stored.id).await;
-                let _ = state.storage.delete_pipeline(&stored.id);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!(
-                        "pipeline {} created but failed to persist plan cache: {err}",
-                        req.id
-                    ),
-                )
-                    .into_response();
-            }
-        }
-    }
 
     let snapshot = build_result.snapshot;
     tracing::info!(pipeline_id = %snapshot.definition.id(), "pipeline created");
@@ -934,39 +847,6 @@ pub async fn upsert_pipeline_handler(
             }
         };
 
-        if let Some(plan_cache) = apply_result.plan_cache.as_ref()
-            && !plan_cache.hit
-            && let Some(b64) = plan_cache.logical_plan_ir_b64.as_deref()
-        {
-            match base64::engine::general_purpose::STANDARD.decode(b64) {
-                Ok(bytes) => match storage_bridge::build_plan_snapshot(
-                    state.storage.as_ref(),
-                    &stored.id,
-                    &stored.raw_json,
-                    &plan_cache.streams,
-                    bytes,
-                )
-                .and_then(|record| {
-                    state
-                        .storage
-                        .put_plan_snapshot(record)
-                        .map_err(|e| e.to_string())
-                }) {
-                    Ok(()) => {}
-                    Err(err) => tracing::error!(
-                        pipeline_id = %stored.id,
-                        error = %err,
-                        "failed to persist plan cache snapshot for remote pipeline"
-                    ),
-                },
-                Err(err) => tracing::error!(
-                    pipeline_id = %stored.id,
-                    error = %err,
-                    "failed to decode worker plan cache logical IR"
-                ),
-            }
-        }
-
         tracing::info!(pipeline_id = %id, flow_instance_id = %flow_instance_id, "pipeline upserted (remote)");
         return Json(CreatePipelineResponse {
             id,
@@ -1055,54 +935,13 @@ pub async fn upsert_pipeline_handler(
         }
     }
 
-    let build_result = match instance.create_pipeline(
-        flow::CreatePipelineRequest::new(definition).with_plan_cache_inputs(
-            flow::planner::plan_cache::PlanCacheInputs {
-                pipeline_raw_json: stored.raw_json.clone(),
-                streams_raw_json: Vec::new(),
-                snapshot: None,
-            },
-        ),
-    ) {
-        Ok(result) => result,
-        Err(err) => {
-            let _ = state.storage.delete_pipeline(&id);
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("failed to create pipeline {id}: {err}"),
-            )
-                .into_response();
-        }
-    };
-
-    let logical_ir = build_result
-        .plan_cache
-        .and_then(|result| result.logical_plan_ir);
-    if let Some(logical_ir) = logical_ir {
-        match storage_bridge::build_plan_snapshot(
-            state.storage.as_ref(),
-            &stored.id,
-            &stored.raw_json,
-            &build_result.snapshot.streams,
-            logical_ir,
+    if let Err(err) = instance.create_pipeline(flow::CreatePipelineRequest::new(definition)) {
+        let _ = state.storage.delete_pipeline(&id);
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("failed to create pipeline {id}: {err}"),
         )
-        .and_then(|record| {
-            state
-                .storage
-                .put_plan_snapshot(record)
-                .map_err(|e| e.to_string())
-        }) {
-            Ok(()) => {}
-            Err(err) => {
-                let _ = instance.delete_pipeline(&id).await;
-                let _ = state.storage.delete_pipeline(&id);
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("pipeline {id} created but failed to persist plan cache: {err}"),
-                )
-                    .into_response();
-            }
-        }
+            .into_response();
     }
 
     if matches!(old_desired_state, StoredPipelineDesiredState::Running) {
@@ -2159,9 +1998,6 @@ pub(crate) fn build_pipeline_definition(
     }
     let options = PipelineOptions {
         data_channel_capacity: req.options.data_channel_capacity,
-        plan_cache: PlanCacheOptions {
-            enabled: req.options.plan_cache.enabled,
-        },
         eventtime: flow::pipeline::EventtimeOptions {
             enabled: req.options.eventtime.enabled,
             late_tolerance: Duration::from_millis(req.options.eventtime.late_tolerance_ms),

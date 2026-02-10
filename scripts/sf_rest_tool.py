@@ -110,7 +110,7 @@ def create_pipeline_body(pipeline_id: str, sql: str) -> Dict[str, Any]:
                 "common_sink_props": {"batch_duration": 100, "batch_count": 50},
             }
         ],
-        "options": {"plan_cache": {"enabled": False}, "eventtime": {"enabled": False}},
+        "options": {"eventtime": {"enabled": False}},
     }
 
 

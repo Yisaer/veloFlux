@@ -44,10 +44,10 @@ pub use instance::{
 };
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
-    CreatePipelinePlanCacheResult, CreatePipelineRequest, CreatePipelineResult,
-    ExplainPipelineTarget, KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps,
-    PipelineDefinition, PipelineError, PipelineOptions, PipelineSnapshot, PipelineStatus,
-    PipelineStopMode, PlanCacheOptions, SinkDefinition, SinkProps, SinkType,
+    CreatePipelineRequest, CreatePipelineResult, ExplainPipelineTarget, KuksaSinkProps,
+    MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
+    PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps,
+    SinkType,
 };
 pub use planner::create_physical_plan;
 pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};

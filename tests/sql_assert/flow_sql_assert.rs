@@ -3,7 +3,6 @@ use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
 use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::connector::{MemoryData, MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY};
 use flow::pipeline::{MemorySinkProps, PipelineDefinition};
-use flow::planner::plan_cache::PlanCacheInputs;
 use flow::{
     CreatePipelineRequest, FlowInstance, PipelineStopMode, SinkDefinition, SinkProps, SinkType,
 };
@@ -127,13 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )],
         );
         instance
-            .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
-                PlanCacheInputs {
-                    pipeline_raw_json: String::new(),
-                    streams_raw_json: Vec::new(),
-                    snapshot: None,
-                },
-            ))
+            .create_pipeline(CreatePipelineRequest::new(pipeline))
             .unwrap_or_else(|_| panic!("failed to create pipeline for SQL: {sql}"));
 
         instance

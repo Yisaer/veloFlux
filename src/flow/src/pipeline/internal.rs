@@ -8,7 +8,6 @@ use crate::connector::{
 use crate::explain_shared_stream::shared_stream_decode_applied_snapshot;
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan;
-use crate::planner::plan_cache::{logical_plan_from_ir, sources_from_logical_ir, LogicalPlanIR};
 use crate::planner::sink::SinkEncoderKind;
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::EventtimePipelineContext;
@@ -106,48 +105,8 @@ impl PipelineManager {
             }
         }
 
-        if definition.options().plan_cache.enabled {
-            let inputs = request.plan_cache_inputs.ok_or_else(|| {
-                PipelineError::BuildFailure(
-                    "plan_cache.enabled=true but CreatePipelineRequest.plan_cache_inputs is None"
-                        .to_string(),
-                )
-            })?;
-
-            if crate::planner::plan_cache::snapshot_matches_inputs(&inputs) {
-                if let Some(snapshot_record) = inputs.snapshot {
-                    if let Ok(snapshot) = self.create_pipeline_from_logical_ir(
-                        definition.clone(),
-                        &snapshot_record.logical_plan_ir,
-                    ) {
-                        tracing::debug!(pipeline_id = %definition.id(), "plan_cache hit");
-                        return Ok(CreatePipelineResult {
-                            snapshot,
-                            plan_cache: Some(CreatePipelinePlanCacheResult {
-                                hit: true,
-                                logical_plan_ir: None,
-                            }),
-                        });
-                    }
-                }
-            }
-
-            tracing::debug!(pipeline_id = %definition.id(), "plan_cache miss");
-            let (snapshot, logical_ir) = self.create_pipeline_with_logical_ir(definition)?;
-            return Ok(CreatePipelineResult {
-                snapshot,
-                plan_cache: Some(CreatePipelinePlanCacheResult {
-                    hit: false,
-                    logical_plan_ir: Some(logical_ir),
-                }),
-            });
-        }
-
         let snapshot = self.create_pipeline_from_sql(definition)?;
-        Ok(CreatePipelineResult {
-            snapshot,
-            plan_cache: None,
-        })
+        Ok(CreatePipelineResult { snapshot })
     }
 
     fn create_pipeline_from_sql(
@@ -162,71 +121,6 @@ impl PipelineManager {
         if guard.contains_key(&pipeline_id) {
             return Err(PipelineError::AlreadyExists(pipeline_id));
         }
-        let entry = ManagedPipeline {
-            definition: Arc::new(definition),
-            pipeline: Some(pipeline),
-            streams,
-            status: PipelineStatus::Stopped,
-        };
-        let snapshot = entry.snapshot();
-        guard.insert(pipeline_id, entry);
-        Ok(snapshot)
-    }
-
-    fn create_pipeline_with_logical_ir(
-        &self,
-        definition: PipelineDefinition,
-    ) -> Result<(PipelineSnapshot, Vec<u8>), PipelineError> {
-        let pipeline_id = definition.id().to_string();
-        let (pipeline, streams, logical_ir) = build_pipeline_runtime_with_logical_ir(
-            &definition,
-            &self.catalog,
-            &self.context,
-            &self.registries,
-        )
-        .map_err(PipelineError::BuildFailure)?;
-        let mut guard = self.pipelines.write();
-        if guard.contains_key(&pipeline_id) {
-            return Err(PipelineError::AlreadyExists(pipeline_id));
-        }
-        let entry = ManagedPipeline {
-            definition: Arc::new(definition),
-            pipeline: Some(pipeline),
-            streams,
-            status: PipelineStatus::Stopped,
-        };
-        let snapshot = entry.snapshot();
-        guard.insert(pipeline_id, entry);
-        Ok((snapshot, logical_ir))
-    }
-
-    /// Internal API used by the plan cache hit path.
-    ///
-    /// Prefer `create_pipeline_with_plan_cache` for user-facing pipeline creation.
-    pub(crate) fn create_pipeline_from_logical_ir(
-        &self,
-        definition: PipelineDefinition,
-        logical_plan_ir: &[u8],
-    ) -> Result<PipelineSnapshot, PipelineError> {
-        let pipeline_id = definition.id().to_string();
-
-        {
-            let guard = self.pipelines.read();
-            if guard.contains_key(&pipeline_id) {
-                return Err(PipelineError::AlreadyExists(pipeline_id));
-            }
-        }
-
-        let (pipeline, streams) = build_pipeline_runtime_from_logical_ir(
-            &definition,
-            logical_plan_ir,
-            &self.catalog,
-            &self.context,
-            &self.registries,
-        )
-        .map_err(PipelineError::BuildFailure)?;
-
-        let mut guard = self.pipelines.write();
         let entry = ManagedPipeline {
             definition: Arc::new(definition),
             pipeline: Some(pipeline),
@@ -385,17 +279,6 @@ fn build_pipeline_runtime(
     context: &PipelineContext,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
-    let (pipeline, streams, _) =
-        build_pipeline_runtime_with_logical_ir(definition, catalog, context, registries)?;
-    Ok((pipeline, streams))
-}
-
-fn build_pipeline_runtime_with_logical_ir(
-    definition: &PipelineDefinition,
-    catalog: &Catalog,
-    context: &PipelineContext,
-    registries: &PipelineRegistries,
-) -> Result<(ProcessorPipeline, Vec<String>, Vec<u8>), String> {
     let select_stmt = parser::parse_sql_with_registries(
         definition.sql(),
         registries.aggregate_registry(),
@@ -492,9 +375,6 @@ fn build_pipeline_runtime_with_logical_ir(
             eventtime_enabled: definition.options().eventtime.enabled,
         },
     );
-    let logical_ir = LogicalPlanIR::from_plan(&logical_plan)
-        .encode()
-        .map_err(|err| err.to_string())?;
 
     let build_options = crate::planner::PhysicalPlanBuildOptions {
         eventtime_enabled: definition.options().eventtime.enabled,
@@ -569,136 +449,6 @@ fn build_pipeline_runtime_with_logical_ir(
     .map_err(|err| err.to_string())?;
     pipeline.set_pipeline_id(definition.id().to_string());
     attach_sources_from_catalog(&mut pipeline, &stream_definitions, context)?;
-    Ok((pipeline, streams, logical_ir))
-}
-
-fn build_pipeline_runtime_from_logical_ir(
-    definition: &PipelineDefinition,
-    logical_plan_ir: &[u8],
-    catalog: &Catalog,
-    context: &PipelineContext,
-    registries: &PipelineRegistries,
-) -> Result<(ProcessorPipeline, Vec<String>), String> {
-    let logical_ir = LogicalPlanIR::decode(logical_plan_ir).map_err(|e| e.to_string())?;
-
-    let shared_stream_registry = context.shared_stream_registry();
-    let mqtt_client_manager = context.mqtt_client_manager();
-
-    let sources = sources_from_logical_ir(&logical_ir);
-    let mut streams: Vec<String> = sources.iter().map(|(s, _)| s.clone()).collect();
-    streams.sort();
-    streams.dedup();
-
-    let mut stream_definitions = HashMap::new();
-    let mut binding_entries = Vec::new();
-    let mut datasource_inputs = HashMap::new();
-
-    for (stream, alias) in sources {
-        let definition = catalog
-            .get(&stream)
-            .ok_or_else(|| format!("stream {stream} not found in catalog"))?;
-        let schema = definition.schema();
-        let kind = if futures::executor::block_on(shared_stream_registry.is_registered(&stream)) {
-            SourceBindingKind::Shared
-        } else if definition.stream_type() == crate::catalog::StreamType::Memory
-            && definition.decoder().kind() == "none"
-        {
-            SourceBindingKind::MemoryCollection
-        } else {
-            SourceBindingKind::Regular
-        };
-        binding_entries.push(SchemaBindingEntry {
-            source_name: stream.clone(),
-            alias,
-            schema: Arc::clone(&schema),
-            kind,
-        });
-        stream_definitions.insert(stream.clone(), Arc::clone(&definition));
-        datasource_inputs.insert(stream, (definition.decoder().clone(), schema));
-    }
-
-    let schema_binding = SchemaBinding::new(binding_entries);
-    let logical_plan =
-        logical_plan_from_ir(&logical_ir, &datasource_inputs).map_err(|e| e.to_string())?;
-    let (logical_plan, pruned_binding) = crate::planner::optimize_logical_plan_with_options(
-        logical_plan,
-        &schema_binding,
-        &crate::planner::LogicalOptimizerOptions {
-            eventtime_enabled: definition.options().eventtime.enabled,
-        },
-    );
-
-    let build_options = crate::planner::PhysicalPlanBuildOptions {
-        eventtime_enabled: definition.options().eventtime.enabled,
-        eventtime_late_tolerance: definition.options().eventtime.late_tolerance,
-    };
-    let physical_plan = crate::planner::create_physical_plan_with_build_options(
-        Arc::clone(&logical_plan),
-        &pruned_binding,
-        registries,
-        &build_options,
-    )
-    .map_err(|err| err.to_string())?;
-    let optimized_plan = optimize_physical_plan(
-        Arc::clone(&physical_plan),
-        registries.encoder_registry().as_ref(),
-        registries.aggregate_registry(),
-    );
-    if definition.options().eventtime.enabled {
-        validate_eventtime_enabled(&stream_definitions, registries)?;
-    }
-    let shared_stream_decode_applied =
-        shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry.as_ref());
-    let explain = PipelineExplain::new(
-        Arc::clone(&logical_plan),
-        Arc::clone(&optimized_plan),
-        PipelineExplainConfig {
-            pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
-                eventtime_enabled: definition.options().eventtime.enabled,
-                eventtime_late_tolerance_ms: definition
-                    .options()
-                    .eventtime
-                    .late_tolerance
-                    .as_millis(),
-            }),
-            shared_stream_decode_applied,
-        },
-    );
-    tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
-
-    let eventtime = if definition.options().eventtime.enabled {
-        let mut per_source = HashMap::new();
-        for (name, def) in &stream_definitions {
-            if let Some(cfg) = def.eventtime() {
-                per_source.insert(name.clone(), cfg.clone());
-            }
-        }
-        Some(EventtimePipelineContext {
-            enabled: true,
-            registry: registries.eventtime_type_registry(),
-            per_source,
-        })
-    } else {
-        None
-    };
-
-    let mut pipeline = create_processor_pipeline(
-        optimized_plan,
-        ProcessorPipelineDependencies::new(
-            mqtt_client_manager.clone(),
-            Arc::clone(&shared_stream_registry),
-            registries,
-            eventtime,
-            context.spawner().clone(),
-        ),
-        ProcessorPipelineOptions::default()
-            .with_data_channel_capacity(definition.options().data_channel_capacity),
-    )
-    .map_err(|err| err.to_string())?;
-
-    pipeline.set_pipeline_id(definition.id().to_string());
-    attach_sources_from_catalog(&mut pipeline, &stream_definitions, context)?;
-
     Ok((pipeline, streams))
 }
 

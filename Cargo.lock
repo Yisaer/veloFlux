@@ -1608,7 +1608,6 @@ name = "manager"
 version = "0.0.1"
 dependencies = [
  "axum 0.7.9",
- "base64 0.22.1",
  "build_info",
  "flow",
  "parking_lot",

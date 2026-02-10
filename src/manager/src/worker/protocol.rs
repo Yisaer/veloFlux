@@ -33,18 +33,8 @@ pub struct WorkerApplyPipelineRequest {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-pub struct WorkerPlanCacheResult {
-    pub hit: bool,
-    /// Base64-encoded logical plan IR bytes (only returned on cache miss).
-    pub logical_plan_ir_b64: Option<String>,
-    /// Stream ids referenced by the built pipeline.
-    pub streams: Vec<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
 pub struct WorkerApplyPipelineResponse {
     pub status: String,
-    pub plan_cache: Option<WorkerPlanCacheResult>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

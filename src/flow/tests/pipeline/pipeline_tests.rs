@@ -5,7 +5,6 @@ use flow::connector::MemoryTopicKind;
 use flow::model::{batch_from_columns_simple, Message, RecordBatch, Tuple};
 use flow::pipeline::MemorySinkProps;
 use flow::pipeline::PipelineDefinition;
-use flow::planner::plan_cache::PlanCacheInputs;
 use flow::Collection;
 use flow::FlowInstance;
 use flow::SinkEncoderConfig;
@@ -55,13 +54,7 @@ async fn run_test_case(test_case: TestCase) {
         )],
     );
     instance
-        .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
-            PlanCacheInputs {
-                pipeline_raw_json: String::new(),
-                streams_raw_json: Vec::new(),
-                snapshot: None,
-            },
-        ))
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", test_case.name));
 
     instance
@@ -152,13 +145,7 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
         )],
     );
     instance
-        .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
-            PlanCacheInputs {
-                pipeline_raw_json: String::new(),
-                streams_raw_json: Vec::new(),
-                snapshot: None,
-            },
-        ))
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", test_case.name));
 
     instance
@@ -268,13 +255,7 @@ async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
         .with_encoder(SinkEncoderConfig::new("none", JsonMap::new()))],
     );
     instance
-        .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
-            PlanCacheInputs {
-                pipeline_raw_json: String::new(),
-                streams_raw_json: Vec::new(),
-                snapshot: None,
-            },
-        ))
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", test_case.name));
 
     instance
