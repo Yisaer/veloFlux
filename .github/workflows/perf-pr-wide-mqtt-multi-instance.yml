@@ -1,7 +1,6 @@
 name: Perf PR Wide MQTT (default + extra worker)
 
 on:
-  pull_request: {}
   workflow_dispatch: {}
 
 concurrency:
