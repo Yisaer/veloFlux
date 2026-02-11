@@ -56,36 +56,17 @@ pub enum PipelineStatus {
 #[derive(Debug, Clone)]
 pub struct CreatePipelineRequest {
     pub definition: PipelineDefinition,
-    pub plan_cache_inputs: Option<crate::planner::plan_cache::PlanCacheInputs>,
 }
 
 impl CreatePipelineRequest {
     pub fn new(definition: PipelineDefinition) -> Self {
-        Self {
-            definition,
-            plan_cache_inputs: None,
-        }
+        Self { definition }
     }
-
-    pub fn with_plan_cache_inputs(
-        mut self,
-        inputs: crate::planner::plan_cache::PlanCacheInputs,
-    ) -> Self {
-        self.plan_cache_inputs = Some(inputs);
-        self
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct CreatePipelinePlanCacheResult {
-    pub hit: bool,
-    pub logical_plan_ir: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CreatePipelineResult {
     pub snapshot: PipelineSnapshot,
-    pub plan_cache: Option<CreatePipelinePlanCacheResult>,
 }
 
 pub enum ExplainPipelineTarget<'a> {
@@ -242,7 +223,6 @@ impl PipelineDefinition {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineOptions {
     pub data_channel_capacity: usize,
-    pub plan_cache: PlanCacheOptions,
     pub eventtime: EventtimeOptions,
 }
 
@@ -250,7 +230,6 @@ impl Default for PipelineOptions {
     fn default() -> Self {
         Self {
             data_channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
-            plan_cache: PlanCacheOptions::default(),
             eventtime: EventtimeOptions::default(),
         }
     }
@@ -269,11 +248,6 @@ impl Default for EventtimeOptions {
             late_tolerance: Duration::ZERO,
         }
     }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct PlanCacheOptions {
-    pub enabled: bool,
 }
 
 /// User-facing view of a pipeline entry.

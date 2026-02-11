@@ -4,7 +4,6 @@ use datatypes::Value;
 use flow::model::batch_from_columns_simple;
 use flow::pipeline::MemorySinkProps;
 use flow::pipeline::PipelineDefinition;
-use flow::planner::plan_cache::PlanCacheInputs;
 use flow::FlowInstance;
 use flow::{CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
 use serde_json::Value as JsonValue;
@@ -54,13 +53,7 @@ async fn run_stateful_case(case: StatefulCase) {
         )],
     );
     instance
-        .create_pipeline(CreatePipelineRequest::new(pipeline).with_plan_cache_inputs(
-            PlanCacheInputs {
-                pipeline_raw_json: String::new(),
-                streams_raw_json: Vec::new(),
-                snapshot: None,
-            },
-        ))
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
         .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
     instance
         .start_pipeline(&pipeline_id)

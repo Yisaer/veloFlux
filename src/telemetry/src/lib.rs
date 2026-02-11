@@ -1,6 +1,8 @@
+pub mod flow_instance;
 pub mod metrics;
 pub mod runtime;
 
+pub use flow_instance::{flow_instance_id, set_flow_instance_id};
 pub use metrics::{
     CPU_USAGE_GAUGE, HEAP_IN_ALLOCATOR_GAUGE, HEAP_IN_USE_GAUGE, MEMORY_USAGE_GAUGE,
     TOKIO_TASKS_GAUGE,

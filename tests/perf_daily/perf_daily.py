@@ -181,7 +181,7 @@ def create_pipeline_body(pipeline_id: str, sql: str) -> Dict[str, Any]:
                 "encoder": {"type": "json", "props": {}},
             }
         ],
-        "options": {"plan_cache": {"enabled": False}, "eventtime": {"enabled": False}},
+        "options": {"eventtime": {"enabled": False}},
     }
 
 

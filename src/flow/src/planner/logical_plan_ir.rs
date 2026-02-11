@@ -1,4 +1,7 @@
-//! Plan cache helpers.
+//! Logical plan IR codec.
+//!
+//! This module provides a JSON-serializable intermediate representation (IR) for `LogicalPlan`
+//! along with helpers to rebuild a `LogicalPlan` from that IR.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -10,69 +13,17 @@ use thiserror::Error;
 
 use crate::connector::sink::mqtt::MqttSinkConfig;
 use crate::planner::logical::LogicalPlan;
-use crate::planner::physical::PhysicalPlan;
 use crate::planner::sink::{
     CommonSinkProps, CustomSinkConnectorConfig, PipelineSink, PipelineSinkConnector,
     SinkConnectorConfig, SinkEncoderConfig,
 };
 
 #[derive(Debug, Error)]
-pub enum PlanCacheCodecError {
+pub enum LogicalPlanIrCodecError {
     #[error("serialize error: {0}")]
     Serialize(String),
     #[error("deserialize error: {0}")]
     Deserialize(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct PlanSnapshotRecord {
-    pub pipeline_json_hash: String,
-    pub stream_json_hashes: Vec<(String, String)>,
-    pub flow_build_id: String,
-    pub logical_plan_ir: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub struct PlanCacheInputs {
-    pub pipeline_raw_json: String,
-    pub streams_raw_json: Vec<(String, String)>,
-    pub snapshot: Option<PlanSnapshotRecord>,
-}
-
-fn fnv1a_64_hex(input: &str) -> String {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x00000100000001B3;
-    let mut hash = FNV_OFFSET_BASIS;
-    for byte in input.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    format!("{hash:016x}")
-}
-
-pub fn snapshot_matches_inputs(inputs: &PlanCacheInputs) -> bool {
-    let Some(snapshot) = &inputs.snapshot else {
-        return false;
-    };
-    if snapshot.flow_build_id != build_info::build_id() {
-        return false;
-    }
-    if snapshot.pipeline_json_hash != fnv1a_64_hex(&inputs.pipeline_raw_json) {
-        return false;
-    }
-    let mut stream_map: HashMap<&str, &str> = HashMap::new();
-    for (id, raw) in &inputs.streams_raw_json {
-        stream_map.insert(id.as_str(), raw.as_str());
-    }
-    for (stream_id, expected_hash) in &snapshot.stream_json_hashes {
-        let Some(raw) = stream_map.get(stream_id.as_str()) else {
-            return false;
-        };
-        if fnv1a_64_hex(raw) != *expected_hash {
-            return false;
-        }
-    }
-    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,84 +143,12 @@ pub struct OrderKeyIR {
     pub asc: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PhysicalPlanIR {
-    pub root: i64,
-    pub nodes: Vec<PhysicalPlanNodeIR>,
+fn encode_ir<T: Serialize>(value: &T) -> Result<Vec<u8>, LogicalPlanIrCodecError> {
+    serde_json::to_vec(value).map_err(|err| LogicalPlanIrCodecError::Serialize(err.to_string()))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PhysicalPlanNodeIR {
-    pub index: i64,
-    pub kind: PhysicalPlanNodeKindIR,
-    pub children: Vec<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum PhysicalPlanNodeKindIR {
-    DataSource {
-        stream: String,
-        alias: Option<String>,
-    },
-    Decoder {
-        decoder_kind: String,
-        decoder_props: JsonMap<String, JsonValue>,
-    },
-    Filter {
-        predicate: Expr,
-    },
-    Compute {
-        fields: Vec<ProjectFieldIR>,
-    },
-    Project {
-        fields: Vec<ProjectFieldIR>,
-    },
-    Encoder {
-        encoder_kind: String,
-        encoder_props: JsonMap<String, JsonValue>,
-    },
-    DataSink {
-        sink: SinkIR,
-        #[serde(default)]
-        encoder_plan_index: Option<i64>,
-    },
-    ResultCollect,
-    Opaque {
-        plan_type: String,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct PlanSnapshotBytes {
-    pub fingerprint: String,
-    pub flow_build_id: String,
-    pub logical_plan_ir: Vec<u8>,
-}
-
-impl PlanSnapshotBytes {
-    pub fn new(
-        fingerprint: String,
-        flow_build_id: String,
-        logical: &LogicalPlanIR,
-    ) -> Result<Self, PlanCacheCodecError> {
-        Ok(Self {
-            fingerprint,
-            flow_build_id,
-            logical_plan_ir: encode_ir(logical)?,
-        })
-    }
-
-    pub fn decode_logical(&self) -> Result<LogicalPlanIR, PlanCacheCodecError> {
-        decode_ir(&self.logical_plan_ir)
-    }
-}
-
-fn encode_ir<T: Serialize>(value: &T) -> Result<Vec<u8>, PlanCacheCodecError> {
-    serde_json::to_vec(value).map_err(|err| PlanCacheCodecError::Serialize(err.to_string()))
-}
-
-fn decode_ir<T: for<'de> Deserialize<'de>>(raw: &[u8]) -> Result<T, PlanCacheCodecError> {
-    serde_json::from_slice(raw).map_err(|err| PlanCacheCodecError::Deserialize(err.to_string()))
+fn decode_ir<T: for<'de> Deserialize<'de>>(raw: &[u8]) -> Result<T, LogicalPlanIrCodecError> {
+    serde_json::from_slice(raw).map_err(|err| LogicalPlanIrCodecError::Deserialize(err.to_string()))
 }
 
 pub fn logical_plan_from_ir(
@@ -327,7 +206,7 @@ fn build_logical_plan_node(
                 node.index,
                 schema,
                 None, // eventtime
-                None, // sampler - plan cache doesn't preserve sampler config yet
+                None, // sampler
             );
             Arc::new(LogicalPlan::DataSource(datasource))
         }
@@ -638,31 +517,11 @@ impl LogicalPlanIR {
         }
     }
 
-    pub fn encode(&self) -> Result<Vec<u8>, PlanCacheCodecError> {
+    pub fn encode(&self) -> Result<Vec<u8>, LogicalPlanIrCodecError> {
         encode_ir(self)
     }
 
-    pub fn decode(raw: &[u8]) -> Result<Self, PlanCacheCodecError> {
-        decode_ir(raw)
-    }
-}
-
-impl PhysicalPlanIR {
-    pub fn from_plan(root: &Arc<PhysicalPlan>) -> Self {
-        let mut nodes = Vec::new();
-        let mut visited = HashMap::<i64, ()>::new();
-        build_physical_ir(root, &mut nodes, &mut visited);
-        Self {
-            root: root.get_plan_index(),
-            nodes,
-        }
-    }
-
-    pub fn encode(&self) -> Result<Vec<u8>, PlanCacheCodecError> {
-        encode_ir(self)
-    }
-
-    pub fn decode(raw: &[u8]) -> Result<Self, PlanCacheCodecError> {
+    pub fn decode(raw: &[u8]) -> Result<Self, LogicalPlanIrCodecError> {
         decode_ir(raw)
     }
 }
@@ -761,74 +620,6 @@ fn build_logical_ir(
     });
 }
 
-fn build_physical_ir(
-    node: &Arc<PhysicalPlan>,
-    out: &mut Vec<PhysicalPlanNodeIR>,
-    visited: &mut HashMap<i64, ()>,
-) {
-    let index = node.get_plan_index();
-    if visited.insert(index, ()).is_some() {
-        return;
-    }
-
-    for child in node.children() {
-        build_physical_ir(child, out, visited);
-    }
-
-    let children = node.children().iter().map(|c| c.get_plan_index()).collect();
-    let kind = match node.as_ref() {
-        PhysicalPlan::DataSource(plan) => PhysicalPlanNodeKindIR::DataSource {
-            stream: plan.source_name.clone(),
-            alias: plan.alias.clone(),
-        },
-        PhysicalPlan::Decoder(plan) => PhysicalPlanNodeKindIR::Decoder {
-            decoder_kind: plan.decoder().kind().to_string(),
-            decoder_props: plan.decoder().props().clone(),
-        },
-        PhysicalPlan::Filter(plan) => PhysicalPlanNodeKindIR::Filter {
-            predicate: plan.predicate.clone(),
-        },
-        PhysicalPlan::Compute(plan) => PhysicalPlanNodeKindIR::Compute {
-            fields: plan
-                .fields
-                .iter()
-                .map(|f| ProjectFieldIR {
-                    field_name: f.field_name.clone(),
-                    expr: f.original_expr.clone(),
-                })
-                .collect(),
-        },
-        PhysicalPlan::Project(plan) => PhysicalPlanNodeKindIR::Project {
-            fields: plan
-                .fields
-                .iter()
-                .map(|f| ProjectFieldIR {
-                    field_name: f.field_name.as_ref().to_string(),
-                    expr: f.original_expr.clone(),
-                })
-                .collect(),
-        },
-        PhysicalPlan::Encoder(plan) => PhysicalPlanNodeKindIR::Encoder {
-            encoder_kind: plan.encoder.kind_str().to_string(),
-            encoder_props: plan.encoder.props().clone(),
-        },
-        PhysicalPlan::DataSink(plan) => PhysicalPlanNodeKindIR::DataSink {
-            sink: physical_sink_to_ir(&plan.connector),
-            encoder_plan_index: plan.connector.encoder_plan_index,
-        },
-        PhysicalPlan::ResultCollect(_) => PhysicalPlanNodeKindIR::ResultCollect,
-        other => PhysicalPlanNodeKindIR::Opaque {
-            plan_type: other.get_plan_type().to_string(),
-        },
-    };
-
-    out.push(PhysicalPlanNodeIR {
-        index,
-        kind,
-        children,
-    });
-}
-
 fn sink_to_ir(sink: &PipelineSink) -> SinkIR {
     let (connector_kind, connector_settings) = connector_to_ir(&sink.connector.connector);
     SinkIR {
@@ -839,19 +630,6 @@ fn sink_to_ir(sink: &PipelineSink) -> SinkIR {
         connector_settings,
         encoder_kind: Some(sink.connector.encoder.kind_str().to_string()),
         encoder_props: Some(sink.connector.encoder.props().clone()),
-    }
-}
-
-fn physical_sink_to_ir(connector: &crate::planner::physical::PhysicalSinkConnector) -> SinkIR {
-    let (connector_kind, connector_settings) = connector_to_ir(&connector.connector);
-    SinkIR {
-        sink_id: connector.sink_id.clone(),
-        forward_to_result: connector.forward_to_result,
-        common: None,
-        connector_kind,
-        connector_settings,
-        encoder_kind: None,
-        encoder_props: None,
     }
 }
 
@@ -948,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_bytes_roundtrip() {
+    fn logical_plan_ir_roundtrip() {
         let logical = LogicalPlanIR {
             root: 0,
             nodes: vec![LogicalPlanNodeIR {
@@ -960,13 +738,7 @@ mod tests {
             }],
         };
 
-        let snapshot = PlanSnapshotBytes::new(
-            "fp".to_string(),
-            "sha:deadbeef tag:v0.0.0".to_string(),
-            &logical,
-        )
-        .unwrap();
-
-        assert_eq!(snapshot.decode_logical().unwrap(), logical);
+        let raw = logical.encode().unwrap();
+        assert_eq!(LogicalPlanIR::decode(&raw).unwrap(), logical);
     }
 }

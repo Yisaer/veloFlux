@@ -4,7 +4,7 @@ use super::{SinkConnector, SinkConnectorError};
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use prometheus::{register_int_counter_vec, IntCounterVec};
+use prometheus::{IntCounterVec, Opts};
 use rumqttc::{
     AsyncClient, ClientError, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS,
     Transport,
@@ -79,21 +79,38 @@ pub(crate) struct MqttSinkConnector {
 }
 
 static MQTT_SINK_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "mqtt_sink_records_in_total",
-        "Number of records received by MQTT sink connectors",
-        &["connector"]
+    let vec = IntCounterVec::new(
+        Opts::new(
+            "mqtt_sink_records_in_total",
+            "Number of records received by MQTT sink connectors",
+        )
+        .const_label(
+            "flow_instance",
+            crate::metrics::flow_instance_id().to_string(),
+        ),
+        &["connector"],
     )
-    .expect("create mqtt sink records_in counter vec")
+    .expect("create mqtt sink records_in counter vec");
+    prometheus::register(Box::new(vec.clone())).expect("register mqtt sink records_in counter vec");
+    vec
 });
 
 static MQTT_SINK_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
-    register_int_counter_vec!(
-        "mqtt_sink_records_out_total",
-        "Number of records successfully published by MQTT sink connectors",
-        &["connector"]
+    let vec = IntCounterVec::new(
+        Opts::new(
+            "mqtt_sink_records_out_total",
+            "Number of records successfully published by MQTT sink connectors",
+        )
+        .const_label(
+            "flow_instance",
+            crate::metrics::flow_instance_id().to_string(),
+        ),
+        &["connector"],
     )
-    .expect("create mqtt sink records_out counter vec")
+    .expect("create mqtt sink records_out counter vec");
+    prometheus::register(Box::new(vec.clone()))
+        .expect("register mqtt sink records_out counter vec");
+    vec
 });
 
 enum SinkClient {

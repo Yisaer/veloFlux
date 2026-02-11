@@ -42,9 +42,8 @@ def build_create_pipeline_request(
                 "encoder": {"type": "json", "props": {}},
             }
         ],
-        "options": {"plan_cache": {"enabled": False}, "eventtime": {"enabled": False}},
+        "options": {"eventtime": {"enabled": False}},
     }
 
 
 __all__ = ["build_create_pipeline_request", "build_create_stream_request"]
-

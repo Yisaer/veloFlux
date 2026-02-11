@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flow::pipeline::{EventtimeOptions, PipelineOptions, PlanCacheOptions};
+use flow::pipeline::{EventtimeOptions, PipelineOptions};
 use serde_json::Map as JsonMap;
 
 fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
@@ -584,7 +584,6 @@ fn plan_explain_table_driven() {
             name: "explain_pipeline_with_eventtime_enabled_prints_plans",
             sql: "SELECT sum(a), lag(a) FROM stream_eventtime GROUP BY tumblingwindow('ss', 10)",
             options: PipelineOptions {
-                plan_cache: PlanCacheOptions { enabled: false },
                 eventtime: EventtimeOptions {
                     enabled: true,
                     late_tolerance: Duration::from_secs(5),
