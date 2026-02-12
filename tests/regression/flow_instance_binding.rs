@@ -1,86 +1,7 @@
-use std::net::SocketAddr;
-
-use serde_json::{json, Value as JsonValue};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-
-async fn http_request(
-    addr: SocketAddr,
-    method: &str,
-    path: &str,
-    body: Option<&JsonValue>,
-) -> (u16, Vec<u8>) {
-    let mut stream = TcpStream::connect(addr)
-        .await
-        .unwrap_or_else(|err| panic!("connect {addr}: {err}"));
-
-    let body_bytes = body
-        .map(|value| serde_json::to_vec(value).expect("encode JSON body"))
-        .unwrap_or_default();
-
-    let mut req = String::new();
-    req.push_str(&format!("{method} {path} HTTP/1.1\r\n"));
-    req.push_str(&format!("Host: {addr}\r\n"));
-    req.push_str("Connection: close\r\n");
-    if body.is_some() {
-        req.push_str("Content-Type: application/json\r\n");
-    }
-    req.push_str(&format!("Content-Length: {}\r\n", body_bytes.len()));
-    req.push_str("\r\n");
-
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .unwrap_or_else(|err| panic!("write request headers: {err}"));
-    if !body_bytes.is_empty() {
-        stream
-            .write_all(&body_bytes)
-            .await
-            .unwrap_or_else(|err| panic!("write request body: {err}"));
-    }
-
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .await
-        .unwrap_or_else(|err| panic!("read response: {err}"));
-
-    let header_end = response
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .expect("invalid HTTP response (missing header delimiter)");
-    let (head, body) = response.split_at(header_end + 4);
-    let head_str = std::str::from_utf8(head).expect("response headers not valid utf8");
-    let status_line = head_str.lines().next().expect("missing HTTP status line");
-    let code = status_line
-        .split_whitespace()
-        .nth(1)
-        .expect("invalid HTTP status line")
-        .parse::<u16>()
-        .expect("invalid HTTP status code");
-
-    (code, body.to_vec())
-}
-
-fn random_suffix() -> String {
-    use rand::{distributions::Alphanumeric, Rng};
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(10)
-        .map(char::from)
-        .collect()
-}
-
-async fn bind_manager_listener_or_skip() -> Option<TcpListener> {
-    match TcpListener::bind("127.0.0.1:0").await {
-        Ok(listener) => Some(listener),
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("skipping test: binding a local listener is not permitted: {err}");
-            None
-        }
-        Err(err) => panic!("bind manager listener: {err}"),
-    }
-}
+use super::{bind_manager_listener_or_skip, make_client, random_suffix};
+use sdk::types::{PipelineCreateRequest, StreamCreateRequest};
+use sdk::SdkError;
+use serde_json::Value as JsonValue;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn flow_instance_pipeline_binding_lifecycle() {
@@ -108,86 +29,58 @@ async fn flow_instance_pipeline_binding_lifecycle() {
         .expect("start manager server");
     });
 
+    let client = make_client(addr);
+
     let stream_name = format!("bind_stream_{}", random_suffix());
-    let create_stream = json!({
-        "name": stream_name,
-        "type": "mock",
-        "schema": {
+    let stream_req = StreamCreateRequest {
+        name: stream_name.clone(),
+        stream_type: "mock".to_string(),
+        schema: serde_json::json!({
             "type": "json",
             "props": {
                 "columns": [
                     { "name": "value", "data_type": "int64" }
                 ]
             }
-        },
-        "props": {},
-        "shared": false,
-        "decoder": { "type": "json", "props": {} }
-    });
-    let (code, body) = http_request(addr, "POST", "/streams", Some(&create_stream)).await;
-    assert_eq!(
-        code,
-        201,
-        "create stream failed (HTTP {code}): {}",
-        String::from_utf8_lossy(&body)
-    );
+        }),
+        props: serde_json::json!({}),
+        shared: false,
+        decoder: serde_json::json!({ "type": "json", "props": {} }),
+    };
+
+    client
+        .create_stream(&stream_req)
+        .await
+        .expect("create stream");
 
     let pipeline_id = format!("bind_pipe_{}", random_suffix());
     let sql = format!("SELECT value FROM {stream_name}");
-    let create_pipeline = json!({
-        "id": pipeline_id,
-        "sql": sql,
-        "sinks": [ { "type": "nop" } ]
-    });
-    let (code, body) = http_request(addr, "POST", "/pipelines", Some(&create_pipeline)).await;
-    assert_eq!(
-        code,
-        201,
-        "create pipeline failed (HTTP {code}): {}",
-        String::from_utf8_lossy(&body)
-    );
 
-    let (code, body) = http_request(
-        addr,
-        "POST",
-        &format!("/pipelines/{pipeline_id}/start"),
-        None,
-    )
-    .await;
-    assert_eq!(
-        code,
-        200,
-        "start pipeline failed (HTTP {code}): {}",
-        String::from_utf8_lossy(&body)
-    );
+    let pipe_req = PipelineCreateRequest::nop(pipeline_id.clone(), sql);
 
-    let (code, body) = http_request(addr, "GET", "/pipelines", None).await;
-    assert_eq!(
-        code,
-        200,
-        "list pipelines failed (HTTP {code}): {}",
-        String::from_utf8_lossy(&body)
-    );
-    let list: JsonValue = serde_json::from_slice(&body).expect("decode pipelines list JSON");
+    client
+        .create_pipeline(&pipe_req)
+        .await
+        .expect("create pipeline");
+
+    client
+        .start_pipeline(&pipeline_id)
+        .await
+        .expect("start pipeline");
+
+    let list = client.list_pipelines().await.expect("list pipelines");
     assert!(
-        list.as_array()
-            .expect("pipelines list is array")
-            .iter()
-            .any(|item| {
-                item["id"].as_str() == Some(pipeline_id.as_str())
-                    && item["flow_instance_id"].as_str() == Some("default")
-            }),
-        "pipelines list missing default flow_instance_id binding"
+        list.iter().any(|item| {
+            item["id"].as_str() == Some(pipeline_id.as_str())
+                && item["flow_instance_id"].as_str() == Some("default")
+        }),
+        "pipelines list missing default binding"
     );
 
-    let (code, body) = http_request(addr, "GET", &format!("/pipelines/{pipeline_id}"), None).await;
-    assert_eq!(
-        code,
-        200,
-        "get pipeline failed (HTTP {code}): {}",
-        String::from_utf8_lossy(&body)
-    );
-    let get_resp: JsonValue = serde_json::from_slice(&body).expect("decode pipeline JSON");
+    let get_resp: JsonValue = client
+        .get_pipeline(&pipeline_id)
+        .await
+        .expect("get pipeline");
     assert_eq!(get_resp["spec"]["id"].as_str(), Some(pipeline_id.as_str()));
     assert_eq!(
         get_resp["spec"]["flow_instance_id"].as_str(),
@@ -195,34 +88,26 @@ async fn flow_instance_pipeline_binding_lifecycle() {
     );
 
     let pipeline_id2 = format!("bind_pipe2_{}", random_suffix());
-    let create_pipeline_undeclared = json!({
-        "id": pipeline_id2,
-        "flow_instance_id": "extra_undeclared",
-        "sql": format!("SELECT value FROM {stream_name}"),
-        "sinks": [ { "type": "nop" } ]
-    });
-    let (code, body) = http_request(
-        addr,
-        "POST",
-        "/pipelines",
-        Some(&create_pipeline_undeclared),
-    )
-    .await;
-    assert_eq!(
-        code,
-        400,
-        "create pipeline with undeclared flow_instance_id should fail (HTTP {code}): {}",
-        String::from_utf8_lossy(&body)
-    );
+    let sql2 = format!("SELECT value FROM {stream_name}");
+    let pipe_req2 = PipelineCreateRequest::nop(pipeline_id2.clone(), sql2)
+        .with_flow_instance_id("extra_undeclared".to_string());
 
-    let (code, body) =
-        http_request(addr, "DELETE", &format!("/pipelines/{pipeline_id}"), None).await;
-    assert_eq!(
-        code,
-        200,
-        "delete pipeline failed (HTTP {code}): {}",
-        String::from_utf8_lossy(&body)
-    );
+    let err = client
+        .create_pipeline(&pipe_req2)
+        .await
+        .expect_err("create pipeline with undeclared flow_instance_id should fail");
+
+    match err {
+        SdkError::Http { status, body, .. } => {
+            assert_eq!(status.as_u16(), 400, "body: {body}");
+        }
+        other => panic!("expected HTTP 400 error, got: {other}"),
+    }
+
+    client
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
 
     server.abort();
     let _ = server.await;
