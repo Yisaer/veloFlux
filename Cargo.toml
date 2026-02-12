@@ -5,6 +5,7 @@ members = [
     "src/parser", "src/manager",
     "src/telemetry", "src/storage",
     "src/build_info",
+    "src/sdk",
 ]
 resolver = "2"
 
@@ -37,6 +38,7 @@ datatypes = { path = "src/datatypes" }
 telemetry = { path = "src/telemetry", optional = true }
 storage = { path = "src/storage" }
 build_info = { path = "src/build_info" }
+sdk = { path = "src/sdk" }
 
 [features]
 default = ["metrics", "profiling", "allocator-jemalloc"]
