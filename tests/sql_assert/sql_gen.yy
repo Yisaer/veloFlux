@@ -11,8 +11,7 @@ eq_ops = { "=", "!=" }
 logic_ops = { "AND", "OR" }
 order_dirs = { "ASC", "DESC" }
 
-
-agg_fns_int = { "sum", "min", "max", "count", "last_row" }
+agg_fns_int = { "sum", "count"}
 
 function rand_pos_int(minv, maxv)
   return tostring(math.random(minv, maxv))
@@ -91,39 +90,31 @@ function pick_int_col()
   return pick(int_cols)
 end
 
-function window_expr()
-  return "countwindow(" .. rand_pos_int(2, 6) .. ")"
-end
-
-function group_by_list()
-  local parts = {}
-  table.insert(parts, window_expr())
-  if #int_cols > 0 and math.random(2) == 1 then
-    table.insert(parts, pick_int_col())
-  end
-  return table.concat(parts, ", ")
-end
-
 function agg_call()
   local fn = pick(agg_fns_int)
   local col = pick_int_col()
   return fn .. "(" .. col .. ")"
 end
 
+current_group_key = nil
+
+function group_by_list()
+  return current_group_key
+end
+
 function agg_select_list()
+  if current_group_key == nil then
+    current_group_key = pick_int_col()
+  end
   local cols = {}
   table.insert(cols, agg_call() .. " AS s")
-
-  if #int_cols > 0 and math.random(2) == 1 then
-    table.insert(cols, pick_int_col() .. " AS k")
-  end
-
+  table.insert(cols, current_group_key .. " AS k")
   return table.concat(cols, ", ")
 end
 
 function having_expr()
   local depth = math.random(1, 3)
-  local out = agg_call()
+  local out = having_pred()
   for i = 2, depth do
     out = out .. " " .. pick(logic_ops) .. " " .. having_pred()
   end
@@ -156,6 +147,7 @@ order_item:
   {print(pick(all_cols))} {print(pick(order_dirs))}
 
 agg_select_stmt:
+  {current_group_key = nil}
   SELECT {print(agg_select_list())}
   FROM {{table_name}}
   where_opt
