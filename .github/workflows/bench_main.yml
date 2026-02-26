@@ -1,0 +1,12 @@
+name: Bench (main)
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  bench:
+    uses: ./.github/workflows/_bench_run.yml
+    with:
+      ref: ${{ github.sha }}
+
