@@ -1,6 +1,9 @@
 name: Perf PR Wide MQTT (cgroup cpu.max isolation)
 
-on: [pull_request]
+on:
+  push:
+    branches:
+      - sub_ci
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
