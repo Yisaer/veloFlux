@@ -18,7 +18,21 @@ function rand_pos_int(minv, maxv)
 end
 
 function having_pred()
-  return agg_call() .. " " .. pick(int_ops) .. " " .. rand_int()
+  local fn = pick(agg_fns_int)
+  local col = pick_int_col()
+
+  if fn == "count" then
+    local op = pick(int_ops)
+    local rhs
+    if op == "<" then
+      rhs = tostring(math.random(1, 10))
+    else
+      rhs = tostring(math.random(0, 10))
+    end
+    return "count(" .. col .. ") " .. op .. " " .. rhs
+  end
+
+  return "sum(" .. col .. ") " .. pick(int_ops) .. " " .. rand_int()
 end
 
 function pick(list)
@@ -124,7 +138,41 @@ end
 function order_by_clause()
   return "s " .. pick(order_dirs)
 end
+
+function order_items_unique()
+  local maxn = math.min(3, #all_cols)
+  local n = math.random(1, maxn)
+  local used = {}
+  local out = {}
+  while #out < n do
+    local col = pick(all_cols)
+    if used[col] == nil then
+      used[col] = true
+      table.insert(out, col .. " " .. pick(order_dirs))
+    end
+  end
+  return table.concat(out, ", ")
+end
+
+function agg_order_items_unique()
+  local keys = {"s", "k", current_group_key}
+
+  local maxn = math.min(3, #keys)
+  local n = math.random(1, maxn)
+  local used = {}
+  local out = {}
+  while #out < n do
+    local key = pick(keys)
+    if used[key] == nil then
+      used[key] = true
+      table.insert(out, key .. " " .. pick(order_dirs))
+    end
+  end
+  return table.concat(out, ", ")
+end
+
 }
+
 
 query:
   select_stmt
@@ -137,14 +185,7 @@ where_opt:
   | WHERE expr
 
 order_opt:
-  | ORDER BY order_items
-
-order_items:
-  order_item
-  | order_item , order_items
-
-order_item:
-  {print(pick(all_cols))} {print(pick(order_dirs))}
+  | ORDER BY {print(order_items_unique())}
 
 agg_select_stmt:
   {current_group_key = nil}
@@ -159,7 +200,7 @@ having_opt:
   | HAVING {print(having_expr())}
 
 agg_order_opt:
-  | ORDER BY {print(order_by_clause())}
+  | ORDER BY {print(agg_order_items_unique())}
 
 select_cols:
   *

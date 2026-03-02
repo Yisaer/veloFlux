@@ -101,11 +101,12 @@ func main() {
 
 	count := 0
 	visitor := sql_generator.FixedTimesVisitor(func(_ int, sql string) {
-		clean := sanitizeSQL(sql)
-		if clean == "" {
+		veloFluxSQL := sanitizeSQL(sql)
+		if veloFluxSQL == "" {
 			return
 		}
-		_, _ = writer.WriteString(clean + "\n")
+		sqliteSQL := mapAggFuncsUpper(veloFluxSQL)
+		_, _ = writer.WriteString(veloFluxSQL + "\t" + sqliteSQL + "\n")
 		count++
 	}, cfg.SQLGen.Queries)
 
@@ -189,4 +190,10 @@ func resolvePath(baseDir, path string) string {
 func fatalf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
+}
+
+func mapAggFuncsUpper(sql string) string {
+	sql = strings.ReplaceAll(sql, "sum(", "SUM(")
+	sql = strings.ReplaceAll(sql, "count(", "COUNT(")
+	return sql
 }
