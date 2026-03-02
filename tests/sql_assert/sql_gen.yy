@@ -11,24 +11,11 @@ eq_ops = { "=", "!=" }
 logic_ops = { "AND", "OR" }
 order_dirs = { "ASC", "DESC" }
 
-agg_fns_int = { "sum", "count"}
+agg_fns_int = {"count"}
 
 function having_pred()
-  local fn = pick(agg_fns_int)
-  local col = pick_int_col()
-
-  if fn == "count" then
-    local op = pick(int_ops)
-    local rhs
-    if op == "<" then
-      rhs = tostring(math.random(1, 10))
-    else
-      rhs = tostring(math.random(0, 10))
-    end
-    return "count(" .. col .. ") " .. op .. " " .. rhs
-  end
-
-  return "sum(" .. col .. ") " .. pick(int_ops) .. " " .. rand_int()
+  local rhs = tostring(math.random(1, 10))
+  return "count(" .. current_group_key .. ") >= " .. rhs
 end
 
 function pick(list)
@@ -107,19 +94,22 @@ function agg_call()
 end
 
 current_group_key = nil
-
-function group_by_list()
-  return current_group_key
-end
+current_group_expr = nil
 
 function agg_select_list()
   if current_group_key == nil then
     current_group_key = pick_int_col()
+    if math.random(2) == 1 then
+      current_group_expr = current_group_key
+    else
+      current_group_expr = current_group_key .. " + 1"
+    end
   end
-  local cols = {}
-  table.insert(cols, agg_call() .. " AS s")
-  table.insert(cols, current_group_key .. " AS k")
-  return table.concat(cols, ", ")
+  return current_group_expr .. " AS k"
+end
+
+function group_by_list()
+  return current_group_expr
 end
 
 function having_expr()
@@ -142,20 +132,16 @@ function order_items_unique()
 end
 
 function agg_order_items_unique()
-  local keys = {"s", "k", current_group_key}
+  return "k " .. pick(order_dirs)
+end
 
-  local maxn = math.min(3, #keys)
-  local n = math.random(1, maxn)
-  local used = {}
-  local out = {}
-  while #out < n do
-    local key = pick(keys)
-    if used[key] == nil then
-      used[key] = true
-      table.insert(out, key .. " " .. pick(order_dirs))
-    end
+function select_expr_list()
+  local base = pick_int_col()
+  if math.random(2) == 1 then
+    return base
+  else
+    return base .. " + 1 AS a"
   end
-  return table.concat(out, ", ")
 end
 
 }
@@ -175,7 +161,7 @@ order_opt:
   | ORDER BY {print(order_items_unique())}
 
 agg_select_stmt:
-  {current_group_key = nil}
+  {current_group_key = nil; current_group_expr = nil}
   SELECT {print(agg_select_list())}
   FROM {{table_name}}
   where_opt
@@ -192,6 +178,7 @@ agg_order_opt:
 select_cols:
   *
   | {print(pick_cols(all_cols))}
+  | {print(select_expr_list())}
 
 expr:
   predicate
