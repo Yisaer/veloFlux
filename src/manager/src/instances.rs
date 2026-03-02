@@ -12,6 +12,7 @@ pub struct FlowInstanceSpec {
     pub worker_addr: String,
     pub metrics_addr: String,
     pub profile_addr: String,
+    pub cgroup_path: Option<String>,
 }
 
 pub fn new_default_flow_instance() -> FlowInstance {

@@ -69,6 +69,11 @@ async fn run_worker(args: Vec<String>) -> Result<(), Box<dyn std::error::Error +
     let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
     let _logging_guard = logging_guard;
 
+    if let Some(path) = spec.cgroup_path.as_deref() {
+        veloflux::cgroup::join_current_process(path)?;
+        tracing::info!(cgroup_path = %path, "joined cgroup");
+    }
+
     let worker_addr: std::net::SocketAddr = spec
         .worker_addr
         .parse()

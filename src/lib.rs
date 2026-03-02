@@ -8,6 +8,7 @@
 compile_error!("features `allocator-jemalloc` and `allocator-system` are mutually exclusive");
 
 pub mod bootstrap;
+pub mod cgroup;
 pub mod config;
 pub mod logging;
 pub mod server;
