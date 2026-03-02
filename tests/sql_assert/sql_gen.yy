@@ -13,10 +13,6 @@ order_dirs = { "ASC", "DESC" }
 
 agg_fns_int = { "sum", "count"}
 
-function rand_pos_int(minv, maxv)
-  return tostring(math.random(minv, maxv))
-end
-
 function having_pred()
   local fn = pick(agg_fns_int)
   local col = pick_int_col()
@@ -128,10 +124,6 @@ end
 
 function having_expr()
   return having_pred()
-end
-
-function order_by_clause()
-  return "s " .. pick(order_dirs)
 end
 
 function order_items_unique()

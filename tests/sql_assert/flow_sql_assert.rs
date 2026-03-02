@@ -169,7 +169,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ).into());
             }
         }
-
         instance
             .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
             .await
