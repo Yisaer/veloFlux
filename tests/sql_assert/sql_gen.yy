@@ -13,7 +13,7 @@ order_dirs = { "ASC", "DESC" }
 
 agg_fns_int = {"count"}
 
-function having_pred()
+function having_expr()
   local rhs = tostring(math.random(1, 10))
   return "count(" .. current_group_key .. ") >= " .. rhs
 end
@@ -112,9 +112,6 @@ function group_by_list()
   return current_group_expr
 end
 
-function having_expr()
-  return having_pred()
-end
 
 function order_items_unique()
   local maxn = math.min(3, #all_cols)
