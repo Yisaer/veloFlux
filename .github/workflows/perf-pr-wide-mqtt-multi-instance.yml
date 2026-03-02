@@ -69,55 +69,55 @@ jobs:
           echo "RUNNER_UID=$(id -u)" >> "${GITHUB_ENV}"
           echo "RUNNER_GID=$(id -g)" >> "${GITHUB_ENV}"
 
-	          sudo CG_BASE="${CG_BASE}" \
-	            CG_MANAGER="${CG_MANAGER}" \
-	            CG_FI_CRITICAL="${CG_FI_CRITICAL}" \
-	            CG_FI_BEST="${CG_FI_BEST}" \
-	            RUNNER_UID="$(id -u)" \
-	            RUNNER_GID="$(id -g)" \
-	            bash -lc '
-	              set -euo pipefail
+            sudo CG_BASE="${CG_BASE}" \
+              CG_MANAGER="${CG_MANAGER}" \
+              CG_FI_CRITICAL="${CG_FI_CRITICAL}" \
+              CG_FI_BEST="${CG_FI_BEST}" \
+              RUNNER_UID="$(id -u)" \
+              RUNNER_GID="$(id -g)" \
+              bash -lc '
+                set -euo pipefail
 
-	              if [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
-	                echo "cgroup v2 is not mounted at /sys/fs/cgroup" >&2
-	                exit 1
-	              fi
+                if [ ! -f /sys/fs/cgroup/cgroup.controllers ]; then
+                  echo "cgroup v2 is not mounted at /sys/fs/cgroup" >&2
+                  exit 1
+                fi
 
-	              if ! grep -qw cpu /sys/fs/cgroup/cgroup.controllers; then
-	                echo "cpu controller is not available: $(cat /sys/fs/cgroup/cgroup.controllers)" >&2
-	                exit 1
-	              fi
+                if ! grep -qw cpu /sys/fs/cgroup/cgroup.controllers; then
+                  echo "cpu controller is not available: $(cat /sys/fs/cgroup/cgroup.controllers)" >&2
+                  exit 1
+                fi
 
-	              if ! grep -qw cpu /sys/fs/cgroup/cgroup.subtree_control; then
-	                echo "+cpu" > /sys/fs/cgroup/cgroup.subtree_control || true
-	              fi
+                if ! grep -qw cpu /sys/fs/cgroup/cgroup.subtree_control; then
+                  echo "+cpu" > /sys/fs/cgroup/cgroup.subtree_control || true
+                fi
 
-	              mkdir -p "/sys/fs/cgroup${CG_BASE}"
-	              if [ -f "/sys/fs/cgroup${CG_BASE}/cgroup.subtree_control" ]; then
-	                echo "+cpu" > "/sys/fs/cgroup${CG_BASE}/cgroup.subtree_control" || true
-	              fi
+                mkdir -p "/sys/fs/cgroup${CG_BASE}"
+                if [ -f "/sys/fs/cgroup${CG_BASE}/cgroup.subtree_control" ]; then
+                  echo "+cpu" > "/sys/fs/cgroup${CG_BASE}/cgroup.subtree_control" || true
+                fi
 
-	              # Total veloflux budget: 1 CPU (100% of one core).
-	              echo "100000 100000" > "/sys/fs/cgroup${CG_BASE}/cpu.max"
+                # Total veloflux budget: 1 CPU (100% of one core).
+                echo "100000 100000" > "/sys/fs/cgroup${CG_BASE}/cpu.max"
 
-	              mkdir -p "/sys/fs/cgroup${CG_MANAGER}" "/sys/fs/cgroup${CG_FI_CRITICAL}" "/sys/fs/cgroup${CG_FI_BEST}"
+                mkdir -p "/sys/fs/cgroup${CG_MANAGER}" "/sys/fs/cgroup${CG_FI_CRITICAL}" "/sys/fs/cgroup${CG_FI_BEST}"
 
-	              # critical: hard cap at 95% of one CPU.
-	              echo "95000 100000" > "/sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max"
+                # critical: hard cap at 95% of one CPU.
+                echo "95000 100000" > "/sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max"
 
-	              # Best-effort shares the leftover with manager. Weight is a hint only.
+                # Best-effort shares the leftover with manager. Weight is a hint only.
               echo "200" > "/sys/fs/cgroup${CG_MANAGER}/cpu.weight"
               echo "100" > "/sys/fs/cgroup${CG_FI_BEST}/cpu.weight"
 
               chown -R "${RUNNER_UID}:${RUNNER_GID}" "/sys/fs/cgroup${CG_BASE}"
-	              chmod -R ug+rwX "/sys/fs/cgroup${CG_BASE}"
+                chmod -R ug+rwX "/sys/fs/cgroup${CG_BASE}"
 
-	              echo "cgroup ready:"
-	              echo "  base: ${CG_BASE} cpu.max=$(cat /sys/fs/cgroup${CG_BASE}/cpu.max)"
-	              echo "  manager: ${CG_MANAGER}"
-	              echo "  fi_critical: ${CG_FI_CRITICAL} cpu.max=$(cat /sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max)"
-	              echo "  fi_best: ${CG_FI_BEST}"
-	            '
+                echo "cgroup ready:"
+                echo "  base: ${CG_BASE} cpu.max=$(cat /sys/fs/cgroup${CG_BASE}/cpu.max)"
+                echo "  manager: ${CG_MANAGER}"
+                echo "  fi_critical: ${CG_FI_CRITICAL} cpu.max=$(cat /sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max)"
+                echo "  fi_best: ${CG_FI_BEST}"
+              '
 
       - name: Write config (with extra worker)
         run: |
@@ -212,13 +212,13 @@ jobs:
           echo "fi_best /proc cgroup:"
           cat "/proc/${WORKER_BEST_PID}/cgroup"
 
-	          grep -F "${CG_MANAGER}" "/proc/${MANAGER_PID}/cgroup" >/dev/null
-	          grep -F "${CG_FI_CRITICAL}" "/proc/${WORKER_CRITICAL_PID}/cgroup" >/dev/null
-	          grep -F "${CG_FI_BEST}" "/proc/${WORKER_BEST_PID}/cgroup" >/dev/null
+            grep -F "${CG_MANAGER}" "/proc/${MANAGER_PID}/cgroup" >/dev/null
+            grep -F "${CG_FI_CRITICAL}" "/proc/${WORKER_CRITICAL_PID}/cgroup" >/dev/null
+            grep -F "${CG_FI_BEST}" "/proc/${WORKER_BEST_PID}/cgroup" >/dev/null
 
-	          echo "cpu.max checks:"
-	          echo "  base: $(cat /sys/fs/cgroup${CG_BASE}/cpu.max)"
-	          echo "  fi_critical: $(cat /sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max)"
+            echo "cpu.max checks:"
+            echo "  base: $(cat /sys/fs/cgroup${CG_BASE}/cpu.max)"
+            echo "  fi_critical: $(cat /sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max)"
           if [ "$(cat /sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max)" != "95000 100000" ]; then
             echo "fi_critical cpu.max mismatch" >&2
             exit 1
@@ -305,26 +305,26 @@ jobs:
           crit_thr1="$(cg_throttled "${CG_FI_CRITICAL}")"
           crit_nthr1="$(cg_nr_throttled "${CG_FI_CRITICAL}")"
 
-	          PYTHONPYCACHEPREFIX=tmp/pycache \
-	          python3 scripts/perf_pr_wide_mqtt_cgroup_summary.py \
-	            --summary-path "${GITHUB_STEP_SUMMARY}" \
-	            --phase A \
-	            --t0-ns "${t0_ns}" \
-	            --t1-ns "${t1_ns}" \
-	            --row base "${CG_BASE}" "${base_u0}" "${base_u1}" \
-	            --row fi_critical "${CG_FI_CRITICAL}" "${crit_u0}" "${crit_u1}" \
-	            --row fi_best "${CG_FI_BEST}" "${best_u0}" "${best_u1}" \
-	            --critical-throttled-usec0 "${crit_thr0}" \
-	            --critical-throttled-usec1 "${crit_thr1}" \
-	            --critical-nr-throttled0 "${crit_nthr0}" \
-	            --critical-nr-throttled1 "${crit_nthr1}"
+            PYTHONPYCACHEPREFIX=tmp/pycache \
+            python3 scripts/perf_pr_wide_mqtt_cgroup_summary.py \
+              --summary-path "${GITHUB_STEP_SUMMARY}" \
+              --phase A \
+              --t0-ns "${t0_ns}" \
+              --t1-ns "${t1_ns}" \
+              --row base "${CG_BASE}" "${base_u0}" "${base_u1}" \
+              --row fi_critical "${CG_FI_CRITICAL}" "${crit_u0}" "${crit_u1}" \
+              --row fi_best "${CG_FI_BEST}" "${best_u0}" "${best_u1}" \
+              --critical-throttled-usec0 "${crit_thr0}" \
+              --critical-throttled-usec1 "${crit_thr1}" \
+              --critical-nr-throttled0 "${crit_nthr0}" \
+              --critical-nr-throttled1 "${crit_nthr1}"
 
-	          PYTHONPYCACHEPREFIX=tmp/pycache \
-	          python3 scripts/perf_pr_wide_mqtt_pipeline_qps_summary.py \
-	            --summary-path "${GITHUB_STEP_SUMMARY}" \
-	            --phase A \
-	            --result-json "${PERF_OUT_DIR}/result.json" \
-	            --openmetrics "${PERF_OUT_DIR}/metrics.openmetrics"
+            PYTHONPYCACHEPREFIX=tmp/pycache \
+            python3 scripts/perf_pr_wide_mqtt_pipeline_qps_summary.py \
+              --summary-path "${GITHUB_STEP_SUMMARY}" \
+              --phase A \
+              --result-json "${PERF_OUT_DIR}/result.json" \
+              --openmetrics "${PERF_OUT_DIR}/metrics.openmetrics"
 
           if [ "$((crit_nthr1 - crit_nthr0))" -le 0 ]; then
             echo "::warning::fi_critical was not throttled in Phase A (nr_throttled did not increase); consider tuning rate/columns."
@@ -375,21 +375,21 @@ jobs:
           crit_u1="$(cg_usage "${CG_FI_CRITICAL}")"
           best_u1="$(cg_usage "${CG_FI_BEST}")"
 
-	          PYTHONPYCACHEPREFIX=tmp/pycache \
-	          python3 scripts/perf_pr_wide_mqtt_cgroup_summary.py \
-	            --summary-path "${GITHUB_STEP_SUMMARY}" \
-	            --phase B \
-	            --t0-ns "${t0_ns}" \
-	            --t1-ns "${t1_ns}" \
-	            --row fi_critical "${CG_FI_CRITICAL}" "${crit_u0}" "${crit_u1}" \
-	            --row fi_best "${CG_FI_BEST}" "${best_u0}" "${best_u1}"
+            PYTHONPYCACHEPREFIX=tmp/pycache \
+            python3 scripts/perf_pr_wide_mqtt_cgroup_summary.py \
+              --summary-path "${GITHUB_STEP_SUMMARY}" \
+              --phase B \
+              --t0-ns "${t0_ns}" \
+              --t1-ns "${t1_ns}" \
+              --row fi_critical "${CG_FI_CRITICAL}" "${crit_u0}" "${crit_u1}" \
+              --row fi_best "${CG_FI_BEST}" "${best_u0}" "${best_u1}"
 
-	          PYTHONPYCACHEPREFIX=tmp/pycache \
-	          python3 scripts/perf_pr_wide_mqtt_pipeline_qps_summary.py \
-	            --summary-path "${GITHUB_STEP_SUMMARY}" \
-	            --phase B \
-	            --result-json "${PERF_OUT_DIR}/result.json" \
-	            --openmetrics "${PERF_OUT_DIR}/metrics.openmetrics"
+            PYTHONPYCACHEPREFIX=tmp/pycache \
+            python3 scripts/perf_pr_wide_mqtt_pipeline_qps_summary.py \
+              --summary-path "${GITHUB_STEP_SUMMARY}" \
+              --phase B \
+              --result-json "${PERF_OUT_DIR}/result.json" \
+              --openmetrics "${PERF_OUT_DIR}/metrics.openmetrics"
 
       - name: Render report (phase A - fi_critical)
         if: always()
