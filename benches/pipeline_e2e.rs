@@ -11,8 +11,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const MESSAGE_COUNT: usize = 200;
+const MESSAGE_COUNT: usize = 2000;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
+const WARM_UP_TIME: Duration = Duration::from_secs(5);
+const MEASUREMENT_TIME: Duration = Duration::from_secs(15);
 
 static TOPIC_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -276,5 +278,11 @@ fn pipeline_e2e_benches(c: &mut Criterion) {
     });
 }
 
-criterion_group!(pipeline_e2e, pipeline_e2e_benches);
+criterion_group! {
+    name = pipeline_e2e;
+    config = Criterion::default()
+        .warm_up_time(WARM_UP_TIME)
+        .measurement_time(MEASUREMENT_TIME);
+    targets = pipeline_e2e_benches
+}
 criterion_main!(pipeline_e2e);
