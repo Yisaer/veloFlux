@@ -1,11 +1,16 @@
-name: Bench Run
+name: Bench
 
 on:
-  workflow_call:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
     inputs:
       ref:
         description: Git ref (branch, tag, or SHA) to benchmark
         required: true
+        default: main
         type: string
 
 env:
@@ -16,11 +21,12 @@ jobs:
   bench:
     name: Cargo Bench
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref }}
+          ref: ${{ github.event.inputs.ref || github.event.pull_request.head.sha || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -38,4 +44,3 @@ jobs:
           set -euo pipefail
           python3 scripts/bench/render_criterion.py --output bench-summary.md
           cat bench-summary.md >> "${GITHUB_STEP_SUMMARY}"
-
