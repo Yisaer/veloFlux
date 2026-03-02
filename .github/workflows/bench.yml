@@ -3,8 +3,6 @@ name: Bench
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
       ref:
@@ -21,12 +19,11 @@ jobs:
   bench:
     name: Cargo Bench
     runs-on: ubuntu-latest
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.ref || github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.inputs.ref || github.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
