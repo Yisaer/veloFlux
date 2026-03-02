@@ -177,8 +177,6 @@ jobs:
           YAML
 
       - name: Start veloflux (jemalloc)
-        env:
-          _RJEM_MALLOC_CONF: "background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
         run: |
           set -euo pipefail
           mkdir -p tmp/perf_pr_ci
