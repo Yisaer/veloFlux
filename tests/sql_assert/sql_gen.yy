@@ -127,12 +127,7 @@ function agg_select_list()
 end
 
 function having_expr()
-  local depth = math.random(1, 3)
-  local out = having_pred()
-  for i = 2, depth do
-    out = out .. " " .. pick(logic_ops) .. " " .. having_pred()
-  end
-  return out
+  return having_pred()
 end
 
 function order_by_clause()
