@@ -32,13 +32,14 @@ def extract_openmetrics_block_multi_instance(
     instance: str,
     include_meta: bool,
 ) -> str:
+    tracked = set(perf_daily.TRACKED_METRICS) | {"processor_records_out_total"}
     out_lines: List[str] = []
     for line in text.splitlines():
         if not line:
             continue
         if include_meta and (line.startswith("# HELP ") or line.startswith("# TYPE ")):
             parts = line.split(" ", 3)
-            if len(parts) >= 3 and parts[2] in perf_daily.TRACKED_METRICS:
+            if len(parts) >= 3 and parts[2] in tracked:
                 out_lines.append(line)
             continue
 
@@ -47,11 +48,13 @@ def extract_openmetrics_block_multi_instance(
             continue
 
         name = m.group(1)
-        if name not in perf_daily.TRACKED_METRICS:
+        if name not in tracked:
             continue
 
         labels = perf_daily._ensure_instance_label(m.group(2), instance=instance)
         if name == "processor_records_in_total" and not _labels_have_kv(labels, "kind", "datasource"):
+            continue
+        if name == "processor_records_out_total" and not _labels_have_kv(labels, "kind", "result_collect"):
             continue
         value = m.group(3)
         out_lines.append(f"{name}{labels} {value} {ts_ms}")
