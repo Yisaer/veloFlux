@@ -410,9 +410,14 @@ fn row_to_json(
 ) -> Result<JsonValue, Box<dyn std::error::Error>> {
     let mut obj = JsonMap::with_capacity(column_names.len());
     for (idx, name) in column_names.iter().enumerate() {
-        let kind = column_map.get(name).copied().unwrap_or(ColumnKind::Str);
         let value: SqlValue = row.get(idx)?;
-        let json_value = sqlite_value_to_json(&value, kind)?;
+        let json_value = match value {
+            SqlValue::Integer(v) => JsonValue::Number(v.into()),
+            SqlValue::Real(v) => JsonValue::Number((v as i64).into()),
+            SqlValue::Text(s) => JsonValue::String(s),
+            SqlValue::Null => JsonValue::Null,
+            SqlValue::Blob(_) => return Err("unexpected blob value".into()),
+        };
         obj.insert(name.clone(), json_value);
     }
     Ok(JsonValue::Object(obj))
