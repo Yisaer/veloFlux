@@ -329,33 +329,19 @@ jobs:
           crit_thr1="$(cg_throttled "${CG_FI_CRITICAL}")"
           crit_nthr1="$(cg_nr_throttled "${CG_FI_CRITICAL}")"
 
-          python3 - <<PY >> "${GITHUB_STEP_SUMMARY}"
-import math
-
-def pct(u0,u1,t0_ns,t1_ns):
-  du=int(u1)-int(u0)
-  dt_us=max(1,(int(t1_ns)-int(t0_ns))//1000)
-  return du/dt_us*100.0
-
-t0_ns=${t0_ns}
-t1_ns=${t1_ns}
-rows=[
-  ("base", "${CG_BASE}", ${base_u0}, ${base_u1}, pct(${base_u0},${base_u1},t0_ns,t1_ns)),
-  ("fi_critical", "${CG_FI_CRITICAL}", ${crit_u0}, ${crit_u1}, pct(${crit_u0},${crit_u1},t0_ns,t1_ns)),
-  ("fi_best", "${CG_FI_BEST}", ${best_u0}, ${best_u1}, pct(${best_u0},${best_u1},t0_ns,t1_ns)),
-]
-print("## Phase A - cgroup cpu.stat")
-print("")
-print("| cgroup | path | usage_usec (Δ) | cpu% |")
-print("|---|---|---:|---:|")
-for name,path,u0,u1,cpu in rows:
-  du=int(u1)-int(u0)
-  print(f"| {name} | `{path}` | {du} | {cpu:.1f}% |")
-print("")
-print(f"- fi_critical throttled_usec Δ: {int(${crit_thr1})-int(${crit_thr0})}")
-print(f"- fi_critical nr_throttled Δ: {int(${crit_nthr1})-int(${crit_nthr0})}")
-print("")
-PY
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 scripts/perf_pr_wide_mqtt_cgroup_summary.py \
+            --summary-path "${GITHUB_STEP_SUMMARY}" \
+            --phase A \
+            --t0-ns "${t0_ns}" \
+            --t1-ns "${t1_ns}" \
+            --row base "${CG_BASE}" "${base_u0}" "${base_u1}" \
+            --row fi_critical "${CG_FI_CRITICAL}" "${crit_u0}" "${crit_u1}" \
+            --row fi_best "${CG_FI_BEST}" "${best_u0}" "${best_u1}" \
+            --critical-throttled-usec0 "${crit_thr0}" \
+            --critical-throttled-usec1 "${crit_thr1}" \
+            --critical-nr-throttled0 "${crit_nthr0}" \
+            --critical-nr-throttled1 "${crit_nthr1}"
 
           if [ "$((crit_nthr1 - crit_nthr0))" -le 0 ]; then
             echo "::warning::fi_critical was not throttled in Phase A (nr_throttled did not increase); consider tuning rate/columns."
@@ -406,22 +392,14 @@ PY
           crit_u1="$(cg_usage "${CG_FI_CRITICAL}")"
           best_u1="$(cg_usage "${CG_FI_BEST}")"
 
-          python3 - <<PY >> "${GITHUB_STEP_SUMMARY}"
-def pct(u0,u1,t0_ns,t1_ns):
-  du=int(u1)-int(u0)
-  dt_us=max(1,(int(t1_ns)-int(t0_ns))//1000)
-  return du/dt_us*100.0
-
-t0_ns=${t0_ns}
-t1_ns=${t1_ns}
-crit_pct=pct(${crit_u0},${crit_u1},t0_ns,t1_ns)
-best_pct=pct(${best_u0},${best_u1},t0_ns,t1_ns)
-print("## Phase B - cgroup cpu.stat")
-print("")
-print(f\"- fi_critical cpu%: {crit_pct:.1f}%\")
-print(f\"- fi_best cpu%: {best_pct:.1f}%\")
-print("")
-PY
+          PYTHONPYCACHEPREFIX=tmp/pycache \
+          python3 scripts/perf_pr_wide_mqtt_cgroup_summary.py \
+            --summary-path "${GITHUB_STEP_SUMMARY}" \
+            --phase B \
+            --t0-ns "${t0_ns}" \
+            --t1-ns "${t1_ns}" \
+            --row fi_critical "${CG_FI_CRITICAL}" "${crit_u0}" "${crit_u1}" \
+            --row fi_best "${CG_FI_BEST}" "${best_u0}" "${best_u1}"
 
       - name: Render report (phase A - fi_critical)
         if: always()
