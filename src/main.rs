@@ -36,119 +36,56 @@ impl WorkerCliArgs {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--worker") {
         let worker_args = WorkerCliArgs::parse(args)?;
-        let mut cfg = veloflux::config::AppConfig::load_required(&worker_args.config_path)?;
-        let spec = cfg
-            .server
-            .extra_flow_instances
-            .iter()
-            .find(|spec| spec.id.trim() == worker_args.instance_id.as_str())
-            .ok_or_else(|| {
-                format!(
-                    "worker instance {} is not declared in config server.extra_flow_instances",
-                    worker_args.instance_id
-                )
-            })?
-            .clone();
-
-        match cfg.logging.output {
-            veloflux::config::LoggingOutput::File => {
-                cfg.logging.file.dir = std::path::Path::new(&cfg.logging.file.dir)
-                    .join(worker_args.instance_id.as_str())
-                    .to_string_lossy()
-                    .to_string();
-            }
-            veloflux::config::LoggingOutput::Stdout => {}
-        }
-
-        let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
-        if let Some(path) = spec.cgroup_path.as_deref() {
-            match veloflux::cgroup::join_current_process(path) {
-                Ok(()) => {
-                    tracing::info!(
-                        flow_instance_id = %worker_args.instance_id,
-                        pid = std::process::id(),
-                        cgroup_path = %path,
-                        reason = "worker process joined target cgroup (pre-runtime single-thread stage)",
-                        "flow instance bound to cgroup"
-                    );
-                }
-                Err(err) => {
-                    tracing::error!(
-                        flow_instance_id = %worker_args.instance_id,
-                        pid = std::process::id(),
-                        cgroup_path = %path,
-                        reason = %err,
-                        cgroup_snapshot = %veloflux::cgroup::debug_snapshot(path),
-                        "failed to bind flow instance to cgroup"
-                    );
-                    return Err(err);
-                }
-            }
-        }
-
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
-        return rt.block_on(async move {
-            let _logging_guard = logging_guard;
-            run_worker(worker_args, cfg, spec).await
-        });
+        return run_worker(worker_args).await;
     }
 
-    let bootstrap = veloflux::bootstrap::default_init_options()?;
-    let _logging_guard = bootstrap.logging_guard;
-
-    if let Some(path) = bootstrap.options.default_cgroup_path.as_deref() {
-        match veloflux::cgroup::join_current_process(path) {
-            Ok(()) => {
-                tracing::info!(
-                    flow_instance_id = "default",
-                    pid = std::process::id(),
-                    cgroup_path = %path,
-                    reason = "manager process joined target cgroup (pre-runtime single-thread stage)",
-                    "flow instance bound to cgroup"
-                );
-            }
-            Err(err) => {
-                tracing::error!(
-                    flow_instance_id = "default",
-                    pid = std::process::id(),
-                    cgroup_path = %path,
-                    reason = %err,
-                    cgroup_snapshot = %veloflux::cgroup::debug_snapshot(path),
-                    "failed to bind flow instance to cgroup"
-                );
-                return Err(err);
-            }
-        }
-    }
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let options = bootstrap.options;
-    rt.block_on(async move {
-        let instance = server::prepare_registry();
-        let ctx = server::init(options, instance).await?;
-        server::start(ctx).await
-    })
+    let result = veloflux::bootstrap::default_init()?;
+    let _logging_guard = result.logging_guard;
+    let ctx = server::init(result.options, result.instance).await?;
+    server::start(ctx).await
 }
 
 async fn run_worker(
     worker_args: WorkerCliArgs,
-    cfg: veloflux::config::AppConfig,
-    spec: manager::FlowInstanceSpec,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let instance_id = worker_args.instance_id;
+    let config_path = worker_args.config_path;
 
     flow::init_process_once();
     flow::metrics::set_flow_instance_id(&instance_id);
     #[cfg(feature = "metrics")]
     telemetry::set_flow_instance_id(&instance_id);
+    let mut cfg = veloflux::config::AppConfig::load_required(&config_path)?;
+
+    let spec = cfg
+        .server
+        .extra_flow_instances
+        .iter()
+        .find(|spec| spec.id.trim() == instance_id)
+        .ok_or_else(|| {
+            format!(
+                "worker instance {instance_id} is not declared in config server.extra_flow_instances"
+            )
+        })?
+        .clone();
+
+    match cfg.logging.output {
+        veloflux::config::LoggingOutput::File => {
+            cfg.logging.file.dir = std::path::Path::new(&cfg.logging.file.dir)
+                .join(instance_id.as_str())
+                .to_string_lossy()
+                .to_string();
+        }
+        veloflux::config::LoggingOutput::Stdout => {}
+    }
+
+    let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
+    let _logging_guard = logging_guard;
 
     let worker_addr: std::net::SocketAddr = spec
         .worker_addr

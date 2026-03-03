@@ -24,7 +24,6 @@ scripts/perf_pr_host/config.macos.yaml
 
 Update these paths using `setup_cgroup.sh` output:
 
-- `server.default_cgroup_path`
 - `server.extra_flow_instances[0].cgroup_path`
 - `server.extra_flow_instances[1].cgroup_path`
 
@@ -50,7 +49,7 @@ CG_FI_CRITICAL=...
 CG_FI_BEST=...
 ```
 
-Use those values in your veloflux config (`default_cgroup_path` and `extra_flow_instances[].cgroup_path`).
+Use those values in your veloflux config (`extra_flow_instances[].cgroup_path`).
 
 ## 2) Deploy stream/pipeline
 
