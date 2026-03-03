@@ -133,6 +133,8 @@ impl Default for MetricsConfig {
 pub struct ServerConfig {
     pub manager_addr: Option<String>,
     pub default_cgroup_path: Option<String>,
+    pub startup_gate_path: Option<String>,
+    pub startup_gate_timeout_ms: Option<u64>,
     #[serde(default)]
     pub extra_flow_instances: Vec<FlowInstanceSpec>,
 }
@@ -142,6 +144,8 @@ impl Default for ServerConfig {
         Self {
             manager_addr: Some(crate::server::DEFAULT_MANAGER_ADDR.to_string()),
             default_cgroup_path: None,
+            startup_gate_path: None,
+            startup_gate_timeout_ms: None,
             extra_flow_instances: Vec::new(),
         }
     }
@@ -190,6 +194,12 @@ impl AppConfig {
         }
         if let Some(path) = self.server.default_cgroup_path.as_ref() {
             opts.default_cgroup_path = Some(path.clone());
+        }
+        if let Some(path) = self.server.startup_gate_path.as_ref() {
+            opts.startup_gate_path = Some(path.clone());
+        }
+        if let Some(timeout_ms) = self.server.startup_gate_timeout_ms {
+            opts.startup_gate_timeout_ms = Some(timeout_ms);
         }
         if !self.server.extra_flow_instances.is_empty() {
             opts.extra_flow_instances = self.server.extra_flow_instances.clone();

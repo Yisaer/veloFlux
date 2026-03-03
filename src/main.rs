@@ -4,13 +4,73 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use veloflux::server;
 
+#[derive(Debug, Clone)]
+struct WorkerCliArgs {
+    instance_id: String,
+    config_path: String,
+    startup_gate_dir: Option<String>,
+    startup_gate_timeout_ms: Option<u64>,
+}
+
+impl WorkerCliArgs {
+    fn parse(args: Vec<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let mut instance_id = None;
+        let mut config_path = None;
+        let mut startup_gate_dir = None;
+        let mut startup_gate_timeout_ms = None;
+        let mut it = args.into_iter().peekable();
+        while let Some(arg) = it.next() {
+            match arg.as_str() {
+                "--flow-instance-id" => {
+                    instance_id = it.next();
+                }
+                "--config" => {
+                    config_path = it.next();
+                }
+                "--startup-gate-dir" => {
+                    startup_gate_dir = it.next();
+                }
+                "--startup-gate-timeout-ms" => {
+                    if let Some(raw) = it.next() {
+                        let parsed = raw
+                            .parse::<u64>()
+                            .map_err(|_| format!("invalid --startup-gate-timeout-ms: {raw}"))?;
+                        startup_gate_timeout_ms = Some(parsed);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let instance_id = instance_id.ok_or("--flow-instance-id is required in --worker mode")?;
+        let config_path = config_path.ok_or("--config is required in --worker mode")?;
+        Ok(Self {
+            instance_id,
+            config_path,
+            startup_gate_dir,
+            startup_gate_timeout_ms,
+        })
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--worker") {
+        let worker_args = WorkerCliArgs::parse(args)?;
+        if let Some(run_dir) = worker_args.startup_gate_dir.as_deref() {
+            let timeout_ms = worker_args
+                .startup_gate_timeout_ms
+                .unwrap_or(veloflux::startup_gate::DEFAULT_STARTUP_GATE_TIMEOUT_MS);
+            veloflux::startup_gate::wait_until_ready(
+                run_dir,
+                &worker_args.instance_id,
+                timeout_ms,
+            )?;
+        }
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
-        return rt.block_on(run_worker(args));
+        return rt.block_on(run_worker(worker_args));
     }
 
     let result = veloflux::bootstrap::default_init()?;
@@ -51,24 +111,11 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     })
 }
 
-async fn run_worker(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut instance_id = None;
-    let mut config_path = None;
-    let mut it = args.into_iter().peekable();
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--flow-instance-id" => {
-                instance_id = it.next();
-            }
-            "--config" => {
-                config_path = it.next();
-            }
-            _ => {}
-        }
-    }
-
-    let instance_id = instance_id.ok_or("--flow-instance-id is required in --worker mode")?;
-    let config_path = config_path.ok_or("--config is required in --worker mode")?;
+async fn run_worker(
+    worker_args: WorkerCliArgs,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let instance_id = worker_args.instance_id;
+    let config_path = worker_args.config_path;
 
     flow::init_process_once();
     flow::metrics::set_flow_instance_id(&instance_id);

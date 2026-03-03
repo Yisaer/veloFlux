@@ -88,6 +88,10 @@ pub struct ServerOptions {
     pub extra_flow_instances: Vec<manager::FlowInstanceSpec>,
     /// Loaded config path (passed to worker subprocesses).
     pub config_path: Option<String>,
+    /// Optional startup gate base path for worker subprocess synchronization.
+    pub startup_gate_path: Option<String>,
+    /// Worker startup gate timeout in milliseconds.
+    pub startup_gate_timeout_ms: Option<u64>,
 }
 
 /// Runtime context returned by [`init`] and consumed by [`start`].
@@ -98,6 +102,8 @@ pub struct ServerContext {
     profiling_enabled: bool,
     extra_flow_instances: Vec<manager::FlowInstanceSpec>,
     config_path: Option<String>,
+    startup_gate_path: Option<String>,
+    startup_gate_timeout_ms: Option<u64>,
 }
 
 impl ServerContext {
@@ -131,6 +137,14 @@ impl ServerContext {
 
     fn config_path(&self) -> Option<&str> {
         self.config_path.as_deref()
+    }
+
+    fn startup_gate_path(&self) -> Option<&str> {
+        self.startup_gate_path.as_deref()
+    }
+
+    fn startup_gate_timeout_ms(&self) -> Option<u64> {
+        self.startup_gate_timeout_ms
     }
 }
 
@@ -175,6 +189,8 @@ pub async fn init(
         profiling_enabled,
         extra_flow_instances: opts.extra_flow_instances,
         config_path: opts.config_path,
+        startup_gate_path: opts.startup_gate_path,
+        startup_gate_timeout_ms: opts.startup_gate_timeout_ms,
     })
 }
 
@@ -182,9 +198,16 @@ pub async fn init(
 pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let extra_instances = ctx.extra_flow_instances().to_vec();
     let config_path = ctx.config_path().map(|s| s.to_string());
+    let startup_gate_path = ctx.startup_gate_path().map(|s| s.to_string());
+    let startup_gate_timeout_ms = ctx.startup_gate_timeout_ms();
     let (instance, storage, manager_addr, _profiling_enabled) = ctx.into_parts();
-    let (worker_endpoints, mut worker_children) =
-        spawn_flow_workers(&extra_instances, config_path.as_deref()).await?;
+    let (worker_endpoints, mut worker_children, startup_gate_session) = spawn_flow_workers(
+        &extra_instances,
+        config_path.as_deref(),
+        startup_gate_path.as_deref(),
+        startup_gate_timeout_ms,
+    )
+    .await?;
     tracing::info!(manager_addr = %manager_addr, "starting manager");
     let manager_future = manager::start_server(
         manager_addr.clone(),
@@ -214,12 +237,16 @@ pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error +
     for child in &mut worker_children {
         let _ = child.wait();
     }
+    if let Some(session) = startup_gate_session.as_ref() {
+        session.cleanup();
+    }
 
     result
 }
 
 type FlowWorkerEndpoints = Vec<(String, String)>;
 type FlowWorkerChildren = Vec<std::process::Child>;
+type StartupGateSession = crate::startup_gate::StartupGateSession;
 
 fn forward_worker_output(
     instance_id: String,
@@ -257,9 +284,18 @@ fn forward_worker_output(
 async fn spawn_flow_workers(
     extra_instances: &[manager::FlowInstanceSpec],
     config_path: Option<&str>,
-) -> Result<(FlowWorkerEndpoints, FlowWorkerChildren), Box<dyn std::error::Error + Send + Sync>> {
+    startup_gate_path: Option<&str>,
+    startup_gate_timeout_ms: Option<u64>,
+) -> Result<
+    (
+        FlowWorkerEndpoints,
+        FlowWorkerChildren,
+        Option<StartupGateSession>,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
     if extra_instances.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), None));
     }
     let config_path =
         config_path.ok_or("extra_flow_instances configured but --config not provided")?;
@@ -337,6 +373,34 @@ async fn spawn_flow_workers(
         });
     }
 
+    let has_worker_cgroup_binding = parsed.iter().any(|spec| {
+        spec.cgroup_path
+            .as_deref()
+            .map(|path| !path.trim().is_empty())
+            .unwrap_or(false)
+    });
+    let startup_gate_session = if has_worker_cgroup_binding {
+        if let Some(path) = startup_gate_path {
+            let session = StartupGateSession::create(path, startup_gate_timeout_ms)?;
+            tracing::info!(
+                startup_gate_base = %path,
+                startup_gate_run_dir = %session.run_dir().display(),
+                startup_gate_timeout_ms = session.timeout_ms(),
+                "startup gate enabled for worker subprocesses"
+            );
+            Some(session)
+        } else {
+            None
+        }
+    } else {
+        if startup_gate_path.is_some() {
+            tracing::info!(
+                "startup gate skipped because no extra flow instance declares cgroup_path"
+            );
+        }
+        None
+    };
+
     let mut endpoints: FlowWorkerEndpoints = Vec::with_capacity(parsed.len());
     let mut children: FlowWorkerChildren = Vec::with_capacity(parsed.len());
     for spec in parsed {
@@ -357,12 +421,21 @@ async fn spawn_flow_workers(
             .arg(config_path)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        if let Some(session) = startup_gate_session.as_ref() {
+            cmd.arg("--startup-gate-dir")
+                .arg(session.run_dir())
+                .arg("--startup-gate-timeout-ms")
+                .arg(session.timeout_ms().to_string());
+        }
 
         let mut child = cmd.spawn()?;
         let pid = child.id();
 
         if let Some(path) = spec.cgroup_path.as_deref() {
             if let Err(err) = crate::cgroup::join_pid(pid, path) {
+                if let Some(session) = startup_gate_session.as_ref() {
+                    let _ = session.mark_failed(&spec.id, &format!("cgroup bind failed: {err}"));
+                }
                 tracing::error!(
                     flow_instance_id = %spec.id,
                     pid = pid,
@@ -377,6 +450,9 @@ async fn spawn_flow_workers(
                     let _ = prior.kill();
                     let _ = prior.wait();
                 }
+                if let Some(session) = startup_gate_session.as_ref() {
+                    session.cleanup();
+                }
                 return Err(format!(
                     "failed to bind worker {} (pid {}) to cgroup {}: {}",
                     spec.id, pid, path, err
@@ -390,6 +466,29 @@ async fn spawn_flow_workers(
                 reason = "manager process joined worker pid to target cgroup",
                 "worker bound to cgroup"
             );
+        }
+        if let Some(session) = startup_gate_session.as_ref() {
+            if let Err(err) = session.mark_ready(&spec.id) {
+                tracing::error!(
+                    flow_instance_id = %spec.id,
+                    pid = pid,
+                    reason = %err,
+                    startup_gate_run_dir = %session.run_dir().display(),
+                    "failed to mark startup gate ready"
+                );
+                let _ = child.kill();
+                let _ = child.wait();
+                for mut prior in children {
+                    let _ = prior.kill();
+                    let _ = prior.wait();
+                }
+                session.cleanup();
+                return Err(format!(
+                    "failed to mark startup gate ready for worker {}: {}",
+                    spec.id, err
+                )
+                .into());
+            }
         }
 
         endpoints.push((spec.id.to_string(), format!("http://{}", spec.worker_addr)));
@@ -416,6 +515,9 @@ async fn spawn_flow_workers(
                             let _ = prior.kill();
                             let _ = prior.wait();
                         }
+                        if let Some(session) = startup_gate_session.as_ref() {
+                            session.cleanup();
+                        }
                         return Err(format!("worker {} exited early: {status}", spec.id).into());
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -428,6 +530,9 @@ async fn spawn_flow_workers(
             for mut prior in children {
                 let _ = prior.kill();
                 let _ = prior.wait();
+            }
+            if let Some(session) = startup_gate_session.as_ref() {
+                session.cleanup();
             }
             return Err(format!(
                 "worker {} did not become ready on {}",
@@ -445,7 +550,7 @@ async fn spawn_flow_workers(
         children.push(child);
     }
 
-    Ok((endpoints, children))
+    Ok((endpoints, children, startup_gate_session))
 }
 
 #[cfg(all(feature = "allocator-jemalloc", not(target_env = "msvc")))]
