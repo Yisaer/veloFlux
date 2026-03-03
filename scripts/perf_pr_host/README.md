@@ -22,11 +22,6 @@ Update these paths using `setup_cgroup.sh` output:
 - `server.extra_flow_instances[0].cgroup_path`
 - `server.extra_flow_instances[1].cgroup_path`
 
-For startup synchronization between manager and worker processes, set:
-
-- `server.startup_gate_path` (recommended: `/tmp/veloflux-startup-gate`)
-- `server.startup_gate_timeout_ms` (example: `15000`)
-
 ## 1) Setup cgroup
 
 ```bash

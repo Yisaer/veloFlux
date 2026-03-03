@@ -27,8 +27,6 @@ server:
   # Example:
   #   CG_MANAGER=/veloflux-ci/perf-pr-host-001/veloflux/manager
   default_cgroup_path: "/veloflux-ci/perf-pr-host-001/veloflux/manager"
-  startup_gate_path: "/tmp/veloflux-startup-gate"
-  startup_gate_timeout_ms: 15000
 
   extra_flow_instances:
     - id: "fi_critical"
