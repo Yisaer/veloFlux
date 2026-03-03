@@ -83,32 +83,193 @@ CG_MANAGER="${CG_BASE}/manager"
 CG_FI_CRITICAL="${CG_BASE}/fi_critical"
 CG_FI_BEST="${CG_BASE}/fi_best"
 
-enable_cpu_controller() {
-  local cgfs="$1"
-  local st="${cgfs}/cgroup.subtree_control"
-  if [ -f "${st}" ] && ! grep -qw cpu "${st}"; then
-    echo "+cpu" > "${st}" || true
+move_procs_to_root_if_any() {
+  local cg="$1"
+  local procs="/sys/fs/cgroup${cg}/cgroup.procs"
+  if [ ! -f "${procs}" ]; then
+    return 0
+  fi
+  local moved=0
+  while read -r pid; do
+    [ -z "${pid}" ] && continue
+    if echo "${pid}" > /sys/fs/cgroup/cgroup.procs 2>/dev/null; then
+      moved=$((moved + 1))
+    fi
+  done < "${procs}"
+  if [ "${moved}" -gt 0 ]; then
+    echo "[setup] moved ${moved} pid(s) from ${cg} to /sys/fs/cgroup"
   fi
 }
 
+remove_cgroup_dir_if_possible() {
+  local cg="$1"
+  if rmdir "/sys/fs/cgroup${cg}" 2>/dev/null; then
+    echo "[setup] removed stale ${cg}"
+  fi
+}
+
+cleanup_descendants_if_any() {
+  local root="/sys/fs/cgroup${CG_BASE}"
+  if [ ! -d "${root}" ]; then
+    return 0
+  fi
+  while IFS= read -r cgfs; do
+    local cg="${cgfs#/sys/fs/cgroup}"
+    move_procs_to_root_if_any "${cg}"
+    remove_cgroup_dir_if_possible "${cg}"
+  done < <(find "${root}" -mindepth 1 -type d | sort -r)
+}
+
+disable_all_subtree_controllers() {
+  local cgfs="$1"
+  local st="${cgfs}/cgroup.subtree_control"
+  if [ ! -f "${st}" ]; then
+    return 0
+  fi
+  local controllers
+  controllers="$(tr ' ' '\n' < "${st}" | sed '/^$/d' || true)"
+  if [ -z "${controllers}" ]; then
+    return 0
+  fi
+  while read -r ctrl; do
+    [ -z "${ctrl}" ] && continue
+    echo "-${ctrl}" > "${st}" 2>/dev/null || true
+  done <<< "${controllers}"
+}
+
+init_cpuset_if_available() {
+  local cgfs="$1"
+  local parentfs="$2"
+
+  local mems_file="${cgfs}/cpuset.mems"
+  local cpus_file="${cgfs}/cpuset.cpus"
+  local parent_mems_eff="${parentfs}/cpuset.mems.effective"
+  local parent_cpus_eff="${parentfs}/cpuset.cpus.effective"
+
+  if [ -f "${mems_file}" ]; then
+    local mems
+    mems="$(cat "${mems_file}" 2>/dev/null || true)"
+    if [ -z "${mems}" ] && [ -f "${parent_mems_eff}" ]; then
+      local v
+      v="$(cat "${parent_mems_eff}" 2>/dev/null || true)"
+      if [ -n "${v}" ]; then
+        echo "${v}" > "${mems_file}" 2>/dev/null || true
+      fi
+    fi
+  fi
+
+  if [ -f "${cpus_file}" ]; then
+    local cpus
+    cpus="$(cat "${cpus_file}" 2>/dev/null || true)"
+    if [ -z "${cpus}" ] && [ -f "${parent_cpus_eff}" ]; then
+      local v
+      v="$(cat "${parent_cpus_eff}" 2>/dev/null || true)"
+      if [ -n "${v}" ]; then
+        echo "${v}" > "${cpus_file}" 2>/dev/null || true
+      fi
+    fi
+  fi
+}
+
+prepare_leaf_cgroup() {
+  local cg="$1"
+  local cgfs="/sys/fs/cgroup${cg}"
+  mkdir -p "${cgfs}"
+  while IFS= read -r child; do
+    local child_cg="${child#/sys/fs/cgroup}"
+    move_procs_to_root_if_any "${child_cg}"
+    remove_cgroup_dir_if_possible "${child_cg}"
+  done < <(find "${cgfs}" -mindepth 1 -type d | sort -r)
+  move_procs_to_root_if_any "${cg}"
+  disable_all_subtree_controllers "${cgfs}"
+  local parentfs
+  parentfs="$(dirname "${cgfs}")"
+  init_cpuset_if_available "${cgfs}" "${parentfs}"
+  echo "[setup] prepared leaf ${cg}"
+}
+
+echo "[setup] target cgroups:"
+echo "[setup]   ${CG_BASE}"
+echo "[setup]   ${CG_MANAGER}"
+echo "[setup]   ${CG_FI_CRITICAL}"
+echo "[setup]   ${CG_FI_BEST}"
+
+enable_cpu_controller() {
+  local cgfs="$1"
+  local ctrls="${cgfs}/cgroup.controllers"
+  local st="${cgfs}/cgroup.subtree_control"
+
+  if [ ! -f "${ctrls}" ]; then
+    echo "[setup] missing ${ctrls}" >&2
+    exit 1
+  fi
+  if ! grep -qw cpu "${ctrls}"; then
+    echo "[setup] cpu controller is not available in ${cgfs}; check parent delegation" >&2
+    exit 1
+  fi
+  if [ -f "${st}" ] && ! grep -qw cpu "${st}"; then
+    if ! echo "+cpu" > "${st}" 2>/dev/null; then
+      # Retry once after moving tasks out (no-internal-process constraint).
+      local cg="${cgfs#/sys/fs/cgroup}"
+      move_procs_to_root_if_any "${cg}"
+      if ! echo "+cpu" > "${st}" 2>/dev/null; then
+        echo "[setup] failed to enable +cpu in ${st}" >&2
+        exit 1
+      fi
+    fi
+  fi
+}
+
+# Best-effort reset of stale tree so rerun can converge.
+if [ -d "/sys/fs/cgroup${CG_BASE}" ]; then
+  echo "[setup] detected existing tree, cleanup stale cgroups before setup"
+  cleanup_descendants_if_any
+  move_procs_to_root_if_any "${CG_MANAGER}"
+  move_procs_to_root_if_any "${CG_FI_CRITICAL}"
+  move_procs_to_root_if_any "${CG_FI_BEST}"
+  move_procs_to_root_if_any "${CG_BASE}"
+  remove_cgroup_dir_if_possible "${CG_MANAGER}"
+  remove_cgroup_dir_if_possible "${CG_FI_CRITICAL}"
+  remove_cgroup_dir_if_possible "${CG_FI_BEST}"
+  remove_cgroup_dir_if_possible "${CG_BASE}"
+fi
+
+# cgroup v2 needs controller delegation step-by-step:
+# parent.cgroup.subtree_control must include +cpu before child can use cpu controller.
 enable_cpu_controller "/sys/fs/cgroup"
 
-mkdir -p "/sys/fs/cgroup${CG_BASE}"
-enable_cpu_controller "/sys/fs/cgroup${CG_BASE}"
+CURRENT="/sys/fs/cgroup"
+BASE_TRIMMED="${CG_BASE#/}"
+IFS='/' read -r -a BASE_PARTS <<< "${BASE_TRIMMED}"
+for part in "${BASE_PARTS[@]}"; do
+  local_prev="${CURRENT}"
+  CURRENT="${CURRENT}/${part}"
+  mkdir -p "${CURRENT}"
+  init_cpuset_if_available "${CURRENT}" "${local_prev}"
+  enable_cpu_controller "${CURRENT}"
+  echo "[setup] ensured ${CURRENT#/sys/fs/cgroup}"
+done
 
 echo "${BASE_MAX_QUOTA_US} ${BASE_MAX_PERIOD_US}" > "/sys/fs/cgroup${CG_BASE}/cpu.max"
+echo "[setup] set ${CG_BASE}/cpu.max = $(cat "/sys/fs/cgroup${CG_BASE}/cpu.max")"
 
-mkdir -p "/sys/fs/cgroup${CG_MANAGER}" "/sys/fs/cgroup${CG_FI_CRITICAL}" "/sys/fs/cgroup${CG_FI_BEST}"
+prepare_leaf_cgroup "${CG_MANAGER}"
+prepare_leaf_cgroup "${CG_FI_CRITICAL}"
+prepare_leaf_cgroup "${CG_FI_BEST}"
 
 echo "${CRITICAL_MAX_QUOTA_US} ${CRITICAL_MAX_PERIOD_US}" > "/sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max"
 echo "${MANAGER_WEIGHT}" > "/sys/fs/cgroup${CG_MANAGER}/cpu.weight"
 echo "${BEST_WEIGHT}" > "/sys/fs/cgroup${CG_FI_BEST}/cpu.weight"
+echo "[setup] set ${CG_FI_CRITICAL}/cpu.max = $(cat "/sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max")"
+echo "[setup] set ${CG_MANAGER}/cpu.weight = $(cat "/sys/fs/cgroup${CG_MANAGER}/cpu.weight")"
+echo "[setup] set ${CG_FI_BEST}/cpu.weight = $(cat "/sys/fs/cgroup${CG_FI_BEST}/cpu.weight")"
 
 # Allow the invoking user to join cgroups (veloflux does the join itself at runtime).
 OWNER_UID="${SUDO_UID:-0}"
 OWNER_GID="${SUDO_GID:-0}"
 chown -R "${OWNER_UID}:${OWNER_GID}" "/sys/fs/cgroup${CG_BASE}"
 chmod -R ug+rwX "/sys/fs/cgroup${CG_BASE}"
+echo "[setup] set ownership to ${OWNER_UID}:${OWNER_GID} on ${CG_BASE}"
 
 cat <<EOF
 CG_BASE=${CG_BASE}
@@ -116,4 +277,3 @@ CG_MANAGER=${CG_MANAGER}
 CG_FI_CRITICAL=${CG_FI_CRITICAL}
 CG_FI_BEST=${CG_FI_BEST}
 EOF
-
