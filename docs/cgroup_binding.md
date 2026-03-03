@@ -1,103 +1,78 @@
-# cgroup Binding and Startup Gate Synchronization
+# cgroup Binding in Multi-FlowInstance Mode
 
 ## Purpose
 
-This document explains how veloFlux binds FlowInstance processes to Linux cgroup v2 paths and how
-the startup gate coordinates Manager/worker startup order.
+This document describes how veloFlux binds processes to Linux cgroup v2 paths when
+`server.extra_flow_instances` is enabled.
 
-The goals are:
+Current design goals:
 
-- keep CPU isolation deterministic at process level
-- avoid worker runtime initialization before cgroup binding is complete
-- provide explicit failure signals and logs for operations/debugging
+- keep cgroup ownership logic simple and local to each process
+- avoid cross-process startup synchronization files
+- make binding success/failure observable in process logs
 
 ## Configuration
 
 All fields are under `server`:
 
 - `default_cgroup_path`  
-  Optional cgroup v2 path for the in-process default FlowInstance (Manager process).
+  Optional cgroup path for the main process (`flow_instance_id=default`).
 - `extra_flow_instances[].cgroup_path`  
-  Optional cgroup v2 path per worker subprocess.
-- `startup_gate_path`  
-  Optional base directory for startup gate marker files.
-- `startup_gate_timeout_ms`  
-  Optional worker wait timeout for gate readiness.
+  Optional cgroup path for each worker subprocess.
 
-## Effective Enablement Rules
+If a cgroup path is not configured, that process skips cgroup binding.
 
-- Manager default-instance binding runs only when `default_cgroup_path` is configured.
-- Worker cgroup binding runs per instance only when that instance has `cgroup_path`.
-- Startup gate is enabled only if:
-  - at least one extra instance has a non-empty `cgroup_path`, and
-  - `startup_gate_path` is configured.
-- If no extra instance declares `cgroup_path`, startup gate is skipped.
+## Binding Sequence
 
-## Startup Sequence
+### 1) Main process (`default`)
 
-### 1) Manager (`default`) pre-runtime bind
+The main process binds itself to `default_cgroup_path` before creating its Tokio runtime.
 
-Before creating the Tokio runtime, the main process tries to join `default_cgroup_path`.
+- success: logs a single `flow instance bound to cgroup` record
+- failure: logs reason + cgroup snapshot, then exits startup
 
-- success: logs one `flow instance bound to cgroup` record
-- failure: logs reason + cgroup snapshot and exits startup
+### 2) Worker subprocesses (`extra_flow_instances`)
 
-This keeps the Manager binding attempt in a pre-runtime stage.
+Each worker process performs self-binding during worker bootstrap:
 
-### 2) Worker spawn and gate-controlled startup
+1. worker loads config and resolves its own `FlowInstanceSpec`
+2. worker initializes logging
+3. worker binds **its own PID** to `spec.cgroup_path` (if configured)
+4. worker creates Tokio runtime and starts worker server
 
-For each `extra_flow_instances` entry (serially):
+If worker binding fails, worker exits immediately with error, and Manager treats it as early worker
+exit during readiness checks.
 
-1. Manager spawns worker process (`--worker ...`).
-2. If configured, Manager binds worker PID to `cgroup_path`.
-3. If startup gate is enabled:
-   - on bind success: Manager writes `<instance>.ready`
-   - on bind failure: Manager writes `<instance>.fail`, kills workers, returns error
-4. Worker process waits for gate readiness before creating its runtime and listeners:
-   - sees `.ready` -> continue startup
-   - sees `.fail` -> exit with failure
-   - timeout -> exit with failure
+## Why No Startup Gate
 
-This guarantees worker runtime init happens only after Manager-side binding succeeds.
+Startup gate synchronization files are removed in this design.
 
-## Startup Gate Details
+Reason:
 
-- Manager creates a per-run gate directory under `startup_gate_path` (for example:
-  `boot-<pid>-<timestamp_ms>`).
-- Marker writes are atomic (tmp file + rename).
-- Marker naming:
-  - ready: `<instance>.ready`
-  - fail: `<instance>.fail`
-- On gate session creation, stale entries under `startup_gate_path` are removed best-effort.
-- On Manager shutdown (normal path), the per-run gate directory is removed best-effort.
+- worker self-binding removes Manager-side PID migration timing concerns
+- startup logic is simpler (no ready/fail marker lifecycle)
+- failure ownership is explicit (worker fails in worker log)
 
-## Failure Behavior
+## cgroup Join Behavior
 
-If any worker bind/gate step fails:
+`join_pid` behavior:
 
-- current worker is terminated
-- previously started workers are terminated
-- startup returns error to Manager bootstrap path
+- validates cgroup path format (`/...`, no parent traversal)
+- if process is already in target cgroup (`/proc/<pid>/cgroup`), returns success (no-op)
+- writes PID into `cgroup.procs`
+- if `cgroup.procs` returns `EINVAL`, falls back to `cgroup.threads`
 
-This keeps startup behavior fail-fast and avoids partial multi-instance availability.
+On failure, logs include cgroup snapshot fields for diagnosis:
 
-## cgroup Join Implementation Notes
+- `cgroup.type`
+- `cgroup.subtree_control`
+- `cpu.max`
+- `cpuset.*`
 
-- `join_pid` validates cgroup path format (`/...`, no parent traversal).
-- If target cgroup already matches `/proc/<pid>/cgroup`, the join is treated as no-op success.
-- Primary write target is `cgroup.procs`.
-- If `cgroup.procs` write returns `EINVAL`, code attempts fallback via `cgroup.threads`.
-- Failure logs include a cgroup snapshot (`cgroup.type`, `cgroup.subtree_control`, `cpu.max`,
-  and `cpuset.*`) for root-cause diagnosis.
+## Operational Notes
 
-## Operational Guidance
-
-- Prepare cgroup tree/controller delegation before starting veloFlux.
-- Use startup logs to verify:
-  - default Manager bind
-  - per-worker bind result
-  - gate enabled/disabled reason
-- If startup fails, inspect:
-  - cgroup path existence and type (domain/leaf)
-  - controller delegation (`cpu` in relevant subtree controls)
-  - gate directory permission and timeout settings
+- cgroup tree and controller delegation must be prepared before starting veloFlux.
+- worker cgroup path permissions must allow the worker process to write `cgroup.procs` (or
+  `cgroup.threads` fallback).
+- stream/pipeline workload isolation verification should use per-instance output QPS and CPU usage
+  from Prometheus/Grafana.

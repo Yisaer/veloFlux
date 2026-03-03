@@ -12,5 +12,4 @@ pub mod cgroup;
 pub mod config;
 pub mod logging;
 pub mod server;
-pub mod startup_gate;
 pub use manager::{register_schema, schema_registry, SchemaParser};
