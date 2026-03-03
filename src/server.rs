@@ -71,6 +71,9 @@ pub struct ServerOptions {
     pub profiling_enabled: Option<bool>,
     /// Custom data directory for storage; if None, uses DEFAULT_DATA_DIR.
     pub data_dir: Option<String>,
+    /// Cgroup v2 path (relative to /sys/fs/cgroup) for binding the Manager process
+    /// (FlowInstance id=default) to a pre-configured CPU group.
+    pub default_cgroup_path: Option<String>,
     /// Manager listen address; if None, uses default.
     pub manager_addr: Option<String>,
     /// Profiling server bind address (feature-gated); if None, uses default.
@@ -141,6 +144,12 @@ pub async fn init(
     #[cfg(feature = "metrics")]
     telemetry::set_flow_instance_id("default");
     log_allocator();
+
+    if let Some(path) = opts.default_cgroup_path.as_deref() {
+        crate::cgroup::join_current_process(path)?;
+        tracing::info!(cgroup_path = %path, "joined cgroup");
+    }
+
     let profiling_enabled = opts.profiling_enabled.unwrap_or(false);
     if profiling_enabled {
         ensure_jemalloc_profiling();
@@ -267,6 +276,7 @@ async fn spawn_flow_workers(
         worker_addr: std::net::SocketAddr,
         metrics_addr: std::net::SocketAddr,
         profile_addr: std::net::SocketAddr,
+        cgroup_path: Option<String>,
     }
 
     let mut seen_ids = std::collections::HashSet::new();
@@ -328,6 +338,7 @@ async fn spawn_flow_workers(
             worker_addr,
             metrics_addr,
             profile_addr,
+            cgroup_path: spec.cgroup_path.clone(),
         });
     }
 
@@ -339,6 +350,7 @@ async fn spawn_flow_workers(
             worker_addr = %spec.worker_addr,
             metrics_addr = %spec.metrics_addr,
             profile_addr = %spec.profile_addr,
+            cgroup_path = ?spec.cgroup_path,
             "spawning flow worker"
         );
 
@@ -353,6 +365,29 @@ async fn spawn_flow_workers(
 
         let mut child = cmd.spawn()?;
         let pid = child.id();
+
+        if let Some(path) = spec.cgroup_path.as_deref() {
+            if let Err(err) = crate::cgroup::join_pid(pid, path) {
+                let _ = child.kill();
+                let _ = child.wait();
+                for mut prior in children {
+                    let _ = prior.kill();
+                    let _ = prior.wait();
+                }
+                return Err(format!(
+                    "failed to bind worker {} (pid {}) to cgroup {}: {}",
+                    spec.id, pid, path, err
+                )
+                .into());
+            }
+            tracing::info!(
+                flow_instance_id = %spec.id,
+                pid = ?pid,
+                cgroup_path = %path,
+                "worker bound to cgroup"
+            );
+        }
+
         endpoints.push((spec.id.to_string(), format!("http://{}", spec.worker_addr)));
 
         if let Some(stdout) = child.stdout.take() {

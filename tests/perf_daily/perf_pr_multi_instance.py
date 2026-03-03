@@ -32,13 +32,14 @@ def extract_openmetrics_block_multi_instance(
     instance: str,
     include_meta: bool,
 ) -> str:
+    tracked = set(perf_daily.TRACKED_METRICS) | {"processor_records_out_total"}
     out_lines: List[str] = []
     for line in text.splitlines():
         if not line:
             continue
         if include_meta and (line.startswith("# HELP ") or line.startswith("# TYPE ")):
             parts = line.split(" ", 3)
-            if len(parts) >= 3 and parts[2] in perf_daily.TRACKED_METRICS:
+            if len(parts) >= 3 and parts[2] in tracked:
                 out_lines.append(line)
             continue
 
@@ -47,11 +48,13 @@ def extract_openmetrics_block_multi_instance(
             continue
 
         name = m.group(1)
-        if name not in perf_daily.TRACKED_METRICS:
+        if name not in tracked:
             continue
 
         labels = perf_daily._ensure_instance_label(m.group(2), instance=instance)
         if name == "processor_records_in_total" and not _labels_have_kv(labels, "kind", "datasource"):
+            continue
+        if name == "processor_records_out_total" and not _labels_have_kv(labels, "kind", "result_collect"):
             continue
         value = m.group(3)
         out_lines.append(f"{name}{labels} {value} {ts_ms}")
@@ -138,74 +141,87 @@ def create_pipeline_body(pipeline_id: str, sql: str, flow_instance_id: Optional[
 def provision_two_pipelines(
     base_url: str,
     timeout_secs: float,
-    stream_name: str,
-    pipeline_id_default: str,
-    pipeline_id_extra: str,
-    extra_instance_id: str,
+    stream_name_critical: str,
+    stream_name_best: str,
+    pipeline_id_critical: str,
+    pipeline_id_best: str,
+    critical_instance_id: str,
+    best_instance_id: str,
     columns: int,
     broker_url: str,
-    topic: str,
+    topic_critical: str,
+    topic_best: str,
     qos: int,
     force: bool,
     no_start: bool,
     sql_mode: str,
 ) -> None:
     client = perf_daily.Client(base_url, timeout_secs)
-    sql = perf_daily.build_select_sql_by_mode(stream_name, columns, sql_mode=sql_mode)
-    stream_req = perf_daily.create_stream_body(stream_name, columns, broker_url, topic, qos)
+    sql_critical = perf_daily.build_select_sql_by_mode(stream_name_critical, columns, sql_mode=sql_mode)
+    sql_best = perf_daily.build_select_sql_by_mode(stream_name_best, columns, sql_mode=sql_mode)
+    stream_critical_req = perf_daily.create_stream_body(stream_name_critical, columns, broker_url, topic_critical, qos)
+    stream_best_req = perf_daily.create_stream_body(stream_name_best, columns, broker_url, topic_best, qos)
 
     if force:
         perf_daily.delete_all_pipelines(client)
 
     try:
-        client.request_json("POST", "/streams", stream_req)
+        client.request_json("POST", "/streams", stream_critical_req)
     except perf_daily.ApiError as e:
         if e.status_code != 409:
             raise
 
-    default_req = create_pipeline_body(pipeline_id_default, sql, flow_instance_id=None)
-    extra_req = create_pipeline_body(pipeline_id_extra, sql, flow_instance_id=extra_instance_id)
+    try:
+        client.request_json("POST", "/streams", stream_best_req)
+    except perf_daily.ApiError as e:
+        if e.status_code != 409:
+            raise
+
+    critical_req = create_pipeline_body(pipeline_id_critical, sql_critical, flow_instance_id=critical_instance_id)
+    best_req = create_pipeline_body(pipeline_id_best, sql_best, flow_instance_id=best_instance_id)
 
     perf_daily._ignore_not_found(
-        lambda: client.request_text("DELETE", f"/pipelines/{urllib.parse.quote(pipeline_id_default)}")
+        lambda: client.request_text("DELETE", f"/pipelines/{urllib.parse.quote(pipeline_id_critical)}")
     )
     perf_daily._ignore_not_found(
-        lambda: client.request_text("DELETE", f"/pipelines/{urllib.parse.quote(pipeline_id_extra)}")
+        lambda: client.request_text("DELETE", f"/pipelines/{urllib.parse.quote(pipeline_id_best)}")
     )
 
-    client.request_json("POST", "/pipelines", default_req)
-    client.request_json("POST", "/pipelines", extra_req)
+    client.request_json("POST", "/pipelines", critical_req)
+    client.request_json("POST", "/pipelines", best_req)
 
     if not no_start:
-        client.request_text("POST", f"/pipelines/{urllib.parse.quote(pipeline_id_default)}/start", None)
-        client.request_text("POST", f"/pipelines/{urllib.parse.quote(pipeline_id_extra)}/start", None)
+        client.request_text("POST", f"/pipelines/{urllib.parse.quote(pipeline_id_critical)}/start", None)
+        client.request_text("POST", f"/pipelines/{urllib.parse.quote(pipeline_id_best)}/start", None)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="PR perf scenario: Wide MQTT with 2 pipelines (default + extra worker)."
-    )
+    p = argparse.ArgumentParser(description="PR perf scenario: Wide MQTT with 2 pipelines (critical + best).")
     p.add_argument("--base-url", default="http://127.0.0.1:8080")
     p.add_argument("--timeout-secs", type=float, default=60.0)
 
-    p.add_argument("--stream-name", default=perf_daily.DEFAULT_STREAM_NAME)
-    p.add_argument("--pipeline-id-default", default="perf_pr_pipeline_default")
-    p.add_argument("--pipeline-id-extra", default="perf_pr_pipeline_extra")
-    p.add_argument("--extra-instance-id", default="fi_1")
+    p.add_argument("--stream-name-critical", default="perf_pr_stream_critical")
+    p.add_argument("--stream-name-best", default="perf_pr_stream_best")
+    p.add_argument("--pipeline-id-critical", default="perf_pr_pipeline_critical")
+    p.add_argument("--pipeline-id-best", default="perf_pr_pipeline_best")
+    p.add_argument("--critical-instance-id", default="fi_critical")
+    p.add_argument("--best-instance-id", default="fi_best")
     p.add_argument("--columns", type=int, default=15000)
     p.add_argument("--sql-mode", choices=("explicit", "star"), default="explicit")
 
     p.add_argument("--broker-url", default="tcp://127.0.0.1:1883")
-    p.add_argument("--topic", default="/perf/daily")
+    p.add_argument("--topic-critical", default="/perf/pr/critical")
+    p.add_argument("--topic-best", default="/perf/pr/best")
     p.add_argument("--qos", type=int, default=1)
 
     p.add_argument("--cases", type=int, default=20)
     p.add_argument("--str-len", type=int, default=10)
     p.add_argument("--duration-secs", type=int, default=120)
-    p.add_argument("--rate", type=int, default=25)
+    p.add_argument("--rate-critical", type=int, default=25)
+    p.add_argument("--rate-best", type=int, default=25)
 
-    p.add_argument("--metrics-url-default", default="http://127.0.0.1:9898/metrics")
-    p.add_argument("--metrics-url-extra", default="http://127.0.0.1:19891/metrics")
+    p.add_argument("--metrics-url-critical", default="http://127.0.0.1:19891/metrics")
+    p.add_argument("--metrics-url-best", default="http://127.0.0.1:19892/metrics")
     p.add_argument("--scrape-interval-ms", type=int, default=15000)
     p.add_argument("--out-dir", default="tmp/perf_pr_ci/out")
     p.add_argument("--no-metrics", action="store_true")
@@ -232,8 +248,10 @@ def main(argv: List[str]) -> int:
         raise PerfPrError("--str-len must be > 0")
     if args.duration_secs < 0:
         raise PerfPrError("--duration-secs must be >= 0")
-    if args.rate < 0:
-        raise PerfPrError("--rate must be >= 0")
+    if args.rate_critical < 0:
+        raise PerfPrError("--rate-critical must be >= 0")
+    if args.rate_best < 0:
+        raise PerfPrError("--rate-best must be >= 0")
     if args.qos != 1:
         raise PerfPrError("--qos must be 1 for publish (QoS1 only)")
 
@@ -245,13 +263,16 @@ def main(argv: List[str]) -> int:
         provision_two_pipelines(
             base_url=args.base_url,
             timeout_secs=args.timeout_secs,
-            stream_name=args.stream_name,
-            pipeline_id_default=args.pipeline_id_default,
-            pipeline_id_extra=args.pipeline_id_extra,
-            extra_instance_id=args.extra_instance_id,
+            stream_name_critical=args.stream_name_critical,
+            stream_name_best=args.stream_name_best,
+            pipeline_id_critical=args.pipeline_id_critical,
+            pipeline_id_best=args.pipeline_id_best,
+            critical_instance_id=args.critical_instance_id,
+            best_instance_id=args.best_instance_id,
             columns=args.columns,
             broker_url=args.broker_url,
-            topic=args.topic,
+            topic_critical=args.topic_critical,
+            topic_best=args.topic_best,
             qos=args.qos,
             force=args.force,
             no_start=args.no_start,
@@ -273,11 +294,11 @@ def main(argv: List[str]) -> int:
 
         publish_start_ts_ms = 0
         publish_end_ts_ms = 0
-        if args.command == "run" and not args.no_metrics:
+        if not args.no_metrics:
             dumper = MultiOpenMetricsDumper(
                 metrics_urls=[
-                    ("default", args.metrics_url_default),
-                    (args.extra_instance_id, args.metrics_url_extra),
+                    (args.critical_instance_id, args.metrics_url_critical),
+                    (args.best_instance_id, args.metrics_url_best),
                 ],
                 timeout_secs=args.timeout_secs,
                 interval_ms=args.scrape_interval_ms,
@@ -285,26 +306,63 @@ def main(argv: List[str]) -> int:
             )
             dumper.start()
 
-        pub = None
+        pubs: Dict[str, Any] = {}
+
+        def _pub_worker(label: str, topic: str, rate_per_sec: int) -> None:
+            try:
+                pubs[label] = publish_qos1_with_timing(
+                    broker_url=args.broker_url,
+                    topic=topic,
+                    payloads=payloads,
+                    duration_secs=args.duration_secs,
+                    rate_per_sec=rate_per_sec,
+                    client_id=f"perf-pr-{label}-{os.getpid()}",
+                    keepalive_secs=60,
+                )
+            except Exception as e:
+                pubs[label] = e
+
         try:
-            pub = publish_qos1_with_timing(
-                broker_url=args.broker_url,
-                topic=args.topic,
-                payloads=payloads,
-                duration_secs=args.duration_secs,
-                rate_per_sec=args.rate,
-                client_id=f"perf-pr-{os.getpid()}",
-                keepalive_secs=60,
-            )
-        except MqttError as e:
-            raise PerfPrError(str(e)) from None
+            threads = [
+                threading.Thread(
+                    target=_pub_worker,
+                    kwargs={
+                        "label": "critical",
+                        "topic": args.topic_critical,
+                        "rate_per_sec": args.rate_critical,
+                    },
+                    name="mqtt-pub-critical",
+                ),
+                threading.Thread(
+                    target=_pub_worker,
+                    kwargs={
+                        "label": "best",
+                        "topic": args.topic_best,
+                        "rate_per_sec": args.rate_best,
+                    },
+                    name="mqtt-pub-best",
+                ),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+            errors = [v for v in pubs.values() if isinstance(v, Exception)]
+            if errors:
+                # Prefer MQTT errors for more actionable messages.
+                mqtt_errs = [e for e in errors if isinstance(e, MqttError)]
+                if mqtt_errs:
+                    raise PerfPrError(str(mqtt_errs[0])) from None
+                raise PerfPrError(str(errors[0])) from None
         finally:
-            if pub is None:
+            results = [v for v in pubs.values() if hasattr(v, "start_ts_ms") and hasattr(v, "end_ts_ms")]
+            if not results:
                 publish_start_ts_ms = int(time.time() * 1000)
                 publish_end_ts_ms = publish_start_ts_ms
             else:
-                publish_start_ts_ms = pub.start_ts_ms
-                publish_end_ts_ms = pub.end_ts_ms
+                publish_start_ts_ms = min(int(r.start_ts_ms) for r in results)
+                publish_end_ts_ms = max(int(r.end_ts_ms) for r in results)
             if dumper is not None:
                 dumper.finish()
 
@@ -314,30 +372,48 @@ def main(argv: List[str]) -> int:
             )
             duration_s = max(0.001, (publish_end_ts_ms - publish_start_ts_ms) / 1000.0)
             result_path = os.path.join(args.out_dir, "result.json")
+            sent_total = sum(int(v.sent) for v in results)
             result = {
                 "publish_start_ts_ms": publish_start_ts_ms,
                 "publish_end_ts_ms": publish_end_ts_ms,
                 "publish_duration_secs": duration_s,
-                "sent_messages": pub.sent if pub is not None else 0,
-                "effective_rate_mps": (pub.sent / duration_s) if pub is not None else 0.0,
+                "sent_messages": sent_total,
+                "effective_rate_mps": (sent_total / duration_s) if sent_total else 0.0,
                 "payload_bytes": payload_bytes,
                 "config": {
                     "base_url": args.base_url,
-                    "stream_name": args.stream_name,
-                    "pipeline_id": args.pipeline_id_default,
-                    "pipeline_ids": [args.pipeline_id_default, args.pipeline_id_extra],
-                    "extra_instance_id": args.extra_instance_id,
+                    "stream_name_critical": args.stream_name_critical,
+                    "stream_name_best": args.stream_name_best,
+                    "pipeline_id": args.pipeline_id_critical,
+                    "pipeline_ids": [args.pipeline_id_critical, args.pipeline_id_best],
+                    "critical_instance_id": args.critical_instance_id,
+                    "best_instance_id": args.best_instance_id,
                     "columns": args.columns,
                     "sql_mode": args.sql_mode,
                     "broker_url": args.broker_url,
-                    "topic": args.topic,
+                    "topic_critical": args.topic_critical,
+                    "topic_best": args.topic_best,
                     "qos": args.qos,
                     "cases": args.cases,
                     "str_len": args.str_len,
                     "duration_secs": args.duration_secs,
-                    "rate": args.rate,
+                    "rate": args.rate_critical + args.rate_best,
+                    "rate_critical": args.rate_critical,
+                    "rate_best": args.rate_best,
                 },
                 "metrics": dumper.result(),
+                "publish": {
+                    "critical": {
+                        "topic": args.topic_critical,
+                        "rate_per_sec": args.rate_critical,
+                        "sent_messages": int(pubs["critical"].sent) if "critical" in pubs else 0,
+                    },
+                    "best": {
+                        "topic": args.topic_best,
+                        "rate_per_sec": args.rate_best,
+                        "sent_messages": int(pubs["best"].sent) if "best" in pubs else 0,
+                    },
+                },
             }
             with open(result_path, "w", encoding="utf-8") as f:
                 json.dump(result, f, indent=2, ensure_ascii=False)
@@ -353,4 +429,3 @@ if __name__ == "__main__":
     except (PerfPrError, perf_daily.ApiError) as e:
         print(f"error: {e}", file=sys.stderr)
         raise SystemExit(2)
-
