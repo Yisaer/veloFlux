@@ -12,6 +12,8 @@ use std::io::{Read, Write};
 use std::net::SocketAddr;
 #[cfg(feature = "profiling")]
 use std::net::{TcpListener, TcpStream};
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 #[cfg(any(feature = "metrics", feature = "profiling"))]
 use std::process;
 #[cfg(feature = "profiling")]
@@ -56,6 +58,15 @@ pub const DEFAULT_DATA_DIR: &str = "./tmp";
 pub const DEFAULT_MANAGER_ADDR: &str = "0.0.0.0:8080";
 #[cfg(feature = "metrics")]
 const DEFAULT_METRICS_POLL_INTERVAL_SECS: u64 = 5;
+#[cfg(target_os = "linux")]
+const PR_SET_PDEATHSIG: i32 = 1;
+#[cfg(target_os = "linux")]
+const SIGTERM_RAW: i32 = 15;
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn prctl(option: i32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> i32;
+}
 
 #[cfg(all(
     feature = "profiling",
@@ -199,8 +210,8 @@ pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error +
             }
             Ok(())
         }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("ctrl+c received, shutting down");
+        _ = shutdown_signal() => {
+            tracing::info!("shutdown signal received, shutting down");
             Ok(())
         }
     };
@@ -215,8 +226,56 @@ pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error +
     result
 }
 
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigint = match signal(SignalKind::interrupt()) {
+        Ok(stream) => stream,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to register SIGINT handler; fallback to ctrl+c");
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        }
+    };
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(stream) => stream,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to register SIGTERM handler; fallback to ctrl+c");
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        }
+    };
+
+    tokio::select! {
+        _ = sigint.recv() => {}
+        _ = sigterm.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 type FlowWorkerEndpoints = Vec<(String, String)>;
 type FlowWorkerChildren = Vec<std::process::Child>;
+
+#[cfg(target_os = "linux")]
+fn configure_worker_pre_exec(cmd: &mut std::process::Command) {
+    unsafe {
+        cmd.pre_exec(|| {
+            let rc = prctl(PR_SET_PDEATHSIG, SIGTERM_RAW as usize, 0, 0, 0);
+            if rc != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_worker_pre_exec(_cmd: &mut std::process::Command) {}
 
 fn forward_worker_output(
     instance_id: String,
@@ -392,6 +451,7 @@ async fn spawn_flow_workers(
                 .arg(config_path);
             direct_cmd
         };
+        configure_worker_pre_exec(&mut cmd);
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 

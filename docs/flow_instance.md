@@ -81,6 +81,7 @@ server:
       worker_addr: "127.0.0.1:18081"
       metrics_addr: "127.0.0.1:19898"
       profile_addr: "127.0.0.1:16061"
+      cgroup_path: "/veloflux-ci/perf/fi_1"
 ```
 
 Constraints enforced by the runtime:
@@ -88,13 +89,41 @@ Constraints enforced by the runtime:
 - `id` must be non-empty and must not be `default`.
 - `worker_addr`, `metrics_addr`, and `profile_addr` must be **loopback** addresses.
 - `worker_addr` must be unique across instances.
+- `cgroup_path` is optional and Linux-only.
 
 Operational notes:
 
 - Workers are spawned by the main server process (same binary) with:
   `--worker --flow-instance-id <id> --config <path>`.
+- Current implementation applies cgroup binding only to worker subprocesses.
+- If `cgroup_path` is configured, worker startup uses a pre-exec wrapper:
+  1) write worker pid to `/sys/fs/cgroup<path>/cgroup.procs`, then
+  2) `exec` the worker process.
 - Because of that, extra instances require a concrete config file path so workers can read the
   same configuration.
+
+## Runtime Startup and Lifecycle
+
+### Manager startup
+
+- Main process initializes config/logging and creates the in-process `default` FlowInstance.
+- Manager server starts and then spawns configured worker subprocesses.
+
+### Worker startup
+
+For each configured worker:
+
+1. Manager validates worker addresses and spawns the subprocess.
+2. If `cgroup_path` is configured, the subprocess joins that cgroup before worker exec.
+3. Worker process initializes logging/metrics/profiling, then starts its internal HTTP listener.
+4. Manager probes `worker_addr` and marks the worker as ready only after successful connect.
+
+### Shutdown and orphan prevention
+
+- Manager listens for both `SIGINT` and `SIGTERM`.
+- On shutdown, Manager sends kill/wait to all tracked worker subprocesses.
+- On Linux, worker subprocesses are launched with `PR_SET_PDEATHSIG=SIGTERM` so workers receive
+  `SIGTERM` if the parent manager process dies unexpectedly.
 
 ## Resource Model: Global Metadata vs Instance Runtime
 
@@ -162,4 +191,3 @@ Extra instances are a good fit when you need:
 - isolation for noisy pipelines (CPU/memory heavy)
 - separate profiling/metrics per group of pipelines
 - safe experimentation without interfering with `default`
-

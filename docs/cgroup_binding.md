@@ -36,6 +36,12 @@ This gives a practical "join cgroup before worker starts serving" behavior.
 - avoids startup gate file lifecycle management
 - keeps isolation focused on extra worker instances
 
+## Worker Lifecycle Safety
+
+- Manager listens for both `SIGINT` and `SIGTERM` and performs worker cleanup on shutdown.
+- Worker subprocesses are launched with Linux `PR_SET_PDEATHSIG=SIGTERM` in pre-exec hook.
+- If Manager exits unexpectedly, kernel sends `SIGTERM` to workers to reduce orphan-process risk.
+
 ## Operational Notes
 
 - cgroup tree and CPU controller delegation must be prepared before launching veloFlux.
