@@ -51,6 +51,26 @@ fn cgroup_threads_path(
 }
 
 #[cfg(target_os = "linux")]
+fn pid_cgroup_v2_path(pid: u32) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let path = PathBuf::from(format!("/proc/{pid}/cgroup"));
+    let raw =
+        std::fs::read_to_string(&path).map_err(|err| format!("read {}: {err}", path.display()))?;
+    for line in raw.lines() {
+        if let Some(value) = line.strip_prefix("0::") {
+            let value = value.trim();
+            if value.is_empty() {
+                return Ok("/".to_string());
+            }
+            if value.starts_with('/') {
+                return Ok(value.to_string());
+            }
+            return Ok(format!("/{value}"));
+        }
+    }
+    Err(format!("missing unified cgroup entry in {}", path.display()).into())
+}
+
+#[cfg(target_os = "linux")]
 pub fn debug_snapshot(cgroup_path: &str) -> String {
     let dir = match cgroup_dir(cgroup_path) {
         Ok(dir) => dir,
@@ -122,7 +142,14 @@ pub fn join_pid(
     pid: u32,
     cgroup_path: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let procs_path = cgroup_procs_path(cgroup_path)?;
+    let target_path = validate_cgroup_path(cgroup_path)?;
+    if let Ok(current_path) = pid_cgroup_v2_path(pid) {
+        if current_path == target_path {
+            return Ok(());
+        }
+    }
+
+    let procs_path = cgroup_procs_path(target_path)?;
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .open(&procs_path)

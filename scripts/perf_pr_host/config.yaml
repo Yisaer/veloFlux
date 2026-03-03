@@ -27,17 +27,18 @@ server:
   # Example:
   #   CG_MANAGER=/veloflux-ci/perf-pr-host-001/veloflux/manager
   default_cgroup_path: "/veloflux-ci/perf-pr-host-001/veloflux/manager"
+  startup_gate_path: "/tmp/veloflux-startup-gate"
+  startup_gate_timeout_ms: 15000
 
   extra_flow_instances:
     - id: "fi_critical"
       worker_addr: "127.0.0.1:18081"
-      metrics_addr: "0.0.0.0:19891"
-      profile_addr: "0.0.0.0:16061"
+      metrics_addr: "127.0.0.1:19891"
+      profile_addr: "127.0.0.1:16061"
       cgroup_path: "/veloflux-ci/perf-pr-host-001/veloflux/fi_critical"
 
     - id: "fi_best"
       worker_addr: "127.0.0.1:18082"
-      metrics_addr: "0.0.0.0:19892"
-      profile_addr: "0.0.0.0:16062"
+      metrics_addr: "127.0.0.1:19892"
+      profile_addr: "127.0.0.1:16062"
       cgroup_path: "/veloflux-ci/perf-pr-host-001/veloflux/fi_best"
-
