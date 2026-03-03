@@ -71,9 +71,6 @@ pub struct ServerOptions {
     pub profiling_enabled: Option<bool>,
     /// Custom data directory for storage; if None, uses DEFAULT_DATA_DIR.
     pub data_dir: Option<String>,
-    /// Cgroup v2 path (relative to /sys/fs/cgroup) for binding the Manager process
-    /// (FlowInstance id=default) to a pre-configured CPU group.
-    pub default_cgroup_path: Option<String>,
     /// Manager listen address; if None, uses default.
     pub manager_addr: Option<String>,
     /// Profiling server bind address (feature-gated); if None, uses default.
@@ -349,13 +346,53 @@ async fn spawn_flow_workers(
             "spawning flow worker"
         );
 
-        let mut cmd = std::process::Command::new(&exe);
-        cmd.arg("--worker")
-            .arg("--flow-instance-id")
-            .arg(&spec.id)
-            .arg("--config")
-            .arg(config_path)
-            .stdout(std::process::Stdio::piped())
+        let mut cmd = if spec.cgroup_path.is_some() {
+            #[cfg(target_os = "linux")]
+            {
+                let path = spec
+                    .cgroup_path
+                    .as_deref()
+                    .expect("checked is_some above for cgroup_path");
+                tracing::info!(
+                    flow_instance_id = %spec.id,
+                    cgroup_path = %path,
+                    reason = "worker process will join target cgroup before exec",
+                    "worker pre-exec cgroup binding enabled"
+                );
+                let cgroup_procs = format!("/sys/fs/cgroup{path}/cgroup.procs");
+                let mut shell_cmd = std::process::Command::new("sh");
+                shell_cmd
+                    .arg("-c")
+                    .arg("set -eu; echo $$ > \"$1\"; shift; exec \"$@\"")
+                    .arg("veloflux-worker-launch")
+                    .arg(cgroup_procs)
+                    .arg(&exe)
+                    .arg("--worker")
+                    .arg("--flow-instance-id")
+                    .arg(&spec.id)
+                    .arg("--config")
+                    .arg(config_path);
+                shell_cmd
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(format!(
+                    "worker {} sets cgroup_path but cgroup binding is only supported on Linux",
+                    spec.id
+                )
+                .into());
+            }
+        } else {
+            let mut direct_cmd = std::process::Command::new(&exe);
+            direct_cmd
+                .arg("--worker")
+                .arg("--flow-instance-id")
+                .arg(&spec.id)
+                .arg("--config")
+                .arg(config_path);
+            direct_cmd
+        };
+        cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
         let mut child = cmd.spawn()?;

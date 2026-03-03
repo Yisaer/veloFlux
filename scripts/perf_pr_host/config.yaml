@@ -22,12 +22,6 @@ metrics:
 server:
   manager_addr: "0.0.0.0:8080"
 
-  # Replace with the path printed by:
-  #   sudo ./scripts/perf_pr_host/setup_cgroup.sh --base-cg ...
-  # Example:
-  #   CG_MANAGER=/veloflux-ci/perf-pr-host-001/veloflux/manager
-  default_cgroup_path: "/veloflux-ci/perf-pr-host-001/veloflux/manager"
-
   extra_flow_instances:
     - id: "fi_critical"
       worker_addr: "127.0.0.1:18081"
