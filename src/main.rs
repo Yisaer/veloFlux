@@ -4,19 +4,51 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use veloflux::server;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--worker") {
-        return run_worker(args).await;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        return rt.block_on(run_worker(args));
     }
 
     let result = veloflux::bootstrap::default_init()?;
     // Keep logging guard alive for the duration of the application
     let _logging_guard = result.logging_guard;
 
-    let ctx = server::init(result.options, result.instance).await?;
-    server::start(ctx).await
+    if let Some(path) = result.options.default_cgroup_path.as_deref() {
+        match veloflux::cgroup::join_current_process(path) {
+            Ok(()) => {
+                tracing::info!(
+                    flow_instance_id = "default",
+                    pid = std::process::id(),
+                    cgroup_path = %path,
+                    reason = "manager process joined target cgroup (pre-runtime single-thread stage)",
+                    "flow instance bound to cgroup"
+                );
+            }
+            Err(err) => {
+                tracing::error!(
+                    flow_instance_id = "default",
+                    pid = std::process::id(),
+                    cgroup_path = %path,
+                    reason = %err,
+                    cgroup_snapshot = %veloflux::cgroup::debug_snapshot(path),
+                    "failed to bind flow instance to cgroup"
+                );
+                return Err(err);
+            }
+        }
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(async move {
+        let ctx = server::init(result.options, result.instance).await?;
+        server::start(ctx).await
+    })
 }
 
 async fn run_worker(args: Vec<String>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

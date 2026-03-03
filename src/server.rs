@@ -145,31 +145,6 @@ pub async fn init(
     telemetry::set_flow_instance_id("default");
     log_allocator();
 
-    if let Some(path) = opts.default_cgroup_path.as_deref() {
-        match crate::cgroup::join_current_process(path) {
-            Ok(()) => {
-                tracing::info!(
-                    flow_instance_id = "default",
-                    pid = std::process::id(),
-                    cgroup_path = %path,
-                    reason = "manager process joined target cgroup",
-                    "flow instance bound to cgroup"
-                );
-            }
-            Err(err) => {
-                tracing::error!(
-                    flow_instance_id = "default",
-                    pid = std::process::id(),
-                    cgroup_path = %path,
-                    reason = %err,
-                    cgroup_snapshot = %crate::cgroup::debug_snapshot(path),
-                    "failed to bind flow instance to cgroup"
-                );
-                return Err(err);
-            }
-        }
-    }
-
     let profiling_enabled = opts.profiling_enabled.unwrap_or(false);
     if profiling_enabled {
         ensure_jemalloc_profiling();
