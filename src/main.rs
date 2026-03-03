@@ -63,8 +63,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             veloflux::config::LoggingOutput::Stdout => {}
         }
-        let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
 
+        let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
         if let Some(path) = spec.cgroup_path.as_deref() {
             match veloflux::cgroup::join_current_process(path) {
                 Ok(()) => {
@@ -100,7 +100,6 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     let bootstrap = veloflux::bootstrap::default_init_options()?;
-    // Keep logging guard alive for the duration of the application
     let _logging_guard = bootstrap.logging_guard;
 
     if let Some(path) = bootstrap.options.default_cgroup_path.as_deref() {

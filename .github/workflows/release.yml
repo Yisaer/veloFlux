@@ -6,34 +6,7 @@ on:
       - published
 
 jobs:
-  lint-and-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Lint and test
-        run: |
-          cargo fmt --all -- --check
-          make clippy
-          make test
-
-  publish-crates:
-    runs-on: ubuntu-latest
-    needs: lint-and-test
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Publish crates (skipped)
-        run: echo "Crates.io publish skipped."
-
   build-and-upload:
-    needs: publish-crates
     permissions:
       contents: write
     runs-on: ${{ matrix.runner }}

@@ -16,6 +16,12 @@ Reference config file:
 scripts/perf_pr_host/config.yaml
 ```
 
+macOS local startup validation config (no cgroup binding):
+
+```text
+scripts/perf_pr_host/config.macos.yaml
+```
+
 Update these paths using `setup_cgroup.sh` output:
 
 - `server.default_cgroup_path`

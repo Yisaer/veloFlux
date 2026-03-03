@@ -103,14 +103,6 @@ pub fn default_init_options(
 /// on `result.instance` before calling `server::init()` and `server::start()`.
 ///
 /// This function must be called within a running Tokio runtime context.
-///
-/// # Example
-/// ```ignore
-/// let result = veloflux::bootstrap::default_init()?;
-/// // Register custom encoders/decoders on result.instance
-/// let ctx = server::init(result.options, result.instance).await?;
-/// server::start(ctx).await
-/// ```
 pub fn default_init() -> Result<BootstrapResult, Box<dyn std::error::Error + Send + Sync>> {
     let bootstrap = default_init_options()?;
     let instance = server::prepare_registry();
