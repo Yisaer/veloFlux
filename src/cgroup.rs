@@ -129,13 +129,13 @@ pub fn join_pid(
         .map_err(|err| format!("open {}: {err}", procs_path.display()))?;
     if let Err(err) = writeln!(f, "{pid}") {
         if err.kind() == ErrorKind::InvalidInput {
-            join_pid_via_threads(pid, cgroup_path).map_err(|fallback_err| {
-                format!(
+            if let Err(fallback_err) = join_pid_via_threads(pid, cgroup_path) {
+                return Err(format!(
                     "write {}: {err}; fallback to cgroup.threads failed: {fallback_err}",
                     procs_path.display()
                 )
-                .into()
-            })?;
+                .into());
+            }
             return Ok(());
         }
         return Err(format!("write {}: {err}", procs_path.display()).into());
