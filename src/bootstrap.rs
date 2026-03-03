@@ -1,18 +1,24 @@
 //! Bootstrap utilities for initializing the veloFlux server.
 //!
-//! This module provides a default initialization function that handles:
+//! This module provides initialization helpers that handle:
 //! - CLI argument parsing (--config, --data-dir)
 //! - Config file loading
 //! - Logging setup
-//! - FlowInstance preparation
 //!
-//! Custom codecs can call `default_init()` and then register their own
-//! encoders/decoders before starting the server.
+//! The default FlowInstance preparation requires a running Tokio runtime context.
 
 use crate::config::AppConfig;
 use crate::logging::LoggingGuard;
 use crate::server::{self, ServerOptions};
 use flow::FlowInstance;
+
+/// Result of bootstrap initialization that does not include a FlowInstance.
+pub struct BootstrapOptionsResult {
+    /// Server options derived from config and CLI.
+    pub options: ServerOptions,
+    /// Logging guard that must be kept alive for the lifetime of the application.
+    pub logging_guard: LoggingGuard,
+}
 
 /// Result of the default initialization process.
 pub struct BootstrapResult {
@@ -57,20 +63,9 @@ impl CliFlags {
     }
 }
 
-/// Perform default initialization: parse CLI, load config, init logging, prepare instance.
-///
-/// Returns a `BootstrapResult` containing the FlowInstance (with default registrations),
-/// ServerOptions, and the logging guard. The caller can then register custom codecs
-/// on `result.instance` before calling `server::init()` and `server::start()`.
-///
-/// # Example
-/// ```ignore
-/// let result = veloflux::bootstrap::default_init()?;
-/// // Register custom encoders/decoders on result.instance
-/// let ctx = server::init(result.options, result.instance).await?;
-/// server::start(ctx).await
-/// ```
-pub fn default_init() -> Result<BootstrapResult, Box<dyn std::error::Error + Send + Sync>> {
+/// Parse CLI/config and initialize logging/options without preparing FlowInstance.
+pub fn default_init_options(
+) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
     let cli_flags = CliFlags::parse();
     let (config, loaded_config_path) = if let Some(path) = cli_flags.config_path.as_deref() {
         let cfg = AppConfig::load_required(path)?;
@@ -93,13 +88,28 @@ pub fn default_init() -> Result<BootstrapResult, Box<dyn std::error::Error + Sen
     if let Some(dir) = cli_flags.data_dir.as_deref() {
         options.data_dir = Some(dir.to_string());
     }
-    options.config_path = loaded_config_path.clone();
+    options.config_path = loaded_config_path;
 
+    Ok(BootstrapOptionsResult {
+        options,
+        logging_guard,
+    })
+}
+
+/// Perform default initialization: parse CLI, load config, init logging, prepare instance.
+///
+/// Returns a `BootstrapResult` containing the FlowInstance (with default registrations),
+/// ServerOptions, and the logging guard. The caller can then register custom codecs
+/// on `result.instance` before calling `server::init()` and `server::start()`.
+///
+/// This function must be called within a running Tokio runtime context.
+pub fn default_init() -> Result<BootstrapResult, Box<dyn std::error::Error + Send + Sync>> {
+    let bootstrap = default_init_options()?;
     let instance = server::prepare_registry();
 
     Ok(BootstrapResult {
         instance,
-        options,
-        logging_guard,
+        options: bootstrap.options,
+        logging_guard: bootstrap.logging_guard,
     })
 }
