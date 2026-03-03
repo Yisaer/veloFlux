@@ -8,6 +8,20 @@ These scripts are intentionally limited to three operations:
 
 No script in this folder starts or manages veloflux/emqx/prometheus/grafana.
 
+## Reference config
+
+Reference config file:
+
+```text
+scripts/perf_pr_host/config.yaml
+```
+
+Update these paths using `setup_cgroup.sh` output:
+
+- `server.default_cgroup_path`
+- `server.extra_flow_instances[0].cgroup_path`
+- `server.extra_flow_instances[1].cgroup_path`
+
 ## 1) Setup cgroup
 
 ```bash
@@ -87,4 +101,18 @@ Use `--phase a` or `--phase b` to run only one phase.
 
 ```bash
 sudo ./scripts/perf_pr_host/cleanup_cgroup.sh --base-cg /veloflux-ci/perf-pr-host-001/veloflux
+```
+
+## Package this directory
+
+Create a `tar.gz` package from repo root:
+
+```bash
+tar -czf perf_pr_host_scripts.tar.gz -C scripts perf_pr_host
+```
+
+Create a `zip` package from repo root:
+
+```bash
+cd scripts && zip -r ../perf_pr_host_scripts.zip perf_pr_host
 ```

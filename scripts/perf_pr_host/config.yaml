@@ -1,0 +1,43 @@
+logging:
+  output: stdout
+  level: info
+  include_source: true
+  file:
+    dir: "./logs"
+    file_name: "app.log"
+    rotation:
+      keep_days: 7
+      max_num: 30
+      max_size_mb: 256
+
+profiling:
+  enabled: true
+  addr: "0.0.0.0:6060"
+  cpu_profile_freq_hz: 100
+
+metrics:
+  addr: "0.0.0.0:9898"
+  poll_interval_secs: 5
+
+server:
+  manager_addr: "0.0.0.0:8080"
+
+  # Replace with the path printed by:
+  #   sudo ./scripts/perf_pr_host/setup_cgroup.sh --base-cg ...
+  # Example:
+  #   CG_MANAGER=/veloflux-ci/perf-pr-host-001/veloflux/manager
+  default_cgroup_path: "/veloflux-ci/perf-pr-host-001/veloflux/manager"
+
+  extra_flow_instances:
+    - id: "fi_critical"
+      worker_addr: "127.0.0.1:18081"
+      metrics_addr: "0.0.0.0:19891"
+      profile_addr: "0.0.0.0:16061"
+      cgroup_path: "/veloflux-ci/perf-pr-host-001/veloflux/fi_critical"
+
+    - id: "fi_best"
+      worker_addr: "127.0.0.1:18082"
+      metrics_addr: "0.0.0.0:19892"
+      profile_addr: "0.0.0.0:16062"
+      cgroup_path: "/veloflux-ci/perf-pr-host-001/veloflux/fi_best"
+

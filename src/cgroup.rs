@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 #[cfg(target_os = "linux")]
 use std::path::PathBuf;
 use std::path::{Component, Path};
@@ -28,13 +28,93 @@ fn validate_cgroup_path(path: &str) -> Result<&str, Box<dyn std::error::Error + 
 }
 
 #[cfg(target_os = "linux")]
+fn cgroup_dir(cgroup_path: &str) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let cgroup_path = validate_cgroup_path(cgroup_path)?;
+    let rel = cgroup_path.strip_prefix('/').unwrap_or(cgroup_path).trim();
+    Ok(Path::new(CGROUP_ROOT).join(rel))
+}
+
+#[cfg(target_os = "linux")]
 fn cgroup_procs_path(
     cgroup_path: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
-    let cgroup_path = validate_cgroup_path(cgroup_path)?;
-    let rel = cgroup_path.strip_prefix('/').unwrap_or(cgroup_path).trim();
-    let dir = Path::new(CGROUP_ROOT).join(rel);
+    let dir = cgroup_dir(cgroup_path)?;
     Ok(dir.join("cgroup.procs"))
+}
+
+#[cfg(target_os = "linux")]
+fn cgroup_threads_path(
+    cgroup_path: &str,
+) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
+    let dir = cgroup_dir(cgroup_path)?;
+    Ok(dir.join("cgroup.threads"))
+}
+
+#[cfg(target_os = "linux")]
+pub fn debug_snapshot(cgroup_path: &str) -> String {
+    let dir = match cgroup_dir(cgroup_path) {
+        Ok(dir) => dir,
+        Err(err) => return format!("invalid cgroup_path={cgroup_path}: {err}"),
+    };
+
+    let mut out = vec![format!("path={cgroup_path}")];
+    for name in [
+        "cgroup.type",
+        "cgroup.subtree_control",
+        "cpu.max",
+        "cpuset.cpus",
+        "cpuset.mems",
+        "cpuset.cpus.effective",
+        "cpuset.mems.effective",
+    ] {
+        let p = dir.join(name);
+        let value = match std::fs::read_to_string(&p) {
+            Ok(v) => {
+                let trimmed = v.trim();
+                if trimmed.is_empty() {
+                    "<empty>".to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            }
+            Err(err) => format!("<{}>", err),
+        };
+        out.push(format!("{name}={value}"));
+    }
+    out.join(", ")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn debug_snapshot(cgroup_path: &str) -> String {
+    format!("path={cgroup_path}, unsupported_platform")
+}
+
+#[cfg(target_os = "linux")]
+fn join_pid_via_threads(
+    pid: u32,
+    cgroup_path: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let threads_path = cgroup_threads_path(cgroup_path)?;
+    let task_dir = PathBuf::from(format!("/proc/{pid}/task"));
+    let tids = std::fs::read_dir(&task_dir)
+        .map_err(|err| format!("read {}: {err}", task_dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter_map(|name| name.parse::<u32>().ok())
+        .collect::<Vec<_>>();
+
+    if tids.is_empty() {
+        return Err(format!("no threads found under {}", task_dir.display()).into());
+    }
+
+    for tid in tids {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&threads_path)
+            .map_err(|err| format!("open {}: {err}", threads_path.display()))?;
+        writeln!(f, "{tid}").map_err(|err| format!("write {}: {err}", threads_path.display()))?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -47,7 +127,19 @@ pub fn join_pid(
         .write(true)
         .open(&procs_path)
         .map_err(|err| format!("open {}: {err}", procs_path.display()))?;
-    writeln!(f, "{pid}").map_err(|err| format!("write {}: {err}", procs_path.display()))?;
+    if let Err(err) = writeln!(f, "{pid}") {
+        if err.kind() == ErrorKind::InvalidInput {
+            join_pid_via_threads(pid, cgroup_path).map_err(|fallback_err| {
+                format!(
+                    "write {}: {err}; fallback to cgroup.threads failed: {fallback_err}",
+                    procs_path.display()
+                )
+                .into()
+            })?;
+            return Ok(());
+        }
+        return Err(format!("write {}: {err}", procs_path.display()).into());
+    }
     Ok(())
 }
 
