@@ -1,12 +1,14 @@
 # Perf PR Host Scripts
 
-These scripts are intentionally limited to three operations:
+These scripts are intentionally limited to four operations:
 
 1. setup cgroup
-2. deploy stream/pipeline
-3. run workload
+2. start veloflux (manager joins cgroup before exec)
+3. deploy stream/pipeline
+4. run workload
 
-No script in this folder starts or manages veloflux/emqx/prometheus/grafana.
+Only `start_veloflux.sh` starts veloflux.
+No script in this folder starts or manages emqx/prometheus/grafana.
 
 ## Reference config
 
@@ -37,7 +39,7 @@ Default cgroup policy:
 
 - base `cpu.max = 100000 100000` (total 1 CPU)
 - `fi_critical` `cpu.max = 95000 100000`
-- `manager` `cpu.weight = 200`
+- `manager` `cpu.weight = 300`
 - `fi_best` `cpu.weight = 100`
 
 The script prints:
@@ -49,9 +51,24 @@ CG_FI_CRITICAL=...
 CG_FI_BEST=...
 ```
 
-Use those values in your veloflux config (`extra_flow_instances[].cgroup_path`).
+Use those values in:
 
-## 2) Deploy stream/pipeline
+- veloflux config (`extra_flow_instances[].cgroup_path`) for worker binding
+- `start_veloflux.sh --manager-cgroup` for main veloflux process binding
+
+## 2) Start veloflux (manager pre-join cgroup)
+
+```bash
+./scripts/perf_pr_host/start_veloflux.sh \
+  --manager-cgroup /veloflux-ci/perf-pr-host-001/veloflux/manager \
+  --veloflux-bin ./veloflux-linux-x86_64 \
+  --config ./scripts/perf_pr_host/config.yaml \
+  --data-dir ./data
+```
+
+This ensures the main veloflux process joins `manager` cgroup before runtime starts.
+
+## 3) Deploy stream/pipeline
 
 ```bash
 ./scripts/perf_pr_host/deploy_stream_pipeline.sh create
@@ -87,7 +104,16 @@ Pause both pipelines:
 ./scripts/perf_pr_host/deploy_stream_pipeline.sh pause
 ```
 
-## 3) Run workload
+## 4) Run workload
+
+Build Go workload binary (first time or after code update):
+
+```bash
+GOPROXY=${GOPROXY:-https://proxy.golang.org,direct} \
+  go -C ./scripts/perf_pr_host/go_workload build -o ./scripts/perf_pr_host/go_workload/bin/go_workload .
+```
+
+The first build downloads Go modules from proxy/network.
 
 ```bash
 ./scripts/perf_pr_host/run_workload.sh
@@ -95,12 +121,13 @@ Pause both pipelines:
 
 Default behavior runs both phases:
 
-- phase A: `rate_critical=100`, `rate_best=100`, `duration=60s`
-- phase B: `rate_critical=5`, `rate_best=100`, `duration=60s`
+- phase A: `rate_critical=120`, `rate_best=120`, `duration=60s`
+- phase B: `rate_critical=10`, `rate_best=120`, `duration=60s`
  
 The script does not scrape or dump metrics. Use Prometheus/Grafana directly for observation.
 
 Use `--phase a` or `--phase b` to run only one phase.
+Use `--workload-bin <path>` to run a prebuilt binary from another location.
 
 ## Optional cleanup
 

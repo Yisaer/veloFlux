@@ -7,6 +7,7 @@ Usage:
   sudo ./scripts/perf_pr_host/setup_cgroup.sh --base-cg /veloflux-ci/perf-pr-host-<id>/veloflux
 
 Creates a cgroup v2 tree for veloflux CPU isolation:
+  <base>            (total veloflux CPU budget group)
   <base>/manager
   <base>/fi_critical
   <base>/fi_best
@@ -14,7 +15,7 @@ Creates a cgroup v2 tree for veloflux CPU isolation:
 Defaults:
   base cpu.max      = 100000 100000   (1 CPU)
   critical cpu.max  =  95000 100000   (95%)
-  manager cpu.weight= 200
+  manager cpu.weight= 300
   best cpu.weight   = 100
 
 Outputs env lines to stdout (CG_BASE/CG_MANAGER/CG_FI_CRITICAL/CG_FI_BEST) for sourcing.
@@ -26,7 +27,7 @@ BASE_MAX_QUOTA_US="100000"
 BASE_MAX_PERIOD_US="100000"
 CRITICAL_MAX_QUOTA_US="95000"
 CRITICAL_MAX_PERIOD_US="100000"
-MANAGER_WEIGHT="200"
+MANAGER_WEIGHT="300"
 BEST_WEIGHT="100"
 
 while [ $# -gt 0 ]; do
@@ -264,16 +265,39 @@ echo "[setup] set ${CG_FI_CRITICAL}/cpu.max = $(cat "/sys/fs/cgroup${CG_FI_CRITI
 echo "[setup] set ${CG_MANAGER}/cpu.weight = $(cat "/sys/fs/cgroup${CG_MANAGER}/cpu.weight")"
 echo "[setup] set ${CG_FI_BEST}/cpu.weight = $(cat "/sys/fs/cgroup${CG_FI_BEST}/cpu.weight")"
 
-# Allow the invoking user to join cgroups (veloflux does the join itself at runtime).
+# Allow the invoking user to join cgroups (main process + workers join at runtime).
 OWNER_UID="${SUDO_UID:-0}"
 OWNER_GID="${SUDO_GID:-0}"
 chown -R "${OWNER_UID}:${OWNER_GID}" "/sys/fs/cgroup${CG_BASE}"
 chmod -R ug+rwX "/sys/fs/cgroup${CG_BASE}"
 echo "[setup] set ownership to ${OWNER_UID}:${OWNER_GID} on ${CG_BASE}"
 
+show_cgroup_config() {
+  local cg="$1"
+  local cgfs="/sys/fs/cgroup${cg}"
+  if [ ! -d "${cgfs}" ]; then
+    echo "[setup] ${cg}: missing"
+    return 0
+  fi
+  local type_v
+  local cpu_max_v
+  local cpu_weight_v
+  type_v="$(cat "${cgfs}/cgroup.type" 2>/dev/null || echo "<n/a>")"
+  cpu_max_v="$(cat "${cgfs}/cpu.max" 2>/dev/null || echo "<n/a>")"
+  cpu_weight_v="$(cat "${cgfs}/cpu.weight" 2>/dev/null || echo "<n/a>")"
+  echo "[setup] ${cg}: type=${type_v}, cpu.max=${cpu_max_v}, cpu.weight=${cpu_weight_v}"
+}
+
+echo "[setup] effective cgroup settings:"
+show_cgroup_config "${CG_BASE}"
+show_cgroup_config "${CG_MANAGER}"
+show_cgroup_config "${CG_FI_CRITICAL}"
+show_cgroup_config "${CG_FI_BEST}"
+
 cat <<EOF
 CG_BASE=${CG_BASE}
 CG_MANAGER=${CG_MANAGER}
 CG_FI_CRITICAL=${CG_FI_CRITICAL}
 CG_FI_BEST=${CG_FI_BEST}
+CG_MANAGER_PROCS=/sys/fs/cgroup${CG_MANAGER}/cgroup.procs
 EOF
