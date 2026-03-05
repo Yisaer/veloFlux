@@ -70,16 +70,19 @@ This ensures the main veloflux process joins `manager` cgroup before runtime sta
 
 ## 3) Deploy stream/pipeline
 
+Use Go workload resource subcommands (idempotent and converge-oriented):
+
 ```bash
-./scripts/perf_pr_host/deploy_stream_pipeline.sh create
+./scripts/perf_pr_host/go_workload/bin/go_workload provision \
+  --base-url http://127.0.0.1:8080
 ```
 
-`create` behavior:
+`provision` behavior:
 
-- Create/reconcile `perf_pr_stream_critical` + `perf_pr_pipeline_critical`
-- Create/reconcile `perf_pr_stream_best` + `perf_pr_pipeline_best`
-- If stream/pipeline already exists, it is skipped/reconciled (idempotent)
-- Pipelines are not auto-started (`--no-start`)
+- Reconcile `perf_pr_stream_critical` + `perf_pr_pipeline_critical`
+- Reconcile `perf_pr_stream_best` + `perf_pr_pipeline_best`
+- Delete/recreate existing target resources when needed
+- Continue on missing/existing resources and converge to final target state
 
 Default flow instance binding:
 
@@ -89,19 +92,28 @@ Default flow instance binding:
 Delete all resources (idempotent):
 
 ```bash
-./scripts/perf_pr_host/deploy_stream_pipeline.sh delete
+./scripts/perf_pr_host/go_workload/bin/go_workload delete \
+  --base-url http://127.0.0.1:8080
 ```
 
 Start both pipelines:
 
 ```bash
-./scripts/perf_pr_host/deploy_stream_pipeline.sh start
+./scripts/perf_pr_host/go_workload/bin/go_workload start \
+  --base-url http://127.0.0.1:8080
 ```
 
 Pause both pipelines:
 
 ```bash
-./scripts/perf_pr_host/deploy_stream_pipeline.sh pause
+./scripts/perf_pr_host/go_workload/bin/go_workload pause \
+  --base-url http://127.0.0.1:8080
+```
+
+Legacy shell helper is still available:
+
+```bash
+./scripts/perf_pr_host/deploy_stream_pipeline.sh <create|start|pause|delete>
 ```
 
 ## 4) Run workload

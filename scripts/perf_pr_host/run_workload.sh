@@ -104,6 +104,7 @@ fi
 
 CMD=(
   "${WORKLOAD_BIN}"
+  run
   --phase "${PHASE}"
   --broker-url "${BROKER_URL}"
   --topic-critical "${TOPIC_CRITICAL}"
