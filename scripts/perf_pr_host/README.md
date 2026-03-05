@@ -38,9 +38,11 @@ sudo ./scripts/perf_pr_host/setup_cgroup.sh --base-cg /veloflux-ci/perf-pr-host-
 Default cgroup policy:
 
 - base `cpu.max = 100000 100000` (total 1 CPU)
-- `fi_critical` `cpu.max = 95000 100000`
+- `fi_critical` `cpu.max = 90000 100000`
+- `fi_best` `cpu.max = 25000 100000`
+- `fi_critical` `cpu.weight = 10000`
 - `manager` `cpu.weight = 300`
-- `fi_best` `cpu.weight = 100`
+- `fi_best` `cpu.weight = 1`
 
 The script prints:
 
@@ -131,14 +133,27 @@ The first build downloads Go modules from proxy/network.
 ./scripts/perf_pr_host/run_workload.sh
 ```
 
-Default behavior runs both phases:
+Default behavior:
 
-- phase A: `rate_critical=120`, `rate_best=120`, `duration=60s`
-- phase B: `rate_critical=10`, `rate_best=120`, `duration=60s`
+- `qps=20`
+- `columns=15000`
+- `str-len=10`
+- `duration=60s`
  
 The script does not scrape or dump metrics. Use Prometheus/Grafana directly for observation.
 
-Use `--phase a` or `--phase b` to run only one phase.
+Lower-pressure example:
+
+```bash
+./scripts/perf_pr_host/run_workload.sh --qps 10 --duration-secs 30
+```
+
+Per-pipeline QPS override example:
+
+```bash
+./scripts/perf_pr_host/run_workload.sh --qps 20 --qps-critical 30 --qps-best 10
+```
+
 Use `--workload-bin <path>` to run a prebuilt binary from another location.
 
 ## Optional cleanup

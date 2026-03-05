@@ -20,21 +20,18 @@ import (
 const randomAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 type runConfig struct {
-	Phase             string
-	BrokerURL         string
-	TopicCritical     string
-	TopicBest         string
-	Columns           int
-	Cases             int
-	StrLen            int
-	QoS               int
-	PhaseADurationSec int
-	PhaseARateCrit    int
-	PhaseARateBest    int
-	PhaseBDurationSec int
-	PhaseBRateCrit    int
-	PhaseBRateBest    int
-	ClientPrefix      string
+	BrokerURL     string
+	TopicCritical string
+	TopicBest     string
+	Columns       int
+	Cases         int
+	StrLen        int
+	QoS           int
+	DurationSec   int
+	QPS           int
+	QPSCritical   int
+	QPSBest       int
+	ClientPrefix  string
 }
 
 type controlConfig struct {
@@ -59,13 +56,6 @@ type controlConfig struct {
 	StopTimeoutMS          int
 	StreamDeleteRetries    int
 	StreamDeleteIntervalMS int
-}
-
-type phaseSettings struct {
-	Name        string
-	DurationSec int
-	RateCrit    int
-	RateBest    int
 }
 
 type publisherResult struct {
@@ -218,7 +208,6 @@ func parseRunFlags(args []string) (*runConfig, error) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stdout)
 
-	fs.StringVar(&cfg.Phase, "phase", "both", "a|b|both")
 	fs.StringVar(&cfg.BrokerURL, "broker-url", "tcp://127.0.0.1:1883", "MQTT broker URL")
 	fs.StringVar(&cfg.TopicCritical, "topic-critical", "/perf/pr/critical", "critical topic")
 	fs.StringVar(&cfg.TopicBest, "topic-best", "/perf/pr/best", "best-effort topic")
@@ -226,12 +215,10 @@ func parseRunFlags(args []string) (*runConfig, error) {
 	fs.IntVar(&cfg.Cases, "cases", 20, "number of payload cases")
 	fs.IntVar(&cfg.StrLen, "str-len", 10, "string length for each column value")
 	fs.IntVar(&cfg.QoS, "qos", 1, "MQTT QoS, only 1 is supported")
-	fs.IntVar(&cfg.PhaseADurationSec, "phase-a-duration-secs", 60, "phase A duration seconds")
-	fs.IntVar(&cfg.PhaseARateCrit, "phase-a-rate-critical", 120, "phase A critical publish rate")
-	fs.IntVar(&cfg.PhaseARateBest, "phase-a-rate-best", 120, "phase A best publish rate")
-	fs.IntVar(&cfg.PhaseBDurationSec, "phase-b-duration-secs", 60, "phase B duration seconds")
-	fs.IntVar(&cfg.PhaseBRateCrit, "phase-b-rate-critical", 10, "phase B critical publish rate")
-	fs.IntVar(&cfg.PhaseBRateBest, "phase-b-rate-best", 120, "phase B best publish rate")
+	fs.IntVar(&cfg.DurationSec, "duration-secs", 60, "workload duration seconds")
+	fs.IntVar(&cfg.QPS, "qps", 20, "default publish rate for critical and best")
+	fs.IntVar(&cfg.QPSCritical, "qps-critical", -1, "critical publish rate override")
+	fs.IntVar(&cfg.QPSBest, "qps-best", -1, "best publish rate override")
 	fs.StringVar(&cfg.ClientPrefix, "client-prefix", "perf-pr-go", "MQTT client id prefix")
 
 	if err := fs.Parse(args); err != nil {
@@ -283,12 +270,6 @@ func parseControlFlags(command string, args []string) (*controlConfig, error) {
 }
 
 func validateRunConfig(cfg *runConfig) error {
-	switch cfg.Phase {
-	case "a", "b", "both":
-	default:
-		return fmt.Errorf("--phase must be one of: a | b | both")
-	}
-
 	if cfg.Columns <= 0 {
 		return errors.New("--columns must be > 0")
 	}
@@ -301,11 +282,17 @@ func validateRunConfig(cfg *runConfig) error {
 	if cfg.QoS != 1 {
 		return errors.New("--qos must be 1")
 	}
-	if cfg.PhaseADurationSec < 0 || cfg.PhaseBDurationSec < 0 {
-		return errors.New("phase duration must be >= 0")
+	if cfg.DurationSec < 0 {
+		return errors.New("--duration-secs must be >= 0")
 	}
-	if cfg.PhaseARateCrit < 0 || cfg.PhaseARateBest < 0 || cfg.PhaseBRateCrit < 0 || cfg.PhaseBRateBest < 0 {
-		return errors.New("phase rates must be >= 0")
+	if cfg.QPS < 0 {
+		return errors.New("--qps must be >= 0")
+	}
+	if cfg.QPSCritical < -1 {
+		return errors.New("--qps-critical must be >= -1")
+	}
+	if cfg.QPSBest < -1 {
+		return errors.New("--qps-best must be >= -1")
 	}
 	if strings.TrimSpace(cfg.TopicCritical) == "" || strings.TrimSpace(cfg.TopicBest) == "" {
 		return errors.New("topic must not be empty")
@@ -376,12 +363,20 @@ func runWorkload(cfg *runConfig) error {
 	if err != nil {
 		return err
 	}
-	for _, phase := range buildPhases(cfg) {
-		if err := runPhase(cfg, phase, payloads); err != nil {
-			return err
-		}
+	rateCritical := cfg.QPS
+	if cfg.QPSCritical >= 0 {
+		rateCritical = cfg.QPSCritical
 	}
-	fmt.Printf("[workload] done phase=%s\n", cfg.Phase)
+	rateBest := cfg.QPS
+	if cfg.QPSBest >= 0 {
+		rateBest = cfg.QPSBest
+	}
+
+	if err := runSingle(cfg, payloads, cfg.DurationSec, rateCritical, rateBest); err != nil {
+		return err
+	}
+
+	fmt.Printf("[workload] done duration=%ds rate_critical=%d rate_best=%d\n", cfg.DurationSec, rateCritical, rateBest)
 	return nil
 }
 
@@ -967,31 +962,6 @@ func trimBody(raw []byte) string {
 	return s
 }
 
-func buildPhases(cfg *runConfig) []phaseSettings {
-	all := []phaseSettings{
-		{
-			Name:        "a",
-			DurationSec: cfg.PhaseADurationSec,
-			RateCrit:    cfg.PhaseARateCrit,
-			RateBest:    cfg.PhaseARateBest,
-		},
-		{
-			Name:        "b",
-			DurationSec: cfg.PhaseBDurationSec,
-			RateCrit:    cfg.PhaseBRateCrit,
-			RateBest:    cfg.PhaseBRateBest,
-		},
-	}
-	switch cfg.Phase {
-	case "a":
-		return all[:1]
-	case "b":
-		return all[1:]
-	default:
-		return all
-	}
-}
-
 func generatePayloadCases(columnCount, cases, strLen int) ([][]byte, error) {
 	keys := make([]string, columnCount)
 	for idx := range keys {
@@ -1022,25 +992,24 @@ func randomString(rng *rand.Rand, n int) string {
 	return string(buf)
 }
 
-func runPhase(cfg *runConfig, phase phaseSettings, payloads [][]byte) error {
+func runSingle(cfg *runConfig, payloads [][]byte, durationSec, rateCritical, rateBest int) error {
 	start := time.Now().UTC()
 	fmt.Printf(
-		"[workload] phase=%s start=%s duration=%ds rate_critical=%d rate_best=%d\n",
-		phase.Name,
+		"[workload] start=%s duration=%ds rate_critical=%d rate_best=%d\n",
 		start.Format(time.RFC3339),
-		phase.DurationSec,
-		phase.RateCrit,
-		phase.RateBest,
+		durationSec,
+		rateCritical,
+		rateBest,
 	)
 
 	resultsCh := make(chan publisherResult, 2)
-	duration := time.Duration(phase.DurationSec) * time.Second
+	duration := time.Duration(durationSec) * time.Second
 
 	go publishLoad(
 		cfg,
 		"critical",
 		cfg.TopicCritical,
-		phase.RateCrit,
+		rateCritical,
 		duration,
 		payloads,
 		resultsCh,
@@ -1049,7 +1018,7 @@ func runPhase(cfg *runConfig, phase phaseSettings, payloads [][]byte) error {
 		cfg,
 		"best",
 		cfg.TopicBest,
-		phase.RateBest,
+		rateBest,
 		duration,
 		payloads,
 		resultsCh,
@@ -1061,7 +1030,7 @@ func runPhase(cfg *runConfig, phase phaseSettings, payloads [][]byte) error {
 	}
 
 	end := time.Now().UTC()
-	fmt.Printf("[workload] phase=%s end=%s\n", phase.Name, end.Format(time.RFC3339))
+	fmt.Printf("[workload] end=%s\n", end.Format(time.RFC3339))
 
 	var finalErr error
 	for _, result := range results {
@@ -1070,8 +1039,7 @@ func runPhase(cfg *runConfig, phase phaseSettings, payloads [][]byte) error {
 			effectiveRate = float64(result.Sent) / result.Duration.Seconds()
 		}
 		fmt.Printf(
-			"[workload] phase=%s publisher=%s topic=%s target_rate=%d sent=%d effective_rate=%.2f err=%v\n",
-			phase.Name,
+			"[workload] publisher=%s topic=%s target_rate=%d sent=%d effective_rate=%.2f err=%v\n",
 			result.Label,
 			result.Topic,
 			result.Rate,

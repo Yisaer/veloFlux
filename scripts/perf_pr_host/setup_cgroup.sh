@@ -14,9 +14,11 @@ Creates a cgroup v2 tree for veloflux CPU isolation:
 
 Defaults:
   base cpu.max      = 100000 100000   (1 CPU)
-  critical cpu.max  =  95000 100000   (95%)
+  critical cpu.max  =  90000 100000   (90%)
+  best cpu.max      =  25000 100000   (25%)
+  critical cpu.weight = 10000
   manager cpu.weight= 300
-  best cpu.weight   = 100
+  best cpu.weight   = 1
 
 Outputs env lines to stdout (CG_BASE/CG_MANAGER/CG_FI_CRITICAL/CG_FI_BEST) for sourcing.
 EOF
@@ -25,10 +27,13 @@ EOF
 BASE_CG=""
 BASE_MAX_QUOTA_US="100000"
 BASE_MAX_PERIOD_US="100000"
-CRITICAL_MAX_QUOTA_US="95000"
+CRITICAL_MAX_QUOTA_US="90000"
 CRITICAL_MAX_PERIOD_US="100000"
+BEST_MAX_QUOTA_US="25000"
+BEST_MAX_PERIOD_US="100000"
 MANAGER_WEIGHT="300"
-BEST_WEIGHT="100"
+CRITICAL_WEIGHT="10000"
+BEST_WEIGHT="1"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -42,8 +47,14 @@ while [ $# -gt 0 ]; do
       CRITICAL_MAX_QUOTA_US="${2:-}"; shift 2;;
     --critical-period)
       CRITICAL_MAX_PERIOD_US="${2:-}"; shift 2;;
+    --best-max)
+      BEST_MAX_QUOTA_US="${2:-}"; shift 2;;
+    --best-period)
+      BEST_MAX_PERIOD_US="${2:-}"; shift 2;;
     --manager-weight)
       MANAGER_WEIGHT="${2:-}"; shift 2;;
+    --critical-weight)
+      CRITICAL_WEIGHT="${2:-}"; shift 2;;
     --best-weight)
       BEST_WEIGHT="${2:-}"; shift 2;;
     -h|--help)
@@ -259,9 +270,13 @@ prepare_leaf_cgroup "${CG_FI_CRITICAL}"
 prepare_leaf_cgroup "${CG_FI_BEST}"
 
 echo "${CRITICAL_MAX_QUOTA_US} ${CRITICAL_MAX_PERIOD_US}" > "/sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max"
+echo "${BEST_MAX_QUOTA_US} ${BEST_MAX_PERIOD_US}" > "/sys/fs/cgroup${CG_FI_BEST}/cpu.max"
+echo "${CRITICAL_WEIGHT}" > "/sys/fs/cgroup${CG_FI_CRITICAL}/cpu.weight"
 echo "${MANAGER_WEIGHT}" > "/sys/fs/cgroup${CG_MANAGER}/cpu.weight"
 echo "${BEST_WEIGHT}" > "/sys/fs/cgroup${CG_FI_BEST}/cpu.weight"
 echo "[setup] set ${CG_FI_CRITICAL}/cpu.max = $(cat "/sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max")"
+echo "[setup] set ${CG_FI_BEST}/cpu.max = $(cat "/sys/fs/cgroup${CG_FI_BEST}/cpu.max")"
+echo "[setup] set ${CG_FI_CRITICAL}/cpu.weight = $(cat "/sys/fs/cgroup${CG_FI_CRITICAL}/cpu.weight")"
 echo "[setup] set ${CG_MANAGER}/cpu.weight = $(cat "/sys/fs/cgroup${CG_MANAGER}/cpu.weight")"
 echo "[setup] set ${CG_FI_BEST}/cpu.weight = $(cat "/sys/fs/cgroup${CG_FI_BEST}/cpu.weight")"
 
