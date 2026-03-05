@@ -22,6 +22,8 @@ metrics:
 server:
   manager_addr: "0.0.0.0:8080"
 
+  # Main process cgroup is set by scripts/perf_pr_host/start_veloflux.sh
+  # via --manager-cgroup. This config only defines worker cgroup paths.
   extra_flow_instances:
     - id: "fi_critical"
       worker_addr: "127.0.0.1:18081"

@@ -1,12 +1,14 @@
 # Perf PR Host Scripts
 
-These scripts are intentionally limited to three operations:
+These scripts are intentionally limited to four operations:
 
 1. setup cgroup
-2. deploy stream/pipeline
-3. run workload
+2. start veloflux (manager joins cgroup before exec)
+3. deploy stream/pipeline
+4. run workload
 
-No script in this folder starts or manages veloflux/emqx/prometheus/grafana.
+Only `start_veloflux.sh` starts veloflux.
+No script in this folder starts or manages emqx/prometheus/grafana.
 
 ## Reference config
 
@@ -36,9 +38,11 @@ sudo ./scripts/perf_pr_host/setup_cgroup.sh --base-cg /veloflux-ci/perf-pr-host-
 Default cgroup policy:
 
 - base `cpu.max = 100000 100000` (total 1 CPU)
-- `fi_critical` `cpu.max = 95000 100000`
-- `manager` `cpu.weight = 200`
-- `fi_best` `cpu.weight = 100`
+- `fi_critical` `cpu.max = 90000 100000`
+- `fi_best` `cpu.max = 25000 100000`
+- `fi_critical` `cpu.weight = 10000`
+- `manager` `cpu.weight = 300`
+- `fi_best` `cpu.weight = 1`
 
 The script prints:
 
@@ -49,20 +53,38 @@ CG_FI_CRITICAL=...
 CG_FI_BEST=...
 ```
 
-Use those values in your veloflux config (`extra_flow_instances[].cgroup_path`).
+Use those values in:
 
-## 2) Deploy stream/pipeline
+- veloflux config (`extra_flow_instances[].cgroup_path`) for worker binding
+- `start_veloflux.sh --manager-cgroup` for main veloflux process binding
+
+## 2) Start veloflux (manager pre-join cgroup)
 
 ```bash
-./scripts/perf_pr_host/deploy_stream_pipeline.sh create
+./scripts/perf_pr_host/start_veloflux.sh \
+  --manager-cgroup /veloflux-ci/perf-pr-host-001/veloflux/manager \
+  --veloflux-bin ./veloflux-linux-x86_64 \
+  --config ./scripts/perf_pr_host/config.yaml \
+  --data-dir ./data
 ```
 
-`create` behavior:
+This ensures the main veloflux process joins `manager` cgroup before runtime starts.
 
-- Create/reconcile `perf_pr_stream_critical` + `perf_pr_pipeline_critical`
-- Create/reconcile `perf_pr_stream_best` + `perf_pr_pipeline_best`
-- If stream/pipeline already exists, it is skipped/reconciled (idempotent)
-- Pipelines are not auto-started (`--no-start`)
+## 3) Deploy stream/pipeline
+
+Use Go workload resource subcommands (idempotent and converge-oriented):
+
+```bash
+./scripts/perf_pr_host/go_workload/bin/go_workload provision \
+  --base-url http://127.0.0.1:8080
+```
+
+`provision` behavior:
+
+- Reconcile `perf_pr_stream_critical` + `perf_pr_pipeline_critical`
+- Reconcile `perf_pr_stream_best` + `perf_pr_pipeline_best`
+- Delete/recreate existing target resources when needed
+- Continue on missing/existing resources and converge to final target state
 
 Default flow instance binding:
 
@@ -72,35 +94,67 @@ Default flow instance binding:
 Delete all resources (idempotent):
 
 ```bash
-./scripts/perf_pr_host/deploy_stream_pipeline.sh delete
+./scripts/perf_pr_host/go_workload/bin/go_workload delete \
+  --base-url http://127.0.0.1:8080
 ```
 
 Start both pipelines:
 
 ```bash
-./scripts/perf_pr_host/deploy_stream_pipeline.sh start
+./scripts/perf_pr_host/go_workload/bin/go_workload start \
+  --base-url http://127.0.0.1:8080
 ```
 
 Pause both pipelines:
 
 ```bash
-./scripts/perf_pr_host/deploy_stream_pipeline.sh pause
+./scripts/perf_pr_host/go_workload/bin/go_workload pause \
+  --base-url http://127.0.0.1:8080
 ```
 
-## 3) Run workload
+Legacy shell helper is still available:
+
+```bash
+./scripts/perf_pr_host/deploy_stream_pipeline.sh <create|start|pause|delete>
+```
+
+## 4) Run workload
+
+Build Go workload binary (first time or after code update):
+
+```bash
+GOPROXY=${GOPROXY:-https://proxy.golang.org,direct} \
+  go -C ./scripts/perf_pr_host/go_workload build -o ./scripts/perf_pr_host/go_workload/bin/go_workload .
+```
+
+The first build downloads Go modules from proxy/network.
 
 ```bash
 ./scripts/perf_pr_host/run_workload.sh
 ```
 
-Default behavior runs both phases:
+Default behavior:
 
-- phase A: `rate_critical=100`, `rate_best=100`, `duration=60s`
-- phase B: `rate_critical=5`, `rate_best=100`, `duration=60s`
+- `qps=20`
+- `columns=15000`
+- `str-len=10`
+- `duration=60s`
  
 The script does not scrape or dump metrics. Use Prometheus/Grafana directly for observation.
 
-Use `--phase a` or `--phase b` to run only one phase.
+Lower-pressure example:
+
+```bash
+./scripts/perf_pr_host/run_workload.sh --qps 10 --duration-secs 30
+```
+
+Per-pipeline QPS override example:
+
+```bash
+./scripts/perf_pr_host/run_workload.sh --qps 20 --qps-critical 30 --qps-best 10
+```
+
+Use `--workload-bin <path>` to run a prebuilt binary from another location.
 
 ## Optional cleanup
 

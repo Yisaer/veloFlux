@@ -103,3 +103,12 @@ remove_cgroup_dir "${CG_MANAGER}"
 remove_cgroup_dir "${CG_FI_CRITICAL}"
 remove_cgroup_dir "${CG_FI_BEST}"
 remove_cgroup_dir "${BASE_CG}"
+
+echo "[cleanup] final status:"
+for cg in "${CG_MANAGER}" "${CG_FI_CRITICAL}" "${CG_FI_BEST}" "${BASE_CG}"; do
+  if [ -d "/sys/fs/cgroup${cg}" ]; then
+    echo "[cleanup] keep ${cg}"
+  else
+    echo "[cleanup] removed ${cg}"
+  fi
+done
