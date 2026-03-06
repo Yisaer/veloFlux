@@ -1,4 +1,4 @@
-use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
+use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend};
 use crate::storage_bridge;
 use crate::worker::WorkerDesiredState;
 use axum::Json;
@@ -49,6 +49,36 @@ fn canonical_flow_instance_id(value: Option<&str>) -> Result<String, String> {
         return Err("flow_instance_id must not be empty".to_string());
     }
     Ok(id.to_string())
+}
+
+fn local_instance_response(
+    state: &AppState,
+    flow_instance_id: &str,
+) -> Result<std::sync::Arc<flow::FlowInstance>, Box<axum::response::Response>> {
+    state.local_instance(flow_instance_id).ok_or_else(|| {
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("in_process flow instance {flow_instance_id} is not available in runtime"),
+            )
+                .into_response(),
+        )
+    })
+}
+
+fn worker_response(
+    state: &AppState,
+    flow_instance_id: &str,
+) -> Result<crate::worker::FlowWorkerClient, Box<axum::response::Response>> {
+    state.worker(flow_instance_id).ok_or_else(|| {
+        Box::new(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("worker_process flow instance {flow_instance_id} is not available"),
+            )
+                .into_response(),
+        )
+    })
 }
 
 async fn resolve_pipeline_spec(
@@ -125,9 +155,7 @@ pub async fn create_pipeline_handler(
         }
     };
 
-    if flow_instance_id != DEFAULT_FLOW_INSTANCE_ID
-        && !state.is_declared_instance(&flow_instance_id)
-    {
+    if !state.is_declared_instance(&flow_instance_id) {
         return (
             StatusCode::BAD_REQUEST,
             format!("flow instance {flow_instance_id} is not declared by config"),
@@ -157,13 +185,13 @@ pub async fn create_pipeline_handler(
         }
     }
 
-    if flow_instance_id != DEFAULT_FLOW_INSTANCE_ID {
-        let Some(worker) = state.worker(&flow_instance_id) else {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("flow instance {flow_instance_id} is not declared by config"),
-            )
-                .into_response();
+    if matches!(
+        state.backend(&flow_instance_id),
+        Some(FlowInstanceBackend::WorkerProcess)
+    ) {
+        let worker = match worker_response(&state, &flow_instance_id) {
+            Ok(worker) => worker,
+            Err(resp) => return *resp,
         };
         let apply_result = match apply_pipeline_in_worker(
             &worker,
@@ -202,15 +230,9 @@ pub async fn create_pipeline_handler(
             .into_response();
     }
 
-    let instance = match state.instances.get(&flow_instance_id) {
-        Some(instance) => instance,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("flow instance {flow_instance_id} is not declared by config"),
-            )
-                .into_response();
-        }
+    let instance = match local_instance_response(&state, &flow_instance_id) {
+        Ok(instance) => instance,
+        Err(resp) => return *resp,
     };
 
     let encoder_registry = instance.encoder_registry();
@@ -328,24 +350,22 @@ pub async fn upsert_pipeline_handler(
         }
     };
 
-    if create_req
+    let flow_instance_id = create_req
         .flow_instance_id
-        .as_deref()
-        .unwrap_or(DEFAULT_FLOW_INSTANCE_ID)
-        != DEFAULT_FLOW_INSTANCE_ID
-    {
-        let flow_instance_id = create_req
-            .flow_instance_id
-            .clone()
-            .unwrap_or_else(|| DEFAULT_FLOW_INSTANCE_ID.to_string());
-        if !state.is_declared_instance(&flow_instance_id) {
+        .clone()
+        .unwrap_or_else(|| DEFAULT_FLOW_INSTANCE_ID.to_string());
+    let backend = match state.backend(&flow_instance_id) {
+        Some(backend) => backend,
+        None => {
             return (
                 StatusCode::BAD_REQUEST,
                 format!("flow instance {flow_instance_id} is not declared by config"),
             )
                 .into_response();
         }
+    };
 
+    if matches!(backend, FlowInstanceBackend::WorkerProcess) {
         if old_pipeline.is_some() {
             let _ = state.storage.delete_pipeline(&id);
         }
@@ -377,24 +397,18 @@ pub async fn upsert_pipeline_handler(
             StoredPipelineDesiredState::Stopped => WorkerDesiredState::Stopped,
         };
 
-        if matches!(old_desired_state, StoredPipelineDesiredState::Running)
+        let _ = matches!(old_desired_state, StoredPipelineDesiredState::Running)
             && state
                 .storage
                 .put_pipeline_run_state(StoredPipelineRunState {
                     pipeline_id: id.clone(),
                     desired_state: StoredPipelineDesiredState::Running,
                 })
-                .is_err()
-        {
-            // Best effort; keep running intent if we cannot persist.
-        }
+                .is_err();
 
-        let Some(worker) = state.worker(&flow_instance_id) else {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("flow instance {flow_instance_id} is not declared by config"),
-            )
-                .into_response();
+        let worker = match worker_response(&state, &flow_instance_id) {
+            Ok(worker) => worker,
+            Err(resp) => return *resp,
         };
         let apply_result = match apply_pipeline_in_worker(
             &worker,
@@ -438,19 +452,9 @@ pub async fn upsert_pipeline_handler(
         .into_response();
     }
 
-    let flow_instance_id = create_req
-        .flow_instance_id
-        .as_deref()
-        .unwrap_or(DEFAULT_FLOW_INSTANCE_ID);
-    let instance = match state.instances.get(flow_instance_id) {
-        Some(instance) => instance,
-        None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("pipeline {id} references undeclared flow instance {flow_instance_id}"),
-            )
-                .into_response();
-        }
+    let instance = match local_instance_response(&state, &flow_instance_id) {
+        Ok(instance) => instance,
+        Err(resp) => return *resp,
     };
 
     let encoder_registry = instance.encoder_registry();
@@ -663,11 +667,14 @@ pub async fn explain_pipeline_handler(
         Err(resp) => return resp,
     };
 
-    if flow_instance_id == DEFAULT_FLOW_INSTANCE_ID {
-        let instance = state
-            .instances
-            .get(DEFAULT_FLOW_INSTANCE_ID)
-            .expect("default instance missing");
+    if matches!(
+        state.backend(&flow_instance_id),
+        Some(FlowInstanceBackend::InProcess)
+    ) {
+        let instance = match local_instance_response(&state, &flow_instance_id) {
+            Ok(instance) => instance,
+            Err(resp) => return *resp,
+        };
         let explain = match instance.explain_pipeline(flow::ExplainPipelineTarget::Id(&id)) {
             Ok(explain) => explain,
             Err(PipelineError::NotFound(_)) => {
@@ -690,15 +697,9 @@ pub async fn explain_pipeline_handler(
         return response;
     }
 
-    let worker = match state.worker(&flow_instance_id) {
-        Some(worker) => worker,
-        None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("flow instance {flow_instance_id} is not declared by config"),
-            )
-                .into_response();
-        }
+    let worker = match worker_response(&state, &flow_instance_id) {
+        Ok(worker) => worker,
+        Err(resp) => return *resp,
     };
     match worker.explain_pipeline(&id).await {
         Ok(text) => {
@@ -739,11 +740,14 @@ pub async fn collect_pipeline_stats_handler(
     };
 
     let timeout = Duration::from_millis(query.timeout_ms);
-    if flow_instance_id == DEFAULT_FLOW_INSTANCE_ID {
-        let instance = state
-            .instances
-            .get(DEFAULT_FLOW_INSTANCE_ID)
-            .expect("default instance missing");
+    if matches!(
+        state.backend(&flow_instance_id),
+        Some(FlowInstanceBackend::InProcess)
+    ) {
+        let instance = match local_instance_response(&state, &flow_instance_id) {
+            Ok(instance) => instance,
+            Err(resp) => return *resp,
+        };
         return match instance.collect_pipeline_stats(&id, timeout).await {
             Ok(stats) => {
                 let stats = stats
@@ -775,15 +779,9 @@ pub async fn collect_pipeline_stats_handler(
         };
     }
 
-    let worker = match state.worker(&flow_instance_id) {
-        Some(worker) => worker,
-        None => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("flow instance {flow_instance_id} is not declared by config"),
-            )
-                .into_response();
-        }
+    let worker = match worker_response(&state, &flow_instance_id) {
+        Ok(worker) => worker,
+        Err(resp) => return *resp,
     };
     match worker.collect_stats(&id, query.timeout_ms).await {
         Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
@@ -833,11 +831,14 @@ pub async fn start_pipeline_handler(
             .into_response();
     }
 
-    if flow_instance_id == DEFAULT_FLOW_INSTANCE_ID {
-        let instance = state
-            .instances
-            .get(DEFAULT_FLOW_INSTANCE_ID)
-            .expect("default instance missing");
+    if matches!(
+        state.backend(&flow_instance_id),
+        Some(FlowInstanceBackend::InProcess)
+    ) {
+        let instance = match local_instance_response(&state, &flow_instance_id) {
+            Ok(instance) => instance,
+            Err(resp) => return *resp,
+        };
         return match instance.start_pipeline(&id) {
             Ok(_) => {
                 tracing::info!(pipeline_id = %id, "pipeline started");
@@ -868,20 +869,16 @@ pub async fn start_pipeline_handler(
         };
     }
 
-    let worker = match state.worker(&flow_instance_id) {
-        Some(worker) => worker,
-        None => {
+    let worker = match worker_response(&state, &flow_instance_id) {
+        Ok(worker) => worker,
+        Err(resp) => {
             let _ = state
                 .storage
                 .put_pipeline_run_state(StoredPipelineRunState {
                     pipeline_id: id.clone(),
                     desired_state: StoredPipelineDesiredState::Stopped,
                 });
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("flow instance {flow_instance_id} is not declared by config"),
-            )
-                .into_response();
+            return *resp;
         }
     };
 
@@ -993,11 +990,14 @@ pub async fn stop_pipeline_handler(
             .into_response();
     }
 
-    if flow_instance_id == DEFAULT_FLOW_INSTANCE_ID {
-        let instance = state
-            .instances
-            .get(DEFAULT_FLOW_INSTANCE_ID)
-            .expect("default instance missing");
+    if matches!(
+        state.backend(&flow_instance_id),
+        Some(FlowInstanceBackend::InProcess)
+    ) {
+        let instance = match local_instance_response(&state, &flow_instance_id) {
+            Ok(instance) => instance,
+            Err(resp) => return *resp,
+        };
         return match instance.stop_pipeline(&id, mode, timeout).await {
             Ok(_) => {
                 tracing::info!(
@@ -1019,15 +1019,9 @@ pub async fn stop_pipeline_handler(
         };
     }
 
-    let worker = match state.worker(&flow_instance_id) {
-        Some(worker) => worker,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("flow instance {flow_instance_id} is not declared by config"),
-            )
-                .into_response();
-        }
+    let worker = match worker_response(&state, &flow_instance_id) {
+        Ok(worker) => worker,
+        Err(resp) => return *resp,
     };
     match worker.stop_pipeline(&id).await {
         Ok(()) => (StatusCode::OK, format!("pipeline {id} stopped")).into_response(),
@@ -1062,11 +1056,14 @@ pub async fn delete_pipeline_handler(
         Err(resp) => return resp,
     };
 
-    if flow_instance_id == DEFAULT_FLOW_INSTANCE_ID {
-        let instance = state
-            .instances
-            .get(DEFAULT_FLOW_INSTANCE_ID)
-            .expect("default instance missing");
+    if matches!(
+        state.backend(&flow_instance_id),
+        Some(FlowInstanceBackend::InProcess)
+    ) {
+        let instance = match local_instance_response(&state, &flow_instance_id) {
+            Ok(instance) => instance,
+            Err(resp) => return *resp,
+        };
         match instance.delete_pipeline(&id).await {
             Ok(_) => {}
             Err(PipelineError::NotFound(_)) => {
@@ -1080,7 +1077,11 @@ pub async fn delete_pipeline_handler(
                     .into_response();
             }
         }
-    } else if let Some(worker) = state.worker(&flow_instance_id) {
+    } else {
+        let worker = match worker_response(&state, &flow_instance_id) {
+            Ok(worker) => worker,
+            Err(resp) => return *resp,
+        };
         let _ = worker.delete_pipeline(&id).await;
     }
 

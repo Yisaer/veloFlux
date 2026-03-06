@@ -1,7 +1,7 @@
 use crate::FlowInstanceSpec;
 use crate::instances::{
     DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend, FlowInstanceBackendKind, FlowInstances,
-    find_default_flow_instance_spec,
+    build_in_process_flow_instance, find_default_flow_instance_spec,
 };
 use crate::storage_bridge;
 use crate::worker::{FlowWorkerClient, WorkerApplyPipelineRequest, WorkerDesiredState};
@@ -43,7 +43,7 @@ impl AppState {
 
         find_default_flow_instance_spec(&flow_instances)?;
 
-        for spec in flow_instances {
+        for spec in &flow_instances {
             let id = spec.id.trim();
             if id.is_empty() {
                 return Err("flow_instances contains an empty id".to_string());
@@ -64,6 +64,23 @@ impl AppState {
             {
                 return Err(format!(
                     "worker_process flow instance {id} requires worker_addr, metrics_addr, and profile_addr"
+                ));
+            }
+        }
+
+        let shared_registries = state.instances.default_instance().shared_registries();
+        for spec in &flow_instances {
+            let id = spec.id.trim();
+            if id == DEFAULT_FLOW_INSTANCE_ID
+                || !matches!(spec.backend, FlowInstanceBackendKind::InProcess)
+            {
+                continue;
+            }
+
+            let instance = build_in_process_flow_instance(spec, Some(shared_registries.clone()))?;
+            if state.instances.insert_local_instance(instance).is_some() {
+                return Err(format!(
+                    "duplicate in_process flow instance id in runtime: {id}"
                 ));
             }
         }
@@ -104,6 +121,13 @@ impl AppState {
 
     pub fn backend(&self, id: &str) -> Option<FlowInstanceBackend> {
         self.declared_instances.get(id).copied()
+    }
+
+    pub fn local_instance(&self, id: &str) -> Option<Arc<flow::FlowInstance>> {
+        match self.backend(id) {
+            Some(FlowInstanceBackend::InProcess) => self.instances.get(id),
+            _ => None,
+        }
     }
 
     pub fn worker(&self, id: &str) -> Option<FlowWorkerClient> {
