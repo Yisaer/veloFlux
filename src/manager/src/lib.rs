@@ -15,8 +15,9 @@ use storage::StorageManager;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
-pub use instances::FlowInstanceSpec;
-pub use instances::new_default_flow_instance;
+pub use instances::{
+    FlowInstanceBackend, FlowInstanceBackendKind, FlowInstanceSpec, new_default_flow_instance,
+};
 pub use stream::{SchemaParser, register_schema, schema_registry};
 pub use worker::FlowWorkerClient;
 pub use worker::{FlowWorkerState, build_worker_app};

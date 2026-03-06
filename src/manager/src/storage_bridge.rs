@@ -271,7 +271,9 @@ mod tests {
     async fn load_storage_skips_invalid_streams() {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
-        let instance = FlowInstance::new_default();
+        let instance = FlowInstance::new(
+            flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
+        );
 
         // 1. Create a GOOD stream
         let good_req = sample_stream_request("good_stream");

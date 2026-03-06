@@ -40,7 +40,8 @@ pub use expr::{
     ConcatFunc, ConversionError, EvalContext, ScalarExpr, StreamSqlConverter, UnaryFunc,
 };
 pub use instance::{
-    FlowInstance, FlowInstanceError, FlowInstanceSharedRegistries, StreamRuntimeInfo,
+    FlowInstance, FlowInstanceDedicatedRuntimeOptions, FlowInstanceError, FlowInstanceOptions,
+    FlowInstanceRuntimeOptions, FlowInstanceSharedRegistries, StreamRuntimeInfo,
 };
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
@@ -264,7 +265,7 @@ fn build_schema_binding(
 /// };
 ///
 /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
-/// let instance = FlowInstance::new_default();
+/// let instance = FlowInstance::new(FlowInstanceOptions::shared_current_runtime("default", None));
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig { log: false }),

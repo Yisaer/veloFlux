@@ -345,14 +345,23 @@ async fn spawn_flow_workers(
             return Err(format!("duplicate flow instance id in config: {id}").into());
         }
 
-        let worker_addr: std::net::SocketAddr = spec
-            .worker_addr
+        if !matches!(
+            spec.backend,
+            manager::FlowInstanceBackendKind::WorkerProcess
+        ) {
+            continue;
+        }
+
+        let worker_addr_raw = spec
+            .worker_addr()
+            .ok_or_else(|| format!("worker_process flow instance {id} requires worker_addr"))?;
+        let worker_addr: std::net::SocketAddr = worker_addr_raw
             .parse()
             .map_err(|e| format!("invalid worker_addr for {id}: {e}"))?;
         if !worker_addr.ip().is_loopback() {
             return Err(format!(
                 "worker_addr for {id} must be loopback, got {}",
-                spec.worker_addr
+                worker_addr_raw
             )
             .into());
         }
@@ -360,26 +369,30 @@ async fn spawn_flow_workers(
             return Err(format!("duplicate worker_addr in config: {worker_addr}").into());
         }
 
-        let metrics_addr: std::net::SocketAddr = spec
-            .metrics_addr
+        let metrics_addr_raw = spec
+            .metrics_addr()
+            .ok_or_else(|| format!("worker_process flow instance {id} requires metrics_addr"))?;
+        let metrics_addr: std::net::SocketAddr = metrics_addr_raw
             .parse()
             .map_err(|e| format!("invalid metrics_addr for {id}: {e}"))?;
         if !metrics_addr.ip().is_loopback() {
             return Err(format!(
                 "metrics_addr for {id} must be loopback, got {}",
-                spec.metrics_addr
+                metrics_addr_raw
             )
             .into());
         }
 
-        let profile_addr: std::net::SocketAddr = spec
-            .profile_addr
+        let profile_addr_raw = spec
+            .profile_addr()
+            .ok_or_else(|| format!("worker_process flow instance {id} requires profile_addr"))?;
+        let profile_addr: std::net::SocketAddr = profile_addr_raw
             .parse()
             .map_err(|e| format!("invalid profile_addr for {id}: {e}"))?;
         if !profile_addr.ip().is_loopback() {
             return Err(format!(
                 "profile_addr for {id} must be loopback, got {}",
-                spec.profile_addr
+                profile_addr_raw
             )
             .into());
         }
@@ -389,7 +402,7 @@ async fn spawn_flow_workers(
             worker_addr,
             metrics_addr,
             profile_addr,
-            cgroup_path: spec.cgroup_path.clone(),
+            cgroup_path: spec.process_cgroup_path().map(ToOwned::to_owned),
         });
     }
 

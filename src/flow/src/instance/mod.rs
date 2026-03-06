@@ -38,6 +38,51 @@ pub struct FlowInstanceSharedRegistries {
     merger_registry: Arc<MergerRegistry>,
 }
 
+#[derive(Clone)]
+pub enum FlowInstanceRuntimeOptions {
+    SharedCurrent,
+    Dedicated(FlowInstanceDedicatedRuntimeOptions),
+}
+
+#[derive(Clone, Default)]
+pub struct FlowInstanceDedicatedRuntimeOptions {
+    pub worker_threads: Option<usize>,
+    pub thread_name_prefix: Option<String>,
+    pub thread_cgroup_path: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct FlowInstanceOptions {
+    pub id: String,
+    pub shared_registries: Option<FlowInstanceSharedRegistries>,
+    pub runtime: FlowInstanceRuntimeOptions,
+}
+
+impl FlowInstanceOptions {
+    pub fn shared_current_runtime(
+        id: impl Into<String>,
+        shared_registries: Option<FlowInstanceSharedRegistries>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            shared_registries,
+            runtime: FlowInstanceRuntimeOptions::SharedCurrent,
+        }
+    }
+
+    pub fn dedicated_runtime(
+        id: impl Into<String>,
+        shared_registries: Option<FlowInstanceSharedRegistries>,
+        runtime: FlowInstanceDedicatedRuntimeOptions,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            shared_registries,
+            runtime: FlowInstanceRuntimeOptions::Dedicated(runtime),
+        }
+    }
+}
+
 /// Runtime container that manages all Flow resources (streams, pipelines, shared clients).
 #[derive(Clone)]
 pub struct FlowInstance {
@@ -61,10 +106,21 @@ pub struct FlowInstance {
 }
 
 impl FlowInstance {
-    fn dedicated_spawner(instance_id: &str) -> crate::runtime::TaskSpawner {
+    fn dedicated_spawner(
+        instance_id: &str,
+        options: &FlowInstanceDedicatedRuntimeOptions,
+    ) -> crate::runtime::TaskSpawner {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        if let Some(worker_threads) = options.worker_threads {
+            builder.worker_threads(worker_threads);
+        }
+        let thread_name = options
+            .thread_name_prefix
+            .clone()
+            .unwrap_or_else(|| format!("flow-instance-{instance_id}"));
         crate::runtime::TaskSpawner::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .thread_name(format!("flow-instance-{instance_id}"))
+            builder
+                .thread_name(thread_name)
                 .enable_all()
                 .build()
                 .expect("build flow instance tokio runtime"),
@@ -151,31 +207,24 @@ impl FlowInstance {
         }
     }
 
-    /// Create the default Flow instance (`id=default`) that shares the current Tokio runtime.
-    ///
-    /// This requires a running Tokio runtime; it will panic if called outside a runtime context.
-    pub fn new_default() -> Self {
-        let handle = tokio::runtime::Handle::current();
-        let spawner = crate::runtime::TaskSpawner::from_handle(handle);
-        Self::build(
-            "default".to_string(),
-            Arc::new(Catalog::new()),
-            spawner,
-            None,
-        )
-    }
-
-    /// Create a non-default Flow instance with a dedicated Tokio runtime.
-    pub fn new_with_id(id: &str, shared_registries: Option<FlowInstanceSharedRegistries>) -> Self {
-        let id = id.trim();
+    /// Create a Flow instance from explicit options.
+    pub fn new(options: FlowInstanceOptions) -> Self {
+        let id = options.id.trim();
         assert!(!id.is_empty(), "flow instance id must not be empty");
-        assert!(id != "default", "use new_default for id=default");
-        let spawner = Self::dedicated_spawner(id);
+        let spawner = match &options.runtime {
+            FlowInstanceRuntimeOptions::SharedCurrent => {
+                let handle = tokio::runtime::Handle::current();
+                crate::runtime::TaskSpawner::from_handle(handle)
+            }
+            FlowInstanceRuntimeOptions::Dedicated(runtime_options) => {
+                Self::dedicated_spawner(id, runtime_options)
+            }
+        };
         Self::build(
             id.to_string(),
             Arc::new(Catalog::new()),
             spawner,
-            shared_registries,
+            options.shared_registries,
         )
     }
 

@@ -1,8 +1,10 @@
 use crate::FlowInstanceSpec;
-use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstances};
+use crate::instances::{
+    DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend, FlowInstanceBackendKind, FlowInstances,
+};
 use crate::storage_bridge;
 use crate::worker::{FlowWorkerClient, WorkerApplyPipelineRequest, WorkerDesiredState};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use storage::{StorageManager, StoredPipelineDesiredState};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
@@ -15,7 +17,7 @@ pub struct AppState {
     pub instances: FlowInstances,
     pub storage: Arc<StorageManager>,
     pub workers: Arc<HashMap<String, FlowWorkerClient>>,
-    pub declared_extra_instances: Arc<BTreeSet<String>>,
+    pub declared_instances: Arc<HashMap<String, FlowInstanceBackend>>,
     pipeline_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
@@ -28,13 +30,13 @@ impl AppState {
     ) -> Result<Self, String> {
         let instances = FlowInstances::new(instance);
         let storage = Arc::new(storage);
-        let mut declared_extra = BTreeSet::new();
+        let mut declared_instances = HashMap::new();
         let mut workers = HashMap::new();
         let state = Self {
             instances,
             storage,
             workers: Arc::new(HashMap::new()),
-            declared_extra_instances: Arc::new(BTreeSet::new()),
+            declared_instances: Arc::new(HashMap::new()),
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -46,34 +48,65 @@ impl AppState {
             if id == DEFAULT_FLOW_INSTANCE_ID {
                 return Err("extra_flow_instances must not include default".to_string());
             }
-            if !declared_extra.insert(id.to_string()) {
+            let backend = FlowInstanceBackend::from(spec.backend);
+            if declared_instances.insert(id.to_string(), backend).is_some() {
                 return Err(format!("duplicate flow instance id in config: {id}"));
+            }
+            if matches!(spec.backend, FlowInstanceBackendKind::WorkerProcess)
+                && (spec.worker_addr().is_none()
+                    || spec.metrics_addr().is_none()
+                    || spec.profile_addr().is_none())
+            {
+                return Err(format!(
+                    "worker_process flow instance {id} requires worker_addr, metrics_addr, and profile_addr"
+                ));
             }
         }
 
         for (id, base_url) in extra_flow_worker_endpoints {
-            if !declared_extra.contains(&id) {
-                return Err(format!(
-                    "flow worker endpoint provided for undeclared instance: {id}"
-                ));
+            match declared_instances.get(&id) {
+                Some(FlowInstanceBackend::WorkerProcess) => {
+                    workers.insert(id, FlowWorkerClient::new(base_url));
+                }
+                Some(FlowInstanceBackend::LocalThread) => {
+                    return Err(format!(
+                        "flow worker endpoint provided for local_thread instance: {id}"
+                    ));
+                }
+                Some(FlowInstanceBackend::Default) => {
+                    return Err(format!(
+                        "flow worker endpoint provided for default instance: {id}"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "flow worker endpoint provided for undeclared instance: {id}"
+                    ));
+                }
             }
-            workers.insert(id, FlowWorkerClient::new(base_url));
         }
-        for id in &declared_extra {
-            if !workers.contains_key(id) {
+        for (id, backend) in &declared_instances {
+            if matches!(backend, FlowInstanceBackend::WorkerProcess) && !workers.contains_key(id) {
                 return Err(format!("missing flow worker endpoint for instance: {id}"));
             }
         }
 
         Ok(Self {
             workers: Arc::new(workers),
-            declared_extra_instances: Arc::new(declared_extra),
+            declared_instances: Arc::new(declared_instances),
             ..state
         })
     }
 
     pub fn is_declared_instance(&self, id: &str) -> bool {
-        id == DEFAULT_FLOW_INSTANCE_ID || self.declared_extra_instances.contains(id)
+        id == DEFAULT_FLOW_INSTANCE_ID || self.declared_instances.contains_key(id)
+    }
+
+    pub fn backend(&self, id: &str) -> Option<FlowInstanceBackend> {
+        if id == DEFAULT_FLOW_INSTANCE_ID {
+            return Some(FlowInstanceBackend::Default);
+        }
+        self.declared_instances.get(id).copied()
     }
 
     pub fn worker(&self, id: &str) -> Option<FlowWorkerClient> {
@@ -138,6 +171,12 @@ impl AppState {
                     flow_instance_id = %flow_instance_id,
                     "skipping worker pipeline hydrate: flow instance not declared by config"
                 );
+                continue;
+            }
+            if !matches!(
+                self.backend(&flow_instance_id),
+                Some(FlowInstanceBackend::WorkerProcess)
+            ) {
                 continue;
             }
 
