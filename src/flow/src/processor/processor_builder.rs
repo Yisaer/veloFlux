@@ -1653,6 +1653,7 @@ mod tests {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let context = ProcessorBuilderContext {
+            flow_instance_id: Arc::<str>::from("default"),
             mqtt_clients: Some(MqttClientManager::new(spawner.clone())),
             connector_registry: Some(connector_registry),
             encoder_registry: Some(encoder_registry),
