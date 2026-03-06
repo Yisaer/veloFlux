@@ -1,4 +1,4 @@
-use super::{bind_manager_listener_or_skip, make_client, random_suffix};
+use super::{bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix};
 use sdk::PipelineCreateRequest;
 use sdk::StopOptions;
 use sdk::StreamCreateRequest;
@@ -16,9 +16,15 @@ async fn shared_stream_rapid_start_stop_cycles_via_rest() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(listener, instance, storage, Vec::new(), Vec::new())
-            .await
-            .expect("start manager server");
+        manager::start_server_with_listener(
+            listener,
+            instance,
+            storage,
+            default_flow_instances(),
+            Vec::new(),
+        )
+        .await
+        .expect("start manager server");
     });
 
     let client = make_client(addr);
@@ -98,9 +104,15 @@ async fn shared_stream_slow_unsubscribe_during_restart_via_rest() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(listener, instance, storage, Vec::new(), Vec::new())
-            .await
-            .expect("start manager server");
+        manager::start_server_with_listener(
+            listener,
+            instance,
+            storage,
+            default_flow_instances(),
+            Vec::new(),
+        )
+        .await
+        .expect("start manager server");
     });
 
     let client = make_client(addr);

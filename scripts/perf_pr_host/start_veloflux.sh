@@ -12,7 +12,7 @@ Usage:
     [-- <extra veloflux args>]
 
 Starts the main veloflux process after joining manager cgroup.
-Workers are still bound by server.extra_flow_instances[].cgroup_path.
+Worker-process instances are still bound by server.flow_instances[].cgroup.process_path.
 EOF
 }
 

@@ -92,8 +92,8 @@ pub struct ServerOptions {
     pub metrics_addr: Option<String>,
     /// Metrics polling interval in seconds (feature-gated); if None, uses default.
     pub metrics_poll_interval_secs: Option<u64>,
-    /// Extra flow instances (excluding `default`) declared by config.
-    pub extra_flow_instances: Vec<manager::FlowInstanceSpec>,
+    /// Declared flow instances loaded from config.
+    pub flow_instances: Vec<manager::FlowInstanceSpec>,
     /// Loaded config path (passed to worker subprocesses).
     pub config_path: Option<String>,
 }
@@ -104,7 +104,7 @@ pub struct ServerContext {
     storage: StorageManager,
     manager_addr: String,
     profiling_enabled: bool,
-    extra_flow_instances: Vec<manager::FlowInstanceSpec>,
+    flow_instances: Vec<manager::FlowInstanceSpec>,
     config_path: Option<String>,
 }
 
@@ -133,8 +133,8 @@ impl ServerContext {
         )
     }
 
-    fn extra_flow_instances(&self) -> &[manager::FlowInstanceSpec] {
-        &self.extra_flow_instances
+    fn flow_instances(&self) -> &[manager::FlowInstanceSpec] {
+        &self.flow_instances
     }
 
     fn config_path(&self) -> Option<&str> {
@@ -181,24 +181,24 @@ pub async fn init(
         storage,
         manager_addr,
         profiling_enabled,
-        extra_flow_instances: opts.extra_flow_instances,
+        flow_instances: opts.flow_instances,
         config_path: opts.config_path,
     })
 }
 
 /// Start the manager server and await termination (Ctrl+C or server error).
 pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let extra_instances = ctx.extra_flow_instances().to_vec();
+    let flow_instances = ctx.flow_instances().to_vec();
     let config_path = ctx.config_path().map(|s| s.to_string());
     let (instance, storage, manager_addr, _profiling_enabled) = ctx.into_parts();
     let (worker_endpoints, mut worker_children) =
-        spawn_flow_workers(&extra_instances, config_path.as_deref()).await?;
+        spawn_flow_workers(&flow_instances, config_path.as_deref()).await?;
     tracing::info!(manager_addr = %manager_addr, "starting manager");
     let manager_future = manager::start_server(
         manager_addr.clone(),
         instance,
         storage,
-        extra_instances,
+        flow_instances,
         worker_endpoints,
     );
 
@@ -311,14 +311,20 @@ fn forward_worker_output(
 }
 
 async fn spawn_flow_workers(
-    extra_instances: &[manager::FlowInstanceSpec],
+    flow_instances: &[manager::FlowInstanceSpec],
     config_path: Option<&str>,
 ) -> Result<(FlowWorkerEndpoints, FlowWorkerChildren), Box<dyn std::error::Error + Send + Sync>> {
-    if extra_instances.is_empty() {
+    let has_worker_process = flow_instances.iter().any(|spec| {
+        matches!(
+            spec.backend,
+            manager::FlowInstanceBackendKind::WorkerProcess
+        )
+    });
+    if !has_worker_process {
         return Ok((Vec::new(), Vec::new()));
     }
     let config_path =
-        config_path.ok_or("extra_flow_instances configured but --config not provided")?;
+        config_path.ok_or("worker_process flow_instances configured but --config not provided")?;
 
     let exe = std::env::current_exe()?;
     #[derive(Debug, Clone)]
@@ -332,14 +338,11 @@ async fn spawn_flow_workers(
 
     let mut seen_ids = std::collections::HashSet::new();
     let mut seen_worker_addrs = std::collections::HashSet::new();
-    let mut parsed = Vec::with_capacity(extra_instances.len());
-    for spec in extra_instances {
+    let mut parsed = Vec::with_capacity(flow_instances.len());
+    for spec in flow_instances {
         let id = spec.id.trim();
         if id.is_empty() {
-            return Err("extra_flow_instances contains an empty id".into());
-        }
-        if id == "default" {
-            return Err("extra_flow_instances must not include default".into());
+            return Err("flow_instances contains an empty id".into());
         }
         if !seen_ids.insert(id.to_string()) {
             return Err(format!("duplicate flow instance id in config: {id}").into());
@@ -402,7 +405,7 @@ async fn spawn_flow_workers(
             worker_addr,
             metrics_addr,
             profile_addr,
-            cgroup_path: spec.process_cgroup_path().map(ToOwned::to_owned),
+            cgroup_path: spec.process_cgroup_path().map(|path| path.to_string()),
         });
     }
 
@@ -741,8 +744,13 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
 
 /// Prepare Flow registries/instance before initialization, so callers can
 /// register custom encoders/decoders/connectors prior to loading storage.
-pub fn prepare_registry() -> FlowInstance {
-    manager::new_default_flow_instance()
+pub fn prepare_registry(
+    flow_instances: &[manager::FlowInstanceSpec],
+) -> Result<FlowInstance, Box<dyn std::error::Error + Send + Sync>> {
+    let default_spec = manager::find_default_flow_instance_spec(flow_instances)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    manager::build_in_process_flow_instance(default_spec, None)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err).into())
 }
 
 #[cfg(feature = "profiling")]

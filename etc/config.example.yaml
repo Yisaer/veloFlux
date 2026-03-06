@@ -21,3 +21,8 @@ metrics:
 
 server:
   manager_addr: "0.0.0.0:8080"
+  flow_instances:
+    - id: "default"
+      backend: "in_process"
+      runtime:
+        thread_name_prefix: "vf-default"

@@ -22,17 +22,27 @@ metrics:
 server:
   manager_addr: "0.0.0.0:8080"
 
-  # Main process cgroup is set by scripts/perf_pr_host/start_veloflux.sh
-  # via --manager-cgroup. This config only defines worker cgroup paths.
-  extra_flow_instances:
+  # The main process cgroup is set by scripts/perf_pr_host/start_veloflux.sh
+  # via --manager-cgroup. The default in-process flow instance runs inside
+  # the main process. Worker process instances define their own process cgroup paths here.
+  flow_instances:
+    - id: "default"
+      backend: "in_process"
+      runtime:
+        thread_name_prefix: "vf-default"
+
     - id: "fi_critical"
+      backend: "worker_process"
       worker_addr: "127.0.0.1:18081"
       metrics_addr: "127.0.0.1:19891"
       profile_addr: "127.0.0.1:16061"
-      cgroup_path: "/veloflux-ci/perf-pr-host-001/veloflux/fi_critical"
+      cgroup:
+        process_path: "/veloflux-ci/perf-pr-host-001/veloflux/fi_critical"
 
     - id: "fi_best"
+      backend: "worker_process"
       worker_addr: "127.0.0.1:18082"
       metrics_addr: "127.0.0.1:19892"
       profile_addr: "127.0.0.1:16062"
-      cgroup_path: "/veloflux-ci/perf-pr-host-001/veloflux/fi_best"
+      cgroup:
+        process_path: "/veloflux-ci/perf-pr-host-001/veloflux/fi_best"

@@ -1,4 +1,4 @@
-use super::{bind_manager_listener_or_skip, make_client, random_suffix};
+use super::{bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix};
 
 use serde_json::Value as JsonValue;
 
@@ -18,9 +18,15 @@ async fn pipeline_build_context_returns_200_and_404() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(listener, instance, storage, Vec::new(), Vec::new())
-            .await
-            .expect("start manager server");
+        manager::start_server_with_listener(
+            listener,
+            instance,
+            storage,
+            default_flow_instances(),
+            Vec::new(),
+        )
+        .await
+        .expect("start manager server");
     });
 
     let client = make_client(addr);

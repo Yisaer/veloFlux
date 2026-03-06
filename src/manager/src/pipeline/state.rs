@@ -1,6 +1,7 @@
 use crate::FlowInstanceSpec;
 use crate::instances::{
     DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend, FlowInstanceBackendKind, FlowInstances,
+    find_default_flow_instance_spec,
 };
 use crate::storage_bridge;
 use crate::worker::{FlowWorkerClient, WorkerApplyPipelineRequest, WorkerDesiredState};
@@ -25,7 +26,7 @@ impl AppState {
     pub fn new(
         instance: flow::FlowInstance,
         storage: StorageManager,
-        extra_flow_instances: Vec<FlowInstanceSpec>,
+        flow_instances: Vec<FlowInstanceSpec>,
         extra_flow_worker_endpoints: Vec<(String, String)>,
     ) -> Result<Self, String> {
         let instances = FlowInstances::new(instance);
@@ -40,17 +41,21 @@ impl AppState {
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
         };
 
-        for spec in extra_flow_instances {
+        find_default_flow_instance_spec(&flow_instances)?;
+
+        for spec in flow_instances {
             let id = spec.id.trim();
             if id.is_empty() {
-                return Err("extra_flow_instances contains an empty id".to_string());
-            }
-            if id == DEFAULT_FLOW_INSTANCE_ID {
-                return Err("extra_flow_instances must not include default".to_string());
+                return Err("flow_instances contains an empty id".to_string());
             }
             let backend = FlowInstanceBackend::from(spec.backend);
             if declared_instances.insert(id.to_string(), backend).is_some() {
                 return Err(format!("duplicate flow instance id in config: {id}"));
+            }
+            if id == DEFAULT_FLOW_INSTANCE_ID
+                && !matches!(spec.backend, FlowInstanceBackendKind::InProcess)
+            {
+                return Err("default flow instance must use backend=in_process".to_string());
             }
             if matches!(spec.backend, FlowInstanceBackendKind::WorkerProcess)
                 && (spec.worker_addr().is_none()
@@ -68,14 +73,9 @@ impl AppState {
                 Some(FlowInstanceBackend::WorkerProcess) => {
                     workers.insert(id, FlowWorkerClient::new(base_url));
                 }
-                Some(FlowInstanceBackend::LocalThread) => {
+                Some(FlowInstanceBackend::InProcess) => {
                     return Err(format!(
-                        "flow worker endpoint provided for local_thread instance: {id}"
-                    ));
-                }
-                Some(FlowInstanceBackend::Default) => {
-                    return Err(format!(
-                        "flow worker endpoint provided for default instance: {id}"
+                        "flow worker endpoint provided for in_process instance: {id}"
                     ));
                 }
                 None => {
@@ -99,13 +99,10 @@ impl AppState {
     }
 
     pub fn is_declared_instance(&self, id: &str) -> bool {
-        id == DEFAULT_FLOW_INSTANCE_ID || self.declared_instances.contains_key(id)
+        self.declared_instances.contains_key(id)
     }
 
     pub fn backend(&self, id: &str) -> Option<FlowInstanceBackend> {
-        if id == DEFAULT_FLOW_INSTANCE_ID {
-            return Some(FlowInstanceBackend::Default);
-        }
         self.declared_instances.get(id).copied()
     }
 
@@ -162,9 +159,6 @@ impl AppState {
                 .flow_instance_id
                 .clone()
                 .unwrap_or_else(|| DEFAULT_FLOW_INSTANCE_ID.to_string());
-            if flow_instance_id == DEFAULT_FLOW_INSTANCE_ID {
-                continue;
-            }
             if !self.is_declared_instance(&flow_instance_id) {
                 tracing::warn!(
                     pipeline_id = %pipeline.id,

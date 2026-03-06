@@ -133,14 +133,14 @@ impl Default for MetricsConfig {
 pub struct ServerConfig {
     pub manager_addr: Option<String>,
     #[serde(default)]
-    pub extra_flow_instances: Vec<FlowInstanceSpec>,
+    pub flow_instances: Vec<FlowInstanceSpec>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             manager_addr: Some(crate::server::DEFAULT_MANAGER_ADDR.to_string()),
-            extra_flow_instances: Vec::new(),
+            flow_instances: Vec::new(),
         }
     }
 }
@@ -186,8 +186,8 @@ impl AppConfig {
         if let Some(addr) = self.server.manager_addr.as_ref() {
             opts.manager_addr = Some(addr.clone());
         }
-        if !self.server.extra_flow_instances.is_empty() {
-            opts.extra_flow_instances = self.server.extra_flow_instances.clone();
+        if !self.server.flow_instances.is_empty() {
+            opts.flow_instances = self.server.flow_instances.clone();
         }
     }
 

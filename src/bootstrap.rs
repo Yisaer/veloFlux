@@ -4,8 +4,6 @@
 //! - CLI argument parsing (--config, --data-dir)
 //! - Config file loading
 //! - Logging setup
-//!
-//! The default FlowInstance preparation requires a running Tokio runtime context.
 
 use crate::config::AppConfig;
 use crate::logging::LoggingGuard;
@@ -101,11 +99,9 @@ pub fn default_init_options(
 /// Returns a `BootstrapResult` containing the FlowInstance (with default registrations),
 /// ServerOptions, and the logging guard. The caller can then register custom codecs
 /// on `result.instance` before calling `server::init()` and `server::start()`.
-///
-/// This function must be called within a running Tokio runtime context.
 pub fn default_init() -> Result<BootstrapResult, Box<dyn std::error::Error + Send + Sync>> {
     let bootstrap = default_init_options()?;
-    let instance = server::prepare_registry();
+    let instance = server::prepare_registry(&bootstrap.options.flow_instances)?;
 
     Ok(BootstrapResult {
         instance,

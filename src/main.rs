@@ -36,7 +36,7 @@ impl WorkerCliArgs {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--worker") {
@@ -64,13 +64,11 @@ async fn run_worker(
 
     let spec = cfg
         .server
-        .extra_flow_instances
+        .flow_instances
         .iter()
         .find(|spec| spec.id.trim() == instance_id)
         .ok_or_else(|| {
-            format!(
-                "worker instance {instance_id} is not declared in config server.extra_flow_instances"
-            )
+            format!("worker instance {instance_id} is not declared in config server.flow_instances")
         })?
         .clone();
 
@@ -144,12 +142,19 @@ async fn run_worker(
         veloflux::server::start_profile_server(&opts);
     }
 
-    let default_instance = server::prepare_registry();
+    let default_spec = manager::find_default_flow_instance_spec(&cfg.server.flow_instances)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    let default_instance = manager::build_in_process_flow_instance(default_spec, None)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
     let shared = default_instance.shared_registries();
     let instance = flow::FlowInstance::new(flow::instance::FlowInstanceOptions::dedicated_runtime(
         instance_id.clone(),
         Some(shared),
-        flow::instance::FlowInstanceDedicatedRuntimeOptions::default(),
+        flow::instance::FlowInstanceDedicatedRuntimeOptions {
+            worker_threads: spec.runtime.worker_threads,
+            thread_name_prefix: spec.runtime.thread_name_prefix.clone(),
+            thread_cgroup_path: spec.thread_cgroup_path().map(|path| path.to_string()),
+        },
     ));
 
     let listener = tokio::net::TcpListener::bind(worker_addr).await?;
