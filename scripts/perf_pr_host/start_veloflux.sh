@@ -2,18 +2,29 @@
 set -euo pipefail
 
 usage() {
-  cat <<'EOF'
+  cat <<'USAGE'
 Usage:
   ./scripts/perf_pr_host/start_veloflux.sh \
-    --manager-cgroup /veloflux-ci/perf-pr-host-001/veloflux/manager \
+    --main-cgroup /veloflux-ci/perf-pr-host-001/veloflux/manager \
     [--veloflux-bin ./veloflux-linux-x86_64] \
     [--config ./scripts/perf_pr_host/config.yaml] \
     [--data-dir ./data] \
     [-- <extra veloflux args>]
 
-Starts the main veloflux process after joining manager cgroup.
-Worker-process instances are still bound by server.flow_instances[].cgroup.process_path.
-EOF
+Starts the main veloflux process after joining the specified main-process cgroup.
+
+Examples:
+  worker-process mode:
+    --main-cgroup /veloflux-ci/perf-pr-host-001/veloflux/manager
+
+  thread-level mode:
+    --main-cgroup /veloflux-ci/perf-pr-host-001/veloflux/main
+
+Worker-process instances are still bound by
+server.flow_instances[].cgroup.process_path.
+In-process instances with dedicated runtimes are bound by
+server.flow_instances[].cgroup.thread_path.
+USAGE
 }
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -21,13 +32,13 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VELOFLUX_BIN="${ROOT_DIR}/veloflux-linux-x86_64"
 CONFIG_PATH="${ROOT_DIR}/scripts/perf_pr_host/config.yaml"
 DATA_DIR="${ROOT_DIR}/data"
-MANAGER_CGROUP=""
+MAIN_CGROUP=""
 EXTRA_ARGS=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --manager-cgroup)
-      MANAGER_CGROUP="${2:-}"; shift 2;;
+    --main-cgroup|--manager-cgroup)
+      MAIN_CGROUP="${2:-}"; shift 2;;
     --veloflux-bin)
       VELOFLUX_BIN="${2:-}"; shift 2;;
     --config)
@@ -47,13 +58,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -z "${MANAGER_CGROUP}" ]; then
-  echo "--manager-cgroup is required" >&2
+if [ -z "${MAIN_CGROUP}" ]; then
+  echo "--main-cgroup is required" >&2
   usage
   exit 2
 fi
-if [ "${MANAGER_CGROUP:0:1}" != "/" ]; then
-  echo "--manager-cgroup must be an absolute cgroup path like /veloflux-ci/..." >&2
+if [ "${MAIN_CGROUP:0:1}" != "/" ]; then
+  echo "--main-cgroup must be an absolute cgroup path like /veloflux-ci/..." >&2
   exit 2
 fi
 
@@ -72,14 +83,14 @@ if [ ! -f "${CONFIG_PATH}" ]; then
 fi
 mkdir -p "${DATA_DIR}"
 
-CGROUP_PROCS="/sys/fs/cgroup${MANAGER_CGROUP}/cgroup.procs"
+CGROUP_PROCS="/sys/fs/cgroup${MAIN_CGROUP}/cgroup.procs"
 if [ ! -f "${CGROUP_PROCS}" ]; then
-  echo "manager cgroup not found: ${CGROUP_PROCS}" >&2
-  echo "run setup_cgroup.sh first and confirm --manager-cgroup value" >&2
+  echo "main cgroup not found: ${CGROUP_PROCS}" >&2
+  echo "run setup_cgroup.sh first and confirm --main-cgroup value" >&2
   exit 1
 fi
 
-echo "[start] joining manager cgroup: ${MANAGER_CGROUP}"
+echo "[start] joining main cgroup: ${MAIN_CGROUP}"
 echo $$ > "${CGROUP_PROCS}"
 echo "[start] exec veloflux: bin=${VELOFLUX_BIN} config=${CONFIG_PATH} data_dir=${DATA_DIR}"
 exec "${VELOFLUX_BIN}" --data-dir "${DATA_DIR}" --config "${CONFIG_PATH}" "${EXTRA_ARGS[@]}"

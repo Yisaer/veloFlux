@@ -1,0 +1,47 @@
+logging:
+  output: stdout
+  level: info
+  include_source: true
+  file:
+    dir: "./logs"
+    file_name: "app.log"
+    rotation:
+      keep_days: 7
+      max_num: 30
+      max_size_mb: 256
+
+profiling:
+  enabled: true
+  addr: "0.0.0.0:6060"
+  cpu_profile_freq_hz: 100
+
+metrics:
+  addr: "0.0.0.0:9898"
+  poll_interval_secs: 5
+
+server:
+  manager_addr: "0.0.0.0:8080"
+
+  # thread_level perf scenario:
+  # - main veloflux process joins /.../main via start_veloflux.sh --main-cgroup
+  # - extra flow instances stay in-process and each owns a dedicated Tokio runtime
+  # - runtime worker thread cgroup binding uses cgroup.thread_path
+  flow_instances:
+    - id: "default"
+      backend: "in_process"
+      runtime:
+        thread_name_prefix: "vf-default"
+
+    - id: "fi_critical"
+      backend: "in_process"
+      runtime:
+        thread_name_prefix: "vf-fi-critical"
+      cgroup:
+        thread_path: "/veloflux-ci/perf-pr-host-001/veloflux/main/fi_critical"
+
+    - id: "fi_best"
+      backend: "in_process"
+      runtime:
+        thread_name_prefix: "vf-fi-best"
+      cgroup:
+        thread_path: "/veloflux-ci/perf-pr-host-001/veloflux/main/fi_best"

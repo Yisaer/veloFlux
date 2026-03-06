@@ -2,12 +2,13 @@
 set -euo pipefail
 
 usage() {
-  cat <<'EOF'
+  cat <<'USAGE'
 Usage:
   sudo ./scripts/perf_pr_host/cleanup_cgroup.sh --base-cg /veloflux-ci/perf-pr-host-<id>/veloflux
 
-Moves any remaining pids back to cgroup root and removes the cgroup directories.
-EOF
+Moves remaining pids/tids back toward the parent cgroup and removes the cgroup tree.
+This works for both worker_process and thread_level perf topologies.
+USAGE
 }
 
 BASE_CG=""
@@ -42,73 +43,81 @@ move_procs_to_root() {
   local cg="$1"
   local procs="/sys/fs/cgroup${cg}/cgroup.procs"
   if [ ! -f "${procs}" ]; then
-    echo "[cleanup] ${cg}: not found (skip)"
     return 0
   fi
   local moved=0
   while read -r pid; do
     [ -z "${pid}" ] && continue
-    # Ignore errors if pid already exited.
     if echo "${pid}" > /sys/fs/cgroup/cgroup.procs 2>/dev/null; then
       moved=$((moved + 1))
     fi
   done < "${procs}"
-  echo "[cleanup] ${cg}: moved ${moved} pid(s) to /sys/fs/cgroup"
+  if [ "${moved}" -gt 0 ]; then
+    echo "[cleanup] ${cg}: moved ${moved} pid(s) to /sys/fs/cgroup"
+  fi
+}
+
+move_threads_to_parent() {
+  local cg="$1"
+  local cgfs="/sys/fs/cgroup${cg}"
+  local type_file="${cgfs}/cgroup.type"
+  local threads_file="${cgfs}/cgroup.threads"
+  local parent_threads="$(dirname "${cgfs}")/cgroup.threads"
+
+  if [ ! -f "${type_file}" ] || [ ! -f "${threads_file}" ] || [ ! -f "${parent_threads}" ]; then
+    return 0
+  fi
+
+  local cg_type
+  cg_type="$(cat "${type_file}" 2>/dev/null || true)"
+  case "${cg_type}" in
+    *threaded*) ;;
+    *) return 0;;
+  esac
+
+  local moved=0
+  while read -r tid; do
+    [ -z "${tid}" ] && continue
+    if echo "${tid}" > "${parent_threads}" 2>/dev/null; then
+      moved=$((moved + 1))
+    fi
+  done < "${threads_file}"
+  if [ "${moved}" -gt 0 ]; then
+    echo "[cleanup] ${cg}: moved ${moved} tid(s) to $(dirname "${cg}")"
+  fi
 }
 
 remove_cgroup_dir() {
   local cg="$1"
   if rmdir "/sys/fs/cgroup${cg}" 2>/dev/null; then
     echo "[cleanup] removed ${cg}"
+  elif [ -d "/sys/fs/cgroup${cg}" ]; then
+    echo "[cleanup] keep ${cg} (not empty or busy)"
   else
-    if [ -d "/sys/fs/cgroup${cg}" ]; then
-      echo "[cleanup] keep ${cg} (not empty or busy)"
-    else
-      echo "[cleanup] ${cg}: already removed"
-    fi
+    echo "[cleanup] ${cg}: already removed"
   fi
 }
 
-cleanup_descendants() {
-  local root="/sys/fs/cgroup${BASE_CG}"
-  if [ ! -d "${root}" ]; then
-    return 0
-  fi
-  while IFS= read -r cgfs; do
-    local cg="${cgfs#/sys/fs/cgroup}"
-    [ "${cg}" = "${BASE_CG}" ] && continue
-    move_procs_to_root "${cg}"
-    remove_cgroup_dir "${cg}"
-  done < <(find "${root}" -mindepth 1 -type d | sort -r)
-}
+ROOT="/sys/fs/cgroup${BASE_CG}"
+if [ ! -d "${ROOT}" ]; then
+  echo "[cleanup] ${BASE_CG}: not found"
+  exit 0
+fi
 
-CG_MANAGER="${BASE_CG}/manager"
-CG_FI_CRITICAL="${BASE_CG}/fi_critical"
-CG_FI_BEST="${BASE_CG}/fi_best"
+echo "[cleanup] target cgroup tree: ${BASE_CG}"
+while IFS= read -r cgfs; do
+  cg="${cgfs#/sys/fs/cgroup}"
+  move_threads_to_parent "${cg}"
+  move_procs_to_root "${cg}"
+  remove_cgroup_dir "${cg}"
+done < <(find "${ROOT}" -mindepth 1 -type d | sort -r)
 
-echo "[cleanup] target cgroups:"
-echo "[cleanup]   ${BASE_CG}"
-echo "[cleanup]   ${CG_MANAGER}"
-echo "[cleanup]   ${CG_FI_CRITICAL}"
-echo "[cleanup]   ${CG_FI_BEST}"
-
-move_procs_to_root "${CG_MANAGER}"
-move_procs_to_root "${CG_FI_CRITICAL}"
-move_procs_to_root "${CG_FI_BEST}"
 move_procs_to_root "${BASE_CG}"
-cleanup_descendants
-
-# Remove leaves first.
-remove_cgroup_dir "${CG_MANAGER}"
-remove_cgroup_dir "${CG_FI_CRITICAL}"
-remove_cgroup_dir "${CG_FI_BEST}"
 remove_cgroup_dir "${BASE_CG}"
 
 echo "[cleanup] final status:"
-for cg in "${CG_MANAGER}" "${CG_FI_CRITICAL}" "${CG_FI_BEST}" "${BASE_CG}"; do
-  if [ -d "/sys/fs/cgroup${cg}" ]; then
-    echo "[cleanup] keep ${cg}"
-  else
-    echo "[cleanup] removed ${cg}"
-  fi
-done
+if [ -d "${ROOT}" ]; then
+  find "${ROOT}" -mindepth 0 -type d | sort | sed 's#^#[cleanup] keep #' 
+else
+  echo "[cleanup] removed ${BASE_CG}"
+fi

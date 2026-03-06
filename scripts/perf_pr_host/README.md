@@ -1,9 +1,14 @@
 # Perf PR Host Scripts
 
-These scripts are intentionally limited to four operations:
+These scripts support two perf validation modes for multi-`flow_instance` CPU isolation:
+
+- `worker_process`: extra flow instances run as local worker subprocesses and bind with `cgroup.procs`
+- `thread_level`: extra flow instances run in-process with dedicated Tokio runtimes and bind with `cgroup.threads`
+
+The shared perf workflow is intentionally limited to four operations:
 
 1. setup cgroup
-2. start veloflux (manager joins cgroup before exec)
+2. start veloflux
 3. deploy stream/pipeline
 4. run workload
 
@@ -12,65 +17,137 @@ No script in this folder starts or manages emqx/prometheus/grafana.
 
 ## Reference config
 
-Reference config file:
+Worker-process config:
 
 ```text
 scripts/perf_pr_host/config.yaml
 ```
 
-macOS local startup validation config (no cgroup binding):
+Thread-level config:
 
 ```text
-scripts/perf_pr_host/config.macos.yaml
+scripts/perf_pr_host/config.thread_level.yaml
 ```
 
-Update these paths using `setup_cgroup.sh` output:
+Update the cgroup paths in the selected config file to match your `--base-cg`.
 
-- `server.extra_flow_instances[0].cgroup_path`
-- `server.extra_flow_instances[1].cgroup_path`
+## Mode A: worker-process extra flow instances
 
-## 1) Setup cgroup
+### 1) Setup cgroup
 
 ```bash
-sudo ./scripts/perf_pr_host/setup_cgroup.sh --base-cg /veloflux-ci/perf-pr-host-001/veloflux
+sudo ./scripts/perf_pr_host/setup_cgroup.sh \
+  --mode worker_process \
+  --base-cg /veloflux-ci/perf-pr-host-001/veloflux
+```
+
+Topology:
+
+```text
+/base
+/base/manager
+/base/fi_critical
+/base/fi_best
 ```
 
 Default cgroup policy:
 
 - base `cpu.max = 100000 100000` (total 1 CPU)
+- `manager` `cpu.weight = 300`
 - `fi_critical` `cpu.max = 90000 100000`
 - `fi_best` `cpu.max = 25000 100000`
 - `fi_critical` `cpu.weight = 10000`
-- `manager` `cpu.weight = 300`
 - `fi_best` `cpu.weight = 1`
 
 The script prints:
 
 ```text
+CG_MODE=worker_process
 CG_BASE=...
-CG_MANAGER=...
+CG_MAIN=...
 CG_FI_CRITICAL=...
 CG_FI_BEST=...
 ```
 
-Use those values in:
+Use them like this:
 
-- veloflux config (`extra_flow_instances[].cgroup_path`) for worker binding
-- `start_veloflux.sh --manager-cgroup` for main veloflux process binding
+- `CG_MAIN` -> `start_veloflux.sh --main-cgroup`
+- `CG_FI_*` -> `server.flow_instances[].cgroup.process_path`
 
-## 2) Start veloflux (manager pre-join cgroup)
+### 2) Start veloflux
 
 ```bash
 ./scripts/perf_pr_host/start_veloflux.sh \
-  --manager-cgroup /veloflux-ci/perf-pr-host-001/veloflux/manager \
+  --main-cgroup /veloflux-ci/perf-pr-host-001/veloflux/manager \
   --veloflux-bin ./veloflux-linux-x86_64 \
   --config ./scripts/perf_pr_host/config.yaml \
   --data-dir ./data
 ```
 
-This ensures the main veloflux process joins `manager` cgroup before runtime starts.
+In this mode:
 
-## 3) Deploy stream/pipeline
+- main veloflux process joins `manager`
+- `fi_critical` and `fi_best` start as worker subprocesses
+- subprocess binding uses `cgroup.procs`
+
+## Mode B: thread-level in-process extra flow instances
+
+### 1) Setup cgroup
+
+```bash
+sudo ./scripts/perf_pr_host/setup_cgroup.sh \
+  --mode thread_level \
+  --base-cg /veloflux-ci/perf-pr-host-001/veloflux
+```
+
+Topology:
+
+```text
+/base
+/base/main
+/base/main/fi_critical
+/base/main/fi_best
+```
+
+Notes:
+
+- `/base/main` is prepared as the threaded-domain root for the main veloflux process
+- `fi_critical` and `fi_best` are threaded child cgroups for dedicated Tokio runtime workers
+- quotas still use the same default values as worker-process mode
+
+The script prints:
+
+```text
+CG_MODE=thread_level
+CG_BASE=...
+CG_MAIN=...
+CG_FI_CRITICAL=...
+CG_FI_BEST=...
+```
+
+Use them like this:
+
+- `CG_MAIN` -> `start_veloflux.sh --main-cgroup`
+- `CG_FI_*` -> `server.flow_instances[].cgroup.thread_path`
+
+### 2) Start veloflux
+
+```bash
+./scripts/perf_pr_host/start_veloflux.sh \
+  --main-cgroup /veloflux-ci/perf-pr-host-001/veloflux/main \
+  --veloflux-bin ./veloflux-linux-x86_64 \
+  --config ./scripts/perf_pr_host/config.thread_level.yaml \
+  --data-dir ./data
+```
+
+In this mode:
+
+- main veloflux process joins the threaded-domain root `/.../main`
+- `fi_critical` and `fi_best` stay in the main process
+- each extra instance owns a dedicated Tokio runtime
+- each runtime worker thread binds itself through `cgroup.threads`
+
+## Shared steps: deploy stream/pipeline
 
 Use Go workload resource subcommands (idempotent and converge-oriented):
 
@@ -81,10 +158,10 @@ Use Go workload resource subcommands (idempotent and converge-oriented):
 
 `provision` behavior:
 
-- Reconcile `perf_pr_stream_critical` + `perf_pr_pipeline_critical`
-- Reconcile `perf_pr_stream_best` + `perf_pr_pipeline_best`
-- Delete/recreate existing target resources when needed
-- Continue on missing/existing resources and converge to final target state
+- reconcile `perf_pr_stream_critical` + `perf_pr_pipeline_critical`
+- reconcile `perf_pr_stream_best` + `perf_pr_pipeline_best`
+- delete/recreate existing target resources when needed
+- continue on missing/existing resources and converge to final target state
 
 Default flow instance binding:
 
@@ -118,16 +195,19 @@ Legacy shell helper is still available:
 ./scripts/perf_pr_host/deploy_stream_pipeline.sh <create|start|pause|delete>
 ```
 
-## 4) Run workload
+## Shared steps: run workload
 
 Build Go workload binary (first time or after code update):
 
 ```bash
 GOPROXY=${GOPROXY:-https://proxy.golang.org,direct} \
-  go -C ./scripts/perf_pr_host/go_workload build -o ./scripts/perf_pr_host/go_workload/bin/go_workload .
+  go -C ./scripts/perf_pr_host/go_workload build \
+  -o ./scripts/perf_pr_host/go_workload/bin/go_workload .
 ```
 
 The first build downloads Go modules from proxy/network.
+
+Run with defaults:
 
 ```bash
 ./scripts/perf_pr_host/run_workload.sh
@@ -139,7 +219,7 @@ Default behavior:
 - `columns=15000`
 - `str-len=10`
 - `duration=60s`
- 
+
 The script does not scrape or dump metrics. Use Prometheus/Grafana directly for observation.
 
 Lower-pressure example:
@@ -156,11 +236,14 @@ Per-pipeline QPS override example:
 
 Use `--workload-bin <path>` to run a prebuilt binary from another location.
 
-## Optional cleanup
+## Cleanup
 
 ```bash
-sudo ./scripts/perf_pr_host/cleanup_cgroup.sh --base-cg /veloflux-ci/perf-pr-host-001/veloflux
+sudo ./scripts/perf_pr_host/cleanup_cgroup.sh \
+  --base-cg /veloflux-ci/perf-pr-host-001/veloflux
 ```
+
+The cleanup script is topology-aware enough to work for both perf modes.
 
 ## Package this directory
 
