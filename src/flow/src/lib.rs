@@ -265,6 +265,7 @@ fn build_schema_binding(
 /// ```no_run
 /// use flow::{
 ///     FlowInstance,
+///     FlowInstanceOptions,
 ///     planner::sink::{
 ///         NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 ///     },
