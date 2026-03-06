@@ -244,6 +244,7 @@ pub enum SharedStreamConnectorSpec {
 /// Configuration used to create a shared stream instance.
 pub struct SharedStreamConfig {
     pub stream_name: String,
+    pub flow_instance_id: Arc<str>,
     pub schema: Arc<Schema>,
     pub decoder: StreamDecoderConfig,
     pub connector: Option<SharedStreamConnectorSpec>,
@@ -255,6 +256,7 @@ impl SharedStreamConfig {
     pub fn new(stream_name: impl Into<String>, schema: Arc<Schema>) -> Self {
         Self {
             stream_name: stream_name.into(),
+            flow_instance_id: Arc::<str>::from("default"),
             schema,
             decoder: StreamDecoderConfig::json(),
             connector: None,
@@ -400,6 +402,7 @@ impl Drop for SharedStreamSubscription {
 /// Internal structure that holds state for a single shared stream.
 struct SharedStreamInner {
     name: String,
+    flow_instance_id: Arc<str>,
     schema: Arc<Schema>,
     decoder_config: StreamDecoderConfig,
     created_at: SystemTime,
@@ -440,6 +443,7 @@ impl SharedStreamInner {
     ) -> Result<Arc<Self>, SharedStreamError> {
         let SharedStreamConfig {
             stream_name,
+            flow_instance_id,
             schema,
             decoder,
             connector,
@@ -485,6 +489,7 @@ impl SharedStreamInner {
 
         Ok(Arc::new(Self {
             name: stream_name,
+            flow_instance_id,
             schema,
             decoder_config: decoder,
             created_at: SystemTime::now(),
@@ -573,6 +578,7 @@ impl SharedStreamInner {
 
         let options = SharedStreamPipelineOptions {
             stream_name: self.name.clone(),
+            flow_instance_id: Arc::clone(&self.flow_instance_id),
             decoder,
             applied_decode_state: Arc::clone(&self.applied_decode_state),
         };

@@ -39,6 +39,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub(crate) struct SharedStreamPipelineOptions {
     pub stream_name: String,
+    pub flow_instance_id: Arc<str>,
     pub decoder: Arc<dyn RecordDecoder>,
     pub applied_decode_state: Arc<parking_lot::RwLock<AppliedDecodeState>>,
 }
@@ -1543,6 +1544,7 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
     create_processor_pipeline_with_context(
         physical_plan,
         ProcessorBuilderContext {
+            flow_instance_id: Arc::clone(&options.flow_instance_id),
             mqtt_clients: None,
             connector_registry: None,
             encoder_registry: None,

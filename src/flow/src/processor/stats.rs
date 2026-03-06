@@ -328,7 +328,7 @@ impl ProcessorStats {
 
 impl Default for ProcessorStats {
     fn default() -> Self {
-        Self::new("unknown", "unknown")
+        Self::new("unknown", "unknown", "unknown")
     }
 }
 
