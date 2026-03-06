@@ -118,6 +118,15 @@ else
   CG_FI_BEST="${CG_MAIN}/fi_best"
 fi
 
+read_cgroup_type() {
+  local cgfs="$1"
+  local type_file="${cgfs}/cgroup.type"
+  if [ ! -f "${type_file}" ]; then
+    return 1
+  fi
+  tr -d '\n' < "${type_file}" 2>/dev/null || true
+}
+
 move_procs_to_root_if_any() {
   local cg="$1"
   local procs="/sys/fs/cgroup${cg}/cgroup.procs"
@@ -148,10 +157,10 @@ move_threads_to_parent_if_any() {
   fi
 
   local cg_type
-  cg_type="$(cat "${type_file}" 2>/dev/null || true)"
+  cg_type="$(read_cgroup_type "${cgfs}" || true)"
   case "${cg_type}" in
     *threaded*) ;;
-    *) return 0;;
+    *) return 0 ;;
   esac
 
   local moved=0
@@ -192,12 +201,14 @@ cleanup_descendants_if_any() {
   if [ ! -d "${root}" ]; then
     return 0
   fi
-  while IFS= read -r cgfs; do
-    local cg="${cgfs#/sys/fs/cgroup}"
-    move_threads_to_parent_if_any "${cg}"
-    move_procs_to_root_if_any "${cg}"
-    disable_all_subtree_controllers "${cgfs}"
-    remove_cgroup_dir_if_possible "${cg}"
+  local child_fs
+  local child_cg
+  while IFS= read -r child_fs; do
+    child_cg="${child_fs#/sys/fs/cgroup}"
+    move_threads_to_parent_if_any "${child_cg}"
+    move_procs_to_root_if_any "${child_cg}"
+    disable_all_subtree_controllers "${child_fs}"
+    remove_cgroup_dir_if_possible "${child_cg}"
   done < <(find "${root}" -mindepth 1 -type d | sort -r)
 }
 
@@ -214,10 +225,10 @@ init_cpuset_if_available() {
     local mems
     mems="$(cat "${mems_file}" 2>/dev/null || true)"
     if [ -z "${mems}" ] && [ -f "${parent_mems_eff}" ]; then
-      local v
-      v="$(cat "${parent_mems_eff}" 2>/dev/null || true)"
-      if [ -n "${v}" ]; then
-        echo "${v}" > "${mems_file}" 2>/dev/null || true
+      local value
+      value="$(cat "${parent_mems_eff}" 2>/dev/null || true)"
+      if [ -n "${value}" ]; then
+        echo "${value}" > "${mems_file}" 2>/dev/null || true
       fi
     fi
   fi
@@ -226,10 +237,10 @@ init_cpuset_if_available() {
     local cpus
     cpus="$(cat "${cpus_file}" 2>/dev/null || true)"
     if [ -z "${cpus}" ] && [ -f "${parent_cpus_eff}" ]; then
-      local v
-      v="$(cat "${parent_cpus_eff}" 2>/dev/null || true)"
-      if [ -n "${v}" ]; then
-        echo "${v}" > "${cpus_file}" 2>/dev/null || true
+      local value
+      value="$(cat "${parent_cpus_eff}" 2>/dev/null || true)"
+      if [ -n "${value}" ]; then
+        echo "${value}" > "${cpus_file}" 2>/dev/null || true
       fi
     fi
   fi
@@ -274,7 +285,23 @@ prepare_leaf_cgroup() {
   echo "[setup] prepared leaf ${cg}"
 }
 
-prepare_threaded_root() {
+write_threaded_type() {
+  local cg="$1"
+  local cgfs="/sys/fs/cgroup${cg}"
+  local tmp_err
+  tmp_err="$(mktemp)"
+  if ! echo threaded > "${cgfs}/cgroup.type" 2>"${tmp_err}"; then
+    local err current_type
+    err="$(tr -d '\n' < "${tmp_err}" 2>/dev/null || true)"
+    current_type="$(read_cgroup_type "${cgfs}" || true)"
+    rm -f "${tmp_err}"
+    echo "[setup] failed to mark ${cg} as threaded: type=${current_type:-<empty>} error=${err:-<none>}" >&2
+    exit 1
+  fi
+  rm -f "${tmp_err}"
+}
+
+prepare_threaded_domain_root() {
   local cg="$1"
   local cgfs="/sys/fs/cgroup${cg}"
   mkdir -p "${cgfs}"
@@ -283,21 +310,82 @@ prepare_threaded_root() {
   local parentfs
   parentfs="$(dirname "${cgfs}")"
   init_cpuset_if_available "${cgfs}" "${parentfs}"
-
-  local current_type
-  current_type="$(cat "${cgfs}/cgroup.type" 2>/dev/null || true)"
-  if [ "${current_type}" = "domain" ]; then
-    echo threaded > "${cgfs}/cgroup.type"
-    current_type="$(cat "${cgfs}/cgroup.type" 2>/dev/null || true)"
-  fi
-  case "${current_type}" in
-    "threaded"|"domain threaded") ;;
-    *)
-      echo "[setup] failed to prepare threaded root ${cg}: type=${current_type}" >&2
-      exit 1;;
-  esac
   enable_cpu_controller "${cgfs}"
-  echo "[setup] prepared threaded root ${cg} (type=${current_type})"
+  local current_type
+  current_type="$(read_cgroup_type "${cgfs}" || true)"
+  case "${current_type}" in
+    "domain"|"domain threaded") ;;
+    *)
+      echo "[setup] unexpected threaded-domain root type for ${cg}: ${current_type:-<empty>}" >&2
+      exit 1 ;;
+  esac
+  echo "[setup] prepared threaded-domain root ${cg} (type=${current_type})"
+}
+
+prepare_threaded_leaf_cgroup() {
+  local cg="$1"
+  local cgfs="/sys/fs/cgroup${cg}"
+  prepare_leaf_cgroup "${cg}"
+  local current_type
+  current_type="$(read_cgroup_type "${cgfs}" || true)"
+  case "${current_type}" in
+    threaded)
+      echo "[setup] prepared threaded leaf ${cg} (type=${current_type})"
+      return 0 ;;
+    "domain"|"domain invalid"|"")
+      write_threaded_type "${cg}"
+      current_type="$(read_cgroup_type "${cgfs}" || true)" ;;
+  esac
+  if [ "${current_type}" != "threaded" ]; then
+    echo "[setup] failed to prepare threaded leaf ${cg}: type=${current_type:-<empty>}" >&2
+    exit 1
+  fi
+  echo "[setup] prepared threaded leaf ${cg} (type=${current_type})"
+}
+
+verify_thread_level_tree() {
+  local main_fs="/sys/fs/cgroup${CG_MAIN}"
+  local critical_fs="/sys/fs/cgroup${CG_FI_CRITICAL}"
+  local best_fs="/sys/fs/cgroup${CG_FI_BEST}"
+  local main_type critical_type best_type
+  local verify_fs
+
+  for verify_fs in "${main_fs}" "${critical_fs}" "${best_fs}"; do
+    if [ ! -d "${verify_fs}" ]; then
+      echo "[setup] verification failed: missing ${verify_fs}" >&2
+      exit 1
+    fi
+  done
+
+  main_type="$(read_cgroup_type "${main_fs}" || true)"
+  critical_type="$(read_cgroup_type "${critical_fs}" || true)"
+  best_type="$(read_cgroup_type "${best_fs}" || true)"
+
+  if [ "${main_type}" != "domain threaded" ]; then
+    echo "[setup] verification failed: ${CG_MAIN} type=${main_type:-<empty>} expected=domain threaded" >&2
+    exit 1
+  fi
+  if [ "${critical_type}" != "threaded" ]; then
+    echo "[setup] verification failed: ${CG_FI_CRITICAL} type=${critical_type:-<empty>} expected=threaded" >&2
+    exit 1
+  fi
+  if [ "${best_type}" != "threaded" ]; then
+    echo "[setup] verification failed: ${CG_FI_BEST} type=${best_type:-<empty>} expected=threaded" >&2
+    exit 1
+  fi
+
+  for path in \
+    "${main_fs}/cgroup.procs" \
+    "${main_fs}/cgroup.threads" \
+    "${critical_fs}/cgroup.threads" \
+    "${best_fs}/cgroup.threads"; do
+    if [ ! -f "${path}" ]; then
+      echo "[setup] verification failed: missing ${path}" >&2
+      exit 1
+    fi
+  done
+
+  echo "[setup] verified thread_level tree: main=${main_type}, fi_critical=${critical_type}, fi_best=${best_type}"
 }
 
 show_cgroup_config() {
@@ -308,7 +396,7 @@ show_cgroup_config() {
     return 0
   fi
   local type_v cpu_max_v cpu_weight_v
-  type_v="$(cat "${cgfs}/cgroup.type" 2>/dev/null || echo "<n/a>")"
+  type_v="$(read_cgroup_type "${cgfs}" || echo "<n/a>")"
   cpu_max_v="$(cat "${cgfs}/cpu.max" 2>/dev/null || echo "<n/a>")"
   cpu_weight_v="$(cat "${cgfs}/cpu.weight" 2>/dev/null || echo "<n/a>")"
   echo "[setup] ${cg}: type=${type_v}, cpu.max=${cpu_max_v}, cpu.weight=${cpu_weight_v}"
@@ -359,9 +447,10 @@ if [ "${MODE}" = "worker_process" ]; then
   prepare_leaf_cgroup "${CG_FI_CRITICAL}"
   prepare_leaf_cgroup "${CG_FI_BEST}"
 else
-  prepare_threaded_root "${CG_MAIN}"
-  prepare_leaf_cgroup "${CG_FI_CRITICAL}"
-  prepare_leaf_cgroup "${CG_FI_BEST}"
+  prepare_threaded_domain_root "${CG_MAIN}"
+  prepare_threaded_leaf_cgroup "${CG_FI_CRITICAL}"
+  prepare_threaded_leaf_cgroup "${CG_FI_BEST}"
+  verify_thread_level_tree
 fi
 
 echo "${CRITICAL_MAX_QUOTA_US} ${CRITICAL_MAX_PERIOD_US}" > "/sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max"
