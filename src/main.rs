@@ -91,6 +91,11 @@ async fn run_worker(
     ) {
         return Err(format!("instance {instance_id} is not configured as worker_process").into());
     }
+    if spec.thread_cgroup_path().is_some() {
+        return Err(
+            format!("worker_process instance {instance_id} cannot set cgroup.thread_path").into(),
+        );
+    }
 
     let worker_addr_raw = spec
         .worker_addr()

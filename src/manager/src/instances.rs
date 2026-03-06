@@ -132,6 +132,11 @@ pub fn build_in_process_flow_instance(
     if id.is_empty() {
         return Err("flow instance id must not be empty".to_string());
     }
+    if spec.process_cgroup_path().is_some() {
+        return Err(format!(
+            "in_process flow instance {id} cannot set cgroup.process_path"
+        ));
+    }
 
     Ok(FlowInstance::new(
         flow::instance::FlowInstanceOptions::dedicated_runtime(

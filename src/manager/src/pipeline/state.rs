@@ -66,6 +66,13 @@ impl AppState {
                     "worker_process flow instance {id} requires worker_addr, metrics_addr, and profile_addr"
                 ));
             }
+            if matches!(spec.backend, FlowInstanceBackendKind::WorkerProcess)
+                && spec.thread_cgroup_path().is_some()
+            {
+                return Err(format!(
+                    "worker_process flow instance {id} cannot set cgroup.thread_path"
+                ));
+            }
         }
 
         let shared_registries = state.instances.default_instance().shared_registries();

@@ -64,3 +64,38 @@ impl TaskSpawner {
         self.runtime.handle().spawn_blocking(f)
     }
 }
+
+#[cfg(target_os = "linux")]
+fn current_thread_tid() -> Result<u32, String> {
+    let link = std::fs::read_link("/proc/thread-self")
+        .map_err(|err| format!("read /proc/thread-self: {err}"))?;
+    let tid = link
+        .components()
+        .next_back()
+        .and_then(|component| component.as_os_str().to_str())
+        .ok_or_else(|| format!("parse /proc/thread-self target: {}", link.display()))?;
+    tid.parse::<u32>()
+        .map_err(|err| format!("parse thread tid `{tid}`: {err}"))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn bind_current_thread_to_cgroup(thread_cgroup_path: &str) -> Result<u32, String> {
+    if !thread_cgroup_path.starts_with('/') {
+        return Err(format!(
+            "thread cgroup path must be absolute, got `{thread_cgroup_path}`"
+        ));
+    }
+
+    let tid = current_thread_tid()?;
+    let cgroup_threads = format!("/sys/fs/cgroup{thread_cgroup_path}/cgroup.threads");
+    std::fs::write(&cgroup_threads, tid.to_string())
+        .map_err(|err| format!("write {cgroup_threads}: {err}"))?;
+    Ok(tid)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn bind_current_thread_to_cgroup(thread_cgroup_path: &str) -> Result<u32, String> {
+    Err(format!(
+        "thread cgroup binding is unsupported on this platform: {thread_cgroup_path}"
+    ))
+}

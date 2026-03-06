@@ -354,6 +354,11 @@ async fn spawn_flow_workers(
         ) {
             continue;
         }
+        if spec.thread_cgroup_path().is_some() {
+            return Err(
+                format!("worker_process flow instance {id} cannot set cgroup.thread_path").into(),
+            );
+        }
 
         let worker_addr_raw = spec
             .worker_addr()

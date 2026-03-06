@@ -118,6 +118,32 @@ impl FlowInstance {
             .thread_name_prefix
             .clone()
             .unwrap_or_else(|| format!("flow-instance-{instance_id}"));
+        if let Some(thread_cgroup_path) = options.thread_cgroup_path.clone() {
+            let runtime_id = instance_id.to_string();
+            builder.on_thread_start(move || {
+                match crate::runtime::bind_current_thread_to_cgroup(&thread_cgroup_path) {
+                    Ok(tid) => {
+                        tracing::info!(
+                            flow_instance_id = %runtime_id,
+                            tid,
+                            thread_cgroup_path = %thread_cgroup_path,
+                            "flow instance runtime thread joined thread cgroup"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            flow_instance_id = %runtime_id,
+                            thread_cgroup_path = %thread_cgroup_path,
+                            error = %err,
+                            "failed to bind flow instance runtime thread to cgroup"
+                        );
+                        panic!(
+                            "failed to bind flow instance runtime thread to cgroup: instance={runtime_id} path={thread_cgroup_path} error={err}"
+                        );
+                    }
+                }
+            });
+        }
         crate::runtime::TaskSpawner::new(
             builder
                 .thread_name(thread_name)
