@@ -66,7 +66,7 @@ impl TaskSpawner {
 }
 
 #[cfg(target_os = "linux")]
-fn current_thread_tid() -> Result<u32, String> {
+pub(crate) fn current_thread_tid() -> Result<u32, String> {
     let link = std::fs::read_link("/proc/thread-self")
         .map_err(|err| format!("read /proc/thread-self: {err}"))?;
     let tid = link
@@ -76,6 +76,11 @@ fn current_thread_tid() -> Result<u32, String> {
         .ok_or_else(|| format!("parse /proc/thread-self target: {}", link.display()))?;
     tid.parse::<u32>()
         .map_err(|err| format!("parse thread tid `{tid}`: {err}"))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn current_thread_tid() -> Result<u32, String> {
+    Err("current thread tid lookup is unsupported on this platform".to_string())
 }
 
 #[cfg(target_os = "linux")]

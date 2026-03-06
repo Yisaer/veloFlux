@@ -897,6 +897,7 @@ pub async fn init_metrics_exporter(
                 CPU_USAGE_GAUGE.set(0);
                 MEMORY_USAGE_GAUGE.set(0);
             }
+            flow::collect_flow_instance_cpu_metrics_once();
             update_heap_metrics();
             sleep(Duration::from_secs(poll_interval)).await;
         }
