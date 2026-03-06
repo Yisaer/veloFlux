@@ -417,7 +417,6 @@ fn row_to_json(
     Ok(JsonValue::Object(obj))
 }
 
-
 fn sqlite_value_to_json(
     value: &SqlValue,
     kind: ColumnKind,
