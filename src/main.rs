@@ -36,7 +36,7 @@ impl WorkerCliArgs {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
+#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.iter().any(|arg| arg == "--worker") {
@@ -64,13 +64,11 @@ async fn run_worker(
 
     let spec = cfg
         .server
-        .extra_flow_instances
+        .flow_instances
         .iter()
         .find(|spec| spec.id.trim() == instance_id)
         .ok_or_else(|| {
-            format!(
-                "worker instance {instance_id} is not declared in config server.extra_flow_instances"
-            )
+            format!("worker instance {instance_id} is not declared in config server.flow_instances")
         })?
         .clone();
 
@@ -87,38 +85,56 @@ async fn run_worker(
     let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
     let _logging_guard = logging_guard;
 
-    let worker_addr: std::net::SocketAddr = spec
-        .worker_addr
+    if !matches!(
+        spec.backend,
+        manager::FlowInstanceBackendKind::WorkerProcess
+    ) {
+        return Err(format!("instance {instance_id} is not configured as worker_process").into());
+    }
+    if spec.thread_cgroup_path().is_some() {
+        return Err(
+            format!("worker_process instance {instance_id} cannot set cgroup.thread_path").into(),
+        );
+    }
+
+    let worker_addr_raw = spec
+        .worker_addr()
+        .ok_or_else(|| format!("worker_process instance {instance_id} requires worker_addr"))?;
+    let worker_addr: std::net::SocketAddr = worker_addr_raw
         .parse()
         .map_err(|e| format!("invalid worker_addr for {instance_id}: {e}"))?;
     if !worker_addr.ip().is_loopback() {
         return Err(format!(
             "worker_addr for {instance_id} must be loopback, got {}",
-            spec.worker_addr
+            worker_addr_raw
         )
         .into());
     }
 
-    let metrics_addr: std::net::SocketAddr = spec
-        .metrics_addr
+    let metrics_addr_raw = spec
+        .metrics_addr()
+        .ok_or_else(|| format!("worker_process instance {instance_id} requires metrics_addr"))?;
+    let metrics_addr: std::net::SocketAddr = metrics_addr_raw
         .parse()
         .map_err(|e| format!("invalid metrics_addr for {instance_id}: {e}"))?;
     if !metrics_addr.ip().is_loopback() {
         return Err(format!(
             "metrics_addr for {instance_id} must be loopback, got {}",
-            spec.metrics_addr
+            metrics_addr_raw
         )
         .into());
     }
 
-    let profile_addr: std::net::SocketAddr = spec
-        .profile_addr
+    let profile_addr_raw = spec
+        .profile_addr()
+        .ok_or_else(|| format!("worker_process instance {instance_id} requires profile_addr"))?;
+    let profile_addr: std::net::SocketAddr = profile_addr_raw
         .parse()
         .map_err(|e| format!("invalid profile_addr for {instance_id}: {e}"))?;
     if !profile_addr.ip().is_loopback() {
         return Err(format!(
             "profile_addr for {instance_id} must be loopback, got {}",
-            spec.profile_addr
+            profile_addr_raw
         )
         .into());
     }
@@ -131,9 +147,20 @@ async fn run_worker(
         veloflux::server::start_profile_server(&opts);
     }
 
-    let default_instance = server::prepare_registry();
+    let default_spec = manager::find_default_flow_instance_spec(&cfg.server.flow_instances)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    let default_instance = manager::build_in_process_flow_instance(default_spec, None)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
     let shared = default_instance.shared_registries();
-    let instance = flow::FlowInstance::new_with_id(&instance_id, Some(shared));
+    let instance = flow::FlowInstance::new(flow::instance::FlowInstanceOptions::dedicated_runtime(
+        instance_id.clone(),
+        Some(shared),
+        flow::instance::FlowInstanceDedicatedRuntimeOptions {
+            worker_threads: spec.runtime.worker_threads,
+            thread_name_prefix: spec.runtime.thread_name_prefix.clone(),
+            thread_cgroup_path: spec.thread_cgroup_path().map(|path| path.to_string()),
+        },
+    ));
 
     let listener = tokio::net::TcpListener::bind(worker_addr).await?;
     tracing::info!(

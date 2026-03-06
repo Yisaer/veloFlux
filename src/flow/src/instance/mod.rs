@@ -17,10 +17,16 @@ use tokio::sync::broadcast;
 
 use parking_lot::Mutex;
 
+mod cpu_metrics;
 mod mqtt;
 mod pipelines;
 mod registries;
 mod streams;
+
+use cpu_metrics::{
+    build_flow_instance_cpu_metrics_state, register_flow_instance_cpu_metrics_state,
+    sample_flow_instance_cpu_usage_percent, FlowInstanceCpuMetricsState, RuntimeThreadRegistry,
+};
 
 /// Registries that can be shared across multiple [`FlowInstance`]s.
 ///
@@ -36,6 +42,51 @@ pub struct FlowInstanceSharedRegistries {
     custom_func_registry: Arc<CustomFuncRegistry>,
     eventtime_type_registry: Arc<EventtimeTypeRegistry>,
     merger_registry: Arc<MergerRegistry>,
+}
+
+#[derive(Clone)]
+pub enum FlowInstanceRuntimeOptions {
+    SharedCurrent,
+    Dedicated(FlowInstanceDedicatedRuntimeOptions),
+}
+
+#[derive(Clone, Default)]
+pub struct FlowInstanceDedicatedRuntimeOptions {
+    pub worker_threads: Option<usize>,
+    pub thread_name_prefix: Option<String>,
+    pub thread_cgroup_path: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct FlowInstanceOptions {
+    pub id: String,
+    pub shared_registries: Option<FlowInstanceSharedRegistries>,
+    pub runtime: FlowInstanceRuntimeOptions,
+}
+
+impl FlowInstanceOptions {
+    pub fn shared_current_runtime(
+        id: impl Into<String>,
+        shared_registries: Option<FlowInstanceSharedRegistries>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            shared_registries,
+            runtime: FlowInstanceRuntimeOptions::SharedCurrent,
+        }
+    }
+
+    pub fn dedicated_runtime(
+        id: impl Into<String>,
+        shared_registries: Option<FlowInstanceSharedRegistries>,
+        runtime: FlowInstanceDedicatedRuntimeOptions,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            shared_registries,
+            runtime: FlowInstanceRuntimeOptions::Dedicated(runtime),
+        }
+    }
 }
 
 /// Runtime container that manages all Flow resources (streams, pipelines, shared clients).
@@ -58,13 +109,68 @@ pub struct FlowInstance {
     custom_func_registry: Arc<CustomFuncRegistry>,
     eventtime_type_registry: Arc<EventtimeTypeRegistry>,
     merger_registry: Arc<MergerRegistry>,
+    cpu_metrics_state: Option<FlowInstanceCpuMetricsState>,
 }
 
 impl FlowInstance {
-    fn dedicated_spawner(instance_id: &str) -> crate::runtime::TaskSpawner {
+    fn dedicated_spawner(
+        instance_id: &str,
+        options: &FlowInstanceDedicatedRuntimeOptions,
+        thread_registry: RuntimeThreadRegistry,
+    ) -> crate::runtime::TaskSpawner {
+        let mut builder = tokio::runtime::Builder::new_multi_thread();
+        if let Some(worker_threads) = options.worker_threads {
+            builder.worker_threads(worker_threads);
+        }
+        let thread_name = options
+            .thread_name_prefix
+            .clone()
+            .unwrap_or_else(|| format!("flow-instance-{instance_id}"));
+        let thread_cgroup_path = options.thread_cgroup_path.clone();
+        let runtime_id = instance_id.to_string();
+        builder.on_thread_start(move || {
+            if let Some(thread_cgroup_path) = &thread_cgroup_path {
+                match crate::runtime::bind_current_thread_to_cgroup(thread_cgroup_path) {
+                    Ok(tid) => {
+                        thread_registry.insert(tid);
+                        tracing::info!(
+                            flow_instance_id = %runtime_id,
+                            tid,
+                            thread_cgroup_path = %thread_cgroup_path,
+                            "flow instance runtime thread joined thread cgroup"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            flow_instance_id = %runtime_id,
+                            thread_cgroup_path = %thread_cgroup_path,
+                            error = %err,
+                            "failed to bind flow instance runtime thread to cgroup"
+                        );
+                        panic!(
+                            "failed to bind flow instance runtime thread to cgroup: instance={runtime_id} path={thread_cgroup_path} error={err}"
+                        );
+                    }
+                }
+                return;
+            }
+
+            match crate::runtime::current_thread_tid() {
+                Ok(tid) => {
+                    thread_registry.insert(tid);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        flow_instance_id = %runtime_id,
+                        error = %err,
+                        "failed to register flow instance runtime thread tid"
+                    );
+                }
+            }
+        });
         crate::runtime::TaskSpawner::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .thread_name(format!("flow-instance-{instance_id}"))
+            builder
+                .thread_name(thread_name)
                 .enable_all()
                 .build()
                 .expect("build flow instance tokio runtime"),
@@ -132,6 +238,7 @@ impl FlowInstance {
             custom_func_registry: registries.custom_func_registry,
             eventtime_type_registry: registries.eventtime_type_registry,
             merger_registry: registries.merger_registry,
+            cpu_metrics_state: None,
         }
     }
 
@@ -151,36 +258,47 @@ impl FlowInstance {
         }
     }
 
-    /// Create the default Flow instance (`id=default`) that shares the current Tokio runtime.
-    ///
-    /// This requires a running Tokio runtime; it will panic if called outside a runtime context.
-    pub fn new_default() -> Self {
-        let handle = tokio::runtime::Handle::current();
-        let spawner = crate::runtime::TaskSpawner::from_handle(handle);
-        Self::build(
-            "default".to_string(),
-            Arc::new(Catalog::new()),
-            spawner,
-            None,
-        )
-    }
-
-    /// Create a non-default Flow instance with a dedicated Tokio runtime.
-    pub fn new_with_id(id: &str, shared_registries: Option<FlowInstanceSharedRegistries>) -> Self {
-        let id = id.trim();
+    /// Create a Flow instance from explicit options.
+    pub fn new(options: FlowInstanceOptions) -> Self {
+        let id = options.id.trim();
         assert!(!id.is_empty(), "flow instance id must not be empty");
-        assert!(id != "default", "use new_default for id=default");
-        let spawner = Self::dedicated_spawner(id);
-        Self::build(
+        let mut cpu_metrics_state = None;
+        let spawner = match &options.runtime {
+            FlowInstanceRuntimeOptions::SharedCurrent => {
+                let handle = tokio::runtime::Handle::current();
+                crate::runtime::TaskSpawner::from_handle(handle)
+            }
+            FlowInstanceRuntimeOptions::Dedicated(runtime_options) => {
+                let thread_registry = RuntimeThreadRegistry::default();
+                cpu_metrics_state = build_flow_instance_cpu_metrics_state(thread_registry.clone());
+                Self::dedicated_spawner(id, runtime_options, thread_registry)
+            }
+        };
+        let mut instance = Self::build(
             id.to_string(),
             Arc::new(Catalog::new()),
             spawner,
-            shared_registries,
-        )
+            options.shared_registries,
+        );
+        instance.cpu_metrics_state = cpu_metrics_state;
+        register_flow_instance_cpu_metrics_state(&instance.id, instance.cpu_metrics_state.clone());
+        instance
     }
 
     pub fn merger_registry(&self) -> Arc<MergerRegistry> {
         Arc::clone(&self.merger_registry)
+    }
+
+    /// Sample CPU usage of this FlowInstance as percent of one CPU core.
+    ///
+    /// A return value of `20.0` means this instance consumed 20% of one core
+    /// during the most recent sampling window.
+    pub fn sample_cpu_usage_percent(&self) -> Result<Option<f64>, FlowInstanceCpuMetricsError> {
+        let state = self
+            .cpu_metrics_state
+            .as_ref()
+            .ok_or(FlowInstanceCpuMetricsError::Unsupported)?;
+        sample_flow_instance_cpu_usage_percent(state)
     }
 
     pub fn declare_memory_topic(
@@ -265,3 +383,16 @@ pub enum FlowInstanceError {
     #[error("{0}")]
     Invalid(String),
 }
+
+/// Errors surfaced by FlowInstance CPU metric sampling.
+#[derive(thiserror::Error, Debug)]
+pub enum FlowInstanceCpuMetricsError {
+    #[error("flow instance cpu metric sampling is unsupported")]
+    Unsupported,
+    #[error("runtime worker thread not found: {0}")]
+    ThreadNotFound(u32),
+    #[error("{0}")]
+    Other(String),
+}
+
+pub(crate) use cpu_metrics::collect_registered_flow_instance_cpu_metrics;

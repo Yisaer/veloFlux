@@ -40,7 +40,9 @@ pub use expr::{
     ConcatFunc, ConversionError, EvalContext, ScalarExpr, StreamSqlConverter, UnaryFunc,
 };
 pub use instance::{
-    FlowInstance, FlowInstanceError, FlowInstanceSharedRegistries, StreamRuntimeInfo,
+    FlowInstance, FlowInstanceCpuMetricsError, FlowInstanceDedicatedRuntimeOptions,
+    FlowInstanceError, FlowInstanceOptions, FlowInstanceRuntimeOptions,
+    FlowInstanceSharedRegistries, StreamRuntimeInfo,
 };
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
@@ -73,6 +75,11 @@ pub use stateful::StatefulFunctionRegistry;
 /// especially when running multiple [`FlowInstance`] runtimes inside the same process.
 pub fn init_process_once() {
     deadlock::start_deadlock_detector_once();
+}
+
+/// Sample and update per-instance CPU metrics for all registered in-process flow instances.
+pub fn collect_flow_instance_cpu_metrics_once() {
+    instance::collect_registered_flow_instance_cpu_metrics();
 }
 
 use connector::{ConnectorRegistry, MqttClientManager};
@@ -258,13 +265,14 @@ fn build_schema_binding(
 /// ```no_run
 /// use flow::{
 ///     FlowInstance,
+///     FlowInstanceOptions,
 ///     planner::sink::{
 ///         NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
 ///     },
 /// };
 ///
 /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
-/// let instance = FlowInstance::new_default();
+/// let instance = FlowInstance::new(FlowInstanceOptions::shared_current_runtime("default", None));
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig { log: false }),

@@ -1,4 +1,5 @@
 mod flow_instance_binding;
+mod multi_in_process_flow_instances;
 mod pipeline_build_context;
 mod shared_stream_lifecycle;
 use std::net::SocketAddr;
@@ -29,4 +30,12 @@ pub async fn bind_manager_listener_or_skip() -> Option<TcpListener> {
         }
         Err(err) => panic!("bind manager listener: {err}"),
     }
+}
+
+pub fn default_flow_instances() -> Vec<manager::FlowInstanceSpec> {
+    vec![manager::FlowInstanceSpec {
+        id: "default".to_string(),
+        backend: manager::FlowInstanceBackendKind::InProcess,
+        ..manager::FlowInstanceSpec::default()
+    }]
 }

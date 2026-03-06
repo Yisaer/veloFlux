@@ -974,6 +974,7 @@ dependencies = [
  "http 0.2.12",
  "humantime-serde",
  "kuksa-rust-sdk",
+ "libc",
  "once_cell",
  "parking_lot",
  "parquet",

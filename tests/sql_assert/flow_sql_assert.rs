@@ -99,7 +99,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tested_sqls = 0usize;
     for (index, sql) in sqls.iter().enumerate() {
         truncate_sqlite_table(&conn, &table_name)?;
-        let instance = FlowInstance::new_default();
+        let instance = FlowInstance::new(
+            flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
+        );
 
         let input_topic = format!("tests.daily.sql_assert.input.{index}");
         let output_topic = format!("tests.daily.sql_assert.output.{index}");

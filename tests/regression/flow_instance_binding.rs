@@ -1,4 +1,4 @@
-use super::{bind_manager_listener_or_skip, make_client, random_suffix};
+use super::{bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix};
 use sdk::types::{PipelineCreateRequest, StreamCreateRequest};
 use sdk::SdkError;
 use serde_json::Value as JsonValue;
@@ -14,7 +14,7 @@ async fn flow_instance_pipeline_binding_lifecycle() {
     };
     let addr = listener.local_addr().expect("read listener addr");
 
-    let extra_flow_instances = Vec::new();
+    let flow_instances = default_flow_instances();
     let worker_endpoints = Vec::new();
 
     let server = tokio::spawn(async move {
@@ -22,7 +22,7 @@ async fn flow_instance_pipeline_binding_lifecycle() {
             listener,
             instance,
             storage,
-            extra_flow_instances,
+            flow_instances,
             worker_endpoints,
         )
         .await

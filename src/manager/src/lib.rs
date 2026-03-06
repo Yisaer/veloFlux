@@ -15,8 +15,10 @@ use storage::StorageManager;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
-pub use instances::FlowInstanceSpec;
-pub use instances::new_default_flow_instance;
+pub use instances::{
+    FlowInstanceBackend, FlowInstanceBackendKind, FlowInstanceSpec, build_in_process_flow_instance,
+    find_default_flow_instance_spec, new_default_flow_instance,
+};
 pub use stream::{SchemaParser, register_schema, schema_registry};
 pub use worker::FlowWorkerClient;
 pub use worker::{FlowWorkerState, build_worker_app};
@@ -90,13 +92,13 @@ pub async fn start_server_with_listener(
     listener: TcpListener,
     instance: flow::FlowInstance,
     storage: StorageManager,
-    extra_flow_instances: Vec<FlowInstanceSpec>,
+    flow_instances: Vec<FlowInstanceSpec>,
     extra_flow_worker_endpoints: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let state = AppState::new(
         instance,
         storage,
-        extra_flow_instances,
+        flow_instances,
         extra_flow_worker_endpoints,
     )
     .map_err(|err| {
@@ -117,7 +119,7 @@ pub async fn start_server(
     addr: String,
     instance: flow::FlowInstance,
     storage: StorageManager,
-    extra_flow_instances: Vec<FlowInstanceSpec>,
+    flow_instances: Vec<FlowInstanceSpec>,
     extra_flow_worker_endpoints: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = addr.parse()?;
@@ -127,7 +129,7 @@ pub async fn start_server(
         listener,
         instance,
         storage,
-        extra_flow_instances,
+        flow_instances,
         extra_flow_worker_endpoints,
     )
     .await
