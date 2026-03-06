@@ -124,6 +124,7 @@ fn create_and_list_pipeline() {
     install_stream(&catalog, "test_stream");
     let registries = PipelineRegistries::new_with_builtin();
     let context = crate::pipeline::PipelineContext::new(
+        "default",
         Arc::clone(&registry),
         mqtt_manager.clone(),
         memory_pubsub_registry.clone(),
@@ -275,6 +276,7 @@ fn prevent_duplicate_pipeline() {
     install_stream(&catalog, "dup_stream");
     let registries = PipelineRegistries::new_with_builtin();
     let context = crate::pipeline::PipelineContext::new(
+        "default",
         Arc::clone(&registry),
         mqtt_manager.clone(),
         memory_pubsub_registry.clone(),
@@ -352,6 +354,7 @@ fn attach_sources_accepts_shared_stream_only_pipeline() {
         .expect("create pipeline");
 
         let context = crate::pipeline::PipelineContext::new(
+            "default",
             Arc::clone(&registry),
             mqtt_manager.clone(),
             memory_pubsub_registry.clone(),
@@ -425,6 +428,7 @@ fn shared_stream_pipeline_uses_full_schema_for_column_indices() {
         .expect("create pipeline");
 
         let context = crate::pipeline::PipelineContext::new(
+            "default",
             Arc::clone(&registry),
             mqtt_manager.clone(),
             memory_pubsub_registry.clone(),

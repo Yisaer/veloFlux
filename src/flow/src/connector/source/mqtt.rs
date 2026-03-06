@@ -7,6 +7,7 @@ use crate::runtime::TaskSpawner;
 use once_cell::sync::Lazy;
 use prometheus::{IntCounterVec, Opts};
 use rumqttc::{AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
@@ -60,6 +61,7 @@ impl MqttSourceConfig {
 
 pub(crate) struct MqttSourceConnector {
     id: String,
+    flow_instance_id: Arc<str>,
     config: MqttSourceConfig,
     channel_capacity: usize,
     receiver: Option<mpsc::Receiver<Result<ConnectorEvent, ConnectorError>>>,
@@ -73,12 +75,8 @@ static MQTT_SOURCE_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
         Opts::new(
             "mqtt_source_records_in_total",
             "Number of records received from MQTT sources",
-        )
-        .const_label(
-            "flow_instance",
-            crate::metrics::flow_instance_id().to_string(),
         ),
-        &["connector"],
+        &["flow_instance", "connector"],
     )
     .expect("create mqtt source records_in counter vec");
     prometheus::register(Box::new(vec.clone()))
@@ -91,12 +89,8 @@ static MQTT_SOURCE_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
         Opts::new(
             "mqtt_source_records_out_total",
             "Number of records emitted downstream by MQTT sources",
-        )
-        .const_label(
-            "flow_instance",
-            crate::metrics::flow_instance_id().to_string(),
         ),
-        &["connector"],
+        &["flow_instance", "connector"],
     )
     .expect("create mqtt source records_out counter vec");
     prometheus::register(Box::new(vec.clone()))
@@ -108,11 +102,13 @@ impl MqttSourceConnector {
     pub fn new(
         id: impl Into<String>,
         config: MqttSourceConfig,
+        flow_instance_id: impl Into<Arc<str>>,
         mqtt_clients: MqttClientManager,
         spawner: TaskSpawner,
     ) -> Self {
         Self {
             id: id.into(),
+            flow_instance_id: flow_instance_id.into(),
             config,
             channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
             receiver: None,
@@ -141,6 +137,7 @@ impl SourceConnector for MqttSourceConnector {
         let (sender, receiver) = mpsc::channel(self.channel_capacity);
         let config = self.config.clone();
         let connector_id = self.id.clone();
+        let flow_instance_id = Arc::clone(&self.flow_instance_id);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         self.shutdown_tx = Some(shutdown_tx);
 
@@ -160,12 +157,18 @@ impl SourceConnector for MqttSourceConnector {
                                     match event {
                                         Ok(Ok(SharedMqttEvent::Payload(payload))) => {
                                             MQTT_SOURCE_RECORDS_IN
-                                                .with_label_values(&[metrics_id.as_str()])
+                                                .with_label_values(&[
+                                                    flow_instance_id.as_ref(),
+                                                    metrics_id.as_str(),
+                                                ])
                                                 .inc();
                                             match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                                                 Ok(_) => {
                                                     MQTT_SOURCE_RECORDS_OUT
-                                                        .with_label_values(&[metrics_id.as_str()])
+                                                        .with_label_values(&[
+                                                            flow_instance_id.as_ref(),
+                                                            metrics_id.as_str(),
+                                                        ])
                                                         .inc();
                                                 }
                                                 Err(_) => break,
@@ -195,9 +198,14 @@ impl SourceConnector for MqttSourceConnector {
             });
         } else {
             spawner.spawn(async move {
-                if let Err(err) =
-                    run_standalone_loop(connector_id.clone(), config, sender.clone(), shutdown_rx)
-                        .await
+                if let Err(err) = run_standalone_loop(
+                    connector_id.clone(),
+                    Arc::clone(&flow_instance_id),
+                    config,
+                    sender.clone(),
+                    shutdown_rx,
+                )
+                .await
                 {
                     let _ = sender.send(Err(err)).await;
                 }
@@ -222,6 +230,7 @@ impl SourceConnector for MqttSourceConnector {
 
 async fn run_standalone_loop(
     connector_id: String,
+    flow_instance_id: Arc<str>,
     config: MqttSourceConfig,
     sender: mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -249,13 +258,19 @@ async fn run_standalone_loop(
                 match event {
                     Ok(Event::Incoming(Packet::Publish(publish))) => {
                         MQTT_SOURCE_RECORDS_IN
-                            .with_label_values(&[connector_id.as_str()])
+                            .with_label_values(&[
+                                flow_instance_id.as_ref(),
+                                connector_id.as_str(),
+                            ])
                             .inc();
                         let payload = publish.payload.to_vec();
                         match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                             Ok(_) => {
                                 MQTT_SOURCE_RECORDS_OUT
-                                    .with_label_values(&[connector_id.as_str()])
+                                    .with_label_values(&[
+                                        flow_instance_id.as_ref(),
+                                        connector_id.as_str(),
+                                    ])
                                     .inc();
                             }
                             Err(_) => break,

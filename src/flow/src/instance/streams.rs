@@ -101,6 +101,7 @@ impl FlowInstance {
                 config.set_decoder(definition.decoder().clone());
                 struct MqttSharedStreamConnectorFactory {
                     stream_id: String,
+                    flow_instance_id: Arc<str>,
                     schema: Arc<datatypes::Schema>,
                     decoder: crate::catalog::StreamDecoderConfig,
                     broker_url: String,
@@ -142,6 +143,7 @@ impl FlowInstance {
                         let connector = crate::connector::MqttSourceConnector::new(
                             self.connector_id(),
                             source_config,
+                            self.flow_instance_id.as_str(),
                             self.mqtt_client_manager.clone(),
                             self.spawner.clone(),
                         );
@@ -159,6 +161,7 @@ impl FlowInstance {
 
                 let factory = Arc::new(MqttSharedStreamConnectorFactory {
                     stream_id: definition.id().to_string(),
+                    flow_instance_id: Arc::<str>::from(self.id.as_str()),
                     schema: definition.schema(),
                     decoder: definition.decoder().clone(),
                     broker_url: props.broker_url.clone(),

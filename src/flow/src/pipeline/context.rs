@@ -17,6 +17,7 @@ impl MockSourceHandleRegistry {
 
 #[derive(Clone)]
 pub(crate) struct PipelineContext {
+    flow_instance_id: Arc<str>,
     shared_stream_registry: Arc<SharedStreamRegistry>,
     mqtt_client_manager: MqttClientManager,
     memory_pubsub_registry: MemoryPubSubRegistry,
@@ -26,18 +27,24 @@ pub(crate) struct PipelineContext {
 
 impl PipelineContext {
     pub(crate) fn new(
+        flow_instance_id: impl Into<Arc<str>>,
         shared_stream_registry: Arc<SharedStreamRegistry>,
         mqtt_client_manager: MqttClientManager,
         memory_pubsub_registry: MemoryPubSubRegistry,
         spawner: crate::runtime::TaskSpawner,
     ) -> Self {
         Self {
+            flow_instance_id: flow_instance_id.into(),
             shared_stream_registry,
             mqtt_client_manager,
             memory_pubsub_registry,
             mock_source_handle_registry: MockSourceHandleRegistry::default(),
             spawner,
         }
+    }
+
+    pub(crate) fn flow_instance_id(&self) -> &str {
+        self.flow_instance_id.as_ref()
     }
 
     pub(crate) fn shared_stream_registry(&self) -> Arc<SharedStreamRegistry> {

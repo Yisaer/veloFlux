@@ -437,6 +437,7 @@ fn build_pipeline_runtime(
     let mut pipeline = create_processor_pipeline(
         optimized_plan,
         ProcessorPipelineDependencies::new(
+            context.flow_instance_id(),
             mqtt_client_manager.clone(),
             Arc::clone(&shared_stream_registry),
             registries,
@@ -620,6 +621,7 @@ pub(super) fn attach_sources_from_catalog(
                     let connector = MqttSourceConnector::new(
                         format!("{processor_id}_source_connector"),
                         config,
+                        context.flow_instance_id(),
                         mqtt_client_manager.clone(),
                         context.spawner().clone(),
                     )

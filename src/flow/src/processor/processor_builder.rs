@@ -98,6 +98,7 @@ pub(crate) enum PlanProcessor {
 
 #[derive(Clone)]
 pub(crate) struct ProcessorPipelineDependencies {
+    flow_instance_id: Arc<str>,
     mqtt_clients: MqttClientManager,
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
@@ -113,6 +114,7 @@ pub(crate) struct ProcessorPipelineDependencies {
 
 impl ProcessorPipelineDependencies {
     pub(crate) fn new(
+        flow_instance_id: impl Into<Arc<str>>,
         mqtt_clients: MqttClientManager,
         shared_stream_registry: Arc<SharedStreamRegistry>,
         registries: &PipelineRegistries,
@@ -120,6 +122,7 @@ impl ProcessorPipelineDependencies {
         spawner: TaskSpawner,
     ) -> Self {
         Self {
+            flow_instance_id: flow_instance_id.into(),
             mqtt_clients,
             connector_registry: registries.connector_registry(),
             encoder_registry: registries.encoder_registry(),
@@ -163,6 +166,7 @@ impl ProcessorPipelineOptions {
 
 #[derive(Clone)]
 struct ProcessorBuilderContext {
+    flow_instance_id: Arc<str>,
     mqtt_clients: Option<MqttClientManager>,
     connector_registry: Option<Arc<ConnectorRegistry>>,
     encoder_registry: Option<Arc<EncoderRegistry>>,
@@ -178,6 +182,10 @@ struct ProcessorBuilderContext {
 }
 
 impl ProcessorBuilderContext {
+    fn flow_instance_id(&self) -> &str {
+        self.flow_instance_id.as_ref()
+    }
+
     fn spawner(&self) -> &TaskSpawner {
         &self.spawner
     }
@@ -1139,6 +1147,7 @@ fn create_processor_from_plan_node(
                     sink_plan.connector.connector.kind(),
                     &sink_plan.connector.sink_id,
                     &sink_plan.connector.connector,
+                    context.flow_instance_id(),
                     context.mqtt_clients_ref()?,
                     context.spawner(),
                 )
@@ -1457,7 +1466,11 @@ fn create_processor_pipeline_with_context(
             "duplicate processor id: {control_id}"
         )));
     }
-    let stats = Arc::new(ProcessorStats::new(control_id.as_str(), "control_source"));
+    let stats = Arc::new(ProcessorStats::new(
+        context.flow_instance_id(),
+        control_id.as_str(),
+        "control_source",
+    ));
     control_source.set_stats(Arc::clone(&stats));
     processor_stats.push(ProcessorStatsHandle {
         processor_id: control_id,
@@ -1471,7 +1484,11 @@ fn create_processor_pipeline_with_context(
                 "duplicate processor id: {id}"
             )));
         }
-        let stats = Arc::new(ProcessorStats::new(id.as_str(), processor.kind()));
+        let stats = Arc::new(ProcessorStats::new(
+            context.flow_instance_id(),
+            id.as_str(),
+            processor.kind(),
+        ));
         processor.set_stats(Arc::clone(&stats));
         processor_stats.push(ProcessorStatsHandle {
             processor_id: id,
@@ -1486,7 +1503,11 @@ fn create_processor_pipeline_with_context(
                 "duplicate processor id: {id}"
             )));
         }
-        let stats = Arc::new(ProcessorStats::new(id.as_str(), "result_collect"));
+        let stats = Arc::new(ProcessorStats::new(
+            context.flow_instance_id(),
+            id.as_str(),
+            "result_collect",
+        ));
         collector.set_stats(Arc::clone(&stats));
         processor_stats.push(ProcessorStatsHandle {
             processor_id: id,
@@ -1549,6 +1570,7 @@ pub(crate) fn create_processor_pipeline(
     create_processor_pipeline_with_context(
         physical_plan,
         ProcessorBuilderContext {
+            flow_instance_id: dependencies.flow_instance_id,
             mqtt_clients: Some(dependencies.mqtt_clients),
             connector_registry: Some(dependencies.connector_registry),
             encoder_registry: Some(dependencies.encoder_registry),
