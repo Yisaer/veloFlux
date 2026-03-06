@@ -1,4 +1,5 @@
 mod flow_instance_binding;
+mod multi_in_process_flow_instances;
 mod pipeline_build_context;
 mod shared_stream_lifecycle;
 use std::net::SocketAddr;
