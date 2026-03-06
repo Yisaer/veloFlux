@@ -210,6 +210,7 @@ impl FlowInstance {
             Arc::clone(&registries.merger_registry),
         );
         let context = crate::pipeline::PipelineContext::new(
+            id.to_string(),
             Arc::clone(&shared_stream_registry),
             mqtt_client_manager.clone(),
             memory_pubsub_registry.clone(),

@@ -72,6 +72,7 @@ impl MqttSinkConfig {
 
 pub(crate) struct MqttSinkConnector {
     id: String,
+    flow_instance_id: Arc<str>,
     config: MqttSinkConfig,
     client: Option<SinkClient>,
     mqtt_clients: MqttClientManager,
@@ -83,12 +84,8 @@ static MQTT_SINK_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
         Opts::new(
             "mqtt_sink_records_in_total",
             "Number of records received by MQTT sink connectors",
-        )
-        .const_label(
-            "flow_instance",
-            crate::metrics::flow_instance_id().to_string(),
         ),
-        &["connector"],
+        &["flow_instance", "connector"],
     )
     .expect("create mqtt sink records_in counter vec");
     prometheus::register(Box::new(vec.clone())).expect("register mqtt sink records_in counter vec");
@@ -100,12 +97,8 @@ static MQTT_SINK_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
         Opts::new(
             "mqtt_sink_records_out_total",
             "Number of records successfully published by MQTT sink connectors",
-        )
-        .const_label(
-            "flow_instance",
-            crate::metrics::flow_instance_id().to_string(),
         ),
-        &["connector"],
+        &["flow_instance", "connector"],
     )
     .expect("create mqtt sink records_out counter vec");
     prometheus::register(Box::new(vec.clone()))
@@ -263,11 +256,13 @@ impl MqttSinkConnector {
     pub fn new(
         id: impl Into<String>,
         config: MqttSinkConfig,
+        flow_instance_id: impl Into<Arc<str>>,
         mqtt_clients: MqttClientManager,
         spawner: TaskSpawner,
     ) -> Self {
         Self {
             id: id.into(),
+            flow_instance_id: flow_instance_id.into(),
             config,
             client: None,
             mqtt_clients,
@@ -323,7 +318,7 @@ impl SinkConnector for MqttSinkConnector {
         let qos = self.publish_qos()?;
         if let Some(client) = &self.client {
             MQTT_SINK_RECORDS_IN
-                .with_label_values(&[self.id.as_str()])
+                .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
                 .inc();
             client
                 .publish(
@@ -335,7 +330,7 @@ impl SinkConnector for MqttSinkConnector {
                 .await
                 .map(|_| {
                     MQTT_SINK_RECORDS_OUT
-                        .with_label_values(&[self.id.as_str()])
+                        .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
                         .inc()
                 })
         } else {

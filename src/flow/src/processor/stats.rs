@@ -8,16 +8,13 @@ use std::sync::{Arc, OnceLock};
 use parking_lot::RwLock;
 
 fn opts_with_flow_instance(name: &str, help: &str) -> Opts {
-    Opts::new(name, help).const_label(
-        "flow_instance",
-        crate::metrics::flow_instance_id().to_string(),
-    )
+    Opts::new(name, help)
 }
 
 static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let vec = IntCounterVec::new(
         opts_with_flow_instance("processor_records_in_total", "Rows received by processors"),
-        &["pipeline_id", "kind"],
+        &["flow_instance", "pipeline_id", "kind"],
     )
     .expect("create processor records_in counter vec");
     prometheus::register(Box::new(vec.clone())).expect("register processor records_in counter vec");
@@ -27,7 +24,7 @@ static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 static PROCESSOR_RECORDS_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let vec = IntCounterVec::new(
         opts_with_flow_instance("processor_records_out_total", "Rows emitted by processors"),
-        &["pipeline_id", "kind"],
+        &["flow_instance", "pipeline_id", "kind"],
     )
     .expect("create processor records_out counter vec");
     prometheus::register(Box::new(vec.clone()))
@@ -38,7 +35,7 @@ static PROCESSOR_RECORDS_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 static PROCESSOR_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let vec = IntCounterVec::new(
         opts_with_flow_instance("processor_errors_total", "Errors observed by processors"),
-        &["pipeline_id", "kind"],
+        &["flow_instance", "pipeline_id", "kind"],
     )
     .expect("create processor errors counter vec");
     prometheus::register(Box::new(vec.clone())).expect("register processor errors counter vec");
@@ -51,7 +48,13 @@ static PROCESSOR_METRIC_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
             "processor_metric_gauge",
             "Gauge metrics reported by processors",
         ),
-        &["pipeline_id", "processor_id", "kind", "metric"],
+        &[
+            "flow_instance",
+            "pipeline_id",
+            "processor_id",
+            "kind",
+            "metric",
+        ],
     )
     .expect("create processor metric gauge vec");
     prometheus::register(Box::new(vec.clone())).expect("register processor metric gauge vec");
@@ -64,7 +67,13 @@ static PROCESSOR_METRIC_COUNTER_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
             "processor_metric_counter_total",
             "Counter metrics reported by processors",
         ),
-        &["pipeline_id", "processor_id", "kind", "metric"],
+        &[
+            "flow_instance",
+            "pipeline_id",
+            "processor_id",
+            "kind",
+            "metric",
+        ],
     )
     .expect("create processor metric counter vec");
     prometheus::register(Box::new(vec.clone())).expect("register processor metric counter vec");
@@ -95,6 +104,7 @@ struct MetricEntry {
 
 #[derive(Debug, Clone)]
 pub struct GaugeHandle {
+    flow_instance_id: Arc<str>,
     pipeline_id: Arc<OnceLock<Arc<str>>>,
     processor_id: Arc<str>,
     kind: Arc<str>,
@@ -110,6 +120,7 @@ impl GaugeHandle {
         let prom_value = i64::try_from(value).unwrap_or(i64::MAX);
         PROCESSOR_METRIC_GAUGE
             .with_label_values(&[
+                self.flow_instance_id.as_ref(),
                 pipeline_id.as_ref(),
                 self.processor_id.as_ref(),
                 self.kind.as_ref(),
@@ -121,6 +132,7 @@ impl GaugeHandle {
 
 #[derive(Debug, Clone)]
 pub struct CounterHandle {
+    flow_instance_id: Arc<str>,
     pipeline_id: Arc<OnceLock<Arc<str>>>,
     processor_id: Arc<str>,
     kind: Arc<str>,
@@ -135,6 +147,7 @@ impl CounterHandle {
         };
         PROCESSOR_METRIC_COUNTER_TOTAL
             .with_label_values(&[
+                self.flow_instance_id.as_ref(),
                 pipeline_id.as_ref(),
                 self.processor_id.as_ref(),
                 self.kind.as_ref(),
@@ -146,6 +159,7 @@ impl CounterHandle {
 
 #[derive(Debug)]
 pub struct ProcessorStats {
+    flow_instance_id: Arc<str>,
     processor_id: Arc<str>,
     kind: Arc<str>,
     pipeline_id: Arc<OnceLock<Arc<str>>>,
@@ -157,8 +171,13 @@ pub struct ProcessorStats {
 }
 
 impl ProcessorStats {
-    pub fn new(processor_id: impl Into<Arc<str>>, kind: impl Into<Arc<str>>) -> Self {
+    pub fn new(
+        flow_instance_id: impl Into<Arc<str>>,
+        processor_id: impl Into<Arc<str>>,
+        kind: impl Into<Arc<str>>,
+    ) -> Self {
         Self {
+            flow_instance_id: flow_instance_id.into(),
             processor_id: processor_id.into(),
             kind: kind.into(),
             pipeline_id: Arc::new(OnceLock::new()),
@@ -177,6 +196,7 @@ impl ProcessorStats {
     pub fn register_gauge(&self, spec: MetricSpec) -> GaugeHandle {
         let entry = self.register_metric(spec, MetricKind::Gauge);
         GaugeHandle {
+            flow_instance_id: Arc::clone(&self.flow_instance_id),
             pipeline_id: Arc::clone(&self.pipeline_id),
             processor_id: Arc::clone(&self.processor_id),
             kind: Arc::clone(&self.kind),
@@ -187,6 +207,7 @@ impl ProcessorStats {
     pub fn register_counter(&self, spec: MetricSpec) -> CounterHandle {
         let entry = self.register_metric(spec, MetricKind::Counter);
         CounterHandle {
+            flow_instance_id: Arc::clone(&self.flow_instance_id),
             pipeline_id: Arc::clone(&self.pipeline_id),
             processor_id: Arc::clone(&self.processor_id),
             kind: Arc::clone(&self.kind),
@@ -235,7 +256,11 @@ impl ProcessorStats {
         self.records_in.fetch_add(rows, Ordering::Relaxed);
         if let Some(pipeline_id) = self.pipeline_id.get() {
             PROCESSOR_RECORDS_IN_TOTAL
-                .with_label_values(&[pipeline_id.as_ref(), self.kind.as_ref()])
+                .with_label_values(&[
+                    self.flow_instance_id.as_ref(),
+                    pipeline_id.as_ref(),
+                    self.kind.as_ref(),
+                ])
                 .inc_by(rows);
         }
     }
@@ -244,7 +269,11 @@ impl ProcessorStats {
         self.records_out.fetch_add(rows, Ordering::Relaxed);
         if let Some(pipeline_id) = self.pipeline_id.get() {
             PROCESSOR_RECORDS_OUT_TOTAL
-                .with_label_values(&[pipeline_id.as_ref(), self.kind.as_ref()])
+                .with_label_values(&[
+                    self.flow_instance_id.as_ref(),
+                    pipeline_id.as_ref(),
+                    self.kind.as_ref(),
+                ])
                 .inc_by(rows);
         }
     }
@@ -257,7 +286,11 @@ impl ProcessorStats {
         self.error_count.fetch_add(count, Ordering::Relaxed);
         if let Some(pipeline_id) = self.pipeline_id.get() {
             PROCESSOR_ERRORS_TOTAL
-                .with_label_values(&[pipeline_id.as_ref(), self.kind.as_ref()])
+                .with_label_values(&[
+                    self.flow_instance_id.as_ref(),
+                    pipeline_id.as_ref(),
+                    self.kind.as_ref(),
+                ])
                 .inc_by(count);
         }
         let message: String = message.into();
@@ -295,7 +328,7 @@ impl ProcessorStats {
 
 impl Default for ProcessorStats {
     fn default() -> Self {
-        Self::new("unknown", "unknown")
+        Self::new("unknown", "unknown", "unknown")
     }
 }
 

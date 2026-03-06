@@ -5,8 +5,8 @@ use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, St
 use flow::connector::{MemoryData, MemoryPublisher, MemoryTopicKind};
 use flow::pipeline::MemorySinkProps;
 use flow::planner::sink::CommonSinkProps;
-use flow::FlowInstance;
 use flow::{CreatePipelineRequest, PipelineDefinition, SinkDefinition, SinkProps, SinkType};
+use flow::{FlowInstance, FlowInstanceOptions};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,8 +64,11 @@ impl PipelineBenchEnv {
         let capacity = (expected_outputs * 8).max(1024);
         let (instance, pipeline_id, input_publisher, output_subscriber) =
             runtime.block_on(async move {
-                let instance = FlowInstance::new_default();
                 let (input_topic, output_topic) = make_memory_topics(case_name);
+                let instance = FlowInstance::new(FlowInstanceOptions::shared_current_runtime(
+                    format!("bench_instance_{output_topic}"),
+                    None,
+                ));
 
                 instance
                     .declare_memory_topic(&input_topic, MemoryTopicKind::Bytes, capacity)

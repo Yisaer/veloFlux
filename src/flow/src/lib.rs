@@ -302,6 +302,7 @@ pub(crate) fn create_pipeline(
     let pipeline = create_processor_pipeline(
         physical_plan,
         ProcessorPipelineDependencies::new(
+            crate::metrics::flow_instance_id(),
             mqtt_client_manager,
             Arc::clone(&shared_stream_registry),
             registries,
