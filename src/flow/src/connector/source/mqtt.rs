@@ -64,7 +64,6 @@ pub(crate) struct MqttSourceConnector {
     flow_instance_id: Arc<str>,
     config: MqttSourceConfig,
     channel_capacity: usize,
-    receiver: Option<mpsc::Receiver<Result<ConnectorEvent, ConnectorError>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     mqtt_clients: MqttClientManager,
     spawner: TaskSpawner,
@@ -111,7 +110,6 @@ impl MqttSourceConnector {
             flow_instance_id: flow_instance_id.into(),
             config,
             channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
-            receiver: None,
             shutdown_tx: None,
             mqtt_clients,
             spawner,
@@ -130,7 +128,7 @@ impl SourceConnector for MqttSourceConnector {
     }
 
     fn subscribe(&mut self) -> Result<ConnectorStream, ConnectorError> {
-        if self.receiver.is_some() {
+        if self.shutdown_tx.is_some() {
             return Err(ConnectorError::AlreadySubscribed(self.id.clone()));
         }
 
@@ -212,8 +210,7 @@ impl SourceConnector for MqttSourceConnector {
             });
         }
 
-        self.receiver = Some(receiver);
-        let stream = ReceiverStream::new(self.receiver.take().unwrap());
+        let stream = ReceiverStream::new(receiver);
         tracing::info!(connector_id = %self.id, "mqtt source starting");
         Ok(Box::pin(stream))
     }
@@ -222,7 +219,6 @@ impl SourceConnector for MqttSourceConnector {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        self.receiver = None;
         tracing::info!(connector_id = %self.id, "mqtt source closed");
         Ok(())
     }

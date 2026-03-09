@@ -37,6 +37,30 @@ enum BatchMode {
 }
 
 impl BatchProcessor {
+    pub(crate) fn validate_batch_config(
+        batch_count: Option<usize>,
+        batch_duration: Option<Duration>,
+    ) -> Result<(), ProcessorError> {
+        Self::batch_mode(batch_count, batch_duration).map(|_| ())
+    }
+
+    fn batch_mode(
+        batch_count: Option<usize>,
+        batch_duration: Option<Duration>,
+    ) -> Result<BatchMode, ProcessorError> {
+        match (batch_count, batch_duration) {
+            (Some(0), _) => Err(ProcessorError::InvalidConfiguration(
+                "batch processor requires batch_count > 0 when configured".to_string(),
+            )),
+            (Some(count), Some(duration)) => Ok(BatchMode::Combined { count, duration }),
+            (Some(count), None) => Ok(BatchMode::CountOnly { count }),
+            (None, Some(duration)) => Ok(BatchMode::DurationOnly { duration }),
+            (None, None) => Err(ProcessorError::InvalidConfiguration(
+                "batch processor requires batch_count or batch_duration".to_string(),
+            )),
+        }
+    }
+
     pub fn new(
         id: impl Into<String>,
         batch_count: Option<usize>,
@@ -179,15 +203,11 @@ impl Processor for BatchProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
-        let mode = match (self.batch_count, self.batch_duration) {
-            (Some(count), Some(duration)) => BatchMode::Combined { count, duration },
-            (Some(count), None) => BatchMode::CountOnly { count },
-            (None, Some(duration)) => BatchMode::DurationOnly { duration },
-            (None, None) => {
-                panic!("BatchProcessor created without batch configuration");
-            }
-        };
         let processor_id = self.id.clone();
+        let mode = match Self::batch_mode(self.batch_count, self.batch_duration) {
+            Ok(mode) => mode,
+            Err(err) => return spawner.spawn(async move { Err(err) }),
+        };
         let stats = Arc::clone(&self.stats);
 
         spawner.spawn(async move {

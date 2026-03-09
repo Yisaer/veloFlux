@@ -263,7 +263,7 @@ impl Processor for ProjectProcessor {
                                                 }
                                             }
                                             Err(e) => {
-                                                stats.record_error(e.to_string());
+                                                stats.record_error_logged("project processor error", e.to_string());
                                             }
                                         }
                                     }

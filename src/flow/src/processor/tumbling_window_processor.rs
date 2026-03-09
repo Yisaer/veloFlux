@@ -124,7 +124,7 @@ impl Processor for TumblingWindowProcessor {
                             Some(Ok(StreamData::Collection(collection))) => {
                                 stats.record_in(collection.num_rows() as u64);
                                 if let Err(e) = state.add_collection(collection).await {
-                                    stats.record_error(e.to_string());
+                                    stats.record_error_logged("tumbling window processor error", e.to_string());
                                 }
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {
@@ -265,7 +265,12 @@ impl ProcessingState {
                 if row_start != window_start {
                     break;
                 }
-                current_rows.push(self.rows.pop_front().unwrap());
+                let row = self.rows.pop_front().ok_or_else(|| {
+                    ProcessorError::ProcessingError(
+                        "tumbling window row buffer corrupted during flush".to_string(),
+                    )
+                })?;
+                current_rows.push(row);
             }
 
             if current_rows.is_empty() {
@@ -294,7 +299,12 @@ impl ProcessingState {
                 if row_start != window_start {
                     break;
                 }
-                current_rows.push(self.rows.pop_front().unwrap());
+                let row = self.rows.pop_front().ok_or_else(|| {
+                    ProcessorError::ProcessingError(
+                        "tumbling window row buffer corrupted during flush_all".to_string(),
+                    )
+                })?;
+                current_rows.push(row);
             }
             if current_rows.is_empty() {
                 continue;

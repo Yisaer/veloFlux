@@ -211,9 +211,11 @@ pub(crate) async fn send_with_backpressure(
     let mut payload = Some(data);
     loop {
         if sender.receiver_count() == 0 || sender.len() < capacity {
-            let value = payload
-                .take()
-                .expect("send_with_backpressure payload already taken");
+            let value = payload.take().ok_or_else(|| {
+                ProcessorError::ProcessingError(
+                    "send_with_backpressure payload state corrupted".to_string(),
+                )
+            })?;
             sender
                 .send(value)
                 .map(|_| ())
@@ -234,9 +236,11 @@ pub(crate) async fn send_control_with_backpressure(
     let mut payload = Some(signal);
     loop {
         if sender.receiver_count() == 0 || sender.len() < capacity {
-            let value = payload
-                .take()
-                .expect("send_control_with_backpressure payload already taken");
+            let value = payload.take().ok_or_else(|| {
+                ProcessorError::ProcessingError(
+                    "send_control_with_backpressure payload state corrupted".to_string(),
+                )
+            })?;
             sender
                 .send(value)
                 .map(|_| ())

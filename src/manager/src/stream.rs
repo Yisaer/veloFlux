@@ -1,4 +1,5 @@
 use crate::MQTT_QOS;
+use crate::audit::ResourceMutationLog;
 use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::pipeline::AppState;
 use crate::storage_bridge;
@@ -272,40 +273,53 @@ pub async fn create_stream_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateStreamRequest>,
 ) -> impl IntoResponse {
+    let audit = ResourceMutationLog::new("stream", "create", req.name.as_str(), None);
     if req.name.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            "stream name must not be empty".to_string(),
-        )
-            .into_response();
+        let err = "stream name must not be empty".to_string();
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
     }
     let schema = match build_schema_from_request(&req) {
         Ok(schema) => schema,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        Err(err) => {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
     };
 
     let stream_props = match build_stream_props(&req.stream_type, &req.props) {
         Ok(props) => props,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        Err(err) => {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
     };
 
     let decoder_registry = state.instances.default_instance().decoder_registry();
     let decoder = match build_stream_decoder(&req, decoder_registry.as_ref()) {
         Ok(config) => config,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        Err(err) => {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
     };
     if let Err(err) = validate_stream_decoder_config(&req, &decoder) {
+        audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
     if let StreamProps::Memory(memory_props) = &stream_props
         && let Err(err) = validate_memory_stream_topic(&req, memory_props)
     {
+        audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
 
     let stored = match storage_bridge::stored_stream_from_request(&req) {
         Ok(stored) => stored,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        Err(err) => {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
     };
     match state.storage.create_stream(stored.clone()) {
         Ok(()) => {}
@@ -362,7 +376,7 @@ pub async fn create_stream_handler(
         }
     }
 
-    tracing::info!(stream_name = %req.name, "stream created");
+    audit.log_success();
     let info = default_info
         .or(first_info)
         .expect("stream created in at least one instance");
@@ -497,6 +511,7 @@ pub async fn delete_stream_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    let audit = ResourceMutationLog::new("stream", "delete", name.as_str(), None);
     let mut pipelines_using_stream = Vec::new();
     for (_, instance) in state.instances.instances_snapshot() {
         pipelines_using_stream.extend(
@@ -509,14 +524,12 @@ pub async fn delete_stream_handler(
     }
     if !pipelines_using_stream.is_empty() {
         pipelines_using_stream.sort();
-        return (
-            StatusCode::CONFLICT,
-            format!(
-                "stream {name} still referenced by pipelines: {}",
-                pipelines_using_stream.join(", ")
-            ),
-        )
-            .into_response();
+        let err = format!(
+            "stream {name} still referenced by pipelines: {}",
+            pipelines_using_stream.join(", ")
+        );
+        audit.log_failure(&err);
+        return (StatusCode::CONFLICT, err).into_response();
     }
 
     for (_, instance) in state.instances.instances_snapshot() {
@@ -534,6 +547,7 @@ pub async fn delete_stream_handler(
         )
             .into_response();
     }
+    audit.log_success();
     (StatusCode::OK, format!("stream {name} deleted")).into_response()
 }
 

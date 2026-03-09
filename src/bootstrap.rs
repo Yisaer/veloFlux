@@ -8,6 +8,7 @@
 use crate::config::AppConfig;
 use crate::logging::LoggingGuard;
 use crate::server::{self, ServerOptions};
+use crate::startup::StartupPhase;
 use flow::FlowInstance;
 
 /// Result of bootstrap initialization that does not include a FlowInstance.
@@ -73,6 +74,12 @@ pub fn default_init_options(
     };
 
     let logging_guard = crate::logging::init_logging(&config.logging)?;
+    let bootstrap_phase = StartupPhase::new(
+        "manager",
+        "default",
+        "bootstrap",
+        loaded_config_path.as_deref(),
+    );
     if let Some(path) = loaded_config_path.as_deref() {
         tracing::info!(config_path = path, "loaded config");
     }
@@ -87,6 +94,19 @@ pub fn default_init_options(
         options.data_dir = Some(dir.to_string());
     }
     options.config_path = loaded_config_path;
+    tracing::info!(
+        mode = bootstrap_phase.mode(),
+        flow_instance_id = %bootstrap_phase.flow_instance_id(),
+        phase = bootstrap_phase.phase(),
+        config_path = bootstrap_phase.config_path(),
+        result = "configured",
+        data_dir = options.data_dir.as_deref().unwrap_or("<default>"),
+        manager_addr = options.manager_addr.as_deref().unwrap_or("<default>"),
+        profiling_enabled = options.profiling_enabled.unwrap_or(false),
+        declared_flow_instance_count = options.flow_instances.len(),
+        "startup configuration"
+    );
+    bootstrap_phase.log_success();
 
     Ok(BootstrapOptionsResult {
         options,
@@ -101,7 +121,20 @@ pub fn default_init_options(
 /// on `result.instance` before calling `server::init()` and `server::start()`.
 pub fn default_init() -> Result<BootstrapResult, Box<dyn std::error::Error + Send + Sync>> {
     let bootstrap = default_init_options()?;
-    let instance = server::prepare_registry(&bootstrap.options.flow_instances)?;
+    let prepare_phase = StartupPhase::new(
+        "manager",
+        "default",
+        "prepare_registry",
+        bootstrap.options.config_path.as_deref(),
+    );
+    let instance = match server::prepare_registry(&bootstrap.options.flow_instances) {
+        Ok(instance) => instance,
+        Err(err) => {
+            prepare_phase.log_failure(err.as_ref());
+            return Err(err);
+        }
+    };
+    prepare_phase.log_success();
 
     Ok(BootstrapResult {
         instance,

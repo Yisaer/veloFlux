@@ -1,8 +1,10 @@
+mod audit;
 mod capabilities;
 mod function;
 mod instances;
 mod memory_topic;
 mod pipeline;
+mod startup;
 pub mod storage_bridge;
 mod stream;
 mod worker;
@@ -10,6 +12,7 @@ mod worker;
 use axum::Router;
 use axum::routing::{delete, get, post};
 use pipeline::AppState;
+use startup::StartupPhase;
 use std::net::SocketAddr;
 use storage::StorageManager;
 use tokio::net::TcpListener;
@@ -123,8 +126,23 @@ pub async fn start_server(
     extra_flow_worker_endpoints: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = addr.parse()?;
-    tracing::info!(manager_addr = %addr, "manager listening");
-    let listener = TcpListener::bind(addr).await?;
+    let bind_phase = StartupPhase::new("manager", "default", "server_bind");
+    let listener = match TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            bind_phase.log_failure(&err);
+            return Err(err.into());
+        }
+    };
+    tracing::info!(
+        mode = "manager",
+        flow_instance_id = "default",
+        phase = "server_bind",
+        result = "succeeded",
+        elapsed_ms = bind_phase.elapsed_ms(),
+        manager_addr = %addr,
+        "manager listening"
+    );
     start_server_with_listener(
         listener,
         instance,

@@ -184,7 +184,7 @@ impl Processor for ComputeProcessor {
                                                 }
                                             }
                                             Err(e) => {
-                                                stats.record_error(e.to_string());
+                                                stats.record_error_logged("compute processor error", e.to_string());
                                             }
                                         }
                                     }

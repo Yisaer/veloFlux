@@ -1,5 +1,6 @@
 use super::{build_group_by_meta, AggregationWorker, GroupByMeta};
 use crate::aggregation::AggregateFunctionRegistry;
+use crate::expr::ScalarExpr;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
@@ -9,6 +10,7 @@ use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats,
 use crate::runtime::TaskSpawner;
 use datatypes::Value;
 use futures::stream::StreamExt;
+use sqlparser::ast::Expr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -17,6 +19,14 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 struct PartitionAggState {
     active: bool,
     worker: AggregationWorker,
+}
+
+struct StateWindowConfig {
+    open_expr: Expr,
+    emit_expr: Expr,
+    open_scalar: ScalarExpr,
+    emit_scalar: ScalarExpr,
+    partition_by_scalars: Vec<ScalarExpr>,
 }
 
 pub struct StreamingStateAggregationProcessor {
@@ -29,6 +39,7 @@ pub struct StreamingStateAggregationProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
+    state_window: Arc<StateWindowConfig>,
     stats: Arc<ProcessorStats>,
 }
 
@@ -37,7 +48,7 @@ impl StreamingStateAggregationProcessor {
         id: impl Into<String>,
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Self {
+    ) -> Result<Self, ProcessorError> {
         Self::new_with_channel_capacities(
             id,
             physical,
@@ -51,12 +62,13 @@ impl StreamingStateAggregationProcessor {
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         channel_capacities: ProcessorChannelCapacities,
-    ) -> Self {
+    ) -> Result<Self, ProcessorError> {
         let group_by_meta =
             build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
+        let state_window = Arc::new(Self::extract_window_spec(physical.as_ref())?);
         let (output, _) = broadcast::channel(channel_capacities.data);
         let (control_output, _) = broadcast::channel(channel_capacities.control);
-        Self {
+        Ok(Self {
             id: id.into(),
             physical,
             aggregate_registry,
@@ -66,7 +78,32 @@ impl StreamingStateAggregationProcessor {
             control_output,
             channel_capacities,
             group_by_meta,
+            state_window,
             stats: Arc::new(ProcessorStats::default()),
+        })
+    }
+
+    fn extract_window_spec(
+        physical: &PhysicalStreamingAggregation,
+    ) -> Result<StateWindowConfig, ProcessorError> {
+        match &physical.window {
+            StreamingWindowSpec::State {
+                open_expr,
+                emit_expr,
+                open_scalar,
+                emit_scalar,
+                partition_by_scalars,
+                ..
+            } => Ok(StateWindowConfig {
+                open_expr: open_expr.clone(),
+                emit_expr: emit_expr.clone(),
+                open_scalar: open_scalar.clone(),
+                emit_scalar: emit_scalar.clone(),
+                partition_by_scalars: partition_by_scalars.clone(),
+            }),
+            other => Err(ProcessorError::InvalidConfiguration(format!(
+                "streaming state aggregation requires state window spec, got {other:?}",
+            ))),
         }
     }
 
@@ -100,25 +137,7 @@ impl Processor for StreamingStateAggregationProcessor {
         let physical = Arc::clone(&self.physical);
         let group_by_meta = self.group_by_meta.clone();
         let stats = Arc::clone(&self.stats);
-
-        let (open_expr, emit_expr, open_scalar, emit_scalar, partition_by_scalars) =
-            match physical.window.clone() {
-                StreamingWindowSpec::State {
-                    open_expr,
-                    emit_expr,
-                    open_scalar,
-                    emit_scalar,
-                    partition_by_scalars,
-                    ..
-                } => (
-                    open_expr,
-                    emit_expr,
-                    open_scalar,
-                    emit_scalar,
-                    partition_by_scalars,
-                ),
-                other => unreachable!("state processor requires state window spec, got {other:?}"),
-            };
+        let state_window = Arc::clone(&self.state_window);
 
         spawner.spawn(async move {
             let mut partitions: HashMap<Option<String>, PartitionAggState> = HashMap::new();
@@ -146,21 +165,21 @@ impl Processor for StreamingStateAggregationProcessor {
                                 let tuples = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(e) => {
-                                        stats.record_error(format!("failed to extract rows: {e}"));
+                                        stats.record_error_logged("streaming state aggregation processor error", format!("failed to extract rows: {e}"));
                                         continue;
                                     }
                                 };
 
                                 for tuple in tuples {
-                                    let partition_key = if partition_by_scalars.is_empty() {
+                                    let partition_key = if state_window.partition_by_scalars.is_empty() {
                                         None
                                     } else {
-                                        let mut key_values = Vec::with_capacity(partition_by_scalars.len());
-                                        for expr in &partition_by_scalars {
+                                        let mut key_values = Vec::with_capacity(state_window.partition_by_scalars.len());
+                                        for expr in &state_window.partition_by_scalars {
                                             match expr.eval_with_tuple(&tuple) {
                                                 Ok(v) => key_values.push(v),
                                                 Err(e) => {
-                                                    stats.record_error(format!(
+                                                    stats.record_error_logged("streaming state aggregation processor error", format!(
                                                         "failed to evaluate statewindow partition key: {e}"
                                                     ));
                                                     key_values.clear();
@@ -185,33 +204,37 @@ impl Processor for StreamingStateAggregationProcessor {
                                         }
                                     });
 
-                                    let open = match open_scalar.eval_with_tuple(&tuple) {
+                                    let open = match state_window.open_scalar.eval_with_tuple(&tuple) {
                                         Ok(Value::Bool(v)) => v,
                                         Ok(other) => {
-                                            stats.record_error(format!(
-                                                "statewindow open must be bool, got {other:?} (expr={open_expr})"
+                                            stats.record_error_logged("streaming state aggregation processor error", format!(
+                                                "statewindow open must be bool, got {other:?} (expr={})",
+                                                state_window.open_expr
                                             ));
                                             continue;
                                         }
                                         Err(e) => {
-                                            stats.record_error(format!(
-                                                "failed to evaluate statewindow open (expr={open_expr}): {e}"
+                                            stats.record_error_logged("streaming state aggregation processor error", format!(
+                                                "failed to evaluate statewindow open (expr={}): {e}",
+                                                state_window.open_expr
                                             ));
                                             continue;
                                         }
                                     };
 
-                                    let emit = match emit_scalar.eval_with_tuple(&tuple) {
+                                    let emit = match state_window.emit_scalar.eval_with_tuple(&tuple) {
                                         Ok(Value::Bool(v)) => v,
                                         Ok(other) => {
-                                            stats.record_error(format!(
-                                                "statewindow emit must be bool, got {other:?} (expr={emit_expr})"
+                                            stats.record_error_logged("streaming state aggregation processor error", format!(
+                                                "statewindow emit must be bool, got {other:?} (expr={})",
+                                                state_window.emit_expr
                                             ));
                                             continue;
                                         }
                                         Err(e) => {
-                                            stats.record_error(format!(
-                                                "failed to evaluate statewindow emit (expr={emit_expr}): {e}"
+                                            stats.record_error_logged("streaming state aggregation processor error", format!(
+                                                "failed to evaluate statewindow emit (expr={}): {e}",
+                                                state_window.emit_expr
                                             ));
                                             continue;
                                         }
@@ -221,14 +244,14 @@ impl Processor for StreamingStateAggregationProcessor {
                                         if open {
                                             entry.active = true;
                                             if let Err(e) = entry.worker.update_groups(&tuple) {
-                                                stats.record_error(e.to_string());
+                                                stats.record_error_logged("streaming state aggregation processor error", e.to_string());
                                             }
                                         }
                                         continue;
                                     }
 
                                     if let Err(e) = entry.worker.update_groups(&tuple) {
-                                        stats.record_error(e.to_string());
+                                        stats.record_error_logged("streaming state aggregation processor error", e.to_string());
                                         continue;
                                     }
 
@@ -245,7 +268,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                             }
                                             Ok(None) => {}
                                             Err(e) => {
-                                                stats.record_error(e.to_string());
+                                                stats.record_error_logged("streaming state aggregation processor error", e.to_string());
                                             }
                                         }
                                         entry.active = false;
@@ -284,7 +307,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                                     }
                                                     Ok(None) => {}
                                                     Err(e) => {
-                                                        stats.record_error(e.to_string());
+                                                        stats.record_error_logged("streaming state aggregation processor error", e.to_string());
                                                     }
                                                 }
                                                 state.active = false;
@@ -446,7 +469,8 @@ mod tests {
             "s",
             Arc::clone(&physical),
             Arc::clone(&aggregate_registry),
-        );
+        )
+        .expect("state processor");
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
@@ -484,7 +508,8 @@ mod tests {
             "s",
             Arc::clone(&physical),
             Arc::clone(&aggregate_registry),
-        );
+        )
+        .expect("state processor");
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();

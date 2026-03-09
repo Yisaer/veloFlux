@@ -166,7 +166,7 @@ impl Processor for FilterProcessor {
                                                 }
                                             }
                                             Err(e) => {
-                                                stats.record_error(e.to_string());
+                                                stats.record_error_logged("filter processor error", e.to_string());
                                             }
                                         }
                                     }

@@ -3,6 +3,7 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use veloflux::server;
+use veloflux::startup::StartupPhase;
 
 #[derive(Debug, Clone)]
 struct WorkerCliArgs {
@@ -85,72 +86,164 @@ async fn run_worker(
     let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
     let _logging_guard = logging_guard;
 
+    tracing::info!(
+        mode = "worker",
+        flow_instance_id = %instance_id,
+        config_path = %config_path,
+        result = "configured",
+        backend = ?spec.backend,
+        worker_threads = ?spec.runtime.worker_threads,
+        thread_name_prefix = ?spec.runtime.thread_name_prefix,
+        "worker startup configuration"
+    );
+
+    let runtime_prepare_phase = StartupPhase::new(
+        "worker",
+        instance_id.as_str(),
+        "runtime_prepare",
+        Some(&config_path),
+    );
+
     if !matches!(
         spec.backend,
         manager::FlowInstanceBackendKind::WorkerProcess
     ) {
-        return Err(format!("instance {instance_id} is not configured as worker_process").into());
+        let err = format!("instance {instance_id} is not configured as worker_process");
+        runtime_prepare_phase.log_failure(&err);
+        return Err(err.into());
     }
     if spec.thread_cgroup_path().is_some() {
-        return Err(
-            format!("worker_process instance {instance_id} cannot set cgroup.thread_path").into(),
-        );
+        let err = format!("worker_process instance {instance_id} cannot set cgroup.thread_path");
+        runtime_prepare_phase.log_failure(&err);
+        return Err(err.into());
     }
 
     let worker_addr_raw = spec
         .worker_addr()
-        .ok_or_else(|| format!("worker_process instance {instance_id} requires worker_addr"))?;
-    let worker_addr: std::net::SocketAddr = worker_addr_raw
-        .parse()
-        .map_err(|e| format!("invalid worker_addr for {instance_id}: {e}"))?;
+        .ok_or_else(|| format!("worker_process instance {instance_id} requires worker_addr"));
+    let worker_addr_raw = match worker_addr_raw {
+        Ok(addr) => addr,
+        Err(err) => {
+            runtime_prepare_phase.log_failure(&err);
+            return Err(err.into());
+        }
+    };
+    let worker_addr: std::net::SocketAddr = match worker_addr_raw.parse() {
+        Ok(addr) => addr,
+        Err(err) => {
+            let message = format!("invalid worker_addr for {instance_id}: {err}");
+            runtime_prepare_phase.log_failure(&message);
+            return Err(message.into());
+        }
+    };
     if !worker_addr.ip().is_loopback() {
-        return Err(format!(
+        let err = format!(
             "worker_addr for {instance_id} must be loopback, got {}",
             worker_addr_raw
-        )
-        .into());
+        );
+        runtime_prepare_phase.log_failure(&err);
+        return Err(err.into());
     }
 
     let metrics_addr_raw = spec
         .metrics_addr()
-        .ok_or_else(|| format!("worker_process instance {instance_id} requires metrics_addr"))?;
-    let metrics_addr: std::net::SocketAddr = metrics_addr_raw
-        .parse()
-        .map_err(|e| format!("invalid metrics_addr for {instance_id}: {e}"))?;
+        .ok_or_else(|| format!("worker_process instance {instance_id} requires metrics_addr"));
+    let metrics_addr_raw = match metrics_addr_raw {
+        Ok(addr) => addr,
+        Err(err) => {
+            runtime_prepare_phase.log_failure(&err);
+            return Err(err.into());
+        }
+    };
+    let metrics_addr: std::net::SocketAddr = match metrics_addr_raw.parse() {
+        Ok(addr) => addr,
+        Err(err) => {
+            let message = format!("invalid metrics_addr for {instance_id}: {err}");
+            runtime_prepare_phase.log_failure(&message);
+            return Err(message.into());
+        }
+    };
     if !metrics_addr.ip().is_loopback() {
-        return Err(format!(
+        let err = format!(
             "metrics_addr for {instance_id} must be loopback, got {}",
             metrics_addr_raw
-        )
-        .into());
+        );
+        runtime_prepare_phase.log_failure(&err);
+        return Err(err.into());
     }
 
     let profile_addr_raw = spec
         .profile_addr()
-        .ok_or_else(|| format!("worker_process instance {instance_id} requires profile_addr"))?;
-    let profile_addr: std::net::SocketAddr = profile_addr_raw
-        .parse()
-        .map_err(|e| format!("invalid profile_addr for {instance_id}: {e}"))?;
+        .ok_or_else(|| format!("worker_process instance {instance_id} requires profile_addr"));
+    let profile_addr_raw = match profile_addr_raw {
+        Ok(addr) => addr,
+        Err(err) => {
+            runtime_prepare_phase.log_failure(&err);
+            return Err(err.into());
+        }
+    };
+    let profile_addr: std::net::SocketAddr = match profile_addr_raw.parse() {
+        Ok(addr) => addr,
+        Err(err) => {
+            let message = format!("invalid profile_addr for {instance_id}: {err}");
+            runtime_prepare_phase.log_failure(&message);
+            return Err(message.into());
+        }
+    };
     if !profile_addr.ip().is_loopback() {
-        return Err(format!(
+        let err = format!(
             "profile_addr for {instance_id} must be loopback, got {}",
             profile_addr_raw
-        )
-        .into());
+        );
+        runtime_prepare_phase.log_failure(&err);
+        return Err(err.into());
     }
 
     let mut opts = cfg.to_server_options();
     opts.metrics_addr = Some(metrics_addr.to_string());
     opts.profile_addr = Some(profile_addr.to_string());
-    veloflux::server::init_metrics_exporter(&opts).await?;
+    let services_phase = StartupPhase::new(
+        "worker",
+        instance_id.as_str(),
+        "services_init",
+        Some(&config_path),
+    );
+    if let Err(err) = veloflux::server::init_metrics_exporter(&opts).await {
+        services_phase.log_failure(err.as_ref());
+        return Err(err);
+    }
     if opts.profiling_enabled.unwrap_or(false) {
         veloflux::server::start_profile_server(&opts);
     }
+    tracing::info!(
+        mode = services_phase.mode(),
+        flow_instance_id = %services_phase.flow_instance_id(),
+        phase = services_phase.phase(),
+        config_path = services_phase.config_path(),
+        result = "succeeded",
+        elapsed_ms = services_phase.elapsed_ms(),
+        metrics_addr = %metrics_addr,
+        profile_addr = %profile_addr,
+        profiling_enabled = opts.profiling_enabled.unwrap_or(false),
+        "startup phase"
+    );
 
-    let default_spec = manager::find_default_flow_instance_spec(&cfg.server.flow_instances)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
-    let default_instance = manager::build_in_process_flow_instance(default_spec, None)
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err))?;
+    let default_spec = match manager::find_default_flow_instance_spec(&cfg.server.flow_instances) {
+        Ok(spec) => spec,
+        Err(err) => {
+            let err = std::io::Error::new(std::io::ErrorKind::InvalidInput, err);
+            runtime_prepare_phase.log_failure(&err);
+            return Err(err.into());
+        }
+    };
+    let default_instance = match manager::build_in_process_flow_instance(default_spec, None) {
+        Ok(instance) => instance,
+        Err(err) => {
+            let err = std::io::Error::new(std::io::ErrorKind::InvalidInput, err);
+            runtime_prepare_phase.log_failure(&err);
+            return Err(err.into());
+        }
+    };
     let shared = default_instance.shared_registries();
     let instance = flow::FlowInstance::new(flow::instance::FlowInstanceOptions::dedicated_runtime(
         instance_id.clone(),
@@ -161,10 +254,41 @@ async fn run_worker(
             thread_cgroup_path: spec.thread_cgroup_path().map(|path| path.to_string()),
         },
     ));
-
-    let listener = tokio::net::TcpListener::bind(worker_addr).await?;
     tracing::info!(
-        flow_instance_id = %instance_id,
+        mode = runtime_prepare_phase.mode(),
+        flow_instance_id = %runtime_prepare_phase.flow_instance_id(),
+        phase = runtime_prepare_phase.phase(),
+        config_path = runtime_prepare_phase.config_path(),
+        result = "succeeded",
+        elapsed_ms = runtime_prepare_phase.elapsed_ms(),
+        worker_addr = %worker_addr,
+        metrics_addr = %metrics_addr,
+        profile_addr = %profile_addr,
+        worker_threads = ?spec.runtime.worker_threads,
+        thread_name_prefix = ?spec.runtime.thread_name_prefix,
+        "startup phase"
+    );
+
+    let bind_phase = StartupPhase::new(
+        "worker",
+        instance_id.as_str(),
+        "server_bind",
+        Some(&config_path),
+    );
+    let listener = match tokio::net::TcpListener::bind(worker_addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            bind_phase.log_failure(&err);
+            return Err(err.into());
+        }
+    };
+    tracing::info!(
+        mode = bind_phase.mode(),
+        flow_instance_id = %bind_phase.flow_instance_id(),
+        phase = bind_phase.phase(),
+        config_path = bind_phase.config_path(),
+        result = "succeeded",
+        elapsed_ms = bind_phase.elapsed_ms(),
         worker_addr = %worker_addr,
         metrics_addr = %metrics_addr,
         profile_addr = %profile_addr,

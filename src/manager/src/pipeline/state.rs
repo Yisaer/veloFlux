@@ -3,6 +3,7 @@ use crate::instances::{
     DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend, FlowInstanceBackendKind, FlowInstances,
     build_in_process_flow_instance, find_default_flow_instance_spec,
 };
+use crate::startup::StartupPhase;
 use crate::storage_bridge;
 use crate::worker::{FlowWorkerClient, WorkerApplyPipelineRequest, WorkerDesiredState};
 use std::collections::HashMap;
@@ -142,9 +143,21 @@ impl AppState {
     }
 
     pub async fn bootstrap_from_storage(&self) -> Result<(), String> {
-        crate::storage_bridge::hydrate_runtime_from_storage(self.storage.as_ref(), &self.instances)
-            .await?;
-        self.hydrate_workers_from_storage().await?;
+        let phase = StartupPhase::new("manager", DEFAULT_FLOW_INSTANCE_ID, "storage_hydrate");
+        if let Err(err) = crate::storage_bridge::hydrate_runtime_from_storage(
+            self.storage.as_ref(),
+            &self.instances,
+        )
+        .await
+        {
+            phase.log_failure(&err);
+            return Err(err);
+        }
+        if let Err(err) = self.hydrate_workers_from_storage().await {
+            phase.log_failure(&err);
+            return Err(err);
+        }
+        phase.log_success();
         Ok(())
     }
 
@@ -173,10 +186,28 @@ impl AppState {
             .map_err(|e| format!("list pipelines from storage: {e}"))?;
 
         let mut applied = 0usize;
+        let mut decode_failed = 0usize;
+        let mut skipped_undeclared = 0usize;
+        let mut skipped_non_worker = 0usize;
+        let mut context_failed = 0usize;
+        let mut missing_worker = 0usize;
+        let mut apply_failed = 0usize;
+
+        tracing::info!(
+            mode = "manager",
+            flow_instance_id = DEFAULT_FLOW_INSTANCE_ID,
+            phase = "worker_storage_hydrate",
+            result = "started",
+            worker_count = self.workers.len(),
+            persisted_pipeline_count = pipelines.len(),
+            "worker pipeline hydrate started"
+        );
+
         for pipeline in pipelines {
             let req = match storage_bridge::pipeline_request_from_stored(&pipeline) {
                 Ok(req) => req,
                 Err(err) => {
+                    decode_failed += 1;
                     tracing::error!(
                         pipeline_id = %pipeline.id,
                         error = %err,
@@ -191,6 +222,7 @@ impl AppState {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_FLOW_INSTANCE_ID.to_string());
             if !self.is_declared_instance(&flow_instance_id) {
+                skipped_undeclared += 1;
                 tracing::warn!(
                     pipeline_id = %pipeline.id,
                     flow_instance_id = %flow_instance_id,
@@ -202,6 +234,7 @@ impl AppState {
                 self.backend(&flow_instance_id),
                 Some(FlowInstanceBackend::WorkerProcess)
             ) {
+                skipped_non_worker += 1;
                 continue;
             }
 
@@ -226,6 +259,7 @@ impl AppState {
             ) {
                 Ok(payload) => payload,
                 Err(resp) => {
+                    context_failed += 1;
                     let msg = response_to_message(*resp).await;
                     tracing::error!(
                         pipeline_id = %pipeline.id,
@@ -238,6 +272,7 @@ impl AppState {
             };
 
             let Some(worker) = self.worker(&flow_instance_id) else {
+                missing_worker += 1;
                 tracing::error!(
                     pipeline_id = %pipeline.id,
                     flow_instance_id = %flow_instance_id,
@@ -266,6 +301,7 @@ impl AppState {
                     );
                 }
                 Err(err) => {
+                    apply_failed += 1;
                     tracing::error!(
                         pipeline_id = %pipeline.id,
                         flow_instance_id = %flow_instance_id,
@@ -276,7 +312,21 @@ impl AppState {
             }
         }
 
-        tracing::info!(count = applied, "worker pipeline hydration completed");
+        tracing::info!(
+            mode = "manager",
+            flow_instance_id = DEFAULT_FLOW_INSTANCE_ID,
+            phase = "worker_storage_hydrate",
+            result = "succeeded",
+            worker_count = self.workers.len(),
+            applied_count = applied,
+            decode_failed_count = decode_failed,
+            skipped_undeclared_count = skipped_undeclared,
+            skipped_non_worker_count = skipped_non_worker,
+            context_failed_count = context_failed,
+            missing_worker_count = missing_worker,
+            apply_failed_count = apply_failed,
+            "worker pipeline hydration completed"
+        );
         Ok(())
     }
 }

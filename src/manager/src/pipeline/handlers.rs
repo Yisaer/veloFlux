@@ -1,3 +1,4 @@
+use crate::audit::ResourceMutationLog;
 use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend};
 use crate::storage_bridge;
 use crate::worker::WorkerDesiredState;
@@ -139,8 +140,15 @@ pub async fn create_pipeline_handler(
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
     };
     req.flow_instance_id = Some(flow_instance_id.clone());
+    let audit = ResourceMutationLog::new(
+        "pipeline",
+        "create",
+        req.id.as_str(),
+        Some(&flow_instance_id),
+    );
 
     if let Err(err) = validate_create_request(&req) {
+        audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
     let _permit = match state.try_acquire_pipeline_op(&req.id).await {
@@ -215,11 +223,7 @@ pub async fn create_pipeline_handler(
             }
         };
 
-        tracing::info!(
-            pipeline_id = %stored.id,
-            flow_instance_id = %flow_instance_id,
-            "pipeline created (remote)"
-        );
+        audit.log_success();
         return (
             StatusCode::CREATED,
             Json(CreatePipelineResponse {
@@ -264,7 +268,7 @@ pub async fn create_pipeline_handler(
     };
 
     let snapshot = build_result.snapshot;
-    tracing::info!(pipeline_id = %snapshot.definition.id(), "pipeline created");
+    audit.log_success();
     (
         StatusCode::CREATED,
         Json(CreatePipelineResponse {
@@ -354,14 +358,14 @@ pub async fn upsert_pipeline_handler(
         .flow_instance_id
         .clone()
         .unwrap_or_else(|| DEFAULT_FLOW_INSTANCE_ID.to_string());
+    let audit =
+        ResourceMutationLog::new("pipeline", "update", id.as_str(), Some(&flow_instance_id));
     let backend = match state.backend(&flow_instance_id) {
         Some(backend) => backend,
         None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("flow instance {flow_instance_id} is not declared by config"),
-            )
-                .into_response();
+            let err = format!("flow instance {flow_instance_id} is not declared by config");
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
         }
     };
 
@@ -440,11 +444,7 @@ pub async fn upsert_pipeline_handler(
             }
         };
 
-        tracing::info!(
-            pipeline_id = %id,
-            flow_instance_id = %flow_instance_id,
-            "pipeline upserted (remote)"
-        );
+        audit.log_success();
         return Json(CreatePipelineResponse {
             id,
             status: apply_result.status,
@@ -564,6 +564,7 @@ pub async fn upsert_pipeline_handler(
     }
 
     let status = stored_state_label(state.storage.get_pipeline_run_state(&id).unwrap_or(None));
+    audit.log_success();
     Json(CreatePipelineResponse { id, status }).into_response()
 }
 
@@ -816,6 +817,7 @@ pub async fn start_pipeline_handler(
         Ok(result) => result,
         Err(resp) => return resp,
     };
+    let audit = ResourceMutationLog::new("pipeline", "start", id.as_str(), Some(&flow_instance_id));
 
     if let Err(err) = state
         .storage
@@ -841,7 +843,7 @@ pub async fn start_pipeline_handler(
         };
         return match instance.start_pipeline(&id) {
             Ok(_) => {
-                tracing::info!(pipeline_id = %id, "pipeline started");
+                audit.log_success();
                 (StatusCode::OK, format!("pipeline {id} started")).into_response()
             }
             Err(PipelineError::NotFound(_)) => {
@@ -883,7 +885,10 @@ pub async fn start_pipeline_handler(
     };
 
     match worker.start_pipeline(&id).await {
-        Ok(()) => (StatusCode::OK, format!("pipeline {id} started")).into_response(),
+        Ok(()) => {
+            audit.log_success();
+            (StatusCode::OK, format!("pipeline {id} started")).into_response()
+        }
         Err(err) if err == "not_found" => {
             // Best-effort: apply pipeline before retrying start.
             let stored = match state.storage.get_pipeline(&id) {
@@ -931,6 +936,7 @@ pub async fn start_pipeline_handler(
                     });
                 return resp;
             }
+            audit.log_success();
             (StatusCode::OK, format!("pipeline {id} started")).into_response()
         }
         Err(err) => {
@@ -969,10 +975,14 @@ pub async fn stop_pipeline_handler(
         Ok(result) => result,
         Err(resp) => return resp,
     };
+    let audit = ResourceMutationLog::new("pipeline", "stop", id.as_str(), Some(&flow_instance_id));
 
     let mode = match parse_stop_mode(&query.mode) {
         Ok(mode) => mode,
-        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+        Err(err) => {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
     };
     let timeout = Duration::from_millis(query.timeout_ms);
 
@@ -1000,12 +1010,7 @@ pub async fn stop_pipeline_handler(
         };
         return match instance.stop_pipeline(&id, mode, timeout).await {
             Ok(_) => {
-                tracing::info!(
-                    pipeline_id = %id,
-                    mode = %query.mode,
-                    timeout_ms = query.timeout_ms,
-                    "pipeline stopped"
-                );
+                audit.log_success();
                 (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
             }
             Err(PipelineError::NotFound(_)) => {
@@ -1024,7 +1029,10 @@ pub async fn stop_pipeline_handler(
         Err(resp) => return *resp,
     };
     match worker.stop_pipeline(&id).await {
-        Ok(()) => (StatusCode::OK, format!("pipeline {id} stopped")).into_response(),
+        Ok(()) => {
+            audit.log_success();
+            (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
+        }
         Err(err) if err == "not_found" => {
             (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
         }
@@ -1040,6 +1048,7 @@ pub async fn delete_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let mut audit = ResourceMutationLog::new("pipeline", "delete", id.as_str(), None);
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&id),
@@ -1051,47 +1060,91 @@ pub async fn delete_pipeline_handler(
                 .into_response();
         }
     };
-    let (flow_instance_id, _) = match resolve_pipeline_spec(&state, &id).await {
-        Ok(result) => result,
-        Err(resp) => return resp,
+    let stored = match state.storage.get_pipeline(&id) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
+            let err = format!("pipeline {id} not found");
+            audit.log_failure(&err);
+            return (StatusCode::NOT_FOUND, err).into_response();
+        }
+        Err(err) => {
+            let err = format!("failed to read pipeline {id} from storage: {err}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+        }
     };
-
-    if matches!(
-        state.backend(&flow_instance_id),
-        Some(FlowInstanceBackend::InProcess)
-    ) {
-        let instance = match local_instance_response(&state, &flow_instance_id) {
-            Ok(instance) => instance,
-            Err(resp) => return *resp,
-        };
-        match instance.delete_pipeline(&id).await {
-            Ok(_) => {}
-            Err(PipelineError::NotFound(_)) => {
-                return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
-            }
+    let flow_instance_id = match storage_bridge::pipeline_request_from_stored(&stored) {
+        Ok(req) => match canonical_flow_instance_id(req.flow_instance_id.as_deref()) {
+            Ok(id) => Some(id),
             Err(err) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("failed to delete pipeline {id}: {err}"),
-                )
-                    .into_response();
+                tracing::warn!(pipeline_id = %id, error = %err, "invalid stored flow_instance_id while deleting pipeline");
+                None
+            }
+        },
+        Err(err) => {
+            tracing::warn!(pipeline_id = %id, error = %err, "failed to decode stored pipeline while deleting");
+            None
+        }
+    };
+    audit.set_flow_instance_id(flow_instance_id.as_deref());
+
+    if let Some(flow_instance_id) = flow_instance_id.as_deref() {
+        match state.backend(flow_instance_id) {
+            Some(FlowInstanceBackend::InProcess) => {
+                if let Some(instance) = state.local_instance(flow_instance_id) {
+                    match instance.delete_pipeline(&id).await {
+                        Ok(_) | Err(PipelineError::NotFound(_)) => {}
+                        Err(err) => {
+                            tracing::warn!(
+                                pipeline_id = %id,
+                                flow_instance_id = %flow_instance_id,
+                                error = %err,
+                                "failed to delete pipeline from in-process runtime"
+                            );
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        pipeline_id = %id,
+                        flow_instance_id = %flow_instance_id,
+                        "local flow instance unavailable while deleting pipeline"
+                    );
+                }
+            }
+            Some(FlowInstanceBackend::WorkerProcess) => {
+                if let Some(worker) = state.worker(flow_instance_id) {
+                    if let Err(err) = worker.delete_pipeline(&id).await {
+                        tracing::warn!(
+                            pipeline_id = %id,
+                            flow_instance_id = %flow_instance_id,
+                            error = %err,
+                            "failed to delete pipeline from worker runtime"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        pipeline_id = %id,
+                        flow_instance_id = %flow_instance_id,
+                        "worker client unavailable while deleting pipeline"
+                    );
+                }
+            }
+            None => {
+                tracing::warn!(
+                    pipeline_id = %id,
+                    flow_instance_id = %flow_instance_id,
+                    "flow instance not declared while deleting pipeline"
+                );
             }
         }
-    } else {
-        let worker = match worker_response(&state, &flow_instance_id) {
-            Ok(worker) => worker,
-            Err(resp) => return *resp,
-        };
-        let _ = worker.delete_pipeline(&id).await;
     }
 
     if let Err(err) = state.storage.delete_pipeline(&id) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to remove pipeline {id} from storage: {err}"),
-        )
-            .into_response();
+        let err = format!("failed to remove pipeline {id} from storage: {err}");
+        audit.log_failure(&err);
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
+    audit.log_success();
     (StatusCode::OK, format!("pipeline {id} deleted")).into_response()
 }
 

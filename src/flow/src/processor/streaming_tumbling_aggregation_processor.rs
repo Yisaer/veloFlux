@@ -26,6 +26,7 @@ pub struct StreamingTumblingAggregationProcessor {
     control_output: broadcast::Sender<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     group_by_meta: Vec<GroupByMeta>,
+    len_secs: u64,
     stats: Arc<ProcessorStats>,
 }
 
@@ -34,7 +35,7 @@ impl StreamingTumblingAggregationProcessor {
         id: impl Into<String>,
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Self {
+    ) -> Result<Self, ProcessorError> {
         Self::new_with_channel_capacities(
             id,
             physical,
@@ -48,12 +49,13 @@ impl StreamingTumblingAggregationProcessor {
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         channel_capacities: ProcessorChannelCapacities,
-    ) -> Self {
+    ) -> Result<Self, ProcessorError> {
         let group_by_meta =
             build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
+        let len_secs = Self::extract_window_length(physical.as_ref())?;
         let (output, _) = broadcast::channel(channel_capacities.data);
         let (control_output, _) = broadcast::channel(channel_capacities.control);
-        Self {
+        Ok(Self {
             id: id.into(),
             physical,
             aggregate_registry,
@@ -63,7 +65,22 @@ impl StreamingTumblingAggregationProcessor {
             control_output,
             channel_capacities,
             group_by_meta,
+            len_secs,
             stats: Arc::new(ProcessorStats::default()),
+        })
+    }
+
+    fn extract_window_length(
+        physical: &PhysicalStreamingAggregation,
+    ) -> Result<u64, ProcessorError> {
+        match &physical.window {
+            StreamingWindowSpec::Tumbling {
+                time_unit: _,
+                length,
+            } => Ok(*length),
+            other => Err(ProcessorError::InvalidConfiguration(format!(
+                "streaming tumbling aggregation requires tumbling window spec, got {other:?}",
+            ))),
         }
     }
 
@@ -97,13 +114,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
         let physical = Arc::clone(&self.physical);
         let group_by_meta = self.group_by_meta.clone();
         let stats = Arc::clone(&self.stats);
-        let len_secs = match physical.window {
-            StreamingWindowSpec::Tumbling {
-                time_unit: _,
-                length,
-            } => length,
-            _ => unreachable!("tumbling processor requires tumbling window spec"),
-        };
+        let len_secs = self.len_secs;
 
         spawner.spawn(async move {
             let mut window_state = ProcessingWindowState::new(

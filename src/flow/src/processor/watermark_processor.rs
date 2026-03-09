@@ -802,7 +802,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                 match state.on_graceful_end() {
                                     Ok(step) => {
                                         for err in step.errors {
-                                            stats.record_error(err);
+                                            stats.record_error_logged("watermark processor error", err);
                                         }
                                         for item in step.outputs {
                                             send_with_backpressure(
@@ -814,7 +814,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                         }
                                     }
                                     Err(err) => {
-                                        stats.record_error(format!("eventtime flush error: {err}"));
+                                        stats.record_error_logged("watermark processor error", format!("eventtime flush error: {err}"));
                                     }
                                 }
                             }
@@ -841,7 +841,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                 let rows = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(err) => {
-                                        stats.record_error(format!(
+                                        stats.record_error_logged("watermark processor error", format!(
                                             "eventtime collection error: {err}"
                                         ));
                                         continue;
@@ -850,7 +850,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                 match state.on_rows(rows) {
                                     Ok(step) => {
                                         for err in step.errors {
-                                            stats.record_error(err);
+                                            stats.record_error_logged("watermark processor error", err);
                                         }
                                         for item in step.outputs {
                                             let out_rows = item.num_rows_hint();
@@ -866,12 +866,12 @@ impl Processor for EventtimeWatermarkProcessor {
                                         }
                                     }
                                     Err(err) => {
-                                        stats.record_error(format!("eventtime ingest error: {err}"));
+                                        stats.record_error_logged("watermark processor error", format!("eventtime ingest error: {err}"));
                                     }
                                 }
                             }
                             Some(Ok(StreamData::Watermark(_))) => {
-                                stats.record_error(
+                                stats.record_error_logged("watermark processor error", 
                                     "unexpected StreamData::Watermark input in eventtime watermark processor"
                                         .to_string(),
                                 );
@@ -882,7 +882,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                     match state.on_graceful_end() {
                                         Ok(step) => {
                                             for err in step.errors {
-                                                stats.record_error(err);
+                                                stats.record_error_logged("watermark processor error", err);
                                             }
                                             for item in step.outputs {
                                                 send_with_backpressure(
@@ -894,7 +894,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                             }
                                         }
                                         Err(err) => {
-                                            stats.record_error(format!("eventtime flush error: {err}"));
+                                            stats.record_error_logged("watermark processor error", format!("eventtime flush error: {err}"));
                                         }
                                     }
                                 }
