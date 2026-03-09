@@ -43,7 +43,7 @@ impl StreamingAggregationProcessor {
         id: impl Into<String>,
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Self {
+    ) -> Result<Self, ProcessorError> {
         Self::new_with_channel_capacities(
             id,
             physical,
@@ -57,10 +57,10 @@ impl StreamingAggregationProcessor {
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         channel_capacities: ProcessorChannelCapacities,
-    ) -> Self {
+    ) -> Result<Self, ProcessorError> {
         let window = physical.window.clone();
         match window {
-            StreamingWindowSpec::Count { count } => StreamingAggregationProcessor::Count(
+            StreamingWindowSpec::Count { count } => Ok(StreamingAggregationProcessor::Count(
                 StreamingCountAggregationProcessor::new_with_channel_capacities(
                     id,
                     Arc::clone(&physical),
@@ -68,37 +68,37 @@ impl StreamingAggregationProcessor {
                     count,
                     channel_capacities,
                 ),
-            ),
+            )),
             StreamingWindowSpec::Tumbling {
                 time_unit: _,
                 length: _,
             } => {
                 // Currently only seconds are supported at the logical level.
-                StreamingAggregationProcessor::Tumbling(
+                Ok(StreamingAggregationProcessor::Tumbling(
                     StreamingTumblingAggregationProcessor::new_with_channel_capacities(
                         id,
                         Arc::clone(&physical),
                         aggregate_registry,
                         channel_capacities,
-                    ),
-                )
+                    )?,
+                ))
             }
-            StreamingWindowSpec::Sliding { .. } => StreamingAggregationProcessor::Sliding(
+            StreamingWindowSpec::Sliding { .. } => Ok(StreamingAggregationProcessor::Sliding(
                 StreamingSlidingAggregationProcessor::new_with_channel_capacities(
                     id,
                     physical,
                     aggregate_registry,
                     channel_capacities,
-                ),
-            ),
-            StreamingWindowSpec::State { .. } => StreamingAggregationProcessor::State(
+                )?,
+            )),
+            StreamingWindowSpec::State { .. } => Ok(StreamingAggregationProcessor::State(
                 StreamingStateAggregationProcessor::new_with_channel_capacities(
                     id,
                     physical,
                     aggregate_registry,
                     channel_capacities,
-                ),
-            ),
+                )?,
+            )),
         }
     }
 
@@ -106,14 +106,14 @@ impl StreamingAggregationProcessor {
         id: impl Into<String>,
         plan: Arc<PhysicalPlan>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, ProcessorError> {
         match plan.as_ref() {
-            PhysicalPlan::StreamingAggregation(aggregation) => Some(Self::new(
+            PhysicalPlan::StreamingAggregation(aggregation) => Ok(Some(Self::new(
                 id,
                 Arc::new(aggregation.clone()),
                 aggregate_registry,
-            )),
-            _ => None,
+            )?)),
+            _ => Ok(None),
         }
     }
 

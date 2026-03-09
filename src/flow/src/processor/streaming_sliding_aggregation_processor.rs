@@ -61,7 +61,7 @@ impl StreamingSlidingAggregationProcessor {
         id: impl Into<String>,
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Self {
+    ) -> Result<Self, ProcessorError> {
         Self::new_with_channel_capacities(
             id,
             physical,
@@ -75,22 +75,15 @@ impl StreamingSlidingAggregationProcessor {
         physical: Arc<PhysicalStreamingAggregation>,
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         channel_capacities: ProcessorChannelCapacities,
-    ) -> Self {
+    ) -> Result<Self, ProcessorError> {
         let group_by_meta =
             build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
         let (output, _) = broadcast::channel(channel_capacities.data);
         let (control_output, _) = broadcast::channel(channel_capacities.control);
 
-        let (length_secs, delay_secs) = match physical.window {
-            StreamingWindowSpec::Sliding {
-                time_unit: _,
-                lookback,
-                lookahead,
-            } => (lookback.max(1), lookahead.unwrap_or(0)),
-            _ => unreachable!("sliding processor requires sliding window spec"),
-        };
+        let (length_secs, delay_secs) = Self::extract_window_spec(physical.as_ref())?;
 
-        Self {
+        Ok(Self {
             id: id.into(),
             physical,
             aggregate_registry,
@@ -103,6 +96,21 @@ impl StreamingSlidingAggregationProcessor {
             length_secs,
             delay_secs,
             stats: Arc::new(ProcessorStats::default()),
+        })
+    }
+
+    fn extract_window_spec(
+        physical: &PhysicalStreamingAggregation,
+    ) -> Result<(u64, u64), ProcessorError> {
+        match &physical.window {
+            StreamingWindowSpec::Sliding {
+                time_unit: _,
+                lookback,
+                lookahead,
+            } => Ok(((*lookback).max(1), lookahead.unwrap_or(0))),
+            other => Err(ProcessorError::InvalidConfiguration(format!(
+                "streaming sliding aggregation requires sliding window spec, got {other:?}",
+            ))),
         }
     }
 

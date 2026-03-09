@@ -1120,7 +1120,7 @@ fn create_processor_from_plan_node(
                 Arc::new(agg.clone()),
                 context.aggregate_registry()?,
                 channel_capacities,
-            );
+            )?;
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::StreamingAggregation(processor),
             ))
