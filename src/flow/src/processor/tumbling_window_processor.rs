@@ -265,7 +265,12 @@ impl ProcessingState {
                 if row_start != window_start {
                     break;
                 }
-                current_rows.push(self.rows.pop_front().unwrap());
+                let row = self.rows.pop_front().ok_or_else(|| {
+                    ProcessorError::ProcessingError(
+                        "tumbling window row buffer corrupted during flush".to_string(),
+                    )
+                })?;
+                current_rows.push(row);
             }
 
             if current_rows.is_empty() {
@@ -294,7 +299,12 @@ impl ProcessingState {
                 if row_start != window_start {
                     break;
                 }
-                current_rows.push(self.rows.pop_front().unwrap());
+                let row = self.rows.pop_front().ok_or_else(|| {
+                    ProcessorError::ProcessingError(
+                        "tumbling window row buffer corrupted during flush_all".to_string(),
+                    )
+                })?;
+                current_rows.push(row);
             }
             if current_rows.is_empty() {
                 continue;

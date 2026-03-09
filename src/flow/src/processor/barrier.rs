@@ -90,13 +90,12 @@ impl BarrierAligner {
                         self.channel, state.key.barrier_id, key.barrier_id
                     )));
                 }
-                let merged = merge_barrier_signal(
-                    state
-                        .merged
-                        .take()
-                        .expect("barrier aligner missing merged signal"),
-                    signal,
-                )?;
+                let current = state.merged.take().ok_or_else(|| {
+                    ProcessorError::ProcessingError(
+                        "barrier aligner state corrupted: missing merged signal".to_string(),
+                    )
+                })?;
+                let merged = merge_barrier_signal(current, signal)?;
                 state.merged = Some(merged);
                 state.arrived_count = state.arrived_count.saturating_add(1);
                 if state.arrived_count > self.expected_upstreams {
@@ -106,10 +105,11 @@ impl BarrierAligner {
                     )));
                 }
                 if state.arrived_count == self.expected_upstreams {
-                    let merged = state
-                        .merged
-                        .take()
-                        .expect("barrier aligner missing merged signal");
+                    let merged = state.merged.take().ok_or_else(|| {
+                        ProcessorError::ProcessingError(
+                            "barrier aligner state corrupted: missing merged signal".to_string(),
+                        )
+                    })?;
                     self.state = None;
                     return Ok(BarrierOutcome::Complete(merged));
                 }
