@@ -153,7 +153,9 @@ impl Processor for SharedStreamProcessor {
                 }
             }
 
-            let (shared_data_rx, shared_control_rx) = subscription.take_receivers();
+            let (shared_data_rx, shared_control_rx) = subscription
+                .take_receivers()
+                .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
             let mut shared_data = BroadcastStream::new(shared_data_rx);
             let mut shared_control = BroadcastStream::new(shared_control_rx);
             loop {

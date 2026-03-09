@@ -223,6 +223,8 @@ pub enum SharedStreamError {
     NotFound(String),
     #[error("shared stream still referenced by pipelines: {0:?}")]
     InUse(Vec<String>),
+    #[error("shared stream receivers already taken: stream={stream} consumer={consumer_id}")]
+    ReceiversAlreadyTaken { stream: String, consumer_id: String },
     #[error("shared stream encountered internal error: {0}")]
     Internal(String),
 }
@@ -368,18 +370,24 @@ impl SharedStreamSubscription {
 
     pub fn take_receivers(
         &mut self,
-    ) -> (
-        broadcast::Receiver<StreamData>,
-        broadcast::Receiver<ControlSignal>,
-    ) {
+    ) -> Result<
+        (
+            broadcast::Receiver<StreamData>,
+            broadcast::Receiver<ControlSignal>,
+        ),
+        SharedStreamError,
+    > {
         if self.receivers_taken {
-            panic!("shared stream receivers already taken");
+            return Err(SharedStreamError::ReceiversAlreadyTaken {
+                stream: self.stream.name.clone(),
+                consumer_id: self.consumer_id.clone(),
+            });
         }
         self.receivers_taken = true;
-        (
+        Ok((
             self.stream.data_sender.subscribe(),
             self.stream.control_sender.subscribe(),
-        )
+        ))
     }
 
     pub async fn release(self) {
@@ -1038,8 +1046,8 @@ mod tests {
             vec!["a".to_string(), "b".to_string()]
         );
 
-        let mut rx_a = sub_a.take_receivers().0;
-        let mut rx_b = sub_b.take_receivers().0;
+        let mut rx_a = sub_a.take_receivers().unwrap().0;
+        let mut rx_b = sub_b.take_receivers().unwrap().0;
 
         handle
             .send(br#"{"a":1,"b":2,"c":3}"#.as_ref())
