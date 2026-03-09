@@ -22,6 +22,7 @@ use std::thread;
 use std::time::Duration as StdDuration;
 use storage::StorageManager;
 
+use crate::startup::StartupPhase;
 #[cfg(feature = "profiling")]
 use pprof::{protos::Message, ProfilerGuardBuilder};
 #[cfg(feature = "metrics")]
@@ -147,6 +148,12 @@ pub async fn init(
     opts: ServerOptions,
     instance: FlowInstance,
 ) -> Result<ServerContext, Box<dyn std::error::Error + Send + Sync>> {
+    let init_phase = StartupPhase::new(
+        "manager",
+        "default",
+        "server_init",
+        opts.config_path.as_deref(),
+    );
     flow::init_process_once();
     flow::metrics::set_flow_instance_id("default");
     #[cfg(feature = "metrics")]
@@ -158,7 +165,10 @@ pub async fn init(
         ensure_jemalloc_profiling();
     }
 
-    init_metrics_exporter(&opts).await?;
+    if let Err(err) = init_metrics_exporter(&opts).await {
+        init_phase.log_failure(err.as_ref());
+        return Err(err);
+    }
     if profiling_enabled {
         start_profile_server(&opts);
     }
@@ -170,10 +180,25 @@ pub async fn init(
         .data_dir
         .unwrap_or_else(|| DEFAULT_DATA_DIR.to_string());
 
-    let storage = StorageManager::new(&data_dir)?;
+    let storage = match StorageManager::new(&data_dir) {
+        Ok(storage) => storage,
+        Err(err) => {
+            init_phase.log_failure(&err);
+            return Err(err.into());
+        }
+    };
     tracing::info!(
+        mode = init_phase.mode(),
+        flow_instance_id = %init_phase.flow_instance_id(),
+        phase = init_phase.phase(),
+        config_path = init_phase.config_path(),
+        result = "succeeded",
+        elapsed_ms = init_phase.elapsed_ms(),
         storage_dir = %storage.base_dir().display(),
-        "storage initialized"
+        manager_addr = %manager_addr,
+        profiling_enabled,
+        declared_flow_instance_count = opts.flow_instances.len(),
+        "startup phase"
     );
 
     Ok(ServerContext {
@@ -191,8 +216,36 @@ pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error +
     let flow_instances = ctx.flow_instances().to_vec();
     let config_path = ctx.config_path().map(|s| s.to_string());
     let (instance, storage, manager_addr, _profiling_enabled) = ctx.into_parts();
+    let worker_spawn_phase =
+        StartupPhase::new("manager", "default", "worker_spawn", config_path.as_deref());
+    let worker_process_count = flow_instances
+        .iter()
+        .filter(|spec| {
+            matches!(
+                spec.backend,
+                manager::FlowInstanceBackendKind::WorkerProcess
+            )
+        })
+        .count();
     let (worker_endpoints, mut worker_children) =
-        spawn_flow_workers(&flow_instances, config_path.as_deref()).await?;
+        match spawn_flow_workers(&flow_instances, config_path.as_deref()).await {
+            Ok(result) => result,
+            Err(err) => {
+                worker_spawn_phase.log_failure(err.as_ref());
+                return Err(err);
+            }
+        };
+    tracing::info!(
+        mode = worker_spawn_phase.mode(),
+        flow_instance_id = %worker_spawn_phase.flow_instance_id(),
+        phase = worker_spawn_phase.phase(),
+        config_path = worker_spawn_phase.config_path(),
+        result = "succeeded",
+        elapsed_ms = worker_spawn_phase.elapsed_ms(),
+        requested_worker_process_count = worker_process_count,
+        spawned_worker_process_count = worker_endpoints.len(),
+        "startup phase"
+    );
     tracing::info!(manager_addr = %manager_addr, "starting manager");
     let manager_future = manager::start_server(
         manager_addr.clone(),

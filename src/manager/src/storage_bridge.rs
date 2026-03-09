@@ -1,5 +1,6 @@
 use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstances};
 use crate::pipeline::{CreatePipelineRequest, build_pipeline_definition};
+use crate::startup::StartupPhase;
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
     validate_memory_stream_topic, validate_stream_decoder_config,
@@ -100,17 +101,29 @@ pub fn stored_mqtt_from_config(cfg: &SharedMqttClientConfig) -> StoredMqttClient
     }
 }
 
+struct InstanceGlobalsHydrationSummary {
+    memory_topic_failures: usize,
+    shared_mqtt_failures: usize,
+    stream_failures: usize,
+}
+
 /// Load persisted resources into the running FlowInstance.
 async fn hydrate_instance_globals_from_storage(
     storage: &StorageManager,
     instance: &flow::FlowInstance,
-) -> Result<(), String> {
+) -> Result<InstanceGlobalsHydrationSummary, String> {
+    let mut summary = InstanceGlobalsHydrationSummary {
+        memory_topic_failures: 0,
+        shared_mqtt_failures: 0,
+        stream_failures: 0,
+    };
     for topic in storage.list_memory_topics().map_err(|e| e.to_string())? {
         let kind = match topic.kind {
             StoredMemoryTopicKind::Bytes => flow::connector::MemoryTopicKind::Bytes,
             StoredMemoryTopicKind::Collection => flow::connector::MemoryTopicKind::Collection,
         };
         if let Err(err) = instance.declare_memory_topic(&topic.topic, kind, topic.capacity) {
+            summary.memory_topic_failures += 1;
             tracing::error!(topic = %topic.topic, error = %err, "failed to restore memory topic");
         }
     }
@@ -120,28 +133,32 @@ async fn hydrate_instance_globals_from_storage(
             .create_shared_mqtt_client(mqtt_config_from_stored(&cfg))
             .await
         {
+            summary.shared_mqtt_failures += 1;
             tracing::error!(key = %cfg.key, error = %err, "failed to restore shared mqtt client");
         }
     }
 
     for stream in storage.list_streams().map_err(|e| e.to_string())? {
         if let Err(err) = restore_stream(stream.clone(), instance).await {
+            summary.stream_failures += 1;
             tracing::error!(stream_id = %stream.id, error = %err, "failed to restore stream");
         }
     }
-    Ok(())
+    Ok(summary)
 }
 
 async fn hydrate_pipelines_into_instances_from_storage(
     storage: &StorageManager,
     instances: &FlowInstances,
-) -> Result<(), String> {
+) -> Result<usize, String> {
+    let mut failures = 0usize;
     for pipeline in storage.list_pipelines().map_err(|e| e.to_string())? {
         if let Err(err) = restore_pipeline(pipeline.clone(), storage, instances).await {
+            failures += 1;
             tracing::error!(pipeline_id = %pipeline.id, error = %err, "failed to restore pipeline");
         }
     }
-    Ok(())
+    Ok(failures)
 }
 
 async fn restore_stream(stream: StoredStream, instance: &flow::FlowInstance) -> Result<(), String> {
@@ -215,10 +232,56 @@ pub(crate) async fn hydrate_runtime_from_storage(
     storage: &StorageManager,
     instances: &FlowInstances,
 ) -> Result<(), String> {
-    for (_, instance) in instances.instances_snapshot() {
-        hydrate_instance_globals_from_storage(storage, instance.as_ref()).await?;
+    let phase = StartupPhase::new("manager", "default", "runtime_storage_hydrate");
+    let memory_topics = storage.list_memory_topics().map_err(|e| e.to_string())?;
+    let mqtt_configs = storage.list_mqtt_configs().map_err(|e| e.to_string())?;
+    let streams = storage.list_streams().map_err(|e| e.to_string())?;
+    let pipelines = storage.list_pipelines().map_err(|e| e.to_string())?;
+    let instances_snapshot = instances.instances_snapshot();
+
+    tracing::info!(
+        mode = "manager",
+        flow_instance_id = "default",
+        phase = "runtime_storage_hydrate",
+        result = "discovered",
+        persisted_memory_topic_count = memory_topics.len(),
+        persisted_shared_mqtt_client_count = mqtt_configs.len(),
+        persisted_stream_count = streams.len(),
+        persisted_pipeline_count = pipelines.len(),
+        instance_count = instances_snapshot.len(),
+        "storage hydrate discovered persisted resources"
+    );
+
+    let mut memory_topic_restore_failures = 0usize;
+    let mut shared_mqtt_restore_failures = 0usize;
+    let mut stream_restore_failures = 0usize;
+
+    for (_, instance) in instances_snapshot {
+        let summary = hydrate_instance_globals_from_storage(storage, instance.as_ref()).await?;
+        memory_topic_restore_failures += summary.memory_topic_failures;
+        shared_mqtt_restore_failures += summary.shared_mqtt_failures;
+        stream_restore_failures += summary.stream_failures;
     }
-    hydrate_pipelines_into_instances_from_storage(storage, instances).await
+
+    let pipeline_restore_failures =
+        hydrate_pipelines_into_instances_from_storage(storage, instances).await?;
+    tracing::info!(
+        mode = "manager",
+        flow_instance_id = "default",
+        phase = "runtime_storage_hydrate",
+        result = "succeeded",
+        elapsed_ms = phase.elapsed_ms(),
+        persisted_memory_topic_count = memory_topics.len(),
+        persisted_shared_mqtt_client_count = mqtt_configs.len(),
+        persisted_stream_count = streams.len(),
+        persisted_pipeline_count = pipelines.len(),
+        memory_topic_restore_failures,
+        shared_mqtt_restore_failures,
+        stream_restore_failures,
+        pipeline_restore_failures,
+        "storage hydrate completed"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
