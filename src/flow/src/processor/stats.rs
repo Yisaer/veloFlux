@@ -282,6 +282,37 @@ impl ProcessorStats {
         self.record_error_count(1, message);
     }
 
+    fn pipeline_id_label(&self) -> &str {
+        self.pipeline_id
+            .get()
+            .map(|id| id.as_ref())
+            .unwrap_or("<unassigned>")
+    }
+
+    pub fn record_error_logged(&self, context: &'static str, message: impl Into<String>) {
+        self.record_error_count_logged(context, 1, message);
+    }
+
+    pub fn record_error_count_logged(
+        &self,
+        context: &'static str,
+        count: u64,
+        message: impl Into<String>,
+    ) {
+        let message = message.into();
+        tracing::error!(
+            flow_instance_id = %self.flow_instance_id,
+            pipeline_id = self.pipeline_id_label(),
+            processor_id = %self.processor_id,
+            processor_kind = %self.kind,
+            context,
+            error = %message,
+            error_count = count,
+            "processor runtime error"
+        );
+        self.record_error_count(count, message);
+    }
+
     pub fn record_error_count(&self, count: u64, message: impl Into<String>) {
         self.error_count.fetch_add(count, Ordering::Relaxed);
         if let Some(pipeline_id) = self.pipeline_id.get() {

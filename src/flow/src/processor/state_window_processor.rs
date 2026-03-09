@@ -127,7 +127,7 @@ impl Processor for StateWindowProcessor {
                                 let tuples = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(e) => {
-                                        stats.record_error(format!("failed to extract rows: {e}"));
+                                        stats.record_error_logged("state window processor error", format!("failed to extract rows: {e}"));
                                         continue;
                                     }
                                 };
@@ -142,7 +142,7 @@ impl Processor for StateWindowProcessor {
                                             match expr.eval_with_tuple(&tuple) {
                                                 Ok(v) => key_values.push(v),
                                                 Err(e) => {
-                                                    stats.record_error(format!(
+                                                    stats.record_error_logged("state window processor error", format!(
                                                         "failed to evaluate statewindow partition key: {e}"
                                                     ));
                                                     key_values.clear();
@@ -167,13 +167,13 @@ impl Processor for StateWindowProcessor {
                                     let open = match open_expr.eval_with_tuple(&tuple) {
                                         Ok(Value::Bool(v)) => v,
                                         Ok(other) => {
-                                            stats.record_error(format!(
+                                            stats.record_error_logged("state window processor error", format!(
                                                 "statewindow open must be bool, got {other:?}"
                                             ));
                                             continue;
                                         }
                                         Err(e) => {
-                                            stats.record_error(format!(
+                                            stats.record_error_logged("state window processor error", format!(
                                                 "failed to evaluate statewindow open: {e}"
                                             ));
                                             continue;
@@ -183,13 +183,13 @@ impl Processor for StateWindowProcessor {
                                     let emit = match emit_expr.eval_with_tuple(&tuple) {
                                         Ok(Value::Bool(v)) => v,
                                         Ok(other) => {
-                                            stats.record_error(format!(
+                                            stats.record_error_logged("state window processor error", format!(
                                                 "statewindow emit must be bool, got {other:?}"
                                             ));
                                             continue;
                                         }
                                         Err(e) => {
-                                            stats.record_error(format!(
+                                            stats.record_error_logged("state window processor error", format!(
                                                 "failed to evaluate statewindow emit: {e}"
                                             ));
                                             continue;

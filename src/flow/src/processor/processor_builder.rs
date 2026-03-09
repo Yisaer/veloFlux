@@ -535,6 +535,7 @@ pub struct ProcessorPipeline {
     handles: Vec<JoinHandle<Result<(), ProcessorError>>>,
     /// Logical pipeline identifier used for diagnostics/subscriptions
     pipeline_id: String,
+    flow_instance_id: Arc<str>,
     /// Allows callers to wait for specific control signals to reach the tail.
     ack_manager: Arc<AckManager>,
     /// Processor-local stats handles (one per processor instance).
@@ -544,29 +545,106 @@ pub struct ProcessorPipeline {
 }
 
 impl ProcessorPipeline {
+    fn wrap_processor_handle(
+        spawner: &TaskSpawner,
+        flow_instance_id: Arc<str>,
+        pipeline_id: String,
+        processor_id: String,
+        processor_kind: &'static str,
+        handle: JoinHandle<Result<(), ProcessorError>>,
+    ) -> JoinHandle<Result<(), ProcessorError>> {
+        spawner.spawn(async move {
+            match handle.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(err)) => {
+                    tracing::error!(
+                        flow_instance_id = %flow_instance_id,
+                        pipeline_id = %pipeline_id,
+                        processor_id = %processor_id,
+                        processor_kind,
+                        error = %err,
+                        "processor task failed"
+                    );
+                    Err(err)
+                }
+                Err(join_err) => {
+                    tracing::error!(
+                        flow_instance_id = %flow_instance_id,
+                        pipeline_id = %pipeline_id,
+                        processor_id = %processor_id,
+                        processor_kind,
+                        error = %join_err,
+                        "processor task panicked"
+                    );
+                    Err(ProcessorError::ProcessingError(format!(
+                        "Join error: {}",
+                        join_err
+                    )))
+                }
+            }
+        })
+    }
+
     /// Start all processors in the pipeline. Subsequent calls are no-ops.
     pub fn start(&mut self) {
         if !self.handles.is_empty() {
             return;
         }
+        let flow_instance_id = Arc::clone(&self.flow_instance_id);
+        let pipeline_id = self.pipeline_id.clone();
         // Start from downstream to upstream so that consumers are ready before producers.
         if let Some(result_sink) = &mut self.result_sink {
-            self.handles.push(result_sink.start(&self.spawner));
+            let processor_id = result_sink.id().to_string();
+            let handle = result_sink.start(&self.spawner);
+            self.handles.push(Self::wrap_processor_handle(
+                &self.spawner,
+                Arc::clone(&flow_instance_id),
+                pipeline_id.clone(),
+                processor_id,
+                "result_collect",
+                handle,
+            ));
         }
         let len = self.middle_processors.len();
         for idx in (0..len).rev() {
             if !matches!(self.middle_processors[idx], PlanProcessor::DataSource(_)) {
-                self.handles
-                    .push(self.middle_processors[idx].start(&self.spawner));
+                let processor_id = self.middle_processors[idx].id().to_string();
+                let processor_kind = self.middle_processors[idx].kind();
+                let handle = self.middle_processors[idx].start(&self.spawner);
+                self.handles.push(Self::wrap_processor_handle(
+                    &self.spawner,
+                    Arc::clone(&flow_instance_id),
+                    pipeline_id.clone(),
+                    processor_id,
+                    processor_kind,
+                    handle,
+                ));
             }
         }
         for idx in (0..len).rev() {
             if matches!(self.middle_processors[idx], PlanProcessor::DataSource(_)) {
-                self.handles
-                    .push(self.middle_processors[idx].start(&self.spawner));
+                let processor_id = self.middle_processors[idx].id().to_string();
+                let processor_kind = self.middle_processors[idx].kind();
+                let handle = self.middle_processors[idx].start(&self.spawner);
+                self.handles.push(Self::wrap_processor_handle(
+                    &self.spawner,
+                    Arc::clone(&flow_instance_id),
+                    pipeline_id.clone(),
+                    processor_id,
+                    processor_kind,
+                    handle,
+                ));
             }
         }
-        self.handles.push(self.control_source.start(&self.spawner));
+        let handle = self.control_source.start(&self.spawner);
+        self.handles.push(Self::wrap_processor_handle(
+            &self.spawner,
+            flow_instance_id,
+            pipeline_id,
+            self.control_source.id().to_string(),
+            "control_source",
+            handle,
+        ));
     }
 
     pub async fn send_ingress(&self, item: Ingress) -> Result<(), ProcessorError> {
@@ -1529,6 +1607,7 @@ fn create_processor_pipeline_with_context(
         result_sink,
         handles: Vec::new(),
         pipeline_id,
+        flow_instance_id: Arc::clone(&context.flow_instance_id),
         ack_manager,
         processor_stats,
         channel_capacities,

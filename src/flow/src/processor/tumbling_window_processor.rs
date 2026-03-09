@@ -124,7 +124,7 @@ impl Processor for TumblingWindowProcessor {
                             Some(Ok(StreamData::Collection(collection))) => {
                                 stats.record_in(collection.num_rows() as u64);
                                 if let Err(e) = state.add_collection(collection).await {
-                                    stats.record_error(e.to_string());
+                                    stats.record_error_logged("tumbling window processor error", e.to_string());
                                 }
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {

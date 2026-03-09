@@ -168,7 +168,8 @@ impl Processor for DecoderProcessor {
                                         Ok(batch) => {
                                             let result = apply_eventtime(batch, &eventtime);
                                             if let Some(last) = result.errors.last() {
-                                                stats.record_error_count(
+                                                stats.record_error_count_logged(
+                                                    "decoder processor error",
                                                     result.errors.len() as u64,
                                                     last.clone(),
                                                 );
@@ -181,7 +182,7 @@ impl Processor for DecoderProcessor {
                                         }
                                         Err(err) => {
                                             let message = format!("decode error: {}", err);
-                                            stats.record_error(message);
+                                            stats.record_error_logged("decoder processor error", message);
                                             continue;
                                         }
                                     }

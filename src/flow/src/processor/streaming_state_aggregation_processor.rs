@@ -146,7 +146,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                 let tuples = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(e) => {
-                                        stats.record_error(format!("failed to extract rows: {e}"));
+                                        stats.record_error_logged("streaming state aggregation processor error", format!("failed to extract rows: {e}"));
                                         continue;
                                     }
                                 };
@@ -160,7 +160,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                             match expr.eval_with_tuple(&tuple) {
                                                 Ok(v) => key_values.push(v),
                                                 Err(e) => {
-                                                    stats.record_error(format!(
+                                                    stats.record_error_logged("streaming state aggregation processor error", format!(
                                                         "failed to evaluate statewindow partition key: {e}"
                                                     ));
                                                     key_values.clear();
@@ -188,13 +188,13 @@ impl Processor for StreamingStateAggregationProcessor {
                                     let open = match open_scalar.eval_with_tuple(&tuple) {
                                         Ok(Value::Bool(v)) => v,
                                         Ok(other) => {
-                                            stats.record_error(format!(
+                                            stats.record_error_logged("streaming state aggregation processor error", format!(
                                                 "statewindow open must be bool, got {other:?} (expr={open_expr})"
                                             ));
                                             continue;
                                         }
                                         Err(e) => {
-                                            stats.record_error(format!(
+                                            stats.record_error_logged("streaming state aggregation processor error", format!(
                                                 "failed to evaluate statewindow open (expr={open_expr}): {e}"
                                             ));
                                             continue;
@@ -204,13 +204,13 @@ impl Processor for StreamingStateAggregationProcessor {
                                     let emit = match emit_scalar.eval_with_tuple(&tuple) {
                                         Ok(Value::Bool(v)) => v,
                                         Ok(other) => {
-                                            stats.record_error(format!(
+                                            stats.record_error_logged("streaming state aggregation processor error", format!(
                                                 "statewindow emit must be bool, got {other:?} (expr={emit_expr})"
                                             ));
                                             continue;
                                         }
                                         Err(e) => {
-                                            stats.record_error(format!(
+                                            stats.record_error_logged("streaming state aggregation processor error", format!(
                                                 "failed to evaluate statewindow emit (expr={emit_expr}): {e}"
                                             ));
                                             continue;
@@ -221,14 +221,14 @@ impl Processor for StreamingStateAggregationProcessor {
                                         if open {
                                             entry.active = true;
                                             if let Err(e) = entry.worker.update_groups(&tuple) {
-                                                stats.record_error(e.to_string());
+                                                stats.record_error_logged("streaming state aggregation processor error", e.to_string());
                                             }
                                         }
                                         continue;
                                     }
 
                                     if let Err(e) = entry.worker.update_groups(&tuple) {
-                                        stats.record_error(e.to_string());
+                                        stats.record_error_logged("streaming state aggregation processor error", e.to_string());
                                         continue;
                                     }
 
@@ -245,7 +245,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                             }
                                             Ok(None) => {}
                                             Err(e) => {
-                                                stats.record_error(e.to_string());
+                                                stats.record_error_logged("streaming state aggregation processor error", e.to_string());
                                             }
                                         }
                                         entry.active = false;
@@ -284,7 +284,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                                     }
                                                     Ok(None) => {}
                                                     Err(e) => {
-                                                        stats.record_error(e.to_string());
+                                                        stats.record_error_logged("streaming state aggregation processor error", e.to_string());
                                                     }
                                                 }
                                                 state.active = false;

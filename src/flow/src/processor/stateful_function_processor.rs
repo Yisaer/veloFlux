@@ -211,7 +211,7 @@ impl Processor for StatefulFunctionProcessor {
                                                 }
                                             }
                                             Err(e) => {
-                                                stats.record_error(e.to_string());
+                                                stats.record_error_logged("stateful function processor error", e.to_string());
                                             }
                                         }
                                     }
