@@ -1,3 +1,4 @@
+mod audit;
 mod capabilities;
 mod function;
 mod instances;

@@ -129,6 +129,15 @@ impl FlowInstance {
         let thread_cgroup_path = options.thread_cgroup_path.clone();
         let runtime_id = instance_id.to_string();
         builder.on_thread_start(move || {
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = &runtime_id;
+                let _ = &thread_cgroup_path;
+                let _ = &thread_registry;
+            }
+
+            #[cfg(target_os = "linux")]
+            {
             if let Some(thread_cgroup_path) = &thread_cgroup_path {
                 match crate::runtime::bind_current_thread_to_cgroup(thread_cgroup_path) {
                     Ok(tid) => {
@@ -166,6 +175,7 @@ impl FlowInstance {
                         "failed to register flow instance runtime thread tid"
                     );
                 }
+            }
             }
         });
         crate::runtime::TaskSpawner::new(

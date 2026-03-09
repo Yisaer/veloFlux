@@ -22,8 +22,9 @@ use crate::{
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn validate_eventtime_enabled(
     stream_definitions: &HashMap<String, Arc<StreamDefinition>>,
@@ -59,6 +60,108 @@ fn validate_eventtime_enabled(
 }
 
 const DEFAULT_SINK_TOPIC: &str = "/yisa/data2";
+
+struct PipelineBuildLog {
+    flow_instance_id: String,
+    pipeline_id: String,
+    sink_count: usize,
+    sql_len: usize,
+    eventtime_enabled: bool,
+    data_channel_capacity: usize,
+    started_at: Instant,
+}
+
+impl PipelineBuildLog {
+    fn new(definition: &PipelineDefinition, context: &PipelineContext) -> Self {
+        let log = Self {
+            flow_instance_id: context.flow_instance_id().to_string(),
+            pipeline_id: definition.id().to_string(),
+            sink_count: definition.sinks().len(),
+            sql_len: definition.sql().len(),
+            eventtime_enabled: definition.options().eventtime.enabled,
+            data_channel_capacity: definition.options().data_channel_capacity,
+            started_at: Instant::now(),
+        };
+        tracing::info!(
+            flow_instance_id = %log.flow_instance_id,
+            pipeline_id = %log.pipeline_id,
+            phase = "build_pipeline_runtime",
+            result = "started",
+            sink_count = log.sink_count,
+            sql_len = log.sql_len,
+            eventtime_enabled = log.eventtime_enabled,
+            data_channel_capacity = log.data_channel_capacity,
+            "pipeline build"
+        );
+        log
+    }
+
+    fn run_phase<T, E, F>(&self, phase: &'static str, f: F) -> Result<T, E>
+    where
+        E: Display,
+        F: FnOnce() -> Result<T, E>,
+    {
+        let started_at = Instant::now();
+        match f() {
+            Ok(value) => {
+                tracing::info!(
+                    flow_instance_id = %self.flow_instance_id,
+                    pipeline_id = %self.pipeline_id,
+                    phase,
+                    result = "succeeded",
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    "pipeline build phase"
+                );
+                Ok(value)
+            }
+            Err(err) => {
+                tracing::error!(
+                    flow_instance_id = %self.flow_instance_id,
+                    pipeline_id = %self.pipeline_id,
+                    phase,
+                    result = "failed",
+                    elapsed_ms = started_at.elapsed().as_millis(),
+                    error = %err,
+                    "pipeline build phase"
+                );
+                Err(err)
+            }
+        }
+    }
+
+    fn log_success(&self, stream_count: usize, processor_count: usize) {
+        tracing::info!(
+            flow_instance_id = %self.flow_instance_id,
+            pipeline_id = %self.pipeline_id,
+            phase = "build_pipeline_runtime",
+            result = "succeeded",
+            elapsed_ms = self.started_at.elapsed().as_millis(),
+            stream_count,
+            sink_count = self.sink_count,
+            processor_count,
+            sql_len = self.sql_len,
+            eventtime_enabled = self.eventtime_enabled,
+            data_channel_capacity = self.data_channel_capacity,
+            "pipeline build"
+        );
+    }
+
+    fn log_failure(&self, error: &(impl Display + ?Sized)) {
+        tracing::error!(
+            flow_instance_id = %self.flow_instance_id,
+            pipeline_id = %self.pipeline_id,
+            phase = "build_pipeline_runtime",
+            result = "failed",
+            elapsed_ms = self.started_at.elapsed().as_millis(),
+            sink_count = self.sink_count,
+            sql_len = self.sql_len,
+            eventtime_enabled = self.eventtime_enabled,
+            data_channel_capacity = self.data_channel_capacity,
+            error = %error,
+            "pipeline build"
+        );
+    }
+}
 
 pub(super) struct ManagedPipeline {
     definition: Arc<PipelineDefinition>,
@@ -279,178 +382,212 @@ fn build_pipeline_runtime(
     context: &PipelineContext,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
-    let select_stmt = parser::parse_sql_with_registries(
-        definition.sql(),
-        registries.aggregate_registry(),
-        registries.stateful_registry(),
-    )
-    .map_err(|err| err.to_string())?;
-    let streams: Vec<String> = select_stmt
-        .source_infos
-        .iter()
-        .map(|info| info.name.clone())
-        .collect();
+    let build_log = PipelineBuildLog::new(definition, context);
+    let result = (|| {
+        let select_stmt = build_log.run_phase("parse_sql", || {
+            parser::parse_sql_with_registries(
+                definition.sql(),
+                registries.aggregate_registry(),
+                registries.stateful_registry(),
+            )
+            .map_err(|err| err.to_string())
+        })?;
+        let streams: Vec<String> = select_stmt
+            .source_infos
+            .iter()
+            .map(|info| info.name.clone())
+            .collect();
 
-    let shared_stream_registry = context.shared_stream_registry();
-    let mqtt_client_manager = context.mqtt_client_manager();
+        let shared_stream_registry = context.shared_stream_registry();
+        let mqtt_client_manager = context.mqtt_client_manager();
+        let (stream_definitions, binding_entries) = build_log.run_phase("resolve_streams", || {
+            let mut stream_definitions = HashMap::new();
+            let mut binding_entries = Vec::new();
 
-    let mut stream_definitions = HashMap::new();
-    let mut binding_entries = Vec::new();
+            for source in &select_stmt.source_infos {
+                let definition = catalog
+                    .get(&source.name)
+                    .ok_or_else(|| format!("stream '{}' not found in catalog", source.name))?;
 
-    for source in &select_stmt.source_infos {
-        let definition = catalog
-            .get(&source.name)
-            .ok_or_else(|| format!("stream '{}' not found in catalog", source.name))?;
+                if definition.stream_type() == crate::catalog::StreamType::Memory {
+                    let StreamProps::Memory(props) = definition.props() else {
+                        return Err(format!(
+                            "stream '{}' expected memory props but received {:?}",
+                            definition.id(),
+                            definition.stream_type()
+                        ));
+                    };
 
-        if definition.stream_type() == crate::catalog::StreamType::Memory {
-            let StreamProps::Memory(props) = definition.props() else {
-                return Err(format!(
-                    "stream '{}' expected memory props but received {:?}",
-                    definition.id(),
-                    definition.stream_type()
-                ));
-            };
+                    let topic = props.topic.trim();
+                    if topic.is_empty() {
+                        return Err(format!(
+                            "stream '{}' memory topic must not be empty",
+                            definition.id()
+                        ));
+                    }
 
-            let topic = props.topic.trim();
-            if topic.is_empty() {
-                return Err(format!(
-                    "stream '{}' memory topic must not be empty",
-                    definition.id()
-                ));
+                    let expected_kind = if definition.decoder().kind() == "none" {
+                        MemoryTopicKind::Collection
+                    } else {
+                        MemoryTopicKind::Bytes
+                    };
+                    let actual_kind = context
+                        .memory_pubsub_registry()
+                        .topic_kind(topic)
+                        .ok_or_else(|| {
+                            format!(
+                                "memory topic '{}' required by stream '{}' not declared in instance",
+                                topic,
+                                definition.id()
+                            )
+                        })?;
+                    if actual_kind != expected_kind {
+                        return Err(format!(
+                            "memory topic '{}' kind mismatch for stream '{}': expected {}, got {}",
+                            topic,
+                            definition.id(),
+                            expected_kind,
+                            actual_kind
+                        ));
+                    }
+                }
+
+                let schema = definition.schema();
+                let kind = if futures::executor::block_on(
+                    shared_stream_registry.is_registered(&source.name),
+                ) {
+                    SourceBindingKind::Shared
+                } else if definition.stream_type() == crate::catalog::StreamType::Memory
+                    && definition.decoder().kind() == "none"
+                {
+                    SourceBindingKind::MemoryCollection
+                } else {
+                    SourceBindingKind::Regular
+                };
+                binding_entries.push(SchemaBindingEntry {
+                    source_name: source.name.clone(),
+                    alias: source.alias.clone(),
+                    schema: Arc::clone(&schema),
+                    kind,
+                });
+                stream_definitions.insert(source.name.clone(), definition);
             }
 
-            let expected_kind = if definition.decoder().kind() == "none" {
-                MemoryTopicKind::Collection
-            } else {
-                MemoryTopicKind::Bytes
-            };
-            let actual_kind = context
-                .memory_pubsub_registry()
-                .topic_kind(topic)
-                .ok_or_else(|| {
-                    format!(
-                        "memory topic '{}' required by stream '{}' not declared in instance",
-                        topic,
-                        definition.id()
-                    )
-                })?;
-            if actual_kind != expected_kind {
-                return Err(format!(
-                    "memory topic '{}' kind mismatch for stream '{}': expected {}, got {}",
-                    topic,
-                    definition.id(),
-                    expected_kind,
-                    actual_kind
-                ));
-            }
-        }
+            Ok((stream_definitions, binding_entries))
+        })?;
 
-        let schema = definition.schema();
-        let kind =
-            if futures::executor::block_on(shared_stream_registry.is_registered(&source.name)) {
-                SourceBindingKind::Shared
-            } else if definition.stream_type() == crate::catalog::StreamType::Memory
-                && definition.decoder().kind() == "none"
-            {
-                SourceBindingKind::MemoryCollection
-            } else {
-                SourceBindingKind::Regular
-            };
-        binding_entries.push(SchemaBindingEntry {
-            source_name: source.name.clone(),
-            alias: source.alias.clone(),
-            schema: Arc::clone(&schema),
-            kind,
-        });
-        stream_definitions.insert(source.name.clone(), definition);
-    }
-
-    let schema_binding = SchemaBinding::new(binding_entries);
-    let sinks = build_sinks_from_definition(definition)?;
-    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_definitions)?;
-    let (logical_plan, pruned_binding) = crate::planner::optimize_logical_plan_with_options(
-        logical_plan,
-        &schema_binding,
-        &crate::planner::LogicalOptimizerOptions {
-            eventtime_enabled: definition.options().eventtime.enabled,
-        },
-    );
-
-    let build_options = crate::planner::PhysicalPlanBuildOptions {
-        eventtime_enabled: definition.options().eventtime.enabled,
-        eventtime_late_tolerance: definition.options().eventtime.late_tolerance,
-    };
-    let physical_plan = crate::planner::create_physical_plan_with_build_options(
-        Arc::clone(&logical_plan),
-        &pruned_binding,
-        registries,
-        &build_options,
-    )?;
-    let physical_plan = physical_plan;
-    let optimized_plan = optimize_physical_plan(
-        Arc::clone(&physical_plan),
-        registries.encoder_registry().as_ref(),
-        registries.aggregate_registry(),
-    );
-    if definition.options().eventtime.enabled {
-        validate_eventtime_enabled(&stream_definitions, registries)?;
-    }
-    // Pipeline explain is exposed via REST; avoid generating/logging it in release builds.
-    #[cfg(debug_assertions)]
-    {
-        let shared_stream_decode_applied =
-            shared_stream_decode_applied_snapshot(&optimized_plan, shared_stream_registry.as_ref());
-        let explain = PipelineExplain::new(
-            Arc::clone(&logical_plan),
-            Arc::clone(&optimized_plan),
-            PipelineExplainConfig {
-                pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
+        let sinks =
+            build_log.run_phase("build_sinks", || build_sinks_from_definition(definition))?;
+        let schema_binding = SchemaBinding::new(binding_entries);
+        let (logical_plan, pruned_binding) = build_log.run_phase("build_logical_plan", || {
+            let logical_plan = create_logical_plan(select_stmt, sinks, &stream_definitions)?;
+            Ok::<_, String>(crate::planner::optimize_logical_plan_with_options(
+                logical_plan,
+                &schema_binding,
+                &crate::planner::LogicalOptimizerOptions {
                     eventtime_enabled: definition.options().eventtime.enabled,
-                    eventtime_late_tolerance_ms: definition
-                        .options()
-                        .eventtime
-                        .late_tolerance
-                        .as_millis(),
-                }),
-                shared_stream_decode_applied,
-            },
-        );
-        tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
-    }
+                },
+            ))
+        })?;
 
-    let eventtime = if definition.options().eventtime.enabled {
-        let mut per_source = HashMap::new();
-        for (name, def) in &stream_definitions {
-            if let Some(cfg) = def.eventtime() {
-                per_source.insert(name.clone(), cfg.clone());
+        let optimized_plan = build_log.run_phase("build_physical_plan", || {
+            let build_options = crate::planner::PhysicalPlanBuildOptions {
+                eventtime_enabled: definition.options().eventtime.enabled,
+                eventtime_late_tolerance: definition.options().eventtime.late_tolerance,
+            };
+            let physical_plan = crate::planner::create_physical_plan_with_build_options(
+                Arc::clone(&logical_plan),
+                &pruned_binding,
+                registries,
+                &build_options,
+            )?;
+            Ok::<_, String>(optimize_physical_plan(
+                Arc::clone(&physical_plan),
+                registries.encoder_registry().as_ref(),
+                registries.aggregate_registry(),
+            ))
+        })?;
+
+        let eventtime = build_log.run_phase("prepare_eventtime", || {
+            if definition.options().eventtime.enabled {
+                validate_eventtime_enabled(&stream_definitions, registries)?;
             }
+            let eventtime = if definition.options().eventtime.enabled {
+                let mut per_source = HashMap::new();
+                for (name, def) in &stream_definitions {
+                    if let Some(cfg) = def.eventtime() {
+                        per_source.insert(name.clone(), cfg.clone());
+                    }
+                }
+                Some(EventtimePipelineContext {
+                    enabled: true,
+                    registry: registries.eventtime_type_registry(),
+                    per_source,
+                })
+            } else {
+                None
+            };
+            Ok::<_, String>(eventtime)
+        })?;
+        // Pipeline explain is exposed via REST; avoid generating/logging it in release builds.
+        #[cfg(debug_assertions)]
+        {
+            let shared_stream_decode_applied = shared_stream_decode_applied_snapshot(
+                &optimized_plan,
+                shared_stream_registry.as_ref(),
+            );
+            let explain = PipelineExplain::new(
+                Arc::clone(&logical_plan),
+                Arc::clone(&optimized_plan),
+                PipelineExplainConfig {
+                    pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
+                        eventtime_enabled: definition.options().eventtime.enabled,
+                        eventtime_late_tolerance_ms: definition
+                            .options()
+                            .eventtime
+                            .late_tolerance
+                            .as_millis(),
+                    }),
+                    shared_stream_decode_applied,
+                },
+            );
+            tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
         }
-        Some(EventtimePipelineContext {
-            enabled: true,
-            registry: registries.eventtime_type_registry(),
-            per_source,
-        })
-    } else {
-        None
-    };
 
-    let mut pipeline = create_processor_pipeline(
-        optimized_plan,
-        ProcessorPipelineDependencies::new(
-            context.flow_instance_id(),
-            mqtt_client_manager.clone(),
-            Arc::clone(&shared_stream_registry),
-            registries,
-            eventtime,
-            context.spawner().clone(),
-        ),
-        ProcessorPipelineOptions::default()
-            .with_data_channel_capacity(definition.options().data_channel_capacity),
-    )
-    .map_err(|err| err.to_string())?;
-    pipeline.set_pipeline_id(definition.id().to_string());
-    attach_sources_from_catalog(&mut pipeline, &stream_definitions, context)?;
-    Ok((pipeline, streams))
+        let mut pipeline = build_log.run_phase("create_processor_pipeline", || {
+            create_processor_pipeline(
+                optimized_plan,
+                ProcessorPipelineDependencies::new(
+                    context.flow_instance_id(),
+                    mqtt_client_manager.clone(),
+                    Arc::clone(&shared_stream_registry),
+                    registries,
+                    eventtime,
+                    context.spawner().clone(),
+                ),
+                ProcessorPipelineOptions::default()
+                    .with_data_channel_capacity(definition.options().data_channel_capacity),
+            )
+            .map_err(|err| err.to_string())
+        })?;
+        pipeline.set_pipeline_id(definition.id().to_string());
+        build_log.run_phase("attach_sources", || {
+            attach_sources_from_catalog(&mut pipeline, &stream_definitions, context)
+        })?;
+        let processor_count = pipeline.processor_stats().len();
+        Ok((pipeline, streams, processor_count))
+    })();
+
+    match result {
+        Ok((pipeline, streams, processor_count)) => {
+            build_log.log_success(streams.len(), processor_count);
+            Ok((pipeline, streams))
+        }
+        Err(err) => {
+            build_log.log_failure(&err);
+            Err(err)
+        }
+    }
 }
 
 fn build_sinks_from_definition(

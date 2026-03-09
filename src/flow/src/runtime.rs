@@ -79,6 +79,7 @@ pub(crate) fn current_thread_tid() -> Result<u32, String> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn current_thread_tid() -> Result<u32, String> {
     Err("current thread tid lookup is unsupported on this platform".to_string())
 }
@@ -99,6 +100,7 @@ pub(crate) fn bind_current_thread_to_cgroup(thread_cgroup_path: &str) -> Result<
 }
 
 #[cfg(not(target_os = "linux"))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn bind_current_thread_to_cgroup(thread_cgroup_path: &str) -> Result<u32, String> {
     Err(format!(
         "thread cgroup binding is unsupported on this platform: {thread_cgroup_path}"
