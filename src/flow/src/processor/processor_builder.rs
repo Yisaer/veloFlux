@@ -1073,6 +1073,10 @@ fn create_processor_from_plan_node(
             )))
         }
         PhysicalPlan::Batch(batch) => {
+            BatchProcessor::validate_batch_config(
+                batch.common.batch_count,
+                batch.common.batch_duration,
+            )?;
             let processor = BatchProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 batch.common.batch_count,
@@ -1169,6 +1173,7 @@ fn create_processor_from_plan_node(
             "PhysicalWatermark is deprecated; use PhysicalProcessTimeWatermark".to_string(),
         )),
         PhysicalPlan::CountWindow(count_window) => {
+            BatchProcessor::validate_batch_config(Some(count_window.count as usize), None)?;
             let processor = BatchProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 Some(count_window.count as usize),
