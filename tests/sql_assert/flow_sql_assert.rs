@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     reset_sqlite_table(&conn, &table_name, &columns)?;
 
     let mut tested_sqls = 0usize;
-    for (index, sql) in sqls.iter().enumerate() {
+    for (index, (engine_sql, sqlite_sql)) in sqls.iter().enumerate() {
         truncate_sqlite_table(&conn, &table_name)?;
         let instance = FlowInstance::new(
             flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
@@ -120,7 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pipeline_id = format!("pipe_{index}");
         let pipeline = PipelineDefinition::new(
             pipeline_id.clone(),
-            sql,
+            engine_sql,
             vec![SinkDefinition::new(
                 "mem_sink",
                 SinkType::Memory,
@@ -129,11 +129,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         instance
             .create_pipeline(CreatePipelineRequest::new(pipeline))
-            .unwrap_or_else(|_| panic!("failed to create pipeline for SQL: {sql}"));
+            .unwrap_or_else(|_| panic!("failed to create pipeline for SQL: {engine_sql}"));
 
         instance
             .start_pipeline(&pipeline_id)
-            .unwrap_or_else(|_| panic!("failed to start pipeline for SQL: {sql}"));
+            .unwrap_or_else(|_| panic!("failed to start pipeline for SQL: {engine_sql}"));
 
         instance
             .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let row_values = generate_row(&columns, &mut rng);
             insert_sqlite_row(&conn, &table_name, &columns, &row_values)?;
 
-            let current_rows = query_sqlite_rows(&conn, sql, &column_map)?;
+            let current_rows = query_sqlite_rows(&conn, sqlite_sql, &column_map)?;
             let current_multiset = multiset_from_rows(&current_rows);
             let expected_multiset = multiset_diff(&current_multiset, &previous_results);
             previous_results = current_multiset;
@@ -167,20 +167,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let expected_debug = JsonValue::Array(expand_multiset(&expected_multiset));
                 let actual_debug = JsonValue::Array(expand_multiset(&actual_multiset));
                 return Err(format!(
-                    "mismatch at sql index {index}, row {row_index}\nSQL: {sql}\nInput: {input_row}\nExpected: {expected_debug}\nActual: {actual_debug}"
-                )
-                .into());
+                    "mismatch at sql index {index}, row {row_index}\nEngine SQL: {engine_sql}\nSQLite SQL: {sqlite_sql}\nInput: {input_row}\nExpected: {expected_debug}\nActual: {actual_debug}"
+                    ).into());
             }
         }
-
         instance
             .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
             .await
-            .unwrap_or_else(|_| panic!("failed to stop pipeline for SQL: {sql}"));
+            .unwrap_or_else(|_| panic!("failed to stop pipeline for SQL: {engine_sql}"));
         instance
             .delete_pipeline(&pipeline_id)
             .await
-            .unwrap_or_else(|_| panic!("failed to delete pipeline for SQL: {sql}"));
+            .unwrap_or_else(|_| panic!("failed to delete pipeline for SQL: {engine_sql}"));
 
         tested_sqls += 1;
     }
@@ -237,24 +235,28 @@ fn resolve_sqlite_path(path: &str, base_dir: &Path) -> String {
     }
 }
 
-fn load_sqls(path: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let raw = fs::read_to_string(path).map_err(|e| {
-        format!(
-            "read SQL file {}: {e} (cwd: {})",
-            path.display(),
-            std::env::current_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "<unknown>".to_string())
-        )
-    })?;
+fn load_sqls(path: &Path) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    let raw = fs::read_to_string(path)?;
     let mut sqls = Vec::new();
+
     for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("--") {
             continue;
         }
-        sqls.push(trimmed.to_string());
+
+        let parts: Vec<&str> = trimmed.splitn(2, '\t').collect();
+
+        if parts.len() != 2 {
+            return Err(format!("invalid SQL line (expect engine\\tsqlite): {trimmed}").into());
+        }
+
+        let engine_sql = parts[0].trim().to_string();
+        let sqlite_sql = parts[1].trim().to_string();
+
+        sqls.push((engine_sql, sqlite_sql));
     }
+
     Ok(sqls)
 }
 
