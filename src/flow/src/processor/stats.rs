@@ -14,7 +14,7 @@ fn opts_with_flow_instance(name: &str, help: &str) -> Opts {
 static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let vec = IntCounterVec::new(
         opts_with_flow_instance("processor_records_in_total", "Rows received by processors"),
-        &["flow_instance", "pipeline_id", "kind"],
+        &["flow_instance", "pipeline_id", "processor_id", "kind"],
     )
     .expect("create processor records_in counter vec");
     prometheus::register(Box::new(vec.clone())).expect("register processor records_in counter vec");
@@ -24,7 +24,7 @@ static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 static PROCESSOR_RECORDS_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let vec = IntCounterVec::new(
         opts_with_flow_instance("processor_records_out_total", "Rows emitted by processors"),
-        &["flow_instance", "pipeline_id", "kind"],
+        &["flow_instance", "pipeline_id", "processor_id", "kind"],
     )
     .expect("create processor records_out counter vec");
     prometheus::register(Box::new(vec.clone()))
@@ -35,7 +35,7 @@ static PROCESSOR_RECORDS_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 static PROCESSOR_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let vec = IntCounterVec::new(
         opts_with_flow_instance("processor_errors_total", "Errors observed by processors"),
-        &["flow_instance", "pipeline_id", "kind"],
+        &["flow_instance", "pipeline_id", "processor_id", "kind"],
     )
     .expect("create processor errors counter vec");
     prometheus::register(Box::new(vec.clone())).expect("register processor errors counter vec");
