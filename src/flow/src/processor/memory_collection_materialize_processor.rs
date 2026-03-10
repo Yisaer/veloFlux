@@ -343,6 +343,7 @@ impl Processor for MemoryCollectionMaterializeProcessor {
                                 }
                                 match data {
                                     StreamData::Collection(collection) => {
+                                        let handle_start = std::time::Instant::now();
                                         match materialize_collection(
                                             &output_schema,
                                             &output_source_name,
@@ -354,17 +355,22 @@ impl Processor for MemoryCollectionMaterializeProcessor {
                                             Ok(out_collection) => {
                                                 let out = StreamData::collection(out_collection);
                                                 let out_rows = out.num_rows_hint();
-                                                send_with_backpressure(
+                                                let send_res = send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
                                                     out,
+                                                    Some(stats.as_ref()),
                                                 )
-                                                .await?;
+                                                .await;
+                                                // For synchronous processors, handle duration includes downstream send/backpressure time.
+                                                stats.record_handle_duration(handle_start.elapsed());
+                                                send_res?;
                                                 if let Some(rows) = out_rows {
                                                     stats.record_out(rows);
                                                 }
                                             }
                                             Err(e) => {
+                                                stats.record_handle_duration(handle_start.elapsed());
                                                 stats.record_error(e.to_string());
                                             }
                                         }
@@ -375,6 +381,7 @@ impl Processor for MemoryCollectionMaterializeProcessor {
                                             &output,
                                             channel_capacities.data,
                                             StreamData::control(control_signal),
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {
@@ -389,6 +396,7 @@ impl Processor for MemoryCollectionMaterializeProcessor {
                                             &output,
                                             channel_capacities.data,
                                             other,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {

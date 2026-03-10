@@ -285,6 +285,7 @@ impl Processor for AggregationProcessor {
                                 }
                                 match data {
                                     StreamData::Collection(collection) => {
+                                        let handle_start = std::time::Instant::now();
                                         match Self::process_batch_with_grouping(
                                             &physical_aggregation,
                                             &aggregate_registry,
@@ -293,22 +294,26 @@ impl Processor for AggregationProcessor {
                                             Ok(result_collection) => {
                                                 let result_data = StreamData::Collection(result_collection);
                                                 let out_rows = result_data.num_rows_hint();
-                                                if let Err(e) = send_with_backpressure(
+                                                let send_res = send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
                                                     result_data,
+                                                    Some(stats.as_ref()),
                                                 )
-                                                .await
-                                                {
+                                                .await;
+                                                // For synchronous processors, handle duration includes downstream send/backpressure time.
+                                                stats.record_handle_duration(handle_start.elapsed());
+                                                if let Err(e) = send_res {
                                                     tracing::error!(processor_id = %id, error = %e, "failed to send result");
                                                     return Err(e);
-                                                }
+                                                };
                                                 if let Some(rows) = out_rows {
                                                     stats.record_out(rows);
                                                 }
                                                 tracing::debug!(processor_id = %id, "processed batch and sent grouped results");
                                             }
                                             Err(e) => {
+                                                stats.record_handle_duration(handle_start.elapsed());
                                                 return Err(ProcessorError::ProcessingError(
                                                     format!(
                                                         "Failed to process aggregation: {}",
@@ -325,6 +330,7 @@ impl Processor for AggregationProcessor {
                                             &output,
                                             channel_capacities.data,
                                             out,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {
@@ -339,6 +345,7 @@ impl Processor for AggregationProcessor {
                                             &output,
                                             channel_capacities.data,
                                             other_data,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                     }

@@ -200,7 +200,13 @@ impl Processor for SharedStreamProcessor {
                             }
                             let is_terminal = data.is_terminal();
                             let out_rows = data.num_rows_hint();
-                            send_with_backpressure(&output, channel_capacities.data, data).await?;
+                            send_with_backpressure(
+                                &output,
+                                channel_capacities.data,
+                                data,
+                                Some(stats.as_ref()),
+                            )
+                            .await?;
                             if let Some(rows) = out_rows {
                                 stats.record_out(rows);
                             }
@@ -219,8 +225,13 @@ impl Processor for SharedStreamProcessor {
                                 }
                                 let is_terminal = data.is_terminal();
                                 let out_rows = data.num_rows_hint();
-                                send_with_backpressure(&output, channel_capacities.data, data)
-                                    .await?;
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    data,
+                                    Some(stats.as_ref()),
+                                )
+                                .await?;
                                 if let Some(rows) = out_rows {
                                     stats.record_out(rows);
                                 }

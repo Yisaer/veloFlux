@@ -236,10 +236,15 @@ impl Processor for SamplerProcessor {
                                 }
 
                                 // Sample data based on selected strategy (lossy).
+                                let handle_start = std::time::Instant::now();
                                 if let Err(e) = strategy_state.on_sampled_data(data) {
+                                    // For sampler (async emit), handle duration measures local state update time only.
+                                    stats.record_handle_duration(handle_start.elapsed());
                                     tracing::error!(processor_id = %processor_id, error = ?e, "strategy sampling error");
                                     return Err(e);
                                 }
+                                // For sampler (async emit), handle duration measures local state update time only.
+                                stats.record_handle_duration(handle_start.elapsed());
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
                                 log_broadcast_lagged(&processor_id, n, "data");
@@ -348,7 +353,7 @@ async fn emit_data(
     data: StreamData,
 ) -> Result<(), ProcessorError> {
     let row_count = data.num_rows_hint().unwrap_or(0);
-    send_with_backpressure(output, data_channel_capacity, data).await?;
+    send_with_backpressure(output, data_channel_capacity, data, Some(stats.as_ref())).await?;
     stats.record_out(row_count);
     Ok(())
 }

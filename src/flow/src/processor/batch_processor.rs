@@ -118,6 +118,7 @@ impl BatchProcessor {
             output,
             data_channel_capacity,
             StreamData::collection(collection),
+            Some(stats.as_ref()),
         )
         .await?;
         stats.record_out(row_count);
@@ -266,11 +267,12 @@ impl Processor for BatchProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         stats.record_in(collection.num_rows() as u64);
+                                        let handle_start = std::time::Instant::now();
                                         BatchProcessor::append_collection(
                                             &mut buffer,
                                             collection.as_ref(),
                                         );
-                                        match &mode {
+                                        let res = match &mode {
                                             BatchMode::CountOnly { count } => {
                                                 BatchProcessor::drain_by_count(
                                                     &processor_id,
@@ -280,7 +282,7 @@ impl Processor for BatchProcessor {
                                                     channel_capacities.data,
                                                     &stats,
                                                 )
-                                                .await?;
+                                                .await
                                             }
                                             BatchMode::DurationOnly { duration } => {
                                                 BatchProcessor::schedule_timer(
@@ -288,9 +290,10 @@ impl Processor for BatchProcessor {
                                                     *duration,
                                                     !buffer.is_empty(),
                                                 );
+                                                Ok(())
                                             }
                                             BatchMode::Combined { count, duration } => {
-                                                BatchProcessor::drain_by_count(
+                                                let res = BatchProcessor::drain_by_count(
                                                     &processor_id,
                                                     &mut buffer,
                                                     &output,
@@ -298,14 +301,22 @@ impl Processor for BatchProcessor {
                                                     channel_capacities.data,
                                                     &stats,
                                                 )
-                                                .await?;
-                                                BatchProcessor::schedule_timer(
-                                                    &mut timer,
-                                                    *duration,
-                                                    !buffer.is_empty(),
-                                                );
+                                                .await;
+                                                if res.is_ok() {
+                                                    BatchProcessor::schedule_timer(
+                                                        &mut timer,
+                                                        *duration,
+                                                        !buffer.is_empty(),
+                                                    );
+                                                }
+                                                res
                                             }
-                                        }
+                                        };
+                                        // Handle duration measures per-collection processing wall time. If this handle
+                                        // triggers one or more count-based flushes, the downstream send/backpressure
+                                        // time is intentionally included.
+                                        stats.record_handle_duration(handle_start.elapsed());
+                                        res?;
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
@@ -323,6 +334,7 @@ impl Processor for BatchProcessor {
                                             &output,
                                             channel_capacities.data,
                                             data,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {

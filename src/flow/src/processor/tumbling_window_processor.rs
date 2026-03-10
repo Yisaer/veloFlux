@@ -123,7 +123,11 @@ impl Processor for TumblingWindowProcessor {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
                                 stats.record_in(collection.num_rows() as u64);
-                                if let Err(e) = state.add_collection(collection).await {
+                                let handle_start = std::time::Instant::now();
+                                let res = state.add_collection(collection).await;
+                                // Tumbling window enqueue/buffer work is local-only.
+                                stats.record_handle_duration(handle_start.elapsed());
+                                if let Err(e) = res {
                                     stats.record_error_logged("tumbling window processor error", e.to_string());
                                 }
                             }
@@ -137,6 +141,7 @@ impl Processor for TumblingWindowProcessor {
                                     &output,
                                     channel_capacities.data,
                                     StreamData::control(signal),
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -155,6 +160,7 @@ impl Processor for TumblingWindowProcessor {
                                     &output,
                                     channel_capacities.data,
                                     other,
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -283,6 +289,7 @@ impl ProcessingState {
                 &self.output,
                 self.data_channel_capacity,
                 StreamData::collection(Box::new(batch)),
+                Some(self.stats.as_ref()),
             )
             .await?;
             self.update_rows_buffered();
@@ -315,6 +322,7 @@ impl ProcessingState {
                 &self.output,
                 self.data_channel_capacity,
                 StreamData::collection(Box::new(batch)),
+                Some(self.stats.as_ref()),
             )
             .await?;
             self.update_rows_buffered();

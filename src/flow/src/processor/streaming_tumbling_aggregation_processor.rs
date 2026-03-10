@@ -148,6 +148,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         stats.record_in(collection.num_rows() as u64);
+                                        let handle_start = std::time::Instant::now();
                                         for row in collection.rows() {
                                             window_state.add_row(row).map_err(|e| {
                                                 ProcessorError::ProcessingError(format!(
@@ -155,6 +156,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                                 ))
                                             })?;
                                         }
+                                        stats.record_handle_duration(handle_start.elapsed());
                                     }
                                     StreamData::Watermark(ts) => {
                                         window_state
@@ -173,6 +175,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                             &output,
                                             channel_capacities.data,
                                             StreamData::control(control_signal),
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {
@@ -193,6 +196,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                             &output,
                                             channel_capacities.data,
                                             other,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                     }
@@ -328,6 +332,7 @@ impl ProcessingWindowState {
                     output,
                     data_channel_capacity,
                     StreamData::Collection(batch),
+                    Some(stats.as_ref()),
                 )
                 .await?;
             }
@@ -352,6 +357,7 @@ impl ProcessingWindowState {
                     output,
                     data_channel_capacity,
                     StreamData::Collection(batch),
+                    Some(stats.as_ref()),
                 )
                 .await?;
             }

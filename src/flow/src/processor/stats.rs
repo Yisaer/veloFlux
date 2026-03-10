@@ -1,9 +1,12 @@
 use once_cell::sync::Lazy;
-use prometheus::{IntCounterVec, IntGaugeVec, Opts};
+use prometheus::{
+    exponential_buckets, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use parking_lot::RwLock;
 
@@ -14,7 +17,7 @@ fn opts_with_flow_instance(name: &str, help: &str) -> Opts {
 static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let vec = IntCounterVec::new(
         opts_with_flow_instance("processor_records_in_total", "Rows received by processors"),
-        &["flow_instance", "pipeline_id", "kind"],
+        &["flow_instance", "pipeline_id", "processor_id"],
     )
     .expect("create processor records_in counter vec");
     prometheus::register(Box::new(vec.clone())).expect("register processor records_in counter vec");
@@ -24,7 +27,7 @@ static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 static PROCESSOR_RECORDS_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let vec = IntCounterVec::new(
         opts_with_flow_instance("processor_records_out_total", "Rows emitted by processors"),
-        &["flow_instance", "pipeline_id", "kind"],
+        &["flow_instance", "pipeline_id", "processor_id"],
     )
     .expect("create processor records_out counter vec");
     prometheus::register(Box::new(vec.clone()))
@@ -35,7 +38,7 @@ static PROCESSOR_RECORDS_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
 static PROCESSOR_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     let vec = IntCounterVec::new(
         opts_with_flow_instance("processor_errors_total", "Errors observed by processors"),
-        &["flow_instance", "pipeline_id", "kind"],
+        &["flow_instance", "pipeline_id", "processor_id"],
     )
     .expect("create processor errors counter vec");
     prometheus::register(Box::new(vec.clone())).expect("register processor errors counter vec");
@@ -48,13 +51,7 @@ static PROCESSOR_METRIC_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
             "processor_metric_gauge",
             "Gauge metrics reported by processors",
         ),
-        &[
-            "flow_instance",
-            "pipeline_id",
-            "processor_id",
-            "kind",
-            "metric",
-        ],
+        &["flow_instance", "pipeline_id", "processor_id", "metric"],
     )
     .expect("create processor metric gauge vec");
     prometheus::register(Box::new(vec.clone())).expect("register processor metric gauge vec");
@@ -67,16 +64,38 @@ static PROCESSOR_METRIC_COUNTER_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
             "processor_metric_counter_total",
             "Counter metrics reported by processors",
         ),
-        &[
-            "flow_instance",
-            "pipeline_id",
-            "processor_id",
-            "kind",
-            "metric",
-        ],
+        &["flow_instance", "pipeline_id", "processor_id", "metric"],
     )
     .expect("create processor metric counter vec");
     prometheus::register(Box::new(vec.clone())).expect("register processor metric counter vec");
+    vec
+});
+
+static PROCESSOR_HANDLE_DURATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
+    let buckets = exponential_buckets(0.000_001, 2.0, 20).expect("create handle duration buckets");
+    let opts = HistogramOpts::new(
+        "processor_handle_duration_seconds",
+        "Time spent handling one processor input batch",
+    )
+    .buckets(buckets);
+    let vec = HistogramVec::new(opts, &["flow_instance", "pipeline_id", "processor_id"])
+        .expect("create processor handle duration histogram vec");
+    prometheus::register(Box::new(vec.clone()))
+        .expect("register processor handle duration histogram vec");
+    vec
+});
+
+static PROCESSOR_SEND_BACKPRESSURE_WAITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let vec = IntCounterVec::new(
+        opts_with_flow_instance(
+            "processor_send_backpressure_waits_total",
+            "Number of cooperative backpressure sleep ticks taken while sending processor data",
+        ),
+        &["flow_instance", "pipeline_id", "processor_id"],
+    )
+    .expect("create processor send backpressure waits counter vec");
+    prometheus::register(Box::new(vec.clone()))
+        .expect("register processor send backpressure waits counter vec");
     vec
 });
 
@@ -107,7 +126,6 @@ pub struct GaugeHandle {
     flow_instance_id: Arc<str>,
     pipeline_id: Arc<OnceLock<Arc<str>>>,
     processor_id: Arc<str>,
-    kind: Arc<str>,
     entry: Arc<MetricEntry>,
 }
 
@@ -123,7 +141,6 @@ impl GaugeHandle {
                 self.flow_instance_id.as_ref(),
                 pipeline_id.as_ref(),
                 self.processor_id.as_ref(),
-                self.kind.as_ref(),
                 self.entry.id,
             ])
             .set(prom_value);
@@ -135,7 +152,6 @@ pub struct CounterHandle {
     flow_instance_id: Arc<str>,
     pipeline_id: Arc<OnceLock<Arc<str>>>,
     processor_id: Arc<str>,
-    kind: Arc<str>,
     entry: Arc<MetricEntry>,
 }
 
@@ -150,7 +166,6 @@ impl CounterHandle {
                 self.flow_instance_id.as_ref(),
                 pipeline_id.as_ref(),
                 self.processor_id.as_ref(),
-                self.kind.as_ref(),
                 self.entry.id,
             ])
             .inc_by(delta);
@@ -199,7 +214,6 @@ impl ProcessorStats {
             flow_instance_id: Arc::clone(&self.flow_instance_id),
             pipeline_id: Arc::clone(&self.pipeline_id),
             processor_id: Arc::clone(&self.processor_id),
-            kind: Arc::clone(&self.kind),
             entry,
         }
     }
@@ -210,7 +224,6 @@ impl ProcessorStats {
             flow_instance_id: Arc::clone(&self.flow_instance_id),
             pipeline_id: Arc::clone(&self.pipeline_id),
             processor_id: Arc::clone(&self.processor_id),
-            kind: Arc::clone(&self.kind),
             entry,
         }
     }
@@ -259,7 +272,7 @@ impl ProcessorStats {
                 .with_label_values(&[
                     self.flow_instance_id.as_ref(),
                     pipeline_id.as_ref(),
-                    self.kind.as_ref(),
+                    self.processor_id.as_ref(),
                 ])
                 .inc_by(rows);
         }
@@ -272,7 +285,7 @@ impl ProcessorStats {
                 .with_label_values(&[
                     self.flow_instance_id.as_ref(),
                     pipeline_id.as_ref(),
-                    self.kind.as_ref(),
+                    self.processor_id.as_ref(),
                 ])
                 .inc_by(rows);
         }
@@ -320,13 +333,43 @@ impl ProcessorStats {
                 .with_label_values(&[
                     self.flow_instance_id.as_ref(),
                     pipeline_id.as_ref(),
-                    self.kind.as_ref(),
+                    self.processor_id.as_ref(),
                 ])
                 .inc_by(count);
         }
         let message: String = message.into();
         let mut guard = self.last_error.write();
         *guard = Some(Arc::<str>::from(message));
+    }
+
+    pub fn record_handle_duration(&self, duration: Duration) {
+        // Note: The semantic boundary of "handle duration" is defined by each processor.
+        // - For processors that send outputs inline (awaiting downstream backpressure), the
+        //   recommended definition is end-to-end wall time including the send wait.
+        // - For processors that enqueue/update local state and emit asynchronously, the recommended
+        //   definition is local work time only, excluding any later flush/send work.
+        if let Some(pipeline_id) = self.pipeline_id.get() {
+            PROCESSOR_HANDLE_DURATION_SECONDS
+                .with_label_values(&[
+                    self.flow_instance_id.as_ref(),
+                    pipeline_id.as_ref(),
+                    self.processor_id.as_ref(),
+                ])
+                .observe(duration.as_secs_f64());
+        }
+    }
+
+    pub fn record_send_backpressure_wait_tick(&self) {
+        let Some(pipeline_id) = self.pipeline_id.get() else {
+            return;
+        };
+        PROCESSOR_SEND_BACKPRESSURE_WAITS_TOTAL
+            .with_label_values(&[
+                self.flow_instance_id.as_ref(),
+                pipeline_id.as_ref(),
+                self.processor_id.as_ref(),
+            ])
+            .inc();
     }
 
     pub fn clear_last_error(&self) {

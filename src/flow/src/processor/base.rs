@@ -5,7 +5,7 @@
 //! - DataSourceProcessor: Processes data from PhysicalDatasource
 //! - ResultCollectProcessor: Final destination, prints received data
 
-use crate::processor::{ControlSignal, StreamData};
+use crate::processor::{ControlSignal, ProcessorStats, StreamData};
 use crate::runtime::TaskSpawner;
 use futures::stream::SelectAll;
 use tokio::sync::broadcast;
@@ -205,6 +205,7 @@ pub(crate) async fn send_with_backpressure(
     sender: &broadcast::Sender<StreamData>,
     capacity: usize,
     data: StreamData,
+    stats: Option<&ProcessorStats>,
 ) -> Result<(), ProcessorError> {
     const BACKOFF: Duration = Duration::from_millis(1);
     let capacity = normalize_channel_capacity(capacity);
@@ -221,6 +222,10 @@ pub(crate) async fn send_with_backpressure(
                 .map(|_| ())
                 .map_err(|_| ProcessorError::ChannelClosed)?;
             return Ok(());
+        }
+        if let Some(stats) = stats {
+            // One tick per cooperative backpressure sleep.
+            stats.record_send_backpressure_wait_tick();
         }
         sleep(BACKOFF).await;
     }

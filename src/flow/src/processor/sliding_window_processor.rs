@@ -129,7 +129,11 @@ impl Processor for SlidingWindowProcessor {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
                                 state.record_in(collection.num_rows() as u64);
-                                if let Err(e) = state.add_collection(collection).await {
+                                let handle_start = std::time::Instant::now();
+                                let res = state.add_collection(collection).await;
+                                // For synchronous processors, handle duration includes downstream send/backpressure time.
+                                stats.record_handle_duration(handle_start.elapsed());
+                                if let Err(e) = res {
                                     stats.record_error_logged("sliding window processor error", e.to_string());
                                 }
                             }
@@ -143,6 +147,7 @@ impl Processor for SlidingWindowProcessor {
                                     &output,
                                     channel_capacities.data,
                                     StreamData::control(signal),
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -159,6 +164,7 @@ impl Processor for SlidingWindowProcessor {
                                     &output,
                                     channel_capacities.data,
                                     other,
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -349,6 +355,7 @@ impl ProcessingWithoutLookaheadState {
             &self.output,
             self.data_channel_capacity,
             StreamData::collection(Box::new(batch)),
+            Some(self.stats.as_ref()),
         )
         .await?;
         Ok(())
@@ -456,6 +463,7 @@ impl ProcessingWithLookaheadState {
             &self.output,
             self.data_channel_capacity,
             StreamData::collection(Box::new(batch)),
+            Some(self.stats.as_ref()),
         )
         .await?;
         Ok(())
