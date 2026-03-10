@@ -196,21 +196,26 @@ impl Processor for StatefulFunctionProcessor {
                                 }
                                 match data {
                                     StreamData::Collection(collection) => {
+                                        let handle_start = std::time::Instant::now();
                                         match Self::apply_stateful(collection, &mut calls) {
                                             Ok(out_collection) => {
                                                 let out = StreamData::collection(out_collection);
                                                 let out_rows = out.num_rows_hint();
-                                                send_with_backpressure(
+                                                let send_res = send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
                                                     out,
                                                 )
-                                                .await?;
+                                                .await;
+                                                // For synchronous processors, handle duration includes downstream send/backpressure time.
+                                                stats.record_handle_duration(handle_start.elapsed());
+                                                send_res?;
                                                 if let Some(rows) = out_rows {
                                                     stats.record_out(rows);
                                                 }
                                             }
                                             Err(e) => {
+                                                stats.record_handle_duration(handle_start.elapsed());
                                                 stats.record_error_logged("stateful function processor error", e.to_string());
                                             }
                                         }

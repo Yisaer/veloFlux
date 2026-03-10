@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::RwLock;
 
@@ -168,7 +168,6 @@ pub struct ProcessorStats {
     records_out: AtomicU64,
     error_count: AtomicU64,
     last_error: RwLock<Option<Arc<str>>>,
-    last_handle_start: RwLock<Option<Instant>>,
     metrics: RwLock<BTreeMap<&'static str, Arc<MetricEntry>>>,
 }
 
@@ -187,7 +186,6 @@ impl ProcessorStats {
             records_out: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
             last_error: RwLock::new(None),
-            last_handle_start: RwLock::new(None),
             metrics: RwLock::new(BTreeMap::new()),
         }
     }
@@ -255,10 +253,6 @@ impl ProcessorStats {
 
     pub fn record_in(&self, rows: u64) {
         self.records_in.fetch_add(rows, Ordering::Relaxed);
-        if rows > 0 {
-            let mut guard = self.last_handle_start.write();
-            *guard = Some(Instant::now());
-        }
         if let Some(pipeline_id) = self.pipeline_id.get() {
             PROCESSOR_RECORDS_IN_TOTAL
                 .with_label_values(&[
@@ -280,11 +274,6 @@ impl ProcessorStats {
                     self.processor_id.as_ref(),
                 ])
                 .inc_by(rows);
-        }
-        if rows > 0 {
-            if let Some(start) = self.last_handle_start.write().take() {
-                self.record_handle_duration(start.elapsed());
-            }
         }
     }
 
@@ -340,6 +329,11 @@ impl ProcessorStats {
     }
 
     pub fn record_handle_duration(&self, duration: Duration) {
+        // Note: The semantic boundary of "handle duration" is defined by each processor.
+        // - For processors that send outputs inline (awaiting downstream backpressure), the
+        //   recommended definition is end-to-end wall time including the send wait.
+        // - For processors that enqueue/update local state and emit asynchronously, the recommended
+        //   definition is local work time only, excluding any later flush/send work.
         if let Some(pipeline_id) = self.pipeline_id.get() {
             PROCESSOR_HANDLE_DURATION_SECONDS
                 .with_label_values(&[

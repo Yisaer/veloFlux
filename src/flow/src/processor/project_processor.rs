@@ -247,22 +247,27 @@ impl Processor for ProjectProcessor {
                                 }
                                 match data {
                                     StreamData::Collection(collection) => {
+                                        let handle_start = std::time::Instant::now();
                                         match exec_mode.apply(collection) {
                                             Ok(projected_collection) => {
                                                 let projected_data =
                                                     StreamData::collection(projected_collection);
                                                 let out_rows = projected_data.num_rows_hint();
-                                                send_with_backpressure(
+                                                let send_res = send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
                                                     projected_data,
                                                 )
-                                                .await?;
+                                                .await;
+                                                // For synchronous processors, handle duration includes downstream send/backpressure time.
+                                                stats.record_handle_duration(handle_start.elapsed());
+                                                send_res?;
                                                 if let Some(rows) = out_rows {
                                                     stats.record_out(rows);
                                                 }
                                             }
                                             Err(e) => {
+                                                stats.record_handle_duration(handle_start.elapsed());
                                                 stats.record_error_logged("project processor error", e.to_string());
                                             }
                                         }

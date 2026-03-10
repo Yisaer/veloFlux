@@ -113,21 +113,26 @@ impl Processor for EncoderProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let rows = collection.num_rows() as u64;
+                                        let handle_start = std::time::Instant::now();
                                         match encoder.encode(collection.as_ref()) {
                                             Ok(payload) => {
                                                 let out = StreamData::encoded_bytes(payload, rows);
                                                 let out_rows = out.num_rows_hint();
-                                                send_with_backpressure(
+                                                let send_res = send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
                                                     out,
                                                 )
-                                                .await?;
+                                                .await;
+                                                // For synchronous processors, handle duration includes downstream send/backpressure time.
+                                                stats.record_handle_duration(handle_start.elapsed());
+                                                send_res?;
                                                 if let Some(rows) = out_rows {
                                                     stats.record_out(rows);
                                                 }
                                             }
                                             Err(err) => {
+                                                stats.record_handle_duration(handle_start.elapsed());
                                                 let message = format!("encode error: {err}");
                                                 tracing::error!(processor_id = %processor_id, error = %err, "encode error");
                                                 stats.record_error(message);

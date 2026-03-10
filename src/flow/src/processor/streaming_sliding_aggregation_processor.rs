@@ -341,42 +341,59 @@ impl Processor for StreamingSlidingAggregationProcessor {
                         match data_item {
                             Some(Ok(StreamData::Collection(collection))) => {
                                 stats.record_in(collection.num_rows() as u64);
-                                let rows = collection.into_rows().map_err(|e| {
-                                    ProcessorError::ProcessingError(format!("failed to extract rows: {e}"))
-                                })?;
+                                let handle_start = std::time::Instant::now();
+                                let res = async {
+                                    let rows = collection.into_rows().map_err(|e| {
+                                        ProcessorError::ProcessingError(format!(
+                                            "failed to extract rows: {e}"
+                                        ))
+                                    })?;
 
-                                for tuple in rows {
-                                    let now_secs = to_epoch_secs(tuple.timestamp)?;
-                                    gc_windows(&mut windows, now_secs, length_secs, delay_secs);
+                                    for tuple in rows {
+                                        let now_secs = to_epoch_secs(tuple.timestamp)?;
+                                        gc_windows(&mut windows, now_secs, length_secs, delay_secs);
 
-                                    windows.push_back(IncAggWindow {
-                                        start_secs: now_secs,
-                                        groups: HashMap::new(),
-                                    });
+                                        windows.push_back(IncAggWindow {
+                                            start_secs: now_secs,
+                                            groups: HashMap::new(),
+                                        });
 
-                                    for window in windows.iter_mut() {
-                                        if window.start_secs <= now_secs
-                                            && window
-                                                .start_secs
-                                                .saturating_add(length_secs)
-                                                .saturating_add(delay_secs)
-                                                > now_secs
-                                        {
-                                            update_window_with_tuple(
+                                        for window in windows.iter_mut() {
+                                            if window.start_secs <= now_secs
+                                                && window
+                                                    .start_secs
+                                                    .saturating_add(length_secs)
+                                                    .saturating_add(delay_secs)
+                                                    > now_secs
+                                            {
+                                                update_window_with_tuple(
+                                                    &physical,
+                                                    aggregate_registry.as_ref(),
+                                                    &group_by_meta,
+                                                    window,
+                                                    &tuple,
+                                                )?;
+                                            }
+                                        }
+
+                                        if delay_secs == 0 {
+                                            emit_oldest_window(
+                                                &output,
+                                                channel_capacities.data,
                                                 &physical,
-                                                aggregate_registry.as_ref(),
                                                 &group_by_meta,
-                                                window,
-                                                &tuple,
-                                            )?;
+                                                &windows,
+                                                &stats,
+                                            )
+                                            .await?;
                                         }
                                     }
 
-                                    if delay_secs == 0 {
-                                        emit_oldest_window(&output, channel_capacities.data, &physical, &group_by_meta, &windows, &stats)
-                                            .await?;
-                                    }
+                                    Ok::<(), ProcessorError>(())
                                 }
+                                .await;
+                                stats.record_handle_duration(handle_start.elapsed());
+                                res?;
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {
                                 if delay_secs == 0 {

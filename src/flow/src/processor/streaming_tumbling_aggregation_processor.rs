@@ -148,6 +148,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         stats.record_in(collection.num_rows() as u64);
+                                        let handle_start = std::time::Instant::now();
                                         for row in collection.rows() {
                                             window_state.add_row(row).map_err(|e| {
                                                 ProcessorError::ProcessingError(format!(
@@ -155,6 +156,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                                 ))
                                             })?;
                                         }
+                                        stats.record_handle_duration(handle_start.elapsed());
                                     }
                                     StreamData::Watermark(ts) => {
                                         window_state

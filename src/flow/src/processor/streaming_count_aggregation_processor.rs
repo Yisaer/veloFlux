@@ -172,6 +172,7 @@ impl Processor for StreamingCountAggregationProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         stats.record_in(collection.num_rows() as u64);
+                                        let handle_start = std::time::Instant::now();
                                         match StreamingCountAggregationProcessor::process_collection(
                                             &mut worker,
                                             &mut window_state,
@@ -181,15 +182,22 @@ impl Processor for StreamingCountAggregationProcessor {
                                                 for out in outputs {
                                                     stats.record_out(out.num_rows() as u64);
                                                     let data = StreamData::Collection(out);
-                                                    send_with_backpressure(
+                                                    let send_res = send_with_backpressure(
                                                         &output,
                                                         channel_capacities.data,
                                                         data,
                                                     )
-                                                    .await?
+                                                    .await;
+                                                    if let Err(err) = send_res {
+                                                        stats.record_handle_duration(handle_start.elapsed());
+                                                        return Err(err);
+                                                    }
                                                 }
+                                                // Handle duration for collection processing includes downstream send/backpressure time.
+                                                stats.record_handle_duration(handle_start.elapsed());
                                             }
                                             Err(e) => {
+                                                stats.record_handle_duration(handle_start.elapsed());
                                                 return Err(ProcessorError::ProcessingError(
                                                     format!(
                                                         "Failed to process streaming count aggregation: {e}"

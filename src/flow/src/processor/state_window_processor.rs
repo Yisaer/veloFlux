@@ -124,10 +124,12 @@ impl Processor for StateWindowProcessor {
                         match item {
                             Some(Ok(StreamData::Collection(collection))) => {
                                 stats.record_in(collection.num_rows() as u64);
+                                let handle_start = std::time::Instant::now();
                                 let tuples = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(e) => {
                                         stats.record_error_logged("state window processor error", format!("failed to extract rows: {e}"));
+                                        stats.record_handle_duration(handle_start.elapsed());
                                         continue;
                                     }
                                 };
@@ -212,17 +214,30 @@ impl Processor for StateWindowProcessor {
                                         }
                                         let batch_rows: Vec<_> = state.rows.drain(..).collect();
                                         stats.record_out(batch_rows.len() as u64);
-                                        let batch = crate::model::RecordBatch::new(batch_rows)
-                                            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
-                                        send_with_backpressure(
+                                        let batch = match crate::model::RecordBatch::new(batch_rows)
+                                            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))
+                                        {
+                                            Ok(batch) => batch,
+                                            Err(e) => {
+                                                stats.record_handle_duration(handle_start.elapsed());
+                                                return Err(e);
+                                            }
+                                        };
+                                        let send_res = send_with_backpressure(
                                             &output,
                                             channel_capacities.data,
                                             StreamData::collection(Box::new(batch)),
                                         )
-                                        .await?;
+                                        .await;
+                                        if let Err(e) = send_res {
+                                            stats.record_handle_duration(handle_start.elapsed());
+                                            return Err(e);
+                                        }
                                         state.active = false;
                                     }
                                 }
+                                // For synchronous processors, handle duration includes downstream send/backpressure time.
+                                stats.record_handle_duration(handle_start.elapsed());
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {
                                 send_with_backpressure(

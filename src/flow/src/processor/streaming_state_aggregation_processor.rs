@@ -162,10 +162,12 @@ impl Processor for StreamingStateAggregationProcessor {
                         match data_item {
                             Some(Ok(StreamData::Collection(collection))) => {
                                 stats.record_in(collection.num_rows() as u64);
+                                let handle_start = std::time::Instant::now();
                                 let tuples = match collection.into_rows() {
                                     Ok(rows) => rows,
                                     Err(e) => {
                                         stats.record_error_logged("streaming state aggregation processor error", format!("failed to extract rows: {e}"));
+                                        stats.record_handle_duration(handle_start.elapsed());
                                         continue;
                                     }
                                 };
@@ -259,12 +261,16 @@ impl Processor for StreamingStateAggregationProcessor {
                                         match entry.worker.finalize_current_window() {
                                             Ok(Some(batch)) => {
                                                 stats.record_out(batch.num_rows() as u64);
-                                                send_with_backpressure(
+                                                let send_res = send_with_backpressure(
                                                     &output,
                                                     channel_capacities.data,
                                                     StreamData::Collection(batch),
                                                 )
-                                                .await?;
+                                                .await;
+                                                if let Err(err) = send_res {
+                                                    stats.record_handle_duration(handle_start.elapsed());
+                                                    return Err(err);
+                                                }
                                             }
                                             Ok(None) => {}
                                             Err(e) => {
@@ -274,6 +280,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                         entry.active = false;
                                     }
                                 }
+                                stats.record_handle_duration(handle_start.elapsed());
                             }
                             Some(Ok(StreamData::Watermark(ts))) => {
                                 send_with_backpressure(

@@ -149,7 +149,9 @@ impl Processor for DecoderProcessor {
                                 if let Some(rows) = data.num_rows_hint() {
                                     stats.record_in(rows);
                                 }
+                                let mut decode_handle_start: Option<std::time::Instant> = None;
                                 if let StreamData::Bytes(payload) = &data {
+                                    decode_handle_start = Some(std::time::Instant::now());
                                     let decoded = if let Some(proj) = decode_projection.as_ref() {
                                         decoder.decode_with_projection(payload.as_ref(), Some(proj))
                                     } else if let Some(lock) = &shared_decode_state {
@@ -177,10 +179,16 @@ impl Processor for DecoderProcessor {
                                             if let Some(batch) = result.batch {
                                                 data = StreamData::collection(Box::new(batch));
                                             } else {
+                                                if let Some(handle_start) = decode_handle_start.take() {
+                                                    stats.record_handle_duration(handle_start.elapsed());
+                                                }
                                                 continue;
                                             }
                                         }
                                         Err(err) => {
+                                            if let Some(handle_start) = decode_handle_start.take() {
+                                                stats.record_handle_duration(handle_start.elapsed());
+                                            }
                                             let message = format!("decode error: {}", err);
                                             stats.record_error_logged("decoder processor error", message);
                                             continue;
@@ -189,12 +197,17 @@ impl Processor for DecoderProcessor {
                                 }
                                 let is_terminal = data.is_terminal();
                                 let out_rows = data.num_rows_hint();
-                                send_with_backpressure(
+                                let send_res = send_with_backpressure(
                                     &output,
                                     channel_capacities.data,
                                     data,
                                 )
-                                .await?;
+                                .await;
+                                // For synchronous processors, handle duration includes downstream send/backpressure time.
+                                if let Some(handle_start) = decode_handle_start {
+                                    stats.record_handle_duration(handle_start.elapsed());
+                                }
+                                send_res?;
                                 if let Some(rows) = out_rows {
                                     stats.record_out(rows);
                                 }

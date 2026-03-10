@@ -306,8 +306,8 @@ impl Processor for StreamingEncoderProcessor {
                                 log_received_data(&processor_id, &data);
                                 match data {
                                     StreamData::Collection(collection) => {
-                                        if let Err(err) =
-                                            StreamingEncoderProcessor::handle_collection(
+                                        let handle_start = std::time::Instant::now();
+                                        let res = StreamingEncoderProcessor::handle_collection(
                                                 &processor_id,
                                                 collection,
                                                 &encoder,
@@ -319,8 +319,11 @@ impl Processor for StreamingEncoderProcessor {
                                                 &mut timer,
                                                 &stats,
                                             )
-                                            .await
-                                        {
+                                        .await;
+                                        // For synchronous processors, handle duration includes downstream send/backpressure
+                                        // time (if a flush happens on the input path).
+                                        stats.record_handle_duration(handle_start.elapsed());
+                                        if let Err(err) = res {
                                             tracing::error!(
                                                 processor_id = %processor_id,
                                                 error = %err,

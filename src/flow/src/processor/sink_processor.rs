@@ -284,23 +284,31 @@ impl SinkProcessor {
                 if ready_state.should_drop_data(processor_id, stats) {
                     return Ok(false);
                 }
+                let handle_start = std::time::Instant::now();
                 if let Err(err) = Self::handle_payload(connector, payload.as_ref()).await {
                     tracing::error!(
                         processor_id = %processor_id,
                         error = %err,
                         "payload handling error"
                     );
+                    stats.record_handle_duration(handle_start.elapsed());
                     stats.record_error(err.to_string());
                     return Ok(false);
                 }
                 stats.record_out(1);
                 if forwarding.forward_data {
-                    send_with_backpressure(
+                    let send_res = send_with_backpressure(
                         forwarding.output,
                         forwarding.data_channel_capacity,
                         StreamData::EncodedBytes { payload, num_rows },
                     )
-                    .await?;
+                    .await;
+                    // For synchronous processors, handle duration includes downstream send/backpressure time.
+                    stats.record_handle_duration(handle_start.elapsed());
+                    send_res?;
+                } else {
+                    // For synchronous processors, handle duration includes downstream send/backpressure time.
+                    stats.record_handle_duration(handle_start.elapsed());
                 }
             }
             StreamData::Collection(collection) => {
@@ -315,23 +323,31 @@ impl SinkProcessor {
                     return Ok(false);
                 }
                 let in_rows = collection.num_rows() as u64;
+                let handle_start = std::time::Instant::now();
                 if let Err(err) = Self::handle_collection(connector, collection.as_ref()).await {
                     tracing::error!(
                         processor_id = %processor_id,
                         error = %err,
                         "collection handling error"
                     );
+                    stats.record_handle_duration(handle_start.elapsed());
                     stats.record_error(err.to_string());
                     return Ok(false);
                 }
                 stats.record_out(in_rows);
                 if forwarding.forward_data {
-                    send_with_backpressure(
+                    let send_res = send_with_backpressure(
                         forwarding.output,
                         forwarding.data_channel_capacity,
                         StreamData::Collection(collection),
                     )
-                    .await?;
+                    .await;
+                    // For synchronous processors, handle duration includes downstream send/backpressure time.
+                    stats.record_handle_duration(handle_start.elapsed());
+                    send_res?;
+                } else {
+                    // For synchronous processors, handle duration includes downstream send/backpressure time.
+                    stats.record_handle_duration(handle_start.elapsed());
                 }
             }
             data => {
