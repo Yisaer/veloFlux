@@ -151,6 +151,7 @@ impl StreamingEncoderProcessor {
                         stream_state,
                         output,
                         data_channel_capacity,
+                        stats,
                     )
                     .await?;
                     if flushed > 0 {
@@ -171,6 +172,7 @@ impl StreamingEncoderProcessor {
         stream_state: &mut Option<Box<dyn CollectionEncoderStream>>,
         output: &broadcast::Sender<StreamData>,
         data_channel_capacity: usize,
+        stats: &Arc<ProcessorStats>,
     ) -> Result<usize, ProcessorError> {
         if *row_count == 0 {
             *stream_state = None;
@@ -189,6 +191,7 @@ impl StreamingEncoderProcessor {
             output,
             data_channel_capacity,
             StreamData::encoded_bytes(payload, flushed_rows as u64),
+            Some(stats.as_ref()),
         )
         .await?;
         tracing::debug!(processor_id = %processor_id, "flushed batch");
@@ -252,6 +255,7 @@ impl Processor for StreamingEncoderProcessor {
                                         &mut stream_state,
                                         &output,
                                         channel_capacities.data,
+                                        &stats,
                                     )
                                     .await?;
                                     if flushed > 0 {
@@ -284,6 +288,7 @@ impl Processor for StreamingEncoderProcessor {
                                 &mut stream_state,
                                 &output,
                                 channel_capacities.data,
+                                &stats,
                             )
                             .await?;
                             if flushed > 0 {
@@ -342,6 +347,7 @@ impl Processor for StreamingEncoderProcessor {
                                                     &mut stream_state,
                                                     &output,
                                                     channel_capacities.data,
+                                                    &stats,
                                                 )
                                                 .await?;
                                                 if flushed > 0 {
@@ -360,6 +366,7 @@ impl Processor for StreamingEncoderProcessor {
                                             &output,
                                             channel_capacities.data,
                                             data,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if let Some(rows) = out_rows {
@@ -395,6 +402,7 @@ impl Processor for StreamingEncoderProcessor {
                                         &mut stream_state,
                                         &output,
                                         channel_capacities.data,
+                                        &stats,
                                     )
                                     .await?;
                                     if flushed > 0 {

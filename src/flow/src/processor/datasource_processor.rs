@@ -88,6 +88,7 @@ impl ConnectorBinding {
                             &sender,
                             data_channel_capacity,
                             StreamData::bytes(bytes),
+                            Some(stats.as_ref()),
                         )
                         .await
                         .is_err()
@@ -100,6 +101,7 @@ impl ConnectorBinding {
                             &sender,
                             data_channel_capacity,
                             StreamData::collection(collection),
+                            Some(stats.as_ref()),
                         )
                         .await
                         .is_err()
@@ -337,6 +339,7 @@ impl Processor for DataSourceProcessor {
                                     &output,
                                     channel_capacities.data,
                                     data,
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if let Some(rows) = out_rows {

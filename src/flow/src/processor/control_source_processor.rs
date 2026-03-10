@@ -102,7 +102,13 @@ impl ControlSourceProcessor {
 
     /// Send StreamData to all downstream processors
     pub async fn send(&self, data: StreamData) -> Result<(), ProcessorError> {
-        send_with_backpressure(&self.output, self.channel_capacities.data, data).await
+        send_with_backpressure(
+            &self.output,
+            self.channel_capacities.data,
+            data,
+            Some(self.stats.as_ref()),
+        )
+        .await
     }
 
     /// Send StreamData to a specific downstream processor by id.
@@ -155,8 +161,13 @@ impl Processor for ControlSourceProcessor {
                         if let Some(rows) = rows {
                             stats.record_in(rows);
                         }
-                        send_with_backpressure(&output, channel_capacities.data, ingress.data)
-                            .await?;
+                        send_with_backpressure(
+                            &output,
+                            channel_capacities.data,
+                            ingress.data,
+                            Some(stats.as_ref()),
+                        )
+                        .await?;
                         if let Some(rows) = rows {
                             stats.record_out(rows);
                         }
@@ -201,6 +212,7 @@ impl Processor for ControlSourceProcessor {
                 StreamData::control(ControlSignal::Barrier(
                     BarrierControlSignal::StreamGracefulEnd { barrier_id },
                 )),
+                Some(stats.as_ref()),
             )
             .await?;
             Ok(())

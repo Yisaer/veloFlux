@@ -353,7 +353,7 @@ async fn emit_data(
     data: StreamData,
 ) -> Result<(), ProcessorError> {
     let row_count = data.num_rows_hint().unwrap_or(0);
-    send_with_backpressure(output, data_channel_capacity, data).await?;
+    send_with_backpressure(output, data_channel_capacity, data, Some(stats.as_ref())).await?;
     stats.record_out(row_count);
     Ok(())
 }

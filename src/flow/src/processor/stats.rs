@@ -85,6 +85,20 @@ static PROCESSOR_HANDLE_DURATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
     vec
 });
 
+static PROCESSOR_SEND_BACKPRESSURE_WAITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    let vec = IntCounterVec::new(
+        opts_with_flow_instance(
+            "processor_send_backpressure_waits_total",
+            "Number of cooperative backpressure sleep ticks taken while sending processor data",
+        ),
+        &["flow_instance", "pipeline_id", "processor_id"],
+    )
+    .expect("create processor send backpressure waits counter vec");
+    prometheus::register(Box::new(vec.clone()))
+        .expect("register processor send backpressure waits counter vec");
+    vec
+});
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricKind {
@@ -343,6 +357,19 @@ impl ProcessorStats {
                 ])
                 .observe(duration.as_secs_f64());
         }
+    }
+
+    pub fn record_send_backpressure_wait_tick(&self) {
+        let Some(pipeline_id) = self.pipeline_id.get() else {
+            return;
+        };
+        PROCESSOR_SEND_BACKPRESSURE_WAITS_TOTAL
+            .with_label_values(&[
+                self.flow_instance_id.as_ref(),
+                pipeline_id.as_ref(),
+                self.processor_id.as_ref(),
+            ])
+            .inc();
     }
 
     pub fn clear_last_error(&self) {

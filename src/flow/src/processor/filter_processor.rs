@@ -160,6 +160,7 @@ impl Processor for FilterProcessor {
                                                     &output,
                                                     channel_capacities.data,
                                                     filtered_data,
+                                                    Some(stats.as_ref()),
                                                 )
                                                 .await;
                                                 // For synchronous processors, handle duration includes downstream send/backpressure time.
@@ -182,6 +183,7 @@ impl Processor for FilterProcessor {
                                             &output,
                                             channel_capacities.data,
                                             out,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {
@@ -196,6 +198,7 @@ impl Processor for FilterProcessor {
                                             &output,
                                             channel_capacities.data,
                                             other,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {

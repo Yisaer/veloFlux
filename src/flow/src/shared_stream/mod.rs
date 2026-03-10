@@ -642,6 +642,7 @@ impl SharedStreamInner {
                             &data_tx,
                             data_channel_capacity,
                             other,
+                            None,
                         )
                         .await
                         .is_err()

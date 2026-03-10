@@ -265,6 +265,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                                     &output,
                                                     channel_capacities.data,
                                                     StreamData::Collection(batch),
+                                                    Some(stats.as_ref()),
                                                 )
                                                 .await;
                                                 if let Err(err) = send_res {
@@ -287,6 +288,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                     &output,
                                     channel_capacities.data,
                                     StreamData::watermark(ts),
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                             }
@@ -297,6 +299,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                     &output,
                                     channel_capacities.data,
                                     StreamData::control(control_signal),
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -309,6 +312,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                                             &output,
                                                             channel_capacities.data,
                                                             StreamData::Collection(batch),
+                                                            Some(stats.as_ref()),
                                                         )
                                                         .await?;
                                                     }
@@ -330,6 +334,7 @@ impl Processor for StreamingStateAggregationProcessor {
                                     &output,
                                     channel_capacities.data,
                                     other,
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {

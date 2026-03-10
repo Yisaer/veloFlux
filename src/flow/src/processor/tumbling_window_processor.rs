@@ -141,6 +141,7 @@ impl Processor for TumblingWindowProcessor {
                                     &output,
                                     channel_capacities.data,
                                     StreamData::control(signal),
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -159,6 +160,7 @@ impl Processor for TumblingWindowProcessor {
                                     &output,
                                     channel_capacities.data,
                                     other,
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -287,6 +289,7 @@ impl ProcessingState {
                 &self.output,
                 self.data_channel_capacity,
                 StreamData::collection(Box::new(batch)),
+                Some(self.stats.as_ref()),
             )
             .await?;
             self.update_rows_buffered();
@@ -319,6 +322,7 @@ impl ProcessingState {
                 &self.output,
                 self.data_channel_capacity,
                 StreamData::collection(Box::new(batch)),
+                Some(self.stats.as_ref()),
             )
             .await?;
             self.update_rows_buffered();

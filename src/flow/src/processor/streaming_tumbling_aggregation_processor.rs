@@ -175,6 +175,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                             &output,
                                             channel_capacities.data,
                                             StreamData::control(control_signal),
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {
@@ -195,6 +196,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                             &output,
                                             channel_capacities.data,
                                             other,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                     }
@@ -330,6 +332,7 @@ impl ProcessingWindowState {
                     output,
                     data_channel_capacity,
                     StreamData::Collection(batch),
+                    Some(stats.as_ref()),
                 )
                 .await?;
             }
@@ -354,6 +357,7 @@ impl ProcessingWindowState {
                     output,
                     data_channel_capacity,
                     StreamData::Collection(batch),
+                    Some(stats.as_ref()),
                 )
                 .await?;
             }

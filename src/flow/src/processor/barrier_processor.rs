@@ -157,6 +157,7 @@ impl Processor for BarrierProcessor {
                                                 &output,
                                                 channel_capacities.data,
                                                 out,
+                                                Some(stats.as_ref()),
                                             )
                                             .await?;
                                             if is_terminal {
@@ -172,6 +173,7 @@ impl Processor for BarrierProcessor {
                                             &output,
                                             channel_capacities.data,
                                             other,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {

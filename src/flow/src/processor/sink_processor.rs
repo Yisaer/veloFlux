@@ -301,6 +301,7 @@ impl SinkProcessor {
                         forwarding.output,
                         forwarding.data_channel_capacity,
                         StreamData::EncodedBytes { payload, num_rows },
+                        Some(stats),
                     )
                     .await;
                     // For synchronous processors, handle duration includes downstream send/backpressure time.
@@ -340,6 +341,7 @@ impl SinkProcessor {
                         forwarding.output,
                         forwarding.data_channel_capacity,
                         StreamData::Collection(collection),
+                        Some(stats),
                     )
                     .await;
                     // For synchronous processors, handle duration includes downstream send/backpressure time.
@@ -352,8 +354,13 @@ impl SinkProcessor {
             }
             data => {
                 let is_terminal = data.is_terminal();
-                send_with_backpressure(forwarding.output, forwarding.data_channel_capacity, data)
-                    .await?;
+                send_with_backpressure(
+                    forwarding.output,
+                    forwarding.data_channel_capacity,
+                    data,
+                    Some(stats),
+                )
+                .await?;
                 if is_terminal {
                     tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                     Self::handle_terminal(connector).await?;

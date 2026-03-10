@@ -118,6 +118,7 @@ impl BatchProcessor {
             output,
             data_channel_capacity,
             StreamData::collection(collection),
+            Some(stats.as_ref()),
         )
         .await?;
         stats.record_out(row_count);
@@ -333,6 +334,7 @@ impl Processor for BatchProcessor {
                                             &output,
                                             channel_capacities.data,
                                             data,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {

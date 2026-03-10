@@ -314,6 +314,7 @@ impl Processor for TumblingWatermarkProcessor {
                             &output,
                             channel_capacities.data,
                             StreamData::watermark(ts),
+                            Some(stats.as_ref()),
                         )
                         .await?;
                         continue;
@@ -326,6 +327,7 @@ impl Processor for TumblingWatermarkProcessor {
                                     &output,
                                     channel_capacities.data,
                                     StreamData::control(signal),
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -344,6 +346,7 @@ impl Processor for TumblingWatermarkProcessor {
                                     &output,
                                     channel_capacities.data,
                                     data,
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if let Some(rows) = out_rows {
@@ -519,14 +522,20 @@ impl Processor for SlidingWatermarkProcessor {
                 data_channel_capacity: usize,
                 last_emitted_nanos: &mut Option<u128>,
                 ts: SystemTime,
+                stats: &Arc<ProcessorStats>,
             ) -> Result<(), ProcessorError> {
                 let nanos = SlidingWatermarkProcessor::to_nanos(ts)?;
                 if last_emitted_nanos.is_some_and(|last| nanos <= last) {
                     return Ok(());
                 }
                 *last_emitted_nanos = Some(nanos);
-                send_with_backpressure(output, data_channel_capacity, StreamData::watermark(ts))
-                    .await?;
+                send_with_backpressure(
+                    output,
+                    data_channel_capacity,
+                    StreamData::watermark(ts),
+                    Some(stats.as_ref()),
+                )
+                .await?;
                 Ok(())
             }
 
@@ -565,6 +574,7 @@ impl Processor for SlidingWatermarkProcessor {
                             channel_capacities.data,
                             &mut last_emitted_nanos,
                             SystemTime::now(),
+                            &stats,
                         )
                         .await?;
                     }
@@ -583,6 +593,7 @@ impl Processor for SlidingWatermarkProcessor {
                                 channel_capacities.data,
                                 &mut last_emitted_nanos,
                                 deadline_ts,
+                                &stats,
                             )
                             .await?;
                         }
@@ -617,6 +628,7 @@ impl Processor for SlidingWatermarkProcessor {
                                             &output,
                                             channel_capacities.data,
                                             out,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if let Some(rows) = out_rows {
@@ -629,6 +641,7 @@ impl Processor for SlidingWatermarkProcessor {
                                             &output,
                                             channel_capacities.data,
                                             other,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {
@@ -809,6 +822,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                                 &output,
                                                 channel_capacities.data,
                                                 item,
+                                                Some(stats.as_ref()),
                                             )
                                             .await?;
                                         }
@@ -858,6 +872,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                                 &output,
                                                 channel_capacities.data,
                                                 item,
+                                                Some(stats.as_ref()),
                                             )
                                             .await?;
                                             if let Some(rows) = out_rows {
@@ -889,6 +904,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                                     &output,
                                                     channel_capacities.data,
                                                     item,
+                                                    Some(stats.as_ref()),
                                                 )
                                                 .await?;
                                             }
@@ -902,6 +918,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                     &output,
                                     channel_capacities.data,
                                     StreamData::control(signal),
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -916,6 +933,7 @@ impl Processor for EventtimeWatermarkProcessor {
                                     &output,
                                     channel_capacities.data,
                                     other,
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {

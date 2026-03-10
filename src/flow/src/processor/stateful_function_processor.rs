@@ -205,6 +205,7 @@ impl Processor for StatefulFunctionProcessor {
                                                     &output,
                                                     channel_capacities.data,
                                                     out,
+                                                    Some(stats.as_ref()),
                                                 )
                                                 .await;
                                                 // For synchronous processors, handle duration includes downstream send/backpressure time.
@@ -226,6 +227,7 @@ impl Processor for StatefulFunctionProcessor {
                                             &output,
                                             channel_capacities.data,
                                             data,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {

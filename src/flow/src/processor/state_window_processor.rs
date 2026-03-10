@@ -227,6 +227,7 @@ impl Processor for StateWindowProcessor {
                                             &output,
                                             channel_capacities.data,
                                             StreamData::collection(Box::new(batch)),
+                                            Some(stats.as_ref()),
                                         )
                                         .await;
                                         if let Err(e) = send_res {
@@ -244,6 +245,7 @@ impl Processor for StateWindowProcessor {
                                     &output,
                                     channel_capacities.data,
                                     StreamData::watermark(ts),
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                             }
@@ -254,6 +256,7 @@ impl Processor for StateWindowProcessor {
                                     &output,
                                     channel_capacities.data,
                                     StreamData::control(signal),
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -268,6 +271,7 @@ impl Processor for StateWindowProcessor {
                                                     &output,
                                                     channel_capacities.data,
                                                     StreamData::collection(Box::new(batch)),
+                                                    Some(stats.as_ref()),
                                                 )
                                                 .await?;
                                                 state.active = false;
@@ -284,6 +288,7 @@ impl Processor for StateWindowProcessor {
                                     &output,
                                     channel_capacities.data,
                                     other,
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {

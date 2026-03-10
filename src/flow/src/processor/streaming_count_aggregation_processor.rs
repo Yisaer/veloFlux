@@ -186,6 +186,7 @@ impl Processor for StreamingCountAggregationProcessor {
                                                         &output,
                                                         channel_capacities.data,
                                                         data,
+                                                        Some(stats.as_ref()),
                                                     )
                                                     .await;
                                                     if let Err(err) = send_res {
@@ -212,6 +213,7 @@ impl Processor for StreamingCountAggregationProcessor {
                                             &output,
                                             channel_capacities.data,
                                             StreamData::control(control_signal),
+                                            Some(stats.as_ref()),
                                         )
                                     .await?;
                                         if is_terminal {
@@ -223,6 +225,7 @@ impl Processor for StreamingCountAggregationProcessor {
                                             &output,
                                             channel_capacities.data,
                                             other,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                     }

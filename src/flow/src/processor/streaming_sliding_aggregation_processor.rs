@@ -315,6 +315,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                     output,
                     data_channel_capacity,
                     StreamData::collection(Box::new(batch)),
+                    Some(stats.as_ref()),
                 )
                 .await?;
                 Ok(())
@@ -415,6 +416,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                     &output,
                                     channel_capacities.data,
                                     StreamData::control(control_signal),
+                                    Some(stats.as_ref()),
                                 )
                                 .await?;
                                 if is_terminal {
@@ -426,7 +428,12 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                 }
                             }
                             Some(Ok(other)) => {
-                                send_with_backpressure(&output, channel_capacities.data, other)
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    other,
+                                    Some(stats.as_ref()),
+                                )
                                     .await?;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {

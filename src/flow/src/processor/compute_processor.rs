@@ -178,6 +178,7 @@ impl Processor for ComputeProcessor {
                                                     &output,
                                                     channel_capacities.data,
                                                     out_data,
+                                                    Some(stats.as_ref()),
                                                 )
                                                 .await;
                                                 // For synchronous processors, handle duration includes downstream send/backpressure time.
@@ -199,6 +200,7 @@ impl Processor for ComputeProcessor {
                                             &output,
                                             channel_capacities.data,
                                             data,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {

@@ -201,6 +201,7 @@ impl Processor for DecoderProcessor {
                                     &output,
                                     channel_capacities.data,
                                     data,
+                                    Some(stats.as_ref()),
                                 )
                                 .await;
                                 // For synchronous processors, handle duration includes downstream send/backpressure time.

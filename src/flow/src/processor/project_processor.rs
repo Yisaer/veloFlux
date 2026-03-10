@@ -257,6 +257,7 @@ impl Processor for ProjectProcessor {
                                                     &output,
                                                     channel_capacities.data,
                                                     projected_data,
+                                                    Some(stats.as_ref()),
                                                 )
                                                 .await;
                                                 // For synchronous processors, handle duration includes downstream send/backpressure time.
@@ -278,6 +279,7 @@ impl Processor for ProjectProcessor {
                                             &output,
                                             channel_capacities.data,
                                             data,
+                                            Some(stats.as_ref()),
                                         )
                                         .await?;
                                         if is_terminal {
