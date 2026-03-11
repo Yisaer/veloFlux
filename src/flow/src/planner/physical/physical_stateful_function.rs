@@ -1,5 +1,6 @@
 use crate::expr::ScalarExpr;
 use crate::planner::physical::BasePhysicalPlan;
+use parser::StatefulCallSpec;
 use sqlparser::ast::Expr;
 use std::sync::Arc;
 
@@ -10,6 +11,9 @@ pub struct StatefulCall {
     pub output_column: String,
     pub func_name: String,
     pub arg_scalars: Vec<ScalarExpr>,
+    pub when_scalar: Option<ScalarExpr>,
+    pub partition_by_scalars: Vec<ScalarExpr>,
+    pub spec: StatefulCallSpec,
     pub original_expr: Expr,
 }
 

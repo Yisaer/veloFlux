@@ -300,54 +300,64 @@ fn create_physical_stateful_function_with_builder(
     entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
     let mut calls = Vec::with_capacity(entries.len());
-    for (output_column, expr) in entries {
-        let sqlparser::ast::Expr::Function(func) = expr else {
-            return Err(format!(
-                "stateful mapping '{}' must be a function expression, got {}",
-                output_column, expr
-            ));
-        };
-
-        let func_name = func
-            .name
-            .0
-            .last()
-            .map(|ident| ident.value.to_lowercase())
-            .unwrap_or_default();
+    for (output_column, spec) in entries {
+        let func_name = spec.func_name.clone();
         registries
             .stateful_registry()
             .get(&func_name)
             .ok_or_else(|| format!("unknown stateful function '{}'", func_name))?;
 
-        let mut arg_scalars = Vec::with_capacity(func.args.len());
-        for arg in &func.args {
-            match arg {
-                sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
+        let mut arg_scalars = Vec::with_capacity(spec.args.len());
+        for arg_expr in &spec.args {
+            arg_scalars.push(
+                convert_expr_to_scalar_with_bindings_and_custom_registry(
                     arg_expr,
-                )) => {
-                    arg_scalars.push(
-                        convert_expr_to_scalar_with_bindings_and_custom_registry(
-                            arg_expr,
-                            bindings,
-                            registries.custom_func_registry().as_ref(),
-                        )
-                        .map_err(|err| err.to_string())?,
-                    );
-                }
-                _ => {
-                    return Err(format!(
-                        "unsupported stateful function argument for {}: {}",
-                        func_name, arg
-                    ));
-                }
-            }
+                    bindings,
+                    registries.custom_func_registry().as_ref(),
+                )
+                .map_err(|err| err.to_string())?,
+            );
+        }
+
+        let when_scalar = match spec.when.as_ref() {
+            Some(expr) => Some(
+                convert_expr_to_scalar_with_bindings_and_custom_registry(
+                    expr,
+                    bindings,
+                    registries.custom_func_registry().as_ref(),
+                )
+                .map_err(|err| err.to_string())?,
+            ),
+            None => None,
+        };
+
+        let mut partition_by_scalars = Vec::with_capacity(spec.partition_by.len());
+        for expr in &spec.partition_by {
+            partition_by_scalars.push(
+                convert_expr_to_scalar_with_bindings_and_custom_registry(
+                    expr,
+                    bindings,
+                    registries.custom_func_registry().as_ref(),
+                )
+                .map_err(|err| err.to_string())?,
+            );
+        }
+
+        if when_scalar.is_some() || !partition_by_scalars.is_empty() {
+            return Err(format!(
+                "stateful function '{}' FILTER/OVER execution is not supported yet",
+                func_name
+            ));
         }
 
         calls.push(StatefulCall {
             output_column: output_column.clone(),
             func_name,
             arg_scalars,
-            original_expr: expr.clone(),
+            when_scalar,
+            partition_by_scalars,
+            spec: spec.clone(),
+            original_expr: spec.original_expr.clone(),
         });
     }
 

@@ -6,8 +6,10 @@ pub mod dialect;
 pub mod expression_extractor;
 pub mod parser;
 pub mod select_stmt;
+pub mod stateful_call;
 pub mod stateful_registry;
 pub mod stateful_transformer;
+pub mod stateful_validation;
 pub mod visitor;
 pub mod window;
 
@@ -23,6 +25,7 @@ pub use expression_extractor::{
 };
 pub use parser::{StreamSqlParser, parse_sql, parse_sql_with_registries};
 pub use select_stmt::{SelectField, SelectStmt};
+pub use stateful_call::StatefulCallSpec;
 pub use stateful_registry::{StatefulRegistry, StaticStatefulRegistry, default_stateful_registry};
 pub use stateful_transformer::transform_stateful_functions;
 pub use visitor::{

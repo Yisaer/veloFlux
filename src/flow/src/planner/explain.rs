@@ -248,7 +248,7 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             let mut mappings = stateful
                 .stateful_mappings
                 .iter()
-                .map(|(out, expr)| format!("{} -> {}", expr, out))
+                .map(|(out, call)| format!("{} -> {}", call.original_expr, out))
                 .collect::<Vec<_>>();
             mappings.sort();
             info.push(format!("calls=[{}]", mappings.join("; ")));

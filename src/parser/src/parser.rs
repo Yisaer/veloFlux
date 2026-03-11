@@ -69,6 +69,7 @@ impl StreamSqlParser {
         // This enables cases like last_row(lag(a)) where a stateful call appears inside an aggregate.
         let (select_stmt, _stateful_mappings) = transform_stateful_functions(
             select_stmt,
+            Arc::clone(&self.aggregate_registry),
             Arc::clone(&self.stateful_registry),
             &mut allocator,
         )?;
@@ -341,6 +342,7 @@ mod tests {
                 .stateful_mappings
                 .get("col_1")
                 .unwrap()
+                .original_expr
                 .to_string(),
             "lag(a)"
         );

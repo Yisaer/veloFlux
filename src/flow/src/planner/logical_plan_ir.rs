@@ -3,6 +3,7 @@
 //! This module provides a JSON-serializable intermediate representation (IR) for `LogicalPlan`
 //! along with helpers to rebuild a `LogicalPlan` from that IR.
 
+use parser::StatefulCallSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sqlparser::ast::Expr;
@@ -134,7 +135,7 @@ pub enum LogicalPlanNodeKindIR {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatefulExprIR {
     pub output_name: String,
-    pub expr: Expr,
+    pub call: StatefulCallSpec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -213,7 +214,7 @@ fn build_logical_plan_node(
         LogicalPlanNodeKindIR::StatefulFunction { calls } => {
             let stateful_mappings = calls
                 .iter()
-                .map(|call| (call.output_name.clone(), call.expr.clone()))
+                .map(|call| (call.output_name.clone(), call.call.clone()))
                 .collect();
             let plan = crate::planner::logical::StatefulFunctionPlan::new(
                 stateful_mappings,
@@ -550,9 +551,9 @@ fn build_logical_ir(
             let calls = plan
                 .stateful_mappings
                 .iter()
-                .map(|(name, expr)| StatefulExprIR {
+                .map(|(name, call)| StatefulExprIR {
                     output_name: name.clone(),
-                    expr: expr.clone(),
+                    call: call.clone(),
                 })
                 .collect();
             LogicalPlanNodeKindIR::StatefulFunction { calls }

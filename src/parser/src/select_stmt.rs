@@ -1,6 +1,7 @@
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 
+use crate::stateful_call::StatefulCallSpec;
 use crate::window::Window;
 
 /// Represents an ORDER BY item.
@@ -38,8 +39,8 @@ pub struct SelectStmt {
     pub window: Option<Window>,
     /// Aggregate function mappings: column name -> original aggregate expression
     pub aggregate_mappings: HashMap<String, Expr>,
-    /// Stateful function mappings: column name -> original stateful expression
-    pub stateful_mappings: HashMap<String, Expr>,
+    /// Stateful function mappings: column name -> extracted stateful call spec
+    pub stateful_mappings: HashMap<String, StatefulCallSpec>,
     /// Information about the data sources (tables) accessed
     pub source_infos: Vec<SourceInfo>,
 }

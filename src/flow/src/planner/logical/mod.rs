@@ -1232,7 +1232,7 @@ fn validate_order_by_constraints(select_stmt: &SelectStmt) -> Result<(), String>
 
 fn expr_references_any_stateful_placeholder(
     expr: &sqlparser::ast::Expr,
-    stateful_mappings: &std::collections::HashMap<String, sqlparser::ast::Expr>,
+    stateful_mappings: &std::collections::HashMap<String, parser::StatefulCallSpec>,
 ) -> bool {
     use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr};
 
