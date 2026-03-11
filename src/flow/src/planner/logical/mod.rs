@@ -4,7 +4,7 @@ use parser::SelectStmt;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use datatypes::{ConcreteDatatype, Schema};
+use datatypes::ConcreteDatatype;
 
 pub mod aggregation;
 pub mod compute;
@@ -343,7 +343,7 @@ pub fn verify_logical_plan(plan: &LogicalPlan) -> Result<(), String> {
 struct SourceSchemaEntry {
     source_name: String,
     alias: Option<String>,
-    schema: Arc<Schema>,
+    column_lookup: HashMap<String, ConcreteDatatype>,
 }
 
 fn validate_expression_types(
@@ -355,10 +355,16 @@ fn validate_expression_types(
         let Some(definition) = stream_defs.get(&source_info.name) else {
             continue;
         };
+        let schema = definition.schema();
+        let mut column_lookup = HashMap::with_capacity(schema.column_schemas().len());
+        for col in schema.column_schemas() {
+            column_lookup.insert(col.name.clone(), col.data_type.clone());
+        }
+
         sources.push(SourceSchemaEntry {
             source_name: source_info.name.clone(),
             alias: source_info.alias.clone(),
-            schema: definition.schema(),
+            column_lookup,
         });
     }
 
@@ -388,14 +394,19 @@ fn validate_select_alias_names(
     use crate::expr::internal_columns::is_reserved_user_name;
     use std::collections::HashSet;
 
-    // Collect all source column names; alias must not collide with any of them.
-    let mut source_column_names = HashSet::<String>::new();
+    // Collect all source schemas to keep them alive.
+    let mut schemas = Vec::with_capacity(select_stmt.source_infos.len());
     for source_info in &select_stmt.source_infos {
-        let Some(definition) = stream_defs.get(&source_info.name) else {
-            continue;
-        };
-        for col in definition.schema().column_schemas() {
-            source_column_names.insert(col.name.clone());
+        if let Some(definition) = stream_defs.get(&source_info.name) {
+            schemas.push(definition.schema());
+        }
+    }
+
+    // Collect all source column names; alias must not collide with any of them.
+    let mut source_column_names = HashSet::<&str>::new();
+    for schema in &schemas {
+        for col in schema.column_schemas() {
+            source_column_names.insert(col.name.as_str());
         }
     }
 
@@ -409,7 +420,7 @@ fn validate_select_alias_names(
             return Err(format!("SELECT alias `{}` is reserved", alias));
         }
 
-        if source_column_names.contains(alias) {
+        if source_column_names.contains(alias.as_str()) {
             return Err(format!(
                 "SELECT alias `{}` collides with an input column name",
                 alias
@@ -1085,13 +1096,7 @@ fn resolve_column_datatype(
             Some(q) => src.source_name == q || src.alias.as_deref() == Some(q),
             None => true,
         })
-        .filter_map(|src| {
-            src.schema
-                .column_schemas()
-                .iter()
-                .find(|c| c.name == column_name)
-                .map(|c| c.data_type.clone())
-        })
+        .filter_map(|src| src.column_lookup.get(column_name).cloned())
         .collect();
 
     match matches.len() {

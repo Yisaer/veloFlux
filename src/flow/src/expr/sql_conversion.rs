@@ -54,10 +54,7 @@ impl SchemaBinding {
 }
 
 fn find_column_index(schema: &Schema, column_name: &str) -> Option<usize> {
-    schema
-        .column_schemas()
-        .iter()
-        .position(|column| column.name == column_name)
+    schema.column_index(column_name)
 }
 
 impl SchemaBindingEntry {

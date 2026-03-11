@@ -24,7 +24,7 @@ pub struct PhysicalProjectField {
 #[derive(Debug, Clone)]
 pub struct PhysicalProject {
     pub base: BasePhysicalPlan,
-    pub fields: Vec<PhysicalProjectField>,
+    pub fields: Arc<[PhysicalProjectField]>,
     /// Whether this project node should pass through input messages unchanged.
     ///
     /// This is used by physical rewrite rules that delay `ColumnRef::ByIndex`
@@ -80,7 +80,7 @@ impl PhysicalProject {
         let base = BasePhysicalPlan::new(children, index);
         Self {
             base,
-            fields,
+            fields: fields.into(),
             passthrough_messages: false,
         }
     }
@@ -94,7 +94,7 @@ impl PhysicalProject {
         let base = BasePhysicalPlan::new(vec![child], index);
         Self {
             base,
-            fields,
+            fields: fields.into(),
             passthrough_messages: false,
         }
     }

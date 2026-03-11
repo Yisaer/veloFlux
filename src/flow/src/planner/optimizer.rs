@@ -343,7 +343,7 @@ fn rewrite_by_index_projection_into_encoder(
 
         let mut columns = Vec::new();
         let mut remaining_fields = Vec::new();
-        for field in &project.fields {
+        for field in project.fields.iter() {
             if is_by_index_field(field) {
                 if let Some(column) = by_index_projection_column_from_field(field) {
                     columns.push(column);
@@ -493,7 +493,8 @@ fn rewrite_by_index_nodes(
                 .project_to_remaining_fields
                 .get(&index)
                 .cloned()
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .into();
             new.passthrough_messages = true;
             Arc::new(PhysicalPlan::Project(new))
         }

@@ -73,3 +73,23 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[profile.dev]
+debug = false # Fully disable debug info to fix CI linker OOM (SIGBUS) issues
+
+[profile.test]
+debug = false
+
+# Optimize heavy dependencies even in dev/test to reduce linker pressure
+[profile.dev.package.arrow]
+opt-level = 3
+[profile.dev.package.parquet]
+opt-level = 3
+[profile.dev.package.tonic]
+opt-level = 3
+[profile.test.package.arrow]
+opt-level = 3
+[profile.test.package.parquet]
+opt-level = 3
+[profile.test.package.tonic]
+opt-level = 3

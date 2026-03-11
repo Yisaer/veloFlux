@@ -19,7 +19,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 #[derive(Clone)]
 enum ProjectExecMode {
-    Normal { fields: Vec<PhysicalProjectField> },
+    Normal { fields: Arc<[PhysicalProjectField]> },
     Passthrough { fields: Vec<AffiliateExpr> },
 }
 

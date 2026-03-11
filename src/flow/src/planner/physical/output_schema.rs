@@ -150,7 +150,7 @@ impl PhysicalPlan {
                 let input = passthrough_single_child(self)?;
                 let mut out = Vec::new();
 
-                for field in &plan.fields {
+                for field in plan.fields.iter() {
                     match &field.compiled_expr {
                         ScalarExpr::Wildcard { source_name } => {
                             let prefix = source_name.as_deref();

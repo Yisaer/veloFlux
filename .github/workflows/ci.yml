@@ -18,6 +18,8 @@ env:
   CARGO_BUILD_JOBS: 2
   CARGO_HOME: /home/runner/.cargo
   CARGO_INCREMENTAL: 0
+  # Switch to LLD linker to reduce memory usage and speed up linking on CI
+  RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
 
 jobs:
   pr-title-lint:
