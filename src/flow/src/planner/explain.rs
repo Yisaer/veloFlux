@@ -711,12 +711,17 @@ fn build_physical_node_with_prefix(
             // Intentionally keep this node opaque in EXPLAIN (no column layout dumped).
         }
         PhysicalPlan::StatefulFunction(stateful) => {
-            let mut calls = stateful
+            let calls = stateful
                 .calls
                 .iter()
-                .map(|call| format!("{} -> {}", call.original_expr, call.output_column))
+                .map(|call| {
+                    format!(
+                        "{} -> {}",
+                        format_stateful_call_spec(&call.spec),
+                        call.output_column
+                    )
+                })
                 .collect::<Vec<_>>();
-            calls.sort();
             info.push(format!("calls=[{}]", calls.join("; ")));
         }
         PhysicalPlan::Filter(filter) => {

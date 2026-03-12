@@ -11,7 +11,7 @@ use flow::{
     SinkConnectorConfig, SinkEncoderConfig, StreamDecoderConfig, StreamDefinition, StreamProps,
 };
 use parser::{
-    StaticAggregateRegistry, StaticStatefulRegistry, parse_sql, parse_sql_with_registries,
+    parse_sql, parse_sql_with_registries, StaticAggregateRegistry, StaticStatefulRegistry,
 };
 use serde_json::json;
 use serde_json::Map as JsonMap;
@@ -265,7 +265,9 @@ fn bindings_for_select(
 fn optimized_logical_json(sql: &str) -> String {
     optimized_logical_json_with_registries(
         sql,
-        Arc::new(StaticAggregateRegistry::new(["sum", "count", "last_row", "ndv"])),
+        Arc::new(StaticAggregateRegistry::new([
+            "sum", "count", "last_row", "ndv",
+        ])),
         Arc::new(StaticStatefulRegistry::new(["lag"])),
         vec![],
     )
@@ -274,7 +276,9 @@ fn optimized_logical_json(sql: &str) -> String {
 fn optimized_logical_json_with_sinks(sql: &str, sinks: Vec<PipelineSink>) -> String {
     optimized_logical_json_with_registries(
         sql,
-        Arc::new(StaticAggregateRegistry::new(["sum", "count", "last_row", "ndv"])),
+        Arc::new(StaticAggregateRegistry::new([
+            "sum", "count", "last_row", "ndv",
+        ])),
         Arc::new(StaticStatefulRegistry::new(["lag"])),
         sinks,
     )
@@ -287,8 +291,8 @@ fn optimized_logical_json_with_registries(
     sinks: Vec<PipelineSink>,
 ) -> String {
     let stream_defs = setup_streams();
-    let select_stmt = parse_sql_with_registries(sql, aggregate_registry, stateful_registry)
-        .expect("parse sql");
+    let select_stmt =
+        parse_sql_with_registries(sql, aggregate_registry, stateful_registry).expect("parse sql");
     let bindings = bindings_for_select(&select_stmt, &stream_defs);
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs).expect("logical");
     let (optimized, _pruned) = flow::optimize_logical_plan(logical_plan, &bindings);
@@ -448,7 +452,8 @@ fn create_logical_plan_stateful_table_driven() {
         },
         Case {
             name: "test_create_logical_plan_with_stateful_filter_over_partition_alias",
-            sql: "SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) as v1 FROM stream",
+            sql:
+                "SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) as v1 FROM stream",
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as v1]"],"operator":"Project"}"##,
         },
         Case {

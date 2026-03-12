@@ -62,9 +62,18 @@ impl StatefulFunctionProcessor {
             output_column,
             func_name,
             arg_scalars,
+            when_scalar,
+            partition_by_scalars,
             ..
         } in &physical_stateful.calls
         {
+            if when_scalar.is_some() || !partition_by_scalars.is_empty() {
+                return Err(ProcessorError::InvalidConfiguration(format!(
+                    "stateful function '{}' FILTER/OVER execution is not supported yet",
+                    func_name
+                )));
+            }
+
             let function = stateful_registry.get(func_name).ok_or_else(|| {
                 ProcessorError::InvalidConfiguration(format!(
                     "unknown stateful function '{}'",

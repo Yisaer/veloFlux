@@ -3,7 +3,9 @@ use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry};
 use crate::planner::decode_projection::{DecodeProjection, FieldPath, FieldPathSegment, ListIndex};
 use crate::planner::logical::{LogicalPlan, TailPlan};
 use datatypes::Schema;
-use sqlparser::ast::{Expr as SqlExpr, FunctionArg, FunctionArgExpr, Ident, ObjectName, WindowType};
+use sqlparser::ast::{
+    Expr as SqlExpr, FunctionArg, FunctionArgExpr, Ident, ObjectName, WindowType,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 

@@ -342,13 +342,6 @@ fn create_physical_stateful_function_with_builder(
             );
         }
 
-        if when_scalar.is_some() || !partition_by_scalars.is_empty() {
-            return Err(format!(
-                "stateful function '{}' FILTER/OVER execution is not supported yet",
-                func_name
-            ));
-        }
-
         calls.push(StatefulCall {
             output_column: output_column.clone(),
             func_name,
