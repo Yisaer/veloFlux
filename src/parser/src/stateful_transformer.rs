@@ -231,6 +231,14 @@ fn rewrite_expr_stateful(
             })
         }
         Expr::Function(func) => {
+            let rewritten_func = rewrite_function_stateful_context(
+                func,
+                aggregate_registry,
+                stateful_registry,
+                allocator,
+                seen,
+                mappings,
+            )?;
             let func_name = func
                 .name
                 .0
@@ -239,8 +247,12 @@ fn rewrite_expr_stateful(
                 .unwrap_or_default();
 
             if stateful_registry.is_stateful_function(&func_name) {
-                let call_spec =
-                    parse_stateful_call(func, expr, stateful_registry, aggregate_registry)?;
+                let call_spec = parse_stateful_call(
+                    &rewritten_func,
+                    expr,
+                    stateful_registry,
+                    aggregate_registry,
+                )?;
                 let key = call_spec.dedup_key();
                 if let Some(col) = seen.get(&key) {
                     return Ok(Expr::Identifier(Ident::new(col)));
@@ -252,29 +264,130 @@ fn rewrite_expr_stateful(
                 return Ok(Expr::Identifier(Ident::new(col)));
             }
 
-            let mut new_args = Vec::with_capacity(func.args.len());
-            for arg in &func.args {
-                if let FunctionArg::Unnamed(FunctionArgExpr::Expr(inner_expr)) = arg {
-                    let new_inner = rewrite_expr_stateful(
-                        inner_expr,
+            Ok(Expr::Function(rewritten_func))
+        }
+        _ => Ok(expr.clone()),
+    }
+}
+
+fn rewrite_function_stateful_context(
+    func: &Function,
+    aggregate_registry: &Arc<dyn AggregateRegistry>,
+    stateful_registry: &Arc<dyn StatefulRegistry>,
+    allocator: &mut ColPlaceholderAllocator,
+    seen: &mut HashMap<String, String>,
+    mappings: &mut HashMap<String, StatefulCallSpec>,
+) -> Result<Function, String> {
+    let mut new_args = Vec::with_capacity(func.args.len());
+    for arg in &func.args {
+        match arg {
+            FunctionArg::Unnamed(FunctionArgExpr::Expr(inner_expr)) => {
+                let rewritten = rewrite_expr_stateful(
+                    inner_expr,
+                    aggregate_registry,
+                    stateful_registry,
+                    allocator,
+                    seen,
+                    mappings,
+                )?;
+                new_args.push(FunctionArg::Unnamed(FunctionArgExpr::Expr(rewritten)));
+            }
+            FunctionArg::Named { name, arg } => {
+                let rewritten_arg = match arg {
+                    FunctionArgExpr::Expr(inner_expr) => {
+                        FunctionArgExpr::Expr(rewrite_expr_stateful(
+                            inner_expr,
+                            aggregate_registry,
+                            stateful_registry,
+                            allocator,
+                            seen,
+                            mappings,
+                        )?)
+                    }
+                    _ => arg.clone(),
+                };
+                new_args.push(FunctionArg::Named {
+                    name: name.clone(),
+                    arg: rewritten_arg,
+                });
+            }
+            _ => new_args.push(arg.clone()),
+        }
+    }
+
+    let new_filter = match func.filter.as_ref() {
+        Some(expr) => Some(Box::new(rewrite_expr_stateful(
+            expr,
+            aggregate_registry,
+            stateful_registry,
+            allocator,
+            seen,
+            mappings,
+        )?)),
+        None => None,
+    };
+
+    let new_over = match func.over.as_ref() {
+        Some(WindowType::WindowSpec(spec)) => Some(WindowType::WindowSpec(WindowSpec {
+            partition_by: spec
+                .partition_by
+                .iter()
+                .map(|expr| {
+                    rewrite_expr_stateful(
+                        expr,
+                        aggregate_registry,
+                        stateful_registry,
+                        allocator,
+                        seen,
+                        mappings,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            order_by: spec
+                .order_by
+                .iter()
+                .map(|item| {
+                    let mut rewritten = item.clone();
+                    rewritten.expr = rewrite_expr_stateful(
+                        &item.expr,
                         aggregate_registry,
                         stateful_registry,
                         allocator,
                         seen,
                         mappings,
                     )?;
-                    new_args.push(FunctionArg::Unnamed(FunctionArgExpr::Expr(new_inner)));
-                } else {
-                    new_args.push(arg.clone());
-                }
-            }
+                    Ok(rewritten)
+                })
+                .collect::<Result<Vec<_>, String>>()?,
+            window_frame: spec.window_frame.clone(),
+        })),
+        Some(WindowType::NamedWindow(name)) => Some(WindowType::NamedWindow(name.clone())),
+        None => None,
+    };
 
-            let mut new_func = func.clone();
-            new_func.args = new_args;
-            Ok(Expr::Function(new_func))
-        }
-        _ => Ok(expr.clone()),
-    }
+    let new_order_by = func
+        .order_by
+        .iter()
+        .map(|item| {
+            let mut rewritten = item.clone();
+            rewritten.expr = rewrite_expr_stateful(
+                &item.expr,
+                aggregate_registry,
+                stateful_registry,
+                allocator,
+                seen,
+                mappings,
+            )?;
+            Ok(rewritten)
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let mut new_func = func.clone();
+    new_func.args = new_args;
+    new_func.filter = new_filter;
+    new_func.over = new_over;
+    new_func.order_by = new_order_by;
+    Ok(new_func)
 }
 
 fn parse_stateful_call(
