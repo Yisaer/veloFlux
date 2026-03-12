@@ -3,7 +3,9 @@ use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry};
 use crate::planner::decode_projection::{DecodeProjection, FieldPath, FieldPathSegment, ListIndex};
 use crate::planner::logical::{LogicalPlan, TailPlan};
 use datatypes::Schema;
-use sqlparser::ast::{Expr as SqlExpr, FunctionArg, FunctionArgExpr, Ident, ObjectName};
+use sqlparser::ast::{
+    Expr as SqlExpr, FunctionArg, FunctionArgExpr, Ident, ObjectName, WindowType,
+};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -200,6 +202,7 @@ fn max_existing_cse_temp_id_in_plan(plan: &LogicalPlan) -> u64 {
                         _ => {}
                     }
                 }
+                visit_function_context_exprs(func, |expr| visit_expr(expr, max_id));
             }
             SqlExpr::JsonAccess { left, right, .. } => {
                 visit_expr(left, max_id);
@@ -229,8 +232,8 @@ fn max_existing_cse_temp_id_in_plan(plan: &LogicalPlan) -> u64 {
             }
             LogicalPlan::Filter(filter) => visit_expr(&filter.predicate, max_id),
             LogicalPlan::StatefulFunction(stateful) => {
-                for expr in stateful.stateful_mappings.values() {
-                    visit_expr(expr, max_id);
+                for call in &stateful.calls {
+                    visit_expr(&call.spec.original_expr, max_id);
                 }
             }
             LogicalPlan::Aggregation(agg) => {
@@ -265,6 +268,25 @@ fn max_existing_cse_temp_id_in_plan(plan: &LogicalPlan) -> u64 {
     let mut max_id = 0u64;
     visit_plan(plan, &mut max_id);
     max_id
+}
+
+fn visit_function_context_exprs(func: &sqlparser::ast::Function, mut visit: impl FnMut(&SqlExpr)) {
+    if let Some(filter) = func.filter.as_deref() {
+        visit(filter);
+    }
+
+    if let Some(WindowType::WindowSpec(spec)) = func.over.as_ref() {
+        for expr in &spec.partition_by {
+            visit(expr);
+        }
+        for item in &spec.order_by {
+            visit(&item.expr);
+        }
+    }
+
+    for item in &func.order_by {
+        visit(&item.expr);
+    }
 }
 
 fn apply_cse_with_cache(
@@ -1189,8 +1211,8 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                 }
             }
             LogicalPlan::StatefulFunction(stateful) => {
-                for expr in stateful.stateful_mappings.values() {
-                    self.collect_expr_ast(expr);
+                for call in &stateful.calls {
+                    self.collect_expr_ast(&call.spec.original_expr);
                 }
             }
             LogicalPlan::Filter(filter) => self.collect_expr_ast(&filter.predicate),
@@ -1240,6 +1262,7 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                 for arg in &func.args {
                     self.collect_function_arg(arg);
                 }
+                visit_function_context_exprs(func, |expr| self.collect_expr_ast(expr));
             }
             SqlExpr::BinaryOp { left, right, .. } => {
                 self.collect_expr_ast(left);
@@ -1248,6 +1271,38 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
             SqlExpr::UnaryOp { expr, .. } => self.collect_expr_ast(expr),
             SqlExpr::Nested(expr) => self.collect_expr_ast(expr),
             SqlExpr::Cast { expr, .. } => self.collect_expr_ast(expr),
+            SqlExpr::Between {
+                expr, low, high, ..
+            } => {
+                self.collect_expr_ast(expr);
+                self.collect_expr_ast(low);
+                self.collect_expr_ast(high);
+            }
+            SqlExpr::InList { expr, list, .. } => {
+                self.collect_expr_ast(expr);
+                for item in list {
+                    self.collect_expr_ast(item);
+                }
+            }
+            SqlExpr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
+                if let Some(expr) = operand.as_ref() {
+                    self.collect_expr_ast(expr);
+                }
+                for expr in conditions {
+                    self.collect_expr_ast(expr);
+                }
+                for expr in results {
+                    self.collect_expr_ast(expr);
+                }
+                if let Some(expr) = else_result.as_ref() {
+                    self.collect_expr_ast(expr);
+                }
+            }
             SqlExpr::JsonAccess { left, .. } => {
                 // For top-level pruning, only the base column matters; JsonAccess RHS is a field.
                 self.collect_expr_ast(left);
@@ -1570,8 +1625,8 @@ impl<'a> StructFieldUsageCollector<'a> {
                 }
             }
             LogicalPlan::StatefulFunction(stateful) => {
-                for expr in stateful.stateful_mappings.values() {
-                    self.collect_expr_ast(expr);
+                for call in &stateful.calls {
+                    self.collect_expr_ast(&call.spec.original_expr);
                 }
             }
             LogicalPlan::Filter(filter) => self.collect_expr_ast(&filter.predicate),
@@ -1613,6 +1668,7 @@ impl<'a> StructFieldUsageCollector<'a> {
                 for arg in &func.args {
                     self.collect_function_arg(arg);
                 }
+                visit_function_context_exprs(func, |expr| self.collect_expr_ast(expr));
             }
             SqlExpr::BinaryOp { left, right, .. } => {
                 self.collect_expr_ast(left);
@@ -1845,8 +1901,8 @@ impl<'a> ListElementUsageCollector<'a> {
                 }
             }
             LogicalPlan::StatefulFunction(stateful) => {
-                for expr in stateful.stateful_mappings.values() {
-                    self.collect_expr_ast(expr);
+                for call in &stateful.calls {
+                    self.collect_expr_ast(&call.spec.original_expr);
                 }
             }
             LogicalPlan::Filter(filter) => self.collect_expr_ast(&filter.predicate),
@@ -1888,6 +1944,7 @@ impl<'a> ListElementUsageCollector<'a> {
                 for arg in &func.args {
                     self.collect_function_arg(arg);
                 }
+                visit_function_context_exprs(func, |expr| self.collect_expr_ast(expr));
             }
             SqlExpr::BinaryOp { left, right, .. } => {
                 self.collect_expr_ast(left);

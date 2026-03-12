@@ -3,6 +3,7 @@
 //! This module provides a JSON-serializable intermediate representation (IR) for `LogicalPlan`
 //! along with helpers to rebuild a `LogicalPlan` from that IR.
 
+use parser::StatefulCallSpec;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use sqlparser::ast::Expr;
@@ -134,7 +135,7 @@ pub enum LogicalPlanNodeKindIR {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StatefulExprIR {
     pub output_name: String,
-    pub expr: Expr,
+    pub call: StatefulCallSpec,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -211,12 +212,15 @@ fn build_logical_plan_node(
             Arc::new(LogicalPlan::DataSource(datasource))
         }
         LogicalPlanNodeKindIR::StatefulFunction { calls } => {
-            let stateful_mappings = calls
+            let logical_calls = calls
                 .iter()
-                .map(|call| (call.output_name.clone(), call.expr.clone()))
+                .map(|call| crate::planner::logical::LogicalStatefulCall {
+                    output_column: call.output_name.clone(),
+                    spec: call.call.clone(),
+                })
                 .collect();
             let plan = crate::planner::logical::StatefulFunctionPlan::new(
-                stateful_mappings,
+                logical_calls,
                 children,
                 node.index,
             );
@@ -548,11 +552,11 @@ fn build_logical_ir(
         },
         LogicalPlan::StatefulFunction(plan) => {
             let calls = plan
-                .stateful_mappings
+                .calls
                 .iter()
-                .map(|(name, expr)| StatefulExprIR {
-                    output_name: name.clone(),
-                    expr: expr.clone(),
+                .map(|call| StatefulExprIR {
+                    output_name: call.output_column.clone(),
+                    call: call.spec.clone(),
                 })
                 .collect();
             LogicalPlanNodeKindIR::StatefulFunction { calls }

@@ -26,11 +26,33 @@ use flow::pipeline::{EventtimeOptions, PipelineOptions};
 use serde_json::Map as JsonMap;
 
 fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
-    let stream_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-        "stream".to_string(),
-        "a".to_string(),
-        ConcreteDatatype::Int64(Int64Type),
-    )]));
+    let stream_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "stream".to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream".to_string(),
+            "b".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream".to_string(),
+            "flag".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream".to_string(),
+            "k1".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream".to_string(),
+            "k2".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
     let stream_def = StreamDefinition::new(
         "stream",
         Arc::clone(&stream_schema),
@@ -380,7 +402,7 @@ fn plan_explain_with_sinks_table_driven() {
                     SinkEncoderConfig::new("none", serde_json::Map::new()),
                 ),
             )],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=kuksa","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[*]"],"operator":"PhysicalProject"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=kuksa"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_4","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=kuksa","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, b, flag, k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[*]"],"operator":"PhysicalProject"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=kuksa"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_4","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         Case {
             name: "memory_collection_sink_includes_layout",
@@ -497,9 +519,9 @@ fn plan_explain_table_driven() {
         },
         Case {
             name: "order_by_projection_alias_non_aggregate",
-            sql: "SELECT a + 1 AS b FROM stream ORDER BY b DESC",
+            sql: "SELECT a + 1 AS x FROM stream ORDER BY x DESC",
             options: PipelineOptions::default(),
-            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Order_1","info":["keys=[(a + 1) DESC]"],"operator":"Order"}],"id":"Project_2","info":["fields=[a + 1 as b]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalOrder_2","info":["keys=[(a + 1) DESC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_3","info":["fields=[a + 1 as b]"],"operator":"PhysicalProject"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Order_1","info":["keys=[(a + 1) DESC]"],"operator":"Order"}],"id":"Project_2","info":["fields=[a + 1 as x]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalOrder_2","info":["keys=[(a + 1) DESC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_3","info":["fields=[a + 1 as x]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "order_by_implicit_aggregate_key",
@@ -605,6 +627,49 @@ fn plan_explain_table_driven() {
 }
 
 #[test]
+fn plan_explain_stateful_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "stateful_select_only",
+            sql: "SELECT lag(a) FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1 as lag(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "stateful_nested_filter_dependency",
+            sql: "SELECT lag(a), lag(b) FILTER (WHERE lag(a)) FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(b) FILTER (WHERE col_1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(b) FILTER (WHERE lag(a))]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1; lag(b) FILTER (WHERE col_1) -> col_2]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1 as lag(a); col_2 as lag(b) FILTER (WHERE lag(a))]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "stateful_filter_over_partition",
+            sql: "SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, flag, k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, flag, k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1 as lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "stateful_filter_over_partition_alias",
+            sql:
+                "SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) as v1 FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as v1]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, flag, k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, flag, k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1 as v1]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "stateful_dedup_and_dependent_filter",
+            sql: "SELECT lag(a), lag(a) FILTER (WHERE lag(a)) FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE col_1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE col_1) -> col_2]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"PhysicalProject"}}"##,
+        },
+    ];
+
+    for case in cases {
+        let got = explain_json_string(case.sql);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
 fn plan_explain_optimizer_table_driven() {
     #[derive(Clone, Copy)]
     struct SinkSpec {
@@ -702,8 +767,8 @@ fn plan_explain_by_index_projection_rewrite_table_driven() {
             name: "does_not_rewrite_when_contains_wildcard",
             sql: "SELECT a, * FROM stream",
             sinks: vec![build_nop_json_sink("test_sink", None)],
-            expected_before: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; *]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; *]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
-            expected_after: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; *]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; *]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected_before: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; *]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, b, flag, k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; *]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected_after: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; *]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, b, flag, k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; *]"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         Case {
             name: "rewrites_by_index_with_alias",

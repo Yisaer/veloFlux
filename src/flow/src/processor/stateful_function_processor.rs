@@ -1,5 +1,6 @@
 //! StatefulFunctionProcessor - evaluates stateful scalar functions per row.
 
+use crate::expr::ScalarExpr;
 use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{PhysicalPlan, PhysicalStatefulFunction, StatefulCall};
 use crate::processor::base::{
@@ -9,16 +10,32 @@ use crate::processor::base::{
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use crate::runtime::TaskSpawner;
-use crate::stateful::{StatefulFunctionInstance, StatefulFunctionRegistry};
+use crate::stateful::{StatefulFunction, StatefulFunctionInstance, StatefulFunctionRegistry};
+use datatypes::Value;
 use futures::stream::StreamExt;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+struct StatefulPartitionState {
+    instance: Box<dyn StatefulFunctionInstance>,
+    last_output: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PartitionKey {
+    Global,
+    Values(Vec<Value>),
+}
+
 struct StatefulProcessorCall {
     output_column: Arc<String>,
-    arg_scalars: Vec<crate::expr::ScalarExpr>,
-    instance: Box<dyn StatefulFunctionInstance>,
+    function: Arc<dyn StatefulFunction>,
+    arg_scalars: Vec<ScalarExpr>,
+    when_scalar: Option<ScalarExpr>,
+    partition_by_scalars: Vec<ScalarExpr>,
+    states: HashMap<PartitionKey, StatefulPartitionState>,
 }
 
 pub struct StatefulFunctionProcessor {
@@ -62,6 +79,8 @@ impl StatefulFunctionProcessor {
             output_column,
             func_name,
             arg_scalars,
+            when_scalar,
+            partition_by_scalars,
             ..
         } in &physical_stateful.calls
         {
@@ -73,8 +92,11 @@ impl StatefulFunctionProcessor {
             })?;
             calls.push(StatefulProcessorCall {
                 output_column: Arc::new(output_column.clone()),
+                function,
                 arg_scalars: arg_scalars.clone(),
-                instance: function.create_instance(),
+                when_scalar: when_scalar.clone(),
+                partition_by_scalars: partition_by_scalars.clone(),
+                states: HashMap::new(),
             });
         }
 
@@ -116,6 +138,48 @@ impl StatefulFunctionProcessor {
 
         for tuple in rows.iter_mut() {
             for call in calls.iter_mut() {
+                let partition_key = if call.partition_by_scalars.is_empty() {
+                    PartitionKey::Global
+                } else {
+                    let mut key_values = Vec::with_capacity(call.partition_by_scalars.len());
+                    for scalar in &call.partition_by_scalars {
+                        key_values.push(scalar.eval_with_tuple(tuple).map_err(|e| {
+                            ProcessorError::ProcessingError(format!(
+                                "failed to evaluate stateful function partition key: {e}"
+                            ))
+                        })?);
+                    }
+                    PartitionKey::Values(key_values)
+                };
+
+                let should_apply = match call.when_scalar.as_ref() {
+                    Some(scalar) => match scalar.eval_with_tuple(tuple) {
+                        Ok(Value::Bool(v)) => v,
+                        Ok(Value::Null) => false,
+                        Ok(other) => {
+                            return Err(ProcessorError::ProcessingError(format!(
+                                "stateful function filter must be bool, got {other:?}"
+                            )));
+                        }
+                        Err(e) => {
+                            return Err(ProcessorError::ProcessingError(format!(
+                                "failed to evaluate stateful function filter: {e}"
+                            )));
+                        }
+                    },
+                    None => true,
+                };
+
+                if !should_apply {
+                    let held_output = call
+                        .states
+                        .get(&partition_key)
+                        .map(|state| state.last_output.clone())
+                        .unwrap_or(Value::Null);
+                    tuple.add_affiliate_column(Arc::clone(&call.output_column), held_output);
+                    continue;
+                }
+
                 let mut args = Vec::with_capacity(call.arg_scalars.len());
                 for scalar in &call.arg_scalars {
                     args.push(
@@ -124,10 +188,20 @@ impl StatefulFunctionProcessor {
                             .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?,
                     );
                 }
-                let out = call
+
+                let state =
+                    call.states
+                        .entry(partition_key)
+                        .or_insert_with(|| StatefulPartitionState {
+                            instance: call.function.create_instance(),
+                            last_output: Value::Null,
+                        });
+
+                let out = state
                     .instance
                     .eval(&args)
                     .map_err(ProcessorError::ProcessingError)?;
+                state.last_output = out.clone();
                 tuple.add_affiliate_column(Arc::clone(&call.output_column), out);
             }
         }

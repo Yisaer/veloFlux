@@ -2,17 +2,14 @@
 
 ## Background
 
-veloFlux currently supports:
+veloFlux supports three different function categories in stream SQL:
 
-- Pure scalar expressions evaluated per row (stateless).
-- Aggregate functions evaluated over windows/batches (stateful across rows within a grouping/window).
+- Pure scalar expressions evaluated per row.
+- Aggregate functions evaluated over windows or batches.
+- Stateful functions evaluated per row, but with internal state carried across rows.
 
-We also need to support **stateful functions** inside scalar expressions, where the output depends on:
-
-- The current input arguments.
-- The function's internal state, which evolves from:
-  - An initialization state, and then
-  - The state produced by the previous invocation.
+A stateful function consumes the current row together with its own historical state and returns a
+scalar value for the current row.
 
 Example:
 
@@ -20,193 +17,385 @@ Example:
 SELECT lag(a) FROM stream
 ```
 
-`lag(a)` returns the value of column `a` from the **previous** record in the stream.
+`lag(a)` returns the previous value of `a` in the stream.
 
-Stateful functions are similar to aggregate functions in that they require a registry and a dedicated
-execution stage, but they differ in that they are evaluated **per row** and must preserve ordering.
+Stateful functions are similar to aggregates in that they require a registry and a dedicated
+execution stage, but they differ in two important ways:
+
+- They are evaluated for every input row.
+- Their execution order must match expression dependency order.
+
+## Supported Syntax
+
+The current supported shape is:
+
+```sql
+stateful_fn(arg1, arg2, ...)
+    [FILTER (WHERE boolean_expr)]
+    [OVER (PARTITION BY expr1, expr2, ...)]
+```
+
+Examples:
+
+```sql
+SELECT lag(a) FROM stream
+```
+
+```sql
+SELECT lag(a) FILTER (WHERE flag = 1) FROM stream
+```
+
+```sql
+SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) FROM stream
+```
+
+## Restrictions
+
+For stateful functions, the current implementation supports only:
+
+- Positional expression arguments.
+- `FILTER (WHERE <expr>)`.
+- `OVER (PARTITION BY <expr> [, <expr> ...])`.
+
+The following are rejected:
+
+- `DISTINCT`.
+- Function-level `ORDER BY`.
+- `OVER ()` without `PARTITION BY`.
+- `OVER (ORDER BY ...)`.
+- Window frames inside `OVER`.
+- Named windows.
+- Aggregate functions, window functions, or unresolved nested stateful functions inside a single
+  stateful call's argument/filter/partition context.
+
+The last restriction is important: nested stateful dependencies are supported by first rewriting the
+inner stateful call to a placeholder, then letting the outer stateful call reference that
+placeholder.
+
+Example:
+
+```sql
+SELECT lag(a), lag(b) FILTER (WHERE lag(a)) FROM stream
+```
+
+is normalized by the parser into two ordered stateful calls:
+
+- `lag(a) -> col_1`
+- `lag(b) FILTER (WHERE col_1) -> col_2`
 
 ## Goals
 
-- Add a `stateful_registry` to `FlowInstance` for registering and resolving stateful functions.
-- During parsing, extract stateful function calls from expressions into `SelectStmt.stateful_mappings`
-  using the same placeholder strategy as aggregates (`col_$index`), and rewrite the SQL AST to
-  reference placeholders.
-- Add `LogicalPlan::StatefulFunction` and `PhysicalPlan::StatefulFunction` nodes.
-- Implement `StatefulFunctionProcessor` to evaluate stateful calls and attach outputs as derived
-  columns (affiliate columns).
+- Parse stateful functions into `SelectStmt.stateful_mappings` using parser placeholders such as
+  `col_1`.
+- Support stateful `FILTER (WHERE ...)` and `OVER (PARTITION BY ...)`.
+- Add dedicated logical and physical plan nodes for stateful evaluation.
+- Execute stateful functions before windowing, aggregation, and final projection.
+- Preserve deterministic evaluation order for dependent stateful calls.
 
-## Non-goals (Initial Scope)
+## Non-goals
 
 - Stateful functions in `HAVING`.
-- Persisting stateful function state across pipeline restarts.
-- Distributed/exactly-once semantics for stateful function state.
+- Persisting stateful state across pipeline restarts.
+- Distributed or exactly-once state management for stateful functions.
+- Additional `OVER` features beyond `PARTITION BY`.
 
 ## Key Design Decisions
 
-### 1) Placeholder strategy and collision avoidance
+### 1) Shared placeholder allocation
 
-Both aggregate and stateful rewrites use placeholder identifiers in the SQL AST such as `col_1`,
-`col_2`, etc. These placeholders must not collide across rewrite passes.
+Aggregate rewrite and stateful rewrite both use parser placeholders such as `col_1`, `col_2`, and
+share a single `ColPlaceholderAllocator`.
 
-We introduce a shared allocator in the parser module:
+This guarantees:
 
-- `ColPlaceholderAllocator` owns the monotonically increasing counter.
-- Aggregate rewrite and stateful rewrite both take `&mut ColPlaceholderAllocator`.
-- This guarantees `col_$index` uniqueness within a single parsed query.
+- No placeholder collision between rewrite passes.
+- Stable placeholder reuse when identical stateful calls are deduplicated.
 
-### 2) Deduplication of repeated stateful calls
+### 2) Ordered extraction, not planner-side sorting
 
-For repeated occurrences of the same stateful function call:
+The parser extracts stateful calls in post-order and stores them in execution order.
+
+`SelectStmt.stateful_mappings` is an ordered `Vec<StatefulMappingEntry>`, not a `HashMap`.
+
+Each entry contains:
+
+- `output_column`
+- `spec: StatefulCallSpec`
+
+`StatefulCallSpec` captures:
+
+- `func_name`
+- `args`
+- `when`
+- `partition_by`
+- `original_expr`
+
+Logical and physical planning preserve this parser order directly. No additional topological sort is
+performed in the planner.
+
+### 3) Deduplication is based on normalized stateful spec
+
+Repeated identical stateful calls share the same placeholder and are computed once.
+
+Example:
 
 ```sql
 SELECT lag(a), lag(a) FROM stream
 ```
 
-We want:
-
-- Only one mapping entry in `SelectStmt.stateful_mappings`.
-- Both occurrences rewritten to the same placeholder:
+is rewritten to:
 
 ```sql
 SELECT col_1, col_1 FROM stream
 ```
 
-This ensures the function is computed only once per row in the execution pipeline.
+with one mapping:
 
-### 3) Plan placement
+- `lag(a) -> col_1`
 
-Stateful functions must be evaluated in a deterministic order before windowing and aggregation.
+Deduplication uses a normalized key built from:
+
+- function name
+- rewritten argument list
+- rewritten filter expression
+- rewritten partition key list
+
+This means the following are different calls:
+
+- `lag(a)`
+- `lag(a) FILTER (WHERE col_1)`
+
+### 4) Plan placement
+
+Stateful functions run before windowing, aggregation, filtering, and projection.
+
 The plan topology is:
 
-1. `DataSource(s)`
-2. `StatefulFunction` (if any)
+1. `DataSource`
+2. `StatefulFunction`
 3. `Window` (if any)
 4. `Aggregation` (if any)
-5. `Filter` (WHERE, if any)
-6. `Project`
-7. `Sink/Tail`
+5. `Filter` (`HAVING` / `WHERE`, if any)
+6. `Order` (if any)
+7. `Project`
+8. `Sink/Tail`
 
-This satisfies:
+This guarantees that:
 
-- `WHERE` can reference stateful placeholders because stateful is upstream of filter.
-- Windowing sees the derived stateful columns if needed in later stages.
+- later expressions can reference stateful placeholders
+- windows and aggregations can consume derived stateful columns
+- stateful dependencies remain deterministic
 
-## Parser Changes
+## Parser
 
-### `SelectStmt` extension
+### Rewrite scope
 
-Add:
+The parser rewrites stateful functions in:
 
-- `stateful_mappings: HashMap<String, Expr>` where the key is `col_$index` and the value is the
-  original `sqlparser::ast::Expr::Function(...)`.
+- `SELECT` fields
+- `WHERE`
+- `ORDER BY`
 
-### Stateful rewrite pass
+The parser applies rewrites in this order:
 
-Add a transformer similar to `aggregate_transformer`:
+1. stateful rewrite
+2. aggregate rewrite
 
-- Input: `SelectStmt`, `Arc<dyn StatefulRegistry>`, `&mut ColPlaceholderAllocator`
-- Visit and rewrite only:
-  - `select_fields[*].expr`
-  - `where_condition` (if present)
-- For each `Expr::Function` that matches `StatefulRegistry::is_stateful_function(name)`:
-  - Compute a stable deduplication key (e.g. `expr.to_string()`).
-  - If seen before, replace with the existing placeholder.
-  - Otherwise allocate a new `col_$index`, record `stateful_mappings[col] = original_expr`,
-    and replace with `Expr::Identifier(col)`.
+This allows expressions such as a stateful call inside an aggregate argument to rewrite the inner
+stateful call first.
+
+### Rewrite behavior
+
+For each detected stateful function:
+
+1. Recursively rewrite child expressions first.
+2. Parse the current function into a `StatefulCallSpec`.
+3. Build a normalized dedup key from the rewritten spec.
+4. Reuse an existing placeholder if the same spec already exists.
+5. Otherwise allocate a new placeholder and append a new ordered mapping entry.
+
+Because the traversal is post-order, a dependent stateful call naturally sees earlier placeholders.
+
+Example:
+
+```sql
+SELECT lag(a), lag(b) FILTER (WHERE lag(a)) FROM stream
+```
+
+becomes:
+
+```sql
+SELECT col_1, col_2 FROM stream
+```
+
+with ordered mappings:
+
+- `lag(a) -> col_1`
+- `lag(b) FILTER (WHERE col_1) -> col_2`
+
+### `FILTER` and `OVER` parsing
+
+For a stateful function call:
+
+- `FILTER (WHERE expr)` is stored as `spec.when`.
+- `OVER (PARTITION BY expr1, expr2, ...)` is stored as `spec.partition_by`.
+
+Only `PARTITION BY` is supported inside `OVER`. The parser rejects `ORDER BY`, window frames, and
+named windows for stateful functions.
 
 ## Registries and Runtime APIs
 
 ### Parser-facing trait
 
-Parser only needs to know whether a function name is stateful:
+The parser only needs to know whether a function name is stateful:
 
-- `parser::stateful_registry::StatefulRegistry { fn is_stateful_function(&self, name: &str) -> bool }`
+- `parser::stateful_registry::StatefulRegistry`
 
 ### Flow runtime registry
 
-In `flow` we introduce a full registry capable of instantiating implementations:
+The flow runtime owns a full registry used to instantiate implementations:
 
 - `StatefulFunctionRegistry`
-  - `register_function(Arc<dyn StatefulFunction>)`
-  - `get(name) -> Option<Arc<dyn StatefulFunction>>`
-  - `is_registered(name) -> bool`
-
-And a stateful function contract:
-
 - `StatefulFunction`
-  - `name()`
-  - `return_type(input_types)`
-  - `create_instance() -> Box<dyn StatefulFunctionInstance>`
 - `StatefulFunctionInstance`
-  - `eval(&mut self, args: &[Value]) -> Result<Value, String>`
 
-The `FlowInstance` and `PipelineRegistries` carry `Arc<StatefulFunctionRegistry>`.
+`FlowInstance` and `PipelineRegistries` carry the shared stateful registry.
 
-## Planner Changes
+## Planner
 
 ### Logical plan
 
-Add:
+The logical planner inserts:
 
 - `LogicalPlan::StatefulFunction(StatefulFunctionPlan)`
-- `StatefulFunctionPlan { stateful_mappings, base }`
 
-Inserted after `DataSource` and before `Window`.
+`StatefulFunctionPlan` stores ordered `calls`, where each call contains:
 
-## Rewrite Order Note
+- `output_column`
+- `spec`
 
-The parser applies rewrites in this order:
+The planner does not reorder these calls. It preserves parser output order so later calls can depend
+on placeholders produced by earlier calls.
 
-1. Stateful rewrite (so nested calls like `last_row(lag(a))` get their `lag(a)` replaced first)
-2. Aggregate rewrite
+Column pruning must collect dependencies from:
 
-Both rewrites share the same `ColPlaceholderAllocator` to ensure `col_$index` does not collide.
+- stateful arguments
+- `FILTER (WHERE ...)`
+- `OVER (PARTITION BY ...)`
+
+Example:
+
+```sql
+SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) AS v1 FROM stream
+```
+
+requires the datasource schema:
+
+- `[a, flag, k1, k2]`
 
 ### Physical plan
 
-Add:
+The physical planner inserts:
 
-- `PhysicalPlan::StatefulFunction(PhysicalStatefulFunctionPlan)`
-- `PhysicalStatefulFunctionPlan` contains a list of compiled calls:
-  - `output_column: String` (e.g. `col_3`)
-  - `func_name: String` (lowercased)
-  - `arg_scalars: Vec<ScalarExpr>`
+- `PhysicalPlan::StatefulFunction(PhysicalStatefulFunction)`
 
-Physical plan builder:
+Each compiled call contains:
 
-- Compiles each `Expr::Function` arguments into `ScalarExpr` with schema bindings.
-- Resolves each function implementation from the `StatefulFunctionRegistry`.
+- `output_column`
+- `func_name`
+- `arg_scalars`
+- `when_scalar`
+- `partition_by_scalars`
 
-## Processor Changes
+### Explain output
 
-### `StatefulFunctionProcessor`
+Logical and physical explain output render the normalized stateful spec instead of the raw original
+expression.
 
-Add a processor similar to `FilterProcessor` / `AggregationProcessor`:
+Example:
 
-- It receives upstream `Collection` batches.
-- For each row, it evaluates each unique `StatefulCall` once.
-- Outputs are written to the tuple affiliate with key `col_$index` (no prefix), consistent with
-  aggregate placeholders and existing derived-column semantics.
-- Instances are stored in the processor so state persists across incoming batches.
+```sql
+SELECT lag(a), lag(b) FILTER (WHERE lag(a)) FROM stream
+```
 
-### Example: `lag(x)`
+is shown as:
 
-Semantics:
+```text
+calls=[lag(a) -> col_1; lag(b) FILTER (WHERE col_1) -> col_2]
+```
 
-- First row: output `NULL`
-- Row N: output the value observed at row N-1
+This makes stateful dependencies explicit in `EXPLAIN`.
 
-The instance holds a single `Value` as previous value and updates it each row.
+## Processor
 
-## Validation
+### Execution model
 
-Add focused tests that assert:
+`StatefulFunctionProcessor` evaluates ordered stateful calls row by row and writes results into
+affiliate columns using the parser placeholders.
 
-- Parser rewrite:
-  - Extracts stateful calls from SELECT and WHERE.
-  - Deduplicates repeated calls.
-  - Does not collide placeholders with aggregates.
-- Planner topology:
-  - `StatefulFunction` is inserted between `DataSource` and `Window`.
-- End-to-end evaluation:
-  - `SELECT lag(a) FROM stream` yields `[NULL, a1, a2, ...]` for an input sequence.
+For each stateful call, the processor maintains:
+
+- one stateful function instance per partition
+- the last output value per partition
+
+If `OVER (PARTITION BY ...)` is absent, all rows share a single implicit partition.
+
+If `OVER (PARTITION BY ...)` is present, the processor evaluates the partition expressions on every
+row and isolates state by partition key.
+
+### `FILTER (WHERE ...)` semantics
+
+For each row and for each stateful call:
+
+1. Evaluate the partition key.
+2. Evaluate `when_scalar` if present.
+3. If the condition is `true`, evaluate the function and advance the partition state.
+4. If the condition is `false`, do not advance state and return the partition's previous output.
+5. If the condition is `NULL`, treat it as `false`.
+
+This is intentionally not the same as returning `NULL` for filtered-out rows.
+
+Example:
+
+```sql
+SELECT a + lag(b) FILTER (WHERE flag = 1) AS v FROM stream
+```
+
+When `flag = 0`:
+
+- `lag(b)` does not consume the current row
+- the state is not advanced
+- the expression uses the previously held `lag(b)` output for that partition
+
+If no previous output exists for that partition, the result of the stateful call is `NULL`.
+
+## Validation Examples
+
+### Basic stateful call
+
+```sql
+SELECT lag(a) FROM stream
+```
+
+### Dependency through filter placeholder
+
+```sql
+SELECT lag(a), lag(b) FILTER (WHERE lag(a)) FROM stream
+```
+
+Normalized ordered calls:
+
+- `lag(a) -> col_1`
+- `lag(b) FILTER (WHERE col_1) -> col_2`
+
+### Filter plus partitioning
+
+```sql
+SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) AS v1 FROM stream
+```
+
+Expected planner behavior:
+
+- stateful call is compiled into one `StatefulFunction` node
+- source column pruning keeps only `a`, `flag`, `k1`, and `k2`
+- state is isolated per `(k1, k2)` partition
