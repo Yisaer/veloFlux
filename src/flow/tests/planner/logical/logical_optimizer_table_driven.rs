@@ -449,7 +449,7 @@ fn create_logical_plan_stateful_table_driven() {
         Case {
             name: "test_create_logical_plan_with_nested_stateful_filter_dependency",
             sql: "SELECT lag(a), lag(b) FILTER (WHERE lag(a)) FROM stream",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(b) FILTER (WHERE lag(a)) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(b) FILTER (WHERE lag(a))]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(b) FILTER (WHERE col_1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(b) FILTER (WHERE lag(a))]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_stateful_filter_over_partition",
@@ -457,9 +457,14 @@ fn create_logical_plan_stateful_table_driven() {
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2)]"],"operator":"Project"}"##,
         },
         Case {
+            name: "test_create_logical_plan_with_stateful_filter_over_partition_alias",
+            sql: "SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) as v1 FROM stream",
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as v1]"],"operator":"Project"}"##,
+        },
+        Case {
             name: "test_create_logical_plan_with_dedup_and_dependent_filter",
             sql: "SELECT lag(a), lag(a) FILTER (WHERE lag(a)) FROM stream",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE lag(a)) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE col_1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"Project"}"##,
         },
     ];
 

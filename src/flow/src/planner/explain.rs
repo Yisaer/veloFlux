@@ -3,6 +3,7 @@ use crate::planner::decode_projection::{DecodeProjection, ListIndexSelection, Pr
 use crate::planner::logical::{DataSinkPlan, LogicalWindowSpec};
 use crate::planner::physical::{WatermarkConfig, WatermarkStrategy};
 use datatypes::{ConcreteDatatype, ListType, Schema, StructField, StructType};
+use parser::StatefulCallSpec;
 use serde::Serialize;
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
@@ -248,7 +249,13 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             let mappings = stateful
                 .calls
                 .iter()
-                .map(|call| format!("{} -> {}", call.spec.original_expr, call.output_column))
+                .map(|call| {
+                    format!(
+                        "{} -> {}",
+                        format_stateful_call_spec(&call.spec),
+                        call.output_column
+                    )
+                })
                 .collect::<Vec<_>>();
             info.push(format!("calls=[{}]", mappings.join("; ")));
         }
@@ -609,6 +616,32 @@ fn format_project_field(expr: &Expr, field_name: &str) -> String {
         // rewrites (e.g., `sum(a)` -> `col_1`) while still keeping user-facing names.
         format!("{expr_str} as {field_name}")
     }
+}
+
+fn format_stateful_call_spec(spec: &StatefulCallSpec) -> String {
+    let args = spec
+        .args
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut rendered = format!("{}({})", spec.func_name, args);
+
+    if let Some(when) = &spec.when {
+        rendered.push_str(&format!(" FILTER (WHERE {})", when));
+    }
+
+    if !spec.partition_by.is_empty() {
+        let partition_by = spec
+            .partition_by
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        rendered.push_str(&format!(" OVER (PARTITION BY {})", partition_by));
+    }
+
+    rendered
 }
 
 fn build_physical_node(plan: &Arc<PhysicalPlan>) -> ExplainNode {
