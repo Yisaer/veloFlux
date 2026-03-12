@@ -263,19 +263,7 @@ fn bindings_for_select(
 }
 
 fn optimized_logical_json(sql: &str) -> String {
-    let stream_defs = setup_streams();
-    let select_stmt = parse_sql(sql).expect("parse sql");
-    let bindings = bindings_for_select(&select_stmt, &stream_defs);
-    let logical_plan = create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical");
-    let (optimized, _pruned) = flow::optimize_logical_plan(logical_plan, &bindings);
-    let explain = ExplainReport::from_logical(optimized);
-    println!("{}", sql);
-    println!("{}", explain.table_string());
-    explain.to_json().to_string()
-}
-
-fn logical_plan_json(sql: &str) -> String {
-    logical_plan_json_with_registries(
+    optimized_logical_json_with_registries(
         sql,
         Arc::new(StaticAggregateRegistry::new(["sum", "count", "last_row", "ndv"])),
         Arc::new(StaticStatefulRegistry::new(["lag"])),
@@ -283,8 +271,8 @@ fn logical_plan_json(sql: &str) -> String {
     )
 }
 
-fn logical_plan_json_with_sinks(sql: &str, sinks: Vec<PipelineSink>) -> String {
-    logical_plan_json_with_registries(
+fn optimized_logical_json_with_sinks(sql: &str, sinks: Vec<PipelineSink>) -> String {
+    optimized_logical_json_with_registries(
         sql,
         Arc::new(StaticAggregateRegistry::new(["sum", "count", "last_row", "ndv"])),
         Arc::new(StaticStatefulRegistry::new(["lag"])),
@@ -292,7 +280,7 @@ fn logical_plan_json_with_sinks(sql: &str, sinks: Vec<PipelineSink>) -> String {
     )
 }
 
-fn logical_plan_json_with_registries(
+fn optimized_logical_json_with_registries(
     sql: &str,
     aggregate_registry: Arc<StaticAggregateRegistry>,
     stateful_registry: Arc<StaticStatefulRegistry>,
@@ -301,8 +289,10 @@ fn logical_plan_json_with_registries(
     let stream_defs = setup_streams();
     let select_stmt = parse_sql_with_registries(sql, aggregate_registry, stateful_registry)
         .expect("parse sql");
+    let bindings = bindings_for_select(&select_stmt, &stream_defs);
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs).expect("logical");
-    let explain = ExplainReport::from_logical(logical_plan);
+    let (optimized, _pruned) = flow::optimize_logical_plan(logical_plan, &bindings);
+    let explain = ExplainReport::from_logical(optimized);
     println!("{}", sql);
     println!("{}", explain.table_string());
     explain.to_json().to_string()
@@ -376,27 +366,27 @@ fn create_logical_plan_table_driven() {
         Case {
             name: "test_create_logical_plan_simple",
             sql: "SELECT a, b FROM users",
-            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_order_by_single_key",
             sql: "SELECT a FROM users ORDER BY b",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Order_1","info":["keys=[b ASC]"],"operator":"Order"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Order_1","info":["keys=[b ASC]"],"operator":"Order"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_filter_then_order_by_multi_key",
             sql: "SELECT a FROM users WHERE a > 10 ORDER BY b DESC, c",
-            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Order_2","info":["keys=[b DESC; c ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Order_2","info":["keys=[b DESC; c ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_order_by_stateful_key",
             sql: "SELECT a FROM users ORDER BY lag(a)",
-            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Order_2","info":["keys=[col_1 ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Order_2","info":["keys=[col_1 ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_filter",
             sql: "SELECT a, b FROM users WHERE a > 10",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a; b]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a; b]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_state_window",
@@ -417,17 +407,17 @@ fn create_logical_plan_table_driven() {
         Case {
             name: "test_create_logical_plan_with_alias",
             sql: "SELECT a, b FROM users AS u WHERE a > 10",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","alias=u","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a; b]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","alias=u","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a; b]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_func_field",
             sql: "SELECT a, concat(b), c AS custom_name FROM users",
-            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; concat(b); c as custom_name]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; concat(b); c as custom_name]"],"operator":"Project"}"##,
         },
     ];
 
     for case in cases {
-        let got = logical_plan_json(case.sql);
+        let got = optimized_logical_json(case.sql);
         assert_eq!(got, case.expected, "case={}", case.name);
     }
 }
@@ -444,32 +434,32 @@ fn create_logical_plan_stateful_table_driven() {
         Case {
             name: "test_create_logical_plan_with_stateful_projection",
             sql: "SELECT lag(a) FROM stream",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a)]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a)]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_nested_stateful_filter_dependency",
             sql: "SELECT lag(a), lag(b) FILTER (WHERE lag(a)) FROM stream",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(b) FILTER (WHERE col_1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(b) FILTER (WHERE lag(a))]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(b) FILTER (WHERE col_1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(b) FILTER (WHERE lag(a))]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_stateful_filter_over_partition",
             sql: "SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) FROM stream",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2)]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2)]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_stateful_filter_over_partition_alias",
             sql: "SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) as v1 FROM stream",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as v1]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as v1]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_dedup_and_dependent_filter",
             sql: "SELECT lag(a), lag(a) FILTER (WHERE lag(a)) FROM stream",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE col_1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE col_1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"Project"}"##,
         },
     ];
 
     for case in cases {
-        let got = logical_plan_json(case.sql);
+        let got = optimized_logical_json(case.sql);
         assert_eq!(got, case.expected, "case={}", case.name);
     }
 }
@@ -488,7 +478,7 @@ fn create_logical_plan_with_sinks_table_driven() {
             name: "test_create_logical_plan_with_single_sink",
             sql: "SELECT a, b FROM users",
             sinks: vec![build_nop_json_sink("test_sink", "test_conn")],
-            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"}"##,
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_multiple_sinks",
@@ -497,7 +487,7 @@ fn create_logical_plan_with_sinks_table_driven() {
                 build_nop_json_sink("sink1", "conn1"),
                 build_nop_json_sink("sink2", "conn2"),
             ],
-            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=sink1","connector=nop","encoder=json"],"operator":"DataSink"},{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_3","info":["sink_id=sink2","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_4","info":["sink_count=2"],"operator":"Tail"}"##,
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=sink1","connector=nop","encoder=json"],"operator":"DataSink"},{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_3","info":["sink_id=sink2","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_4","info":["sink_count=2"],"operator":"Tail"}"##,
         },
         Case {
             name: "select_star_with_kuksa_sink",
@@ -518,7 +508,7 @@ fn create_logical_plan_with_sinks_table_driven() {
     ];
 
     for case in cases {
-        let got = logical_plan_json_with_sinks(case.sql, case.sinks);
+        let got = optimized_logical_json_with_sinks(case.sql, case.sinks);
         assert_eq!(got, case.expected, "case={}", case.name);
     }
 }

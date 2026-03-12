@@ -3,7 +3,7 @@ use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry};
 use crate::planner::decode_projection::{DecodeProjection, FieldPath, FieldPathSegment, ListIndex};
 use crate::planner::logical::{LogicalPlan, TailPlan};
 use datatypes::Schema;
-use sqlparser::ast::{Expr as SqlExpr, FunctionArg, FunctionArgExpr, Ident, ObjectName};
+use sqlparser::ast::{Expr as SqlExpr, FunctionArg, FunctionArgExpr, Ident, ObjectName, WindowType};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -200,6 +200,7 @@ fn max_existing_cse_temp_id_in_plan(plan: &LogicalPlan) -> u64 {
                         _ => {}
                     }
                 }
+                visit_function_context_exprs(func, |expr| visit_expr(expr, max_id));
             }
             SqlExpr::JsonAccess { left, right, .. } => {
                 visit_expr(left, max_id);
@@ -265,6 +266,25 @@ fn max_existing_cse_temp_id_in_plan(plan: &LogicalPlan) -> u64 {
     let mut max_id = 0u64;
     visit_plan(plan, &mut max_id);
     max_id
+}
+
+fn visit_function_context_exprs(func: &sqlparser::ast::Function, mut visit: impl FnMut(&SqlExpr)) {
+    if let Some(filter) = func.filter.as_deref() {
+        visit(filter);
+    }
+
+    if let Some(WindowType::WindowSpec(spec)) = func.over.as_ref() {
+        for expr in &spec.partition_by {
+            visit(expr);
+        }
+        for item in &spec.order_by {
+            visit(&item.expr);
+        }
+    }
+
+    for item in &func.order_by {
+        visit(&item.expr);
+    }
 }
 
 fn apply_cse_with_cache(
@@ -1240,6 +1260,7 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                 for arg in &func.args {
                     self.collect_function_arg(arg);
                 }
+                visit_function_context_exprs(func, |expr| self.collect_expr_ast(expr));
             }
             SqlExpr::BinaryOp { left, right, .. } => {
                 self.collect_expr_ast(left);
@@ -1613,6 +1634,7 @@ impl<'a> StructFieldUsageCollector<'a> {
                 for arg in &func.args {
                     self.collect_function_arg(arg);
                 }
+                visit_function_context_exprs(func, |expr| self.collect_expr_ast(expr));
             }
             SqlExpr::BinaryOp { left, right, .. } => {
                 self.collect_expr_ast(left);
@@ -1888,6 +1910,7 @@ impl<'a> ListElementUsageCollector<'a> {
                 for arg in &func.args {
                     self.collect_function_arg(arg);
                 }
+                visit_function_context_exprs(func, |expr| self.collect_expr_ast(expr));
             }
             SqlExpr::BinaryOp { left, right, .. } => {
                 self.collect_expr_ast(left);
