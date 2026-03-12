@@ -1,7 +1,7 @@
 use crate::aggregate_registry::AggregateRegistry;
 use crate::col_placeholder_allocator::ColPlaceholderAllocator;
 use crate::select_stmt::SelectStmt;
-use crate::stateful_call::StatefulCallSpec;
+use crate::stateful_call::{StatefulCallSpec, StatefulMappingEntry};
 use crate::stateful_registry::StatefulRegistry;
 use crate::stateful_validation::validate_stateful_context_expr;
 use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Ident, WindowSpec, WindowType};
@@ -15,6 +15,7 @@ pub fn transform_stateful_functions(
     allocator: &mut ColPlaceholderAllocator,
 ) -> Result<(SelectStmt, HashMap<String, StatefulCallSpec>), String> {
     let mut mappings: HashMap<String, StatefulCallSpec> = HashMap::new();
+    let mut ordered_columns = Vec::new();
     let mut seen: HashMap<String, String> = HashMap::new();
 
     for field in &mut select_stmt.select_fields {
@@ -25,6 +26,7 @@ pub fn transform_stateful_functions(
             allocator,
             &mut seen,
             &mut mappings,
+            &mut ordered_columns,
         )?;
     }
 
@@ -36,6 +38,7 @@ pub fn transform_stateful_functions(
             allocator,
             &mut seen,
             &mut mappings,
+            &mut ordered_columns,
         )?;
     }
 
@@ -47,10 +50,22 @@ pub fn transform_stateful_functions(
             allocator,
             &mut seen,
             &mut mappings,
+            &mut ordered_columns,
         )?;
     }
 
-    select_stmt.stateful_mappings = mappings.clone();
+    select_stmt.stateful_mappings = ordered_columns
+        .iter()
+        .map(|output_column| {
+            let spec = mappings
+                .get(output_column)
+                .expect("ordered stateful mapping must exist");
+            StatefulMappingEntry {
+                output_column: output_column.clone(),
+                spec: spec.clone(),
+            }
+        })
+        .collect();
     Ok((select_stmt, mappings))
 }
 
@@ -61,6 +76,7 @@ fn rewrite_expr_stateful(
     allocator: &mut ColPlaceholderAllocator,
     seen: &mut HashMap<String, String>,
     mappings: &mut HashMap<String, StatefulCallSpec>,
+    ordered_columns: &mut Vec<String>,
 ) -> Result<Expr, String> {
     match expr {
         Expr::BinaryOp { left, op, right } => Ok(Expr::BinaryOp {
@@ -71,6 +87,7 @@ fn rewrite_expr_stateful(
                 allocator,
                 seen,
                 mappings,
+                ordered_columns,
             )?),
             op: op.clone(),
             right: Box::new(rewrite_expr_stateful(
@@ -80,6 +97,7 @@ fn rewrite_expr_stateful(
                 allocator,
                 seen,
                 mappings,
+                ordered_columns,
             )?),
         }),
         Expr::UnaryOp { op, expr } => Ok(Expr::UnaryOp {
@@ -91,6 +109,7 @@ fn rewrite_expr_stateful(
                 allocator,
                 seen,
                 mappings,
+                ordered_columns,
             )?),
         }),
         Expr::Nested(inner) => Ok(Expr::Nested(Box::new(rewrite_expr_stateful(
@@ -100,6 +119,7 @@ fn rewrite_expr_stateful(
             allocator,
             seen,
             mappings,
+            ordered_columns,
         )?))),
         Expr::Between {
             expr,
@@ -114,6 +134,7 @@ fn rewrite_expr_stateful(
                 allocator,
                 seen,
                 mappings,
+                ordered_columns,
             )?),
             negated: *negated,
             low: Box::new(rewrite_expr_stateful(
@@ -123,6 +144,7 @@ fn rewrite_expr_stateful(
                 allocator,
                 seen,
                 mappings,
+                ordered_columns,
             )?),
             high: Box::new(rewrite_expr_stateful(
                 high,
@@ -131,6 +153,7 @@ fn rewrite_expr_stateful(
                 allocator,
                 seen,
                 mappings,
+                ordered_columns,
             )?),
         }),
         Expr::InList {
@@ -145,6 +168,7 @@ fn rewrite_expr_stateful(
                 allocator,
                 seen,
                 mappings,
+                ordered_columns,
             )?;
             let rewritten_list = list
                 .iter()
@@ -156,6 +180,7 @@ fn rewrite_expr_stateful(
                         allocator,
                         seen,
                         mappings,
+                        ordered_columns,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -179,6 +204,7 @@ fn rewrite_expr_stateful(
                     allocator,
                     seen,
                     mappings,
+                    ordered_columns,
                 )?)),
                 None => None,
             };
@@ -193,6 +219,7 @@ fn rewrite_expr_stateful(
                         allocator,
                         seen,
                         mappings,
+                        ordered_columns,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -207,6 +234,7 @@ fn rewrite_expr_stateful(
                         allocator,
                         seen,
                         mappings,
+                        ordered_columns,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -219,6 +247,7 @@ fn rewrite_expr_stateful(
                     allocator,
                     seen,
                     mappings,
+                    ordered_columns,
                 )?)),
                 None => None,
             };
@@ -238,6 +267,7 @@ fn rewrite_expr_stateful(
                 allocator,
                 seen,
                 mappings,
+                ordered_columns,
             )?;
             let func_name = func
                 .name
@@ -261,6 +291,7 @@ fn rewrite_expr_stateful(
                 let col = allocator.allocate();
                 seen.insert(key, col.clone());
                 mappings.insert(col.clone(), call_spec);
+                ordered_columns.push(col.clone());
                 return Ok(Expr::Identifier(Ident::new(col)));
             }
 
@@ -277,6 +308,7 @@ fn rewrite_function_stateful_context(
     allocator: &mut ColPlaceholderAllocator,
     seen: &mut HashMap<String, String>,
     mappings: &mut HashMap<String, StatefulCallSpec>,
+    ordered_columns: &mut Vec<String>,
 ) -> Result<Function, String> {
     let mut new_args = Vec::with_capacity(func.args.len());
     for arg in &func.args {
@@ -289,6 +321,7 @@ fn rewrite_function_stateful_context(
                     allocator,
                     seen,
                     mappings,
+                    ordered_columns,
                 )?;
                 new_args.push(FunctionArg::Unnamed(FunctionArgExpr::Expr(rewritten)));
             }
@@ -302,6 +335,7 @@ fn rewrite_function_stateful_context(
                             allocator,
                             seen,
                             mappings,
+                            ordered_columns,
                         )?)
                     }
                     _ => arg.clone(),
@@ -323,6 +357,7 @@ fn rewrite_function_stateful_context(
             allocator,
             seen,
             mappings,
+            ordered_columns,
         )?)),
         None => None,
     };
@@ -340,6 +375,7 @@ fn rewrite_function_stateful_context(
                         allocator,
                         seen,
                         mappings,
+                        ordered_columns,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?,
@@ -355,6 +391,7 @@ fn rewrite_function_stateful_context(
                         allocator,
                         seen,
                         mappings,
+                        ordered_columns,
                     )?;
                     Ok(rewritten)
                 })
@@ -377,6 +414,7 @@ fn rewrite_function_stateful_context(
                 allocator,
                 seen,
                 mappings,
+                ordered_columns,
             )?;
             Ok(rewritten)
         })

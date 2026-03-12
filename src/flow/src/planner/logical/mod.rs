@@ -25,7 +25,7 @@ pub use filter::Filter;
 pub use order::{Order, OrderItem};
 pub use project::Project;
 pub use sink::DataSinkPlan;
-pub use stateful_function::StatefulFunctionPlan;
+pub use stateful_function::{LogicalStatefulCall, StatefulFunctionPlan};
 pub use tail::TailPlan;
 pub use window::{LogicalWindow, LogicalWindowSpec, TimeUnit};
 
@@ -197,7 +197,14 @@ pub fn create_logical_plan(
     // 2. Create StatefulFunctionPlan if stateful mappings exist
     if !select_stmt.stateful_mappings.is_empty() {
         let stateful = stateful_function::StatefulFunctionPlan::new(
-            select_stmt.stateful_mappings.clone(),
+            select_stmt
+                .stateful_mappings
+                .iter()
+                .map(|entry| stateful_function::LogicalStatefulCall {
+                    output_column: entry.output_column.clone(),
+                    spec: entry.spec.clone(),
+                })
+                .collect(),
             current_plans,
             current_index,
         );
@@ -1232,12 +1239,14 @@ fn validate_order_by_constraints(select_stmt: &SelectStmt) -> Result<(), String>
 
 fn expr_references_any_stateful_placeholder(
     expr: &sqlparser::ast::Expr,
-    stateful_mappings: &std::collections::HashMap<String, parser::StatefulCallSpec>,
+    stateful_mappings: &[parser::StatefulMappingEntry],
 ) -> bool {
     use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr};
 
     match expr {
-        Expr::Identifier(ident) => stateful_mappings.contains_key(ident.value.as_str()),
+        Expr::Identifier(ident) => stateful_mappings
+            .iter()
+            .any(|entry| entry.output_column == ident.value),
         Expr::CompoundIdentifier(_) => false,
         Expr::BinaryOp { left, right, .. } => {
             expr_references_any_stateful_placeholder(left, stateful_mappings)

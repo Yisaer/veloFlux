@@ -35,7 +35,9 @@ fn select_stmt_to_json(select_stmt: parser::SelectStmt) -> Value {
     let mut stateful_mappings: Vec<_> = select_stmt
         .stateful_mappings
         .iter()
-        .map(|(col, call)| {
+        .map(|entry| {
+            let col = &entry.output_column;
+            let call = &entry.spec;
             json!({
                 "col": col,
                 "expr": call.original_expr.to_string(),

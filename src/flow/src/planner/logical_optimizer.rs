@@ -229,8 +229,8 @@ fn max_existing_cse_temp_id_in_plan(plan: &LogicalPlan) -> u64 {
             }
             LogicalPlan::Filter(filter) => visit_expr(&filter.predicate, max_id),
             LogicalPlan::StatefulFunction(stateful) => {
-                for call in stateful.stateful_mappings.values() {
-                    visit_expr(&call.original_expr, max_id);
+                for call in &stateful.calls {
+                    visit_expr(&call.spec.original_expr, max_id);
                 }
             }
             LogicalPlan::Aggregation(agg) => {
@@ -1189,8 +1189,8 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                 }
             }
             LogicalPlan::StatefulFunction(stateful) => {
-                for call in stateful.stateful_mappings.values() {
-                    self.collect_expr_ast(&call.original_expr);
+                for call in &stateful.calls {
+                    self.collect_expr_ast(&call.spec.original_expr);
                 }
             }
             LogicalPlan::Filter(filter) => self.collect_expr_ast(&filter.predicate),
@@ -1570,8 +1570,8 @@ impl<'a> StructFieldUsageCollector<'a> {
                 }
             }
             LogicalPlan::StatefulFunction(stateful) => {
-                for call in stateful.stateful_mappings.values() {
-                    self.collect_expr_ast(&call.original_expr);
+                for call in &stateful.calls {
+                    self.collect_expr_ast(&call.spec.original_expr);
                 }
             }
             LogicalPlan::Filter(filter) => self.collect_expr_ast(&filter.predicate),
@@ -1845,8 +1845,8 @@ impl<'a> ListElementUsageCollector<'a> {
                 }
             }
             LogicalPlan::StatefulFunction(stateful) => {
-                for call in stateful.stateful_mappings.values() {
-                    self.collect_expr_ast(&call.original_expr);
+                for call in &stateful.calls {
+                    self.collect_expr_ast(&call.spec.original_expr);
                 }
             }
             LogicalPlan::Filter(filter) => self.collect_expr_ast(&filter.predicate),

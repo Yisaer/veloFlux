@@ -1,7 +1,7 @@
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 
-use crate::stateful_call::StatefulCallSpec;
+use crate::stateful_call::StatefulMappingEntry;
 use crate::window::Window;
 
 /// Represents an ORDER BY item.
@@ -39,8 +39,8 @@ pub struct SelectStmt {
     pub window: Option<Window>,
     /// Aggregate function mappings: column name -> original aggregate expression
     pub aggregate_mappings: HashMap<String, Expr>,
-    /// Stateful function mappings: column name -> extracted stateful call spec
-    pub stateful_mappings: HashMap<String, StatefulCallSpec>,
+    /// Stateful function mappings in parser rewrite order
+    pub stateful_mappings: Vec<StatefulMappingEntry>,
     /// Information about the data sources (tables) accessed
     pub source_infos: Vec<SourceInfo>,
 }
@@ -67,7 +67,7 @@ impl SelectStmt {
             group_by_exprs: Vec::new(),
             window: None,
             aggregate_mappings: HashMap::new(),
-            stateful_mappings: HashMap::new(),
+            stateful_mappings: Vec::new(),
             source_infos: Vec::new(),
         }
     }
@@ -82,7 +82,7 @@ impl SelectStmt {
             group_by_exprs: Vec::new(),
             window: None,
             aggregate_mappings: HashMap::new(),
-            stateful_mappings: HashMap::new(),
+            stateful_mappings: Vec::new(),
             source_infos: Vec::new(),
         }
     }
@@ -101,7 +101,7 @@ impl SelectStmt {
             group_by_exprs: Vec::new(),
             window: None,
             aggregate_mappings: HashMap::new(),
-            stateful_mappings: HashMap::new(),
+            stateful_mappings: Vec::new(),
             source_infos: Vec::new(),
         }
     }

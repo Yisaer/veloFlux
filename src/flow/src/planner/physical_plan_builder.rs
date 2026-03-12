@@ -296,11 +296,10 @@ fn create_physical_stateful_function_with_builder(
         physical_children.push(physical_child);
     }
 
-    let mut entries: Vec<_> = logical_stateful.stateful_mappings.iter().collect();
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
-
-    let mut calls = Vec::with_capacity(entries.len());
-    for (output_column, spec) in entries {
+    let mut calls = Vec::with_capacity(logical_stateful.calls.len());
+    for entry in &logical_stateful.calls {
+        let output_column = &entry.output_column;
+        let spec = &entry.spec;
         let func_name = spec.func_name.clone();
         registries
             .stateful_registry()

@@ -212,12 +212,15 @@ fn build_logical_plan_node(
             Arc::new(LogicalPlan::DataSource(datasource))
         }
         LogicalPlanNodeKindIR::StatefulFunction { calls } => {
-            let stateful_mappings = calls
+            let logical_calls = calls
                 .iter()
-                .map(|call| (call.output_name.clone(), call.call.clone()))
+                .map(|call| crate::planner::logical::LogicalStatefulCall {
+                    output_column: call.output_name.clone(),
+                    spec: call.call.clone(),
+                })
                 .collect();
             let plan = crate::planner::logical::StatefulFunctionPlan::new(
-                stateful_mappings,
+                logical_calls,
                 children,
                 node.index,
             );
@@ -549,11 +552,11 @@ fn build_logical_ir(
         },
         LogicalPlan::StatefulFunction(plan) => {
             let calls = plan
-                .stateful_mappings
+                .calls
                 .iter()
-                .map(|(name, call)| StatefulExprIR {
-                    output_name: name.clone(),
-                    call: call.clone(),
+                .map(|call| StatefulExprIR {
+                    output_name: call.output_column.clone(),
+                    call: call.spec.clone(),
                 })
                 .collect();
             LogicalPlanNodeKindIR::StatefulFunction { calls }

@@ -35,3 +35,9 @@ impl StatefulCallSpec {
         )
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatefulMappingEntry {
+    pub output_column: String,
+    pub spec: StatefulCallSpec,
+}

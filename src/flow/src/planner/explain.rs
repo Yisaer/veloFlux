@@ -245,12 +245,11 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             }
         }
         LogicalPlan::StatefulFunction(stateful) => {
-            let mut mappings = stateful
-                .stateful_mappings
+            let mappings = stateful
+                .calls
                 .iter()
-                .map(|(out, call)| format!("{} -> {}", call.original_expr, out))
+                .map(|call| format!("{} -> {}", call.spec.original_expr, call.output_column))
                 .collect::<Vec<_>>();
-            mappings.sort();
             info.push(format!("calls=[{}]", mappings.join("; ")));
         }
         LogicalPlan::Filter(filter) => {

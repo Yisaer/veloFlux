@@ -10,7 +10,9 @@ use flow::{
     ExplainReport, MqttStreamProps, NopSinkConfig, PipelineSink, PipelineSinkConnector,
     SinkConnectorConfig, SinkEncoderConfig, StreamDecoderConfig, StreamDefinition, StreamProps,
 };
-use parser::parse_sql;
+use parser::{
+    StaticAggregateRegistry, StaticStatefulRegistry, parse_sql, parse_sql_with_registries,
+};
 use serde_json::json;
 use serde_json::Map as JsonMap;
 use std::collections::HashMap;
@@ -141,14 +143,60 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamDecoderConfig::json(),
     );
 
-    let stream_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
-        "stream".to_string(),
-        "a".to_string(),
-        ConcreteDatatype::Int64(Int64Type),
-    )]));
+    let stream_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "stream".to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream".to_string(),
+            "b".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream".to_string(),
+            "flag".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream".to_string(),
+            "k1".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream".to_string(),
+            "k2".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
     let stream_def = StreamDefinition::new(
         "stream",
         Arc::clone(&stream_schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    );
+
+    let demo_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "demo".to_string(),
+            "Status".to_string(),
+            ConcreteDatatype::String(StringType),
+        ),
+        ColumnSchema::new(
+            "demo".to_string(),
+            "ts".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "demo".to_string(),
+            "statusCode".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+    let demo_def = StreamDefinition::new(
+        "demo",
+        Arc::clone(&demo_schema),
         StreamProps::Mqtt(MqttStreamProps::default()),
         StreamDecoderConfig::json(),
     );
@@ -179,6 +227,7 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs.insert("stream_struct".to_string(), Arc::new(stream_struct_def));
     stream_defs.insert("stream_3".to_string(), Arc::new(stream_3_def));
     stream_defs.insert("stream".to_string(), Arc::new(stream_def));
+    stream_defs.insert("demo".to_string(), Arc::new(demo_def));
     stream_defs.insert("memory_collect".to_string(), Arc::new(memory_collect_def));
     stream_defs
 }
@@ -226,12 +275,32 @@ fn optimized_logical_json(sql: &str) -> String {
 }
 
 fn logical_plan_json(sql: &str) -> String {
-    logical_plan_json_with_sinks(sql, vec![])
+    logical_plan_json_with_registries(
+        sql,
+        Arc::new(StaticAggregateRegistry::new(["sum", "count", "last_row", "ndv"])),
+        Arc::new(StaticStatefulRegistry::new(["lag"])),
+        vec![],
+    )
 }
 
 fn logical_plan_json_with_sinks(sql: &str, sinks: Vec<PipelineSink>) -> String {
+    logical_plan_json_with_registries(
+        sql,
+        Arc::new(StaticAggregateRegistry::new(["sum", "count", "last_row", "ndv"])),
+        Arc::new(StaticStatefulRegistry::new(["lag"])),
+        sinks,
+    )
+}
+
+fn logical_plan_json_with_registries(
+    sql: &str,
+    aggregate_registry: Arc<StaticAggregateRegistry>,
+    stateful_registry: Arc<StaticStatefulRegistry>,
+    sinks: Vec<PipelineSink>,
+) -> String {
     let stream_defs = setup_streams();
-    let select_stmt = parse_sql(sql).expect("parse sql");
+    let select_stmt = parse_sql_with_registries(sql, aggregate_registry, stateful_registry)
+        .expect("parse sql");
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs).expect("logical");
     let explain = ExplainReport::from_logical(logical_plan);
     println!("{}", sql);
@@ -364,6 +433,43 @@ fn create_logical_plan_table_driven() {
 }
 
 #[test]
+fn create_logical_plan_stateful_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "test_create_logical_plan_with_stateful_projection",
+            sql: "SELECT lag(a) FROM stream",
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a)]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "test_create_logical_plan_with_nested_stateful_filter_dependency",
+            sql: "SELECT lag(a), lag(b) FILTER (WHERE lag(a)) FROM stream",
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(b) FILTER (WHERE lag(a)) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(b) FILTER (WHERE lag(a))]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "test_create_logical_plan_with_stateful_filter_over_partition",
+            sql: "SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) FROM stream",
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2)]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "test_create_logical_plan_with_dedup_and_dependent_filter",
+            sql: "SELECT lag(a), lag(a) FILTER (WHERE lag(a)) FROM stream",
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE lag(a)) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"Project"}"##,
+        },
+    ];
+
+    for case in cases {
+        let got = logical_plan_json(case.sql);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
 fn create_logical_plan_with_sinks_table_driven() {
     struct Case {
         name: &'static str,
@@ -402,7 +508,7 @@ fn create_logical_plan_with_sinks_table_driven() {
                     SinkEncoderConfig::new("none", serde_json::Map::new()),
                 ),
             )],
-            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=kuksa","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"}"##,
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=kuksa","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"}"##,
         },
     ];
 

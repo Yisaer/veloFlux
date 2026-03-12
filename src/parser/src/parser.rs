@@ -340,8 +340,10 @@ mod tests {
         assert_eq!(
             select_stmt
                 .stateful_mappings
-                .get("col_1")
+                .iter()
+                .find(|entry| entry.output_column == "col_1")
                 .unwrap()
+                .spec
                 .original_expr
                 .to_string(),
             "lag(a)"
