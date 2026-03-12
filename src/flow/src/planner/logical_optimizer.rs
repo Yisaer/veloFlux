@@ -1271,6 +1271,38 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
             SqlExpr::UnaryOp { expr, .. } => self.collect_expr_ast(expr),
             SqlExpr::Nested(expr) => self.collect_expr_ast(expr),
             SqlExpr::Cast { expr, .. } => self.collect_expr_ast(expr),
+            SqlExpr::Between {
+                expr, low, high, ..
+            } => {
+                self.collect_expr_ast(expr);
+                self.collect_expr_ast(low);
+                self.collect_expr_ast(high);
+            }
+            SqlExpr::InList { expr, list, .. } => {
+                self.collect_expr_ast(expr);
+                for item in list {
+                    self.collect_expr_ast(item);
+                }
+            }
+            SqlExpr::Case {
+                operand,
+                conditions,
+                results,
+                else_result,
+            } => {
+                if let Some(expr) = operand.as_ref() {
+                    self.collect_expr_ast(expr);
+                }
+                for expr in conditions {
+                    self.collect_expr_ast(expr);
+                }
+                for expr in results {
+                    self.collect_expr_ast(expr);
+                }
+                if let Some(expr) = else_result.as_ref() {
+                    self.collect_expr_ast(expr);
+                }
+            }
             SqlExpr::JsonAccess { left, .. } => {
                 // For top-level pruning, only the base column matters; JsonAccess RHS is a field.
                 self.collect_expr_ast(left);
