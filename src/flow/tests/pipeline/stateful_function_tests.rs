@@ -239,6 +239,45 @@ async fn stateful_function_table_driven() {
             close_before_read: false,
         },
         StatefulCase {
+            name: "lag_filter_false_holds_last_output",
+            sql: "SELECT lag(a) FILTER (WHERE flag = 1) AS prev FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(30),
+                        Value::Int64(40),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                        Value::Int64(0),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "prev".to_string(),
+                    expected_values: vec![
+                        Value::Null,
+                        Value::Null,
+                        Value::Int64(10),
+                        Value::Int64(10),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
             name: "lag_in_where_filter",
             sql: "SELECT a FROM stream WHERE lag(a) > 1",
             input_data: vec![(
@@ -256,6 +295,160 @@ async fn stateful_function_table_driven() {
                 column_checks: vec![ColumnCheck {
                     expected_name: "a".to_string(),
                     expected_values: vec![Value::Int64(3), Value::Int64(4)],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "lag_filter_partition_by_holds_per_partition",
+            sql: "SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) AS prev FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(30),
+                        Value::Int64(40),
+                        Value::Int64(50),
+                        Value::Int64(60),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                    ],
+                ),
+                (
+                    "k1".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 6,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "prev".to_string(),
+                    expected_values: vec![
+                        Value::Null,
+                        Value::Null,
+                        Value::Int64(10),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int64(40),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "lag_filter_depends_on_prior_stateful_bool_output",
+            sql: "SELECT lag(flag) AS prev_flag, lag(a) FILTER (WHERE lag(flag)) AS prev_a FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(30),
+                        Value::Int64(40),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "prev_flag".to_string(),
+                        expected_values: vec![
+                            Value::Null,
+                            Value::Bool(true),
+                            Value::Bool(false),
+                            Value::Bool(true),
+                        ],
+                    },
+                    ColumnCheck {
+                        expected_name: "prev_a".to_string(),
+                        expected_values: vec![
+                            Value::Null,
+                            Value::Null,
+                            Value::Null,
+                            Value::Int64(20),
+                        ],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "project_expression_uses_held_stateful_value",
+            sql: "SELECT a + lag(b) FILTER (WHERE flag = 1) AS v FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(3),
+                        Value::Int64(4),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(30),
+                        Value::Int64(40),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                        Value::Int64(0),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "v".to_string(),
+                    expected_values: vec![
+                        Value::Null,
+                        Value::Null,
+                        Value::Int64(13),
+                        Value::Int64(14),
+                    ],
                 }],
             }],
             wait_after_send: Duration::from_millis(0),
