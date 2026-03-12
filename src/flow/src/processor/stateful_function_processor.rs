@@ -23,13 +23,19 @@ struct StatefulPartitionState {
     last_output: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PartitionKey {
+    Global,
+    Values(Vec<Value>),
+}
+
 struct StatefulProcessorCall {
     output_column: Arc<String>,
     function: Arc<dyn StatefulFunction>,
     arg_scalars: Vec<ScalarExpr>,
     when_scalar: Option<ScalarExpr>,
     partition_by_scalars: Vec<ScalarExpr>,
-    states: HashMap<Option<String>, StatefulPartitionState>,
+    states: HashMap<PartitionKey, StatefulPartitionState>,
 }
 
 pub struct StatefulFunctionProcessor {
@@ -133,7 +139,7 @@ impl StatefulFunctionProcessor {
         for tuple in rows.iter_mut() {
             for call in calls.iter_mut() {
                 let partition_key = if call.partition_by_scalars.is_empty() {
-                    None
+                    PartitionKey::Global
                 } else {
                     let mut key_values = Vec::with_capacity(call.partition_by_scalars.len());
                     for scalar in &call.partition_by_scalars {
@@ -143,7 +149,7 @@ impl StatefulFunctionProcessor {
                             ))
                         })?);
                     }
-                    Some(format!("{:?}", key_values))
+                    PartitionKey::Values(key_values)
                 };
 
                 let should_apply = match call.when_scalar.as_ref() {
