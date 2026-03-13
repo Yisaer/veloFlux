@@ -2,7 +2,9 @@
 
 use crate::expr::ScalarExpr;
 use crate::model::{Collection, RecordBatch};
-use crate::planner::physical::{PhysicalPlan, PhysicalStatefulFunction, StatefulCall};
+use crate::planner::physical::{
+    PartitionGroupKey, PhysicalPlan, PhysicalStatefulFunction, StatefulCall,
+};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure,
@@ -80,7 +82,7 @@ impl StatefulFunctionProcessor {
         let (output, _) = broadcast::channel(channel_capacities.data);
         let (control_output, _) = broadcast::channel(channel_capacities.control);
 
-        let mut partition_group_ids = HashMap::new();
+        let mut partition_group_ids: HashMap<PartitionGroupKey, usize> = HashMap::new();
         let mut partition_groups = vec![PartitionGroup {
             scalars: Vec::new(),
         }];
@@ -90,8 +92,8 @@ impl StatefulFunctionProcessor {
             func_name,
             arg_scalars,
             when_scalar,
+            partition_group_key,
             partition_by_scalars,
-            spec,
             ..
         } in &physical_stateful.calls
         {
@@ -103,23 +105,15 @@ impl StatefulFunctionProcessor {
             })?;
             let partition_group_id = if partition_by_scalars.is_empty() {
                 0
+            } else if let Some(existing) = partition_group_ids.get(partition_group_key) {
+                *existing
             } else {
-                let key = spec
-                    .partition_by
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                if let Some(existing) = partition_group_ids.get(&key) {
-                    *existing
-                } else {
-                    let id = partition_groups.len();
-                    partition_groups.push(PartitionGroup {
-                        scalars: partition_by_scalars.clone(),
-                    });
-                    partition_group_ids.insert(key, id);
-                    id
-                }
+                let id = partition_groups.len();
+                partition_groups.push(PartitionGroup {
+                    scalars: partition_by_scalars.clone(),
+                });
+                partition_group_ids.insert(partition_group_key.clone(), id);
+                id
             };
             calls.push(StatefulProcessorCall {
                 output_column: Arc::new(output_column.clone()),
