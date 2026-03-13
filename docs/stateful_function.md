@@ -56,6 +56,100 @@ Built-in stateful functions currently include:
 - `changed_col`
 - `had_changed`
 
+## Built-in Functions
+
+### `lag`
+
+Signature:
+
+```sql
+lag(x [, offset [, default [, ignore_null]]])
+```
+
+Semantics:
+
+- `offset` defaults to `1` and must be a positive integer.
+- `default` is used when the lag buffer does not yet contain enough history.
+- `ignore_null` defaults to `true`.
+- When `ignore_null = true`, a `NULL` current value does not advance the lag buffer.
+- When `should_apply = false`, `lag` returns the current visible lag value and does not advance the
+  lag buffer.
+
+Examples:
+
+```sql
+SELECT lag(a) AS prev_a FROM stream
+```
+
+```sql
+SELECT lag(a, 2, 0, true) AS prev_a2 FROM stream
+```
+
+### `latest`
+
+Signature:
+
+```sql
+latest(x [, default])
+```
+
+Semantics:
+
+- Tracks the latest accepted non-`NULL` value.
+- `NULL` input does not overwrite the tracked state.
+- If no tracked value exists yet, returns `default` or `NULL`.
+- When `should_apply = false`, `latest` returns the tracked value if present; otherwise it returns
+  `default` or `NULL`.
+
+Example:
+
+```sql
+SELECT latest(status, 'unknown') AS latest_status FROM stream
+```
+
+### `changed_col`
+
+Signature:
+
+```sql
+changed_col(ignore_null, x)
+```
+
+Semantics:
+
+- Emits `x` only when it differs from the previous accepted value.
+- Returns `NULL` when the value does not change.
+- When `ignore_null = true`, `NULL` does not update the tracked state.
+- When `should_apply = false`, returns `NULL` and does not update the tracked state.
+
+Example:
+
+```sql
+SELECT changed_col(true, status) AS status_change FROM stream
+```
+
+### `had_changed`
+
+Signature:
+
+```sql
+had_changed(ignore_null, x1, x2, ...)
+```
+
+Semantics:
+
+- Tracks one previous value per argument position after `ignore_null`.
+- Returns `true` if any tracked argument changes on the current accepted row.
+- Returns `false` if no tracked argument changes.
+- When `ignore_null = true`, `NULL` arguments are skipped and do not update tracked state.
+- When `should_apply = false`, returns `false` and does not update tracked state.
+
+Example:
+
+```sql
+SELECT had_changed(true, status, code) AS changed FROM stream
+```
+
 ## Restrictions
 
 For stateful functions, the current implementation supports only:
@@ -265,6 +359,7 @@ The flow runtime owns a full registry used to instantiate implementations:
 - `StatefulFunctionRegistry`
 - `StatefulFunction`
 - `StatefulFunctionInstance`
+- `StatefulEvalInput`
 
 `FlowInstance` and `PipelineRegistries` carry the shared stateful registry.
 
@@ -365,6 +460,13 @@ This is intentionally not modeled as one shared skipped-row behavior across all 
 functions. For example, `lag`, `latest`, `changed_col`, and `had_changed` can all return different
 values when `should_apply` is false.
 
+Current built-in skipped-row behavior:
+
+- `lag`: return the current visible lag value, do not advance the lag buffer
+- `latest`: return the tracked value if present; otherwise return the optional default or `NULL`
+- `changed_col`: return `NULL`, do not update tracked state
+- `had_changed`: return `false`, do not update tracked state
+
 Example:
 
 ```sql
@@ -409,3 +511,35 @@ Expected planner behavior:
 - stateful call is compiled into one `StatefulFunction` node
 - source column pruning keeps only `a`, `flag`, `k1`, and `k2`
 - state is isolated per `(k1, k2)` partition
+
+### Built-in behavior examples
+
+```sql
+SELECT latest(a, 0) OVER (PARTITION BY k1) AS latest_a FROM stream
+```
+
+Expected runtime behavior:
+
+- each `k1` partition keeps its own latest accepted non-`NULL` value
+- `NULL` rows reuse the partition's tracked value
+- a partition with no tracked value returns `0`
+
+```sql
+SELECT changed_col(true, a) FILTER (WHERE flag = 1) AS delta FROM stream
+```
+
+Expected runtime behavior:
+
+- filtered-out rows produce `NULL`
+- repeated accepted values produce `NULL`
+- accepted changed values emit the current value
+
+```sql
+SELECT had_changed(true, a, b) FILTER (WHERE flag = 1) AS changed FROM stream
+```
+
+Expected runtime behavior:
+
+- filtered-out rows return `false`
+- accepted rows compare against the most recent accepted state
+- a skipped row does not advance the tracked state for later comparisons
