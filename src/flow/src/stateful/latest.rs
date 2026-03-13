@@ -13,34 +13,23 @@ pub fn latest_function_def() -> FunctionDef {
         name: "latest".to_string(),
         aliases: vec![],
         signature: FunctionSignatureSpec {
-            args: vec![
-                FunctionArgSpec {
-                    name: "x".to_string(),
-                    r#type: TypeSpec::Any,
-                    optional: false,
-                    variadic: false,
-                },
-                FunctionArgSpec {
-                    name: "default".to_string(),
-                    r#type: TypeSpec::Any,
-                    optional: true,
-                    variadic: false,
-                },
-            ],
+            args: vec![FunctionArgSpec {
+                name: "x".to_string(),
+                r#type: TypeSpec::Any,
+                optional: false,
+                variadic: false,
+            }],
             return_type: TypeSpec::Any,
         },
         description: "Return the latest accepted non-NULL value of the argument.".to_string(),
         allowed_contexts: vec![FunctionContext::Select, FunctionContext::Where],
         requirements: vec![FunctionRequirement::DeterministicOrder],
         constraints: vec![
-            "Requires 1 or 2 arguments.".to_string(),
+            "Requires exactly 1 argument.".to_string(),
             "Ignores NULL input values and keeps the previously accepted value.".to_string(),
-            "If no value has been accepted yet, returns the optional default or NULL.".to_string(),
+            "If no value has been accepted yet, returns NULL.".to_string(),
         ],
-        examples: vec![
-            "SELECT latest(status) AS latest_status FROM stream".to_string(),
-            "SELECT latest(status, 'unknown') AS latest_status FROM stream".to_string(),
-        ],
+        examples: vec!["SELECT latest(status) AS latest_status FROM stream".to_string()],
         aggregate: None,
         stateful: Some(StatefulFunctionSpec {
             state_semantics: "Maintains the latest accepted non-NULL value per partition."
@@ -68,9 +57,9 @@ struct LatestInstance {
 
 impl StatefulFunctionInstance for LatestInstance {
     fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        if input.args.len() != 1 && input.args.len() != 2 {
+        if input.args.len() != 1 {
             return Err(format!(
-                "latest() expects 1 or 2 arguments, got {}",
+                "latest() expects exactly 1 argument, got {}",
                 input.args.len()
             ));
         }
@@ -85,7 +74,7 @@ impl StatefulFunctionInstance for LatestInstance {
             return Ok(value.clone());
         }
 
-        Ok(input.args.get(1).cloned().unwrap_or(Value::Null))
+        Ok(Value::Null)
     }
 }
 
@@ -95,9 +84,9 @@ impl StatefulFunction for LatestFunction {
     }
 
     fn return_type(&self, input_types: &[ConcreteDatatype]) -> Result<ConcreteDatatype, String> {
-        if input_types.len() != 1 && input_types.len() != 2 {
+        if input_types.len() != 1 {
             return Err(format!(
-                "latest() expects 1 or 2 argument types, got {}",
+                "latest() expects exactly 1 argument type, got {}",
                 input_types.len()
             ));
         }
@@ -149,18 +138,18 @@ mod tests {
     }
 
     #[test]
-    fn latest_returns_default_before_state_exists() {
+    fn latest_returns_null_before_state_exists() {
         let function = LatestFunction::new();
         let mut instance = function.create_instance();
 
         assert_eq!(
             instance
                 .eval(StatefulEvalInput {
-                    args: &[Value::Null, Value::String("unknown".to_string())],
+                    args: &[Value::Null],
                     should_apply: false,
                 })
                 .unwrap(),
-            Value::String("unknown".to_string())
+            Value::Null
         );
     }
 

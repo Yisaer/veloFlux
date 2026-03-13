@@ -30,12 +30,6 @@ pub fn lag_function_def() -> FunctionDef {
                     variadic: false,
                 },
                 FunctionArgSpec {
-                    name: "default".to_string(),
-                    r#type: TypeSpec::Any,
-                    optional: true,
-                    variadic: false,
-                },
-                FunctionArgSpec {
                     name: "ignore_null".to_string(),
                     r#type: TypeSpec::Named {
                         name: "bool".to_string(),
@@ -50,10 +44,9 @@ pub fn lag_function_def() -> FunctionDef {
         allowed_contexts: vec![FunctionContext::Select, FunctionContext::Where],
         requirements: vec![FunctionRequirement::DeterministicOrder],
         constraints: vec![
-            "Requires 1 to 4 arguments.".to_string(),
+            "Requires 1 to 3 arguments.".to_string(),
             "Return type matches the argument type.".to_string(),
-            "First rows return the optional default (or NULL) until enough history exists."
-                .to_string(),
+            "First rows return NULL until enough history exists.".to_string(),
             "The optional offset must be a positive integer.".to_string(),
             "When ignore_null is true, NULL input values do not advance the lag state."
                 .to_string(),
@@ -62,7 +55,7 @@ pub fn lag_function_def() -> FunctionDef {
         ],
         examples: vec![
             "SELECT lag(x) AS prev_x, x".to_string(),
-            "SELECT lag(x, 2, 0, true) AS prev_x2 FROM stream".to_string(),
+            "SELECT lag(x, 2, true) AS prev_x2 FROM stream".to_string(),
         ],
         aggregate: None,
         stateful: Some(StatefulFunctionSpec {
@@ -92,9 +85,9 @@ struct LagInstance {
 
 impl StatefulFunctionInstance for LagInstance {
     fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        if input.args.is_empty() || input.args.len() > 4 {
+        if input.args.is_empty() || input.args.len() > 3 {
             return Err(format!(
-                "lag() expects 1 to 4 arguments, got {}",
+                "lag() expects 1 to 3 arguments, got {}",
                 input.args.len()
             ));
         }
@@ -103,16 +96,15 @@ impl StatefulFunctionInstance for LagInstance {
             Some(value) => lag_offset(value)?,
             None => 1,
         };
-        let default_value = input.args.get(2).cloned().unwrap_or(Value::Null);
-        let ignore_null = match input.args.get(3) {
-            Some(value) => bool_arg("lag() fourth argument", value)?,
+        let ignore_null = match input.args.get(2) {
+            Some(value) => bool_arg("lag() third argument", value)?,
             None => true,
         };
 
         let queue = self.queue.get_or_insert_with(|| {
             let mut values = VecDeque::with_capacity(offset);
             for _ in 0..offset {
-                values.push_back(default_value.clone());
+                values.push_back(Value::Null);
             }
             values
         });
@@ -139,9 +131,9 @@ impl StatefulFunction for LagFunction {
     }
 
     fn return_type(&self, input_types: &[ConcreteDatatype]) -> Result<ConcreteDatatype, String> {
-        if input_types.is_empty() || input_types.len() > 4 {
+        if input_types.is_empty() || input_types.len() > 3 {
             return Err(format!(
-                "lag() expects 1 to 4 argument types, got {}",
+                "lag() expects 1 to 3 argument types, got {}",
                 input_types.len()
             ));
         }
@@ -258,61 +250,41 @@ mod tests {
     }
 
     #[test]
-    fn lag_supports_offset_default_and_ignore_null() {
+    fn lag_supports_offset_and_ignore_null() {
         let function = LagFunction::new();
         let mut instance = function.create_instance();
 
         assert_eq!(
             instance
                 .eval(StatefulEvalInput {
-                    args: &[
-                        Value::Int64(10),
-                        Value::Int64(2),
-                        Value::Int64(0),
-                        Value::Bool(true)
-                    ],
+                    args: &[Value::Int64(10), Value::Int64(2), Value::Bool(true)],
                     should_apply: true,
                 })
                 .unwrap(),
-            Value::Int64(0)
+            Value::Null
         );
         assert_eq!(
             instance
                 .eval(StatefulEvalInput {
-                    args: &[
-                        Value::Null,
-                        Value::Int64(2),
-                        Value::Int64(999),
-                        Value::Bool(true)
-                    ],
+                    args: &[Value::Null, Value::Int64(2), Value::Bool(true)],
                     should_apply: true,
                 })
                 .unwrap(),
-            Value::Int64(0)
+            Value::Null
         );
         assert_eq!(
             instance
                 .eval(StatefulEvalInput {
-                    args: &[
-                        Value::Int64(30),
-                        Value::Int64(2),
-                        Value::Int64(999),
-                        Value::Bool(true)
-                    ],
+                    args: &[Value::Int64(30), Value::Int64(2), Value::Bool(true)],
                     should_apply: true,
                 })
                 .unwrap(),
-            Value::Int64(0)
+            Value::Null
         );
         assert_eq!(
             instance
                 .eval(StatefulEvalInput {
-                    args: &[
-                        Value::Int64(40),
-                        Value::Int64(2),
-                        Value::Int64(999),
-                        Value::Bool(true)
-                    ],
+                    args: &[Value::Int64(40), Value::Int64(2), Value::Bool(true)],
                     should_apply: true,
                 })
                 .unwrap(),
@@ -327,6 +299,7 @@ mod tests {
             .return_type(&[
                 ConcreteDatatype::Int64(types::Int64Type),
                 ConcreteDatatype::Int64(types::Int64Type),
+                ConcreteDatatype::Bool(types::BooleanType),
             ])
             .unwrap();
         assert!(matches!(ty, ConcreteDatatype::Int64(_)));

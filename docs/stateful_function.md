@@ -63,14 +63,14 @@ Built-in stateful functions currently include:
 Signature:
 
 ```sql
-lag(x [, offset [, default [, ignore_null]]])
+lag(x [, offset [, ignore_null]])
 ```
 
 Semantics:
 
 - `offset` defaults to `1` and must be a positive integer.
-- `default` is used when the lag buffer does not yet contain enough history.
 - `ignore_null` defaults to `true`.
+- `offset` and `ignore_null` are static literal configuration parameters.
 - When `ignore_null = true`, a `NULL` current value does not advance the lag buffer.
 - When `should_apply = false`, `lag` returns the current visible lag value and does not advance the
   lag buffer.
@@ -82,7 +82,7 @@ SELECT lag(a) AS prev_a FROM stream
 ```
 
 ```sql
-SELECT lag(a, 2, 0, true) AS prev_a2 FROM stream
+SELECT lag(a, 2, true) AS prev_a2 FROM stream
 ```
 
 ### `latest`
@@ -90,21 +90,21 @@ SELECT lag(a, 2, 0, true) AS prev_a2 FROM stream
 Signature:
 
 ```sql
-latest(x [, default])
+latest(x)
 ```
 
 Semantics:
 
 - Tracks the latest accepted non-`NULL` value.
 - `NULL` input does not overwrite the tracked state.
-- If no tracked value exists yet, returns `default` or `NULL`.
+- If no tracked value exists yet, returns `NULL`.
 - When `should_apply = false`, `latest` returns the tracked value if present; otherwise it returns
-  `default` or `NULL`.
+  `NULL`.
 
 Example:
 
 ```sql
-SELECT latest(status, 'unknown') AS latest_status FROM stream
+SELECT latest(status) AS latest_status FROM stream
 ```
 
 ### `changed_col`
@@ -463,7 +463,7 @@ values when `should_apply` is false.
 Current built-in skipped-row behavior:
 
 - `lag`: return the current visible lag value, do not advance the lag buffer
-- `latest`: return the tracked value if present; otherwise return the optional default or `NULL`
+- `latest`: return the tracked value if present; otherwise return `NULL`
 - `changed_col`: return `NULL`, do not update tracked state
 - `had_changed`: return `false`, do not update tracked state
 
@@ -479,7 +479,7 @@ When `flag = 0`:
 - the lag buffer is not advanced
 - the expression uses the current visible lag value for that partition
 
-If no previous lag value exists for that partition, the result is the configured default or `NULL`.
+If no previous lag value exists for that partition, the result is `NULL`.
 
 ## Validation Examples
 
@@ -515,14 +515,14 @@ Expected planner behavior:
 ### Built-in behavior examples
 
 ```sql
-SELECT latest(a, 0) OVER (PARTITION BY k1) AS latest_a FROM stream
+SELECT latest(a) OVER (PARTITION BY k1) AS latest_a FROM stream
 ```
 
 Expected runtime behavior:
 
 - each `k1` partition keeps its own latest accepted non-`NULL` value
 - `NULL` rows reuse the partition's tracked value
-- a partition with no tracked value returns `0`
+- a partition with no tracked value returns `NULL`
 
 ```sql
 SELECT changed_col(true, a) FILTER (WHERE flag = 1) AS delta FROM stream

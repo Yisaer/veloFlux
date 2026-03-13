@@ -4,7 +4,10 @@ use crate::select_stmt::SelectStmt;
 use crate::stateful_call::{StatefulCallSpec, StatefulMappingEntry};
 use crate::stateful_registry::StatefulRegistry;
 use crate::stateful_validation::validate_stateful_context_expr;
-use sqlparser::ast::{Expr, Function, FunctionArg, FunctionArgExpr, Ident, WindowSpec, WindowType};
+use sqlparser::ast::{
+    Expr, Function, FunctionArg, FunctionArgExpr, Ident, UnaryOperator, Value, WindowSpec,
+    WindowType,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -494,6 +497,8 @@ fn parse_stateful_call(
         )?;
     }
 
+    validate_stateful_builtin_args(&func_name, &args)?;
+
     Ok(StatefulCallSpec {
         func_name,
         args,
@@ -543,6 +548,88 @@ fn parse_stateful_window_spec_partition_by(
     }
 
     Ok(spec.partition_by.clone())
+}
+
+fn validate_stateful_builtin_args(func_name: &str, args: &[Expr]) -> Result<(), String> {
+    match func_name {
+        "latest" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "stateful function '{}' expects exactly 1 argument, got {}",
+                    func_name,
+                    args.len()
+                ));
+            }
+        }
+        "changed_col" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "stateful function '{}' expects exactly 2 arguments, got {}",
+                    func_name,
+                    args.len()
+                ));
+            }
+        }
+        "had_changed" => {
+            if args.len() < 2 {
+                return Err(format!(
+                    "stateful function '{}' expects at least 2 arguments, got {}",
+                    func_name,
+                    args.len()
+                ));
+            }
+        }
+        "lag" => {
+            if args.is_empty() || args.len() > 3 {
+                return Err(format!(
+                    "stateful function '{}' expects 1 to 3 arguments, got {}",
+                    func_name,
+                    args.len()
+                ));
+            }
+            if let Some(offset) = args.get(1) {
+                validate_positive_integer_literal(offset, "lag() second argument")?;
+            }
+            if let Some(ignore_null) = args.get(2) {
+                validate_bool_literal(ignore_null, "lag() third argument")?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn validate_positive_integer_literal(expr: &Expr, context: &str) -> Result<(), String> {
+    let value = parse_integer_literal(expr)
+        .ok_or_else(|| format!("{context} must be a positive integer literal, got {expr}"))?;
+    if value < 1 {
+        return Err(format!(
+            "{context} must be a positive integer literal, got {expr}"
+        ));
+    }
+    Ok(())
+}
+
+fn parse_integer_literal(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Value(Value::Number(raw, _)) => raw.parse::<i64>().ok(),
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr,
+        } => match expr.as_ref() {
+            Expr::Value(Value::Number(raw, _)) => raw.parse::<i64>().ok().map(|v| -v),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn validate_bool_literal(expr: &Expr, context: &str) -> Result<(), String> {
+    match expr {
+        Expr::Value(Value::Boolean(_)) => Ok(()),
+        _ => Err(format!("{context} must be a boolean literal, got {expr}")),
+    }
 }
 
 #[cfg(test)]

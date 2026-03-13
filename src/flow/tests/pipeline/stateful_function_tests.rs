@@ -455,8 +455,8 @@ async fn stateful_function_table_driven() {
             close_before_read: false,
         },
         StatefulCase {
-            name: "lag_offset_default_ignore_null",
-            sql: "SELECT lag(a, 2, 0, true) AS prev FROM stream",
+            name: "lag_offset_ignore_null",
+            sql: "SELECT lag(a, 2, true) AS prev FROM stream",
             input_data: vec![(
                 "a".to_string(),
                 vec![Value::Int64(10), Value::Null, Value::Int64(30), Value::Int64(40)],
@@ -467,9 +467,9 @@ async fn stateful_function_table_driven() {
                 column_checks: vec![ColumnCheck {
                     expected_name: "prev".to_string(),
                     expected_values: vec![
-                        Value::Int64(0),
-                        Value::Int64(0),
-                        Value::Int64(0),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
                         Value::Int64(10),
                     ],
                 }],
@@ -478,8 +478,8 @@ async fn stateful_function_table_driven() {
             close_before_read: false,
         },
         StatefulCase {
-            name: "latest_tracks_last_non_null_with_default_and_filter",
-            sql: "SELECT latest(a, 0) FILTER (WHERE flag = 1) AS latest_a FROM stream",
+            name: "latest_tracks_last_non_null_with_filter",
+            sql: "SELECT latest(a) FILTER (WHERE flag = 1) AS latest_a FROM stream",
             input_data: vec![
                 (
                     "a".to_string(),
@@ -508,7 +508,7 @@ async fn stateful_function_table_driven() {
                 column_checks: vec![ColumnCheck {
                     expected_name: "latest_a".to_string(),
                     expected_values: vec![
-                        Value::Int64(0),
+                        Value::Null,
                         Value::Int64(10),
                         Value::Int64(10),
                         Value::Int64(20),
@@ -521,7 +521,7 @@ async fn stateful_function_table_driven() {
         },
         StatefulCase {
             name: "latest_partition_by_keeps_state_per_partition",
-            sql: "SELECT latest(a, 0) OVER (PARTITION BY k1) AS latest_a FROM stream",
+            sql: "SELECT latest(a) OVER (PARTITION BY k1) AS latest_a FROM stream",
             input_data: vec![
                 (
                     "a".to_string(),
