@@ -1,4 +1,4 @@
-use super::{StatefulFunction, StatefulFunctionInstance};
+use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
@@ -54,18 +54,23 @@ impl Default for LagFunction {
 
 struct LagInstance {
     prev: Option<Value>,
+    last_output: Value,
 }
 
 impl StatefulFunctionInstance for LagInstance {
-    fn eval(&mut self, args: &[Value]) -> Result<Value, String> {
-        if args.len() != 1 {
+    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
+        if input.args.len() != 1 {
             return Err(format!(
                 "lag() expects exactly 1 argument, got {}",
-                args.len()
+                input.args.len()
             ));
         }
+        if !input.should_apply {
+            return Ok(self.last_output.clone());
+        }
         let out = self.prev.clone().unwrap_or(Value::Null);
-        self.prev = Some(args[0].clone());
+        self.prev = Some(input.args[0].clone());
+        self.last_output = out.clone();
         Ok(out)
     }
 }
@@ -86,7 +91,10 @@ impl StatefulFunction for LagFunction {
     }
 
     fn create_instance(&self) -> Box<dyn StatefulFunctionInstance> {
-        Box::new(LagInstance { prev: None })
+        Box::new(LagInstance {
+            prev: None,
+            last_output: Value::Null,
+        })
     }
 }
 
@@ -100,9 +108,67 @@ mod tests {
         let function = LagFunction::new();
         let mut instance = function.create_instance();
 
-        assert_eq!(instance.eval(&[Value::Int64(1)]).unwrap(), Value::Null);
-        assert_eq!(instance.eval(&[Value::Int64(2)]).unwrap(), Value::Int64(1));
-        assert_eq!(instance.eval(&[Value::Int64(3)]).unwrap(), Value::Int64(2));
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(1)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(2)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Int64(1)
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(3)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Int64(2)
+        );
+    }
+
+    #[test]
+    fn lag_holds_last_output_when_should_apply_is_false() {
+        let function = LagFunction::new();
+        let mut instance = function.create_instance();
+
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(1)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(999)],
+                    should_apply: false,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(2)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Int64(1)
+        );
     }
 
     #[test]

@@ -10,7 +10,9 @@ use crate::processor::base::{
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use crate::runtime::TaskSpawner;
-use crate::stateful::{StatefulFunction, StatefulFunctionInstance, StatefulFunctionRegistry};
+use crate::stateful::{
+    StatefulEvalInput, StatefulFunction, StatefulFunctionInstance, StatefulFunctionRegistry,
+};
 use datatypes::Value;
 use futures::stream::StreamExt;
 use std::collections::HashMap;
@@ -20,7 +22,6 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 struct StatefulPartitionState {
     instance: Box<dyn StatefulFunctionInstance>,
-    last_output: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -170,16 +171,6 @@ impl StatefulFunctionProcessor {
                     None => true,
                 };
 
-                if !should_apply {
-                    let held_output = call
-                        .states
-                        .get(&partition_key)
-                        .map(|state| state.last_output.clone())
-                        .unwrap_or(Value::Null);
-                    tuple.add_affiliate_column(Arc::clone(&call.output_column), held_output);
-                    continue;
-                }
-
                 let mut args = Vec::with_capacity(call.arg_scalars.len());
                 for scalar in &call.arg_scalars {
                     args.push(
@@ -194,14 +185,15 @@ impl StatefulFunctionProcessor {
                         .entry(partition_key)
                         .or_insert_with(|| StatefulPartitionState {
                             instance: call.function.create_instance(),
-                            last_output: Value::Null,
                         });
 
                 let out = state
                     .instance
-                    .eval(&args)
+                    .eval(StatefulEvalInput {
+                        args: &args,
+                        should_apply,
+                    })
                     .map_err(ProcessorError::ProcessingError)?;
-                state.last_output = out.clone();
                 tuple.add_affiliate_column(Arc::clone(&call.output_column), out);
             }
         }

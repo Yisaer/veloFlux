@@ -5,8 +5,13 @@ use std::sync::Arc;
 
 use super::lag::LagFunction;
 
+pub struct StatefulEvalInput<'a> {
+    pub args: &'a [Value],
+    pub should_apply: bool,
+}
+
 pub trait StatefulFunctionInstance: Send + Sync {
-    fn eval(&mut self, args: &[Value]) -> Result<Value, String>;
+    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String>;
 }
 
 pub trait StatefulFunction: Send + Sync {
@@ -99,7 +104,7 @@ mod tests {
         fn create_instance(&self) -> Box<dyn StatefulFunctionInstance> {
             struct Inst;
             impl StatefulFunctionInstance for Inst {
-                fn eval(&mut self, _args: &[Value]) -> Result<Value, String> {
+                fn eval(&mut self, _input: StatefulEvalInput<'_>) -> Result<Value, String> {
                     Ok(Value::Null)
                 }
             }
