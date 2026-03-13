@@ -68,7 +68,13 @@ impl Default for ChangedColFunction {
 
 #[derive(Default)]
 struct ChangedColInstance {
+    config: Option<ChangedColConfig>,
     previous: Option<Value>,
+}
+
+#[derive(Clone, Copy)]
+struct ChangedColConfig {
+    ignore_null: bool,
 }
 
 impl StatefulFunctionInstance for ChangedColInstance {
@@ -80,10 +86,19 @@ impl StatefulFunctionInstance for ChangedColInstance {
             ));
         }
 
-        let ignore_null = bool_arg("changed_col() first argument", &input.args[0])?;
+        let config = match self.config {
+            Some(config) => config,
+            None => {
+                let config = ChangedColConfig {
+                    ignore_null: bool_arg("changed_col() first argument", &input.args[0])?,
+                };
+                self.config = Some(config);
+                config
+            }
+        };
         let current = &input.args[1];
 
-        if ignore_null && current.is_null() {
+        if config.ignore_null && current.is_null() {
             return Ok(Value::Null);
         }
         if !input.should_apply {
@@ -155,6 +170,40 @@ mod tests {
                 })
                 .unwrap(),
             Value::Int64(2)
+        );
+    }
+
+    #[test]
+    fn changed_col_caches_ignore_null_configuration() {
+        let function = ChangedColFunction::new();
+        let mut instance = function.create_instance();
+
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Bool(true), Value::Null],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Bool(false), Value::Null],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Bool(false), Value::Int64(7)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Int64(7)
         );
     }
 }

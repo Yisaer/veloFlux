@@ -569,6 +569,7 @@ fn validate_stateful_builtin_args(func_name: &str, args: &[Expr]) -> Result<(), 
                     args.len()
                 ));
             }
+            validate_bool_literal(&args[0], "changed_col() first argument")?;
         }
         "had_changed" => {
             if args.len() < 2 {
@@ -578,6 +579,7 @@ fn validate_stateful_builtin_args(func_name: &str, args: &[Expr]) -> Result<(), 
                     args.len()
                 ));
             }
+            validate_bool_literal(&args[0], "had_changed() first argument")?;
         }
         "lag" => {
             if args.is_empty() || args.len() > 3 {

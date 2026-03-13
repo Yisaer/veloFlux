@@ -188,7 +188,7 @@ impl StatefulFunctionProcessor {
             }
 
             for call in calls.iter_mut() {
-                let partition_key = partition_keys[call.partition_group_id].clone();
+                let partition_key = &partition_keys[call.partition_group_id];
 
                 let should_apply = match call.when_scalar.as_ref() {
                     Some(scalar) => match scalar.eval_with_tuple(tuple) {
@@ -217,20 +217,28 @@ impl StatefulFunctionProcessor {
                     );
                 }
 
-                let state =
-                    call.states
-                        .entry(partition_key)
-                        .or_insert_with(|| StatefulPartitionState {
+                let out = if let Some(state) = call.states.get_mut(partition_key) {
+                    state
+                        .instance
+                        .eval(StatefulEvalInput {
+                            args: &args,
+                            should_apply,
+                        })
+                        .map_err(ProcessorError::ProcessingError)?
+                } else {
+                    let state = call.states.entry(partition_key.clone()).or_insert_with(|| {
+                        StatefulPartitionState {
                             instance: call.function.create_instance(),
-                        });
-
-                let out = state
-                    .instance
-                    .eval(StatefulEvalInput {
-                        args: &args,
-                        should_apply,
-                    })
-                    .map_err(ProcessorError::ProcessingError)?;
+                        }
+                    });
+                    state
+                        .instance
+                        .eval(StatefulEvalInput {
+                            args: &args,
+                            should_apply,
+                        })
+                        .map_err(ProcessorError::ProcessingError)?
+                };
                 tuple.add_affiliate_column(Arc::clone(&call.output_column), out);
             }
         }

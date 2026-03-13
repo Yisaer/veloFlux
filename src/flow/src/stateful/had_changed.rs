@@ -70,7 +70,13 @@ impl Default for HadChangedFunction {
 
 #[derive(Default)]
 struct HadChangedInstance {
+    config: Option<HadChangedConfig>,
     previous: Vec<Option<Value>>,
+}
+
+#[derive(Clone, Copy)]
+struct HadChangedConfig {
+    ignore_null: bool,
 }
 
 impl StatefulFunctionInstance for HadChangedInstance {
@@ -86,7 +92,16 @@ impl StatefulFunctionInstance for HadChangedInstance {
             return Ok(Value::Bool(false));
         }
 
-        let ignore_null = bool_arg("had_changed() first argument", &input.args[0])?;
+        let config = match self.config {
+            Some(config) => config,
+            None => {
+                let config = HadChangedConfig {
+                    ignore_null: bool_arg("had_changed() first argument", &input.args[0])?,
+                };
+                self.config = Some(config);
+                config
+            }
+        };
         let tracked_len = input.args.len() - 1;
         if self.previous.len() < tracked_len {
             self.previous.resize(tracked_len, None);
@@ -94,7 +109,7 @@ impl StatefulFunctionInstance for HadChangedInstance {
 
         let mut changed = false;
         for (index, value) in input.args[1..].iter().enumerate() {
-            if ignore_null && value.is_null() {
+            if config.ignore_null && value.is_null() {
                 continue;
             }
 
@@ -172,6 +187,40 @@ mod tests {
                         Value::Int64(2),
                         Value::String("a".to_string())
                     ],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn had_changed_caches_ignore_null_configuration() {
+        let function = HadChangedFunction::new();
+        let mut instance = function.create_instance();
+
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Bool(true), Value::Null],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Bool(false), Value::Null],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Bool(false), Value::Int64(9)],
                     should_apply: true,
                 })
                 .unwrap(),

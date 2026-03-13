@@ -118,6 +118,7 @@ changed_col(ignore_null, x)
 Semantics:
 
 - Emits `x` only when it differs from the previous accepted value.
+- `ignore_null` is a static boolean literal configuration parameter.
 - The first accepted row is treated as changed and returns the current value.
 - Returns `NULL` when the value does not change.
 - When `ignore_null = true`, `NULL` does not update the tracked state.
@@ -140,6 +141,7 @@ had_changed(ignore_null, x1, x2, ...)
 Semantics:
 
 - Tracks one previous value per argument position after `ignore_null`.
+- `ignore_null` is a static boolean literal configuration parameter.
 - The first accepted row is treated as changed and returns `true`.
 - Returns `true` if any tracked argument changes on the current accepted row.
 - Returns `false` if no tracked argument changes.
