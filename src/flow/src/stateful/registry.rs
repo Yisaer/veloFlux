@@ -3,7 +3,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::lag::LagFunction;
+use super::{ChangedColFunction, HadChangedFunction, LagFunction, LatestFunction};
 
 pub struct StatefulEvalInput<'a> {
     pub args: &'a [Value],
@@ -64,7 +64,10 @@ impl StatefulFunctionRegistry {
     }
 
     fn register_builtin_functions(&self) {
+        let _ = self.register_function(Arc::new(ChangedColFunction::new()));
+        let _ = self.register_function(Arc::new(HadChangedFunction::new()));
         let _ = self.register_function(Arc::new(LagFunction::new()));
+        let _ = self.register_function(Arc::new(LatestFunction::new()));
     }
 }
 

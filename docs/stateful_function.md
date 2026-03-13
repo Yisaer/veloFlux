@@ -49,6 +49,13 @@ SELECT lag(a) FILTER (WHERE flag = 1) FROM stream
 SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) FROM stream
 ```
 
+Built-in stateful functions currently include:
+
+- `lag`
+- `latest`
+- `changed_col`
+- `had_changed`
+
 ## Restrictions
 
 For stateful functions, the current implementation supports only:
@@ -336,7 +343,6 @@ affiliate columns using the parser placeholders.
 For each stateful call, the processor maintains:
 
 - one stateful function instance per partition
-- the last output value per partition
 
 If `OVER (PARTITION BY ...)` is absent, all rows share a single implicit partition.
 
@@ -349,11 +355,15 @@ For each row and for each stateful call:
 
 1. Evaluate the partition key.
 2. Evaluate `when_scalar` if present.
-3. If the condition is `true`, evaluate the function and advance the partition state.
-4. If the condition is `false`, do not advance state and return the partition's previous output.
-5. If the condition is `NULL`, treat it as `false`.
+3. Evaluate the function with a `should_apply` flag.
+4. If the condition is `true`, the function may advance its internal state.
+5. If the condition is `false`, the function decides what to return and whether any internal state
+   should change.
+6. If the condition is `NULL`, treat it as `false`.
 
-This is intentionally not the same as returning `NULL` for filtered-out rows.
+This is intentionally not modeled as one shared skipped-row behavior across all stateful
+functions. For example, `lag`, `latest`, `changed_col`, and `had_changed` can all return different
+values when `should_apply` is false.
 
 Example:
 
@@ -364,10 +374,10 @@ SELECT a + lag(b) FILTER (WHERE flag = 1) AS v FROM stream
 When `flag = 0`:
 
 - `lag(b)` does not consume the current row
-- the state is not advanced
-- the expression uses the previously held `lag(b)` output for that partition
+- the lag buffer is not advanced
+- the expression uses the current visible lag value for that partition
 
-If no previous output exists for that partition, the result of the stateful call is `NULL`.
+If no previous lag value exists for that partition, the result is the configured default or `NULL`.
 
 ## Validation Examples
 
