@@ -1,9 +1,11 @@
+pub mod helpers;
+pub mod math_func;
 pub mod registry;
 pub mod string_func;
-
 use crate::catalog::FunctionDef;
 use crate::expr::func::EvalError;
 use datatypes::Value;
+pub use math_func::*;
 pub use registry::CustomFuncRegistry;
 pub use string_func::ConcatFunc;
 

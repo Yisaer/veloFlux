@@ -29,6 +29,8 @@ kuksa-rust-sdk = "0.2.1"
 http = "0.2.12"
 humantime-serde = "1"
 libc = "0.2"
+rand = "0.10.0"
+rug = "1.28.1"
 
 [dev-dependencies]
 tempfile = "3"
