@@ -41,7 +41,8 @@ pub fn lag_function_def() -> FunctionDef {
             ],
             return_type: TypeSpec::Any,
         },
-        description: "Return the previous row's value of the argument.".to_string(),
+        description: "Return the value from offset rows back, optionally skipping NULL inputs."
+            .to_string(),
         allowed_contexts: vec![FunctionContext::Select, FunctionContext::Where],
         requirements: vec![FunctionRequirement::DeterministicOrder],
         constraints: vec![
@@ -118,15 +119,11 @@ impl StatefulFunctionInstance for LagInstance {
             }
         };
 
-        let queue = self.queue.get_or_insert_with(|| {
-            let mut values = VecDeque::with_capacity(config.offset);
-            for _ in 0..config.offset {
-                values.push_back(Value::Null);
-            }
-            values
-        });
-
-        let visible = queue.front().cloned().unwrap_or(Value::Null);
+        let visible = self
+            .queue
+            .as_ref()
+            .and_then(|queue| queue.front().cloned())
+            .unwrap_or(Value::Null);
         if !input.should_apply {
             return Ok(visible);
         }
@@ -136,6 +133,13 @@ impl StatefulFunctionInstance for LagInstance {
             return Ok(visible);
         }
 
+        let queue = self.queue.get_or_insert_with(|| {
+            let mut values = VecDeque::with_capacity(config.offset);
+            for _ in 0..config.offset {
+                values.push_back(Value::Null);
+            }
+            values
+        });
         let out = queue.pop_front().unwrap_or(Value::Null);
         queue.push_back(current.clone());
         Ok(out)
@@ -276,6 +280,38 @@ mod tests {
                 .unwrap(),
             Value::Int64(10)
         );
+    }
+
+    #[test]
+    fn lag_does_not_initialize_queue_for_filtered_out_first_row() {
+        let mut instance = LagInstance::default();
+
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(1), Value::Int64(64), Value::Bool(true)],
+                    should_apply: false,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert!(instance.queue.is_none());
+    }
+
+    #[test]
+    fn lag_does_not_initialize_queue_for_ignored_null_input() {
+        let mut instance = LagInstance::default();
+
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Null, Value::Int64(64), Value::Bool(true)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert!(instance.queue.is_none());
     }
 
     #[test]
