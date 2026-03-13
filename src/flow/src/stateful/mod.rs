@@ -3,6 +3,7 @@ pub mod had_changed;
 pub mod lag;
 pub mod latest;
 pub mod registry;
+pub(crate) mod util;
 
 pub use changed_col::changed_col_function_def;
 pub use changed_col::ChangedColFunction;

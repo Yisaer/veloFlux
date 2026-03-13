@@ -1,3 +1,4 @@
+use super::util::{bool_arg, lag_offset};
 use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
@@ -80,7 +81,14 @@ impl Default for LagFunction {
 
 #[derive(Default)]
 struct LagInstance {
+    config: Option<LagConfig>,
     queue: Option<VecDeque<Value>>,
+}
+
+#[derive(Clone, Copy)]
+struct LagConfig {
+    offset: usize,
+    ignore_null: bool,
 }
 
 impl StatefulFunctionInstance for LagInstance {
@@ -92,18 +100,27 @@ impl StatefulFunctionInstance for LagInstance {
             ));
         }
 
-        let offset = match input.args.get(1) {
-            Some(value) => lag_offset(value)?,
-            None => 1,
-        };
-        let ignore_null = match input.args.get(2) {
-            Some(value) => bool_arg("lag() third argument", value)?,
-            None => true,
+        let config = match self.config {
+            Some(config) => config,
+            None => {
+                let config = LagConfig {
+                    offset: match input.args.get(1) {
+                        Some(value) => lag_offset(value)?,
+                        None => 1,
+                    },
+                    ignore_null: match input.args.get(2) {
+                        Some(value) => bool_arg("lag() third argument", value)?,
+                        None => true,
+                    },
+                };
+                self.config = Some(config);
+                config
+            }
         };
 
         let queue = self.queue.get_or_insert_with(|| {
-            let mut values = VecDeque::with_capacity(offset);
-            for _ in 0..offset {
+            let mut values = VecDeque::with_capacity(config.offset);
+            for _ in 0..config.offset {
                 values.push_back(Value::Null);
             }
             values
@@ -115,7 +132,7 @@ impl StatefulFunctionInstance for LagInstance {
         }
 
         let current = &input.args[0];
-        if ignore_null && current.is_null() {
+        if config.ignore_null && current.is_null() {
             return Ok(visible);
         }
 
@@ -142,37 +159,6 @@ impl StatefulFunction for LagFunction {
 
     fn create_instance(&self) -> Box<dyn StatefulFunctionInstance> {
         Box::new(LagInstance::default())
-    }
-}
-
-fn lag_offset(value: &Value) -> Result<usize, String> {
-    let offset = match value {
-        Value::Int8(v) => i64::from(*v),
-        Value::Int16(v) => i64::from(*v),
-        Value::Int32(v) => i64::from(*v),
-        Value::Int64(v) => *v,
-        Value::Uint8(v) => i64::from(*v),
-        Value::Uint16(v) => i64::from(*v),
-        Value::Uint32(v) => i64::from(*v),
-        Value::Uint64(v) => i64::try_from(*v)
-            .map_err(|_| format!("lag() offset is too large for i64: {value:?}"))?,
-        other => {
-            return Err(format!(
-                "lag() second argument must be an integer, got {other:?}"
-            ))
-        }
-    };
-
-    usize::try_from(offset)
-        .ok()
-        .filter(|offset| *offset >= 1)
-        .ok_or_else(|| format!("lag() offset must be >= 1, got {offset}"))
-}
-
-fn bool_arg(name: &str, value: &Value) -> Result<bool, String> {
-    match value {
-        Value::Bool(v) => Ok(*v),
-        other => Err(format!("{name} must be bool, got {other:?}")),
     }
 }
 

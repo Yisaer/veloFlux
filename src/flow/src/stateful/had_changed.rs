@@ -1,3 +1,4 @@
+use super::util::{bool_arg, normalize_state_value};
 use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
@@ -41,6 +42,7 @@ pub fn had_changed_function_def() -> FunctionDef {
         constraints: vec![
             "Requires at least 2 arguments.".to_string(),
             "The first argument must be a boolean ignore_null flag.".to_string(),
+            "The first accepted row is treated as changed and returns true.".to_string(),
             "Returns false when the row is filtered out.".to_string(),
         ],
         examples: vec![
@@ -69,21 +71,6 @@ impl Default for HadChangedFunction {
 #[derive(Default)]
 struct HadChangedInstance {
     previous: Vec<Option<Value>>,
-}
-
-fn bool_arg(name: &str, value: &Value) -> Result<bool, String> {
-    match value {
-        Value::Bool(v) => Ok(*v),
-        other => Err(format!("{name} must be bool, got {other:?}")),
-    }
-}
-
-fn normalize_state_value(value: &Value) -> Option<Value> {
-    if value.is_null() {
-        None
-    } else {
-        Some(value.clone())
-    }
 }
 
 impl StatefulFunctionInstance for HadChangedInstance {

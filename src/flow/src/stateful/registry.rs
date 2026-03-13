@@ -143,4 +143,15 @@ mod tests {
             StatefulRegistryError::AlreadyRegistered("dummy".to_string())
         );
     }
+
+    #[test]
+    fn runtime_builtins_cover_parser_builtin_stateful_names() {
+        let registry = StatefulFunctionRegistry::default();
+        for name in parser::builtin_stateful_function_names() {
+            assert!(
+                registry.is_registered(name),
+                "runtime registry missing parser builtin stateful function '{name}'"
+            );
+        }
+    }
 }

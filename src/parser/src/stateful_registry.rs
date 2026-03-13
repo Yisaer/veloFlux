@@ -4,7 +4,11 @@ pub trait StatefulRegistry: Send + Sync {
     fn is_stateful_function(&self, name: &str) -> bool;
 }
 
-const BUILTIN_STATEFUL_FUNCTIONS: [&str; 4] = ["changed_col", "had_changed", "lag", "latest"];
+pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 4] = ["changed_col", "had_changed", "lag", "latest"];
+
+pub fn builtin_stateful_function_names() -> &'static [&'static str] {
+    &BUILTIN_STATEFUL_FUNCTIONS
+}
 
 #[derive(Default)]
 pub struct StaticStatefulRegistry {
@@ -26,7 +30,9 @@ impl StatefulRegistry for StaticStatefulRegistry {
 }
 
 pub fn default_stateful_registry() -> Arc<dyn StatefulRegistry> {
-    Arc::new(StaticStatefulRegistry::new(BUILTIN_STATEFUL_FUNCTIONS))
+    Arc::new(StaticStatefulRegistry::new(
+        builtin_stateful_function_names().iter().copied(),
+    ))
 }
 
 #[cfg(test)]
