@@ -239,7 +239,7 @@ async fn stateful_function_table_driven() {
             close_before_read: false,
         },
         StatefulCase {
-            name: "lag_filter_false_holds_last_output",
+            name: "lag_filter_false_returns_visible_lag_value",
             sql: "SELECT lag(a) FILTER (WHERE flag = 1) AS prev FROM stream",
             input_data: vec![
                 (
@@ -268,9 +268,9 @@ async fn stateful_function_table_driven() {
                     expected_name: "prev".to_string(),
                     expected_values: vec![
                         Value::Null,
-                        Value::Null,
                         Value::Int64(10),
                         Value::Int64(10),
+                        Value::Int64(30),
                     ],
                 }],
             }],
@@ -301,7 +301,7 @@ async fn stateful_function_table_driven() {
             close_before_read: false,
         },
         StatefulCase {
-            name: "lag_filter_partition_by_holds_per_partition",
+            name: "lag_filter_partition_by_uses_visible_lag_per_partition",
             sql: "SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) AS prev FROM stream",
             input_data: vec![
                 (
@@ -345,10 +345,10 @@ async fn stateful_function_table_driven() {
                     expected_name: "prev".to_string(),
                     expected_values: vec![
                         Value::Null,
-                        Value::Null,
+                        Value::Int64(10),
                         Value::Int64(10),
                         Value::Null,
-                        Value::Null,
+                        Value::Int64(40),
                         Value::Int64(40),
                     ],
                 }],
@@ -397,7 +397,7 @@ async fn stateful_function_table_driven() {
                         expected_values: vec![
                             Value::Null,
                             Value::Null,
-                            Value::Null,
+                            Value::Int64(20),
                             Value::Int64(20),
                         ],
                     },
@@ -407,7 +407,7 @@ async fn stateful_function_table_driven() {
             close_before_read: false,
         },
         StatefulCase {
-            name: "project_expression_uses_held_stateful_value",
+            name: "project_expression_uses_visible_lag_value",
             sql: "SELECT a + lag(b) FILTER (WHERE flag = 1) AS v FROM stream",
             input_data: vec![
                 (
@@ -445,9 +445,375 @@ async fn stateful_function_table_driven() {
                     expected_name: "v".to_string(),
                     expected_values: vec![
                         Value::Null,
-                        Value::Null,
+                        Value::Int64(12),
                         Value::Int64(13),
-                        Value::Int64(14),
+                        Value::Int64(34),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "lag_offset_ignore_null",
+            sql: "SELECT lag(a, 2, true) AS prev FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![Value::Int64(10), Value::Null, Value::Int64(30), Value::Int64(40)],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "prev".to_string(),
+                    expected_values: vec![
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Int64(10),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "latest_tracks_last_non_null_with_filter",
+            sql: "SELECT latest(a) FILTER (WHERE flag = 1) AS latest_a FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Null,
+                        Value::Int64(10),
+                        Value::Null,
+                        Value::Int64(20),
+                        Value::Int64(30),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(0),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 5,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "latest_a".to_string(),
+                    expected_values: vec![
+                        Value::Null,
+                        Value::Int64(10),
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(20),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "latest_partition_by_keeps_state_per_partition",
+            sql: "SELECT latest(a) OVER (PARTITION BY k1) AS latest_a FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Null,
+                        Value::Int64(30),
+                        Value::Int64(40),
+                        Value::Null,
+                    ],
+                ),
+                (
+                    "k1".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 6,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "latest_a".to_string(),
+                    expected_values: vec![
+                        Value::Int64(10),
+                        Value::Int64(20),
+                        Value::Int64(10),
+                        Value::Int64(30),
+                        Value::Int64(40),
+                        Value::Int64(40),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "changed_col_emits_only_on_changes",
+            sql: "SELECT changed_col(true, a) FILTER (WHERE flag = 1) AS delta FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Null,
+                        Value::Int64(2),
+                        Value::Int64(3),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 6,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "delta".to_string(),
+                    expected_values: vec![
+                        Value::Int64(1),
+                        Value::Null,
+                        Value::Int64(2),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int64(3),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "changed_col_ignore_null_false_treats_null_as_change",
+            sql: "SELECT changed_col(false, a) AS delta FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Int64(1),
+                    Value::Int64(1),
+                    Value::Null,
+                    Value::Null,
+                    Value::Int64(2),
+                ],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 5,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "delta".to_string(),
+                    expected_values: vec![
+                        Value::Int64(1),
+                        Value::Null,
+                        Value::Null,
+                        Value::Null,
+                        Value::Int64(2),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "changed_col_filter_false_always_returns_null",
+            sql: "SELECT changed_col(true, a) FILTER (WHERE flag = 1) AS delta FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(3),
+                        Value::Int64(4),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "delta".to_string(),
+                    expected_values: vec![
+                        Value::Int64(1),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int64(4),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "had_changed_detects_any_input_change",
+            sql: "SELECT had_changed(true, a, b) FILTER (WHERE flag = 1) AS changed FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::String("x".to_string()),
+                        Value::String("x".to_string()),
+                        Value::String("y".to_string()),
+                        Value::String("y".to_string()),
+                        Value::Null,
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 5,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "changed".to_string(),
+                    expected_values: vec![
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "had_changed_ignore_null_false_null_affects_state",
+            sql: "SELECT had_changed(false, a, b) AS changed FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Null,
+                        Value::Null,
+                        Value::Int64(1),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::String("x".to_string()),
+                        Value::String("x".to_string()),
+                        Value::String("x".to_string()),
+                        Value::Null,
+                        Value::Null,
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 5,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "changed".to_string(),
+                    expected_values: vec![
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(true),
+                        Value::Bool(true),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "had_changed_filter_false_returns_false_and_does_not_advance",
+            sql: "SELECT had_changed(true, a, b) FILTER (WHERE flag = 1) AS changed FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(2),
+                        Value::Int64(3),
+                    ],
+                ),
+                (
+                    "b".to_string(),
+                    vec![
+                        Value::String("x".to_string()),
+                        Value::String("y".to_string()),
+                        Value::String("y".to_string()),
+                        Value::String("y".to_string()),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "changed".to_string(),
+                    expected_values: vec![
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(true),
                     ],
                 }],
             }],

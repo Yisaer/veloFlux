@@ -26,7 +26,10 @@ pub use expression_extractor::{
 pub use parser::{StreamSqlParser, parse_sql, parse_sql_with_registries};
 pub use select_stmt::{SelectField, SelectStmt};
 pub use stateful_call::{StatefulCallSpec, StatefulMappingEntry};
-pub use stateful_registry::{StatefulRegistry, StaticStatefulRegistry, default_stateful_registry};
+pub use stateful_registry::{
+    StatefulRegistry, StaticStatefulRegistry, builtin_stateful_function_names,
+    default_stateful_registry,
+};
 pub use stateful_transformer::transform_stateful_functions;
 pub use visitor::{
     AggregateVisitor, SourceInfo, TableInfoVisitor, contains_aggregates_with_visitor,

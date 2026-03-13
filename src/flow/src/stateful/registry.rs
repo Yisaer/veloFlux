@@ -3,10 +3,15 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::lag::LagFunction;
+use super::{ChangedColFunction, HadChangedFunction, LagFunction, LatestFunction};
+
+pub struct StatefulEvalInput<'a> {
+    pub args: &'a [Value],
+    pub should_apply: bool,
+}
 
 pub trait StatefulFunctionInstance: Send + Sync {
-    fn eval(&mut self, args: &[Value]) -> Result<Value, String>;
+    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String>;
 }
 
 pub trait StatefulFunction: Send + Sync {
@@ -59,7 +64,10 @@ impl StatefulFunctionRegistry {
     }
 
     fn register_builtin_functions(&self) {
+        let _ = self.register_function(Arc::new(ChangedColFunction::new()));
+        let _ = self.register_function(Arc::new(HadChangedFunction::new()));
         let _ = self.register_function(Arc::new(LagFunction::new()));
+        let _ = self.register_function(Arc::new(LatestFunction::new()));
     }
 }
 
@@ -99,7 +107,7 @@ mod tests {
         fn create_instance(&self) -> Box<dyn StatefulFunctionInstance> {
             struct Inst;
             impl StatefulFunctionInstance for Inst {
-                fn eval(&mut self, _args: &[Value]) -> Result<Value, String> {
+                fn eval(&mut self, _input: StatefulEvalInput<'_>) -> Result<Value, String> {
                     Ok(Value::Null)
                 }
             }
@@ -134,5 +142,16 @@ mod tests {
             err,
             StatefulRegistryError::AlreadyRegistered("dummy".to_string())
         );
+    }
+
+    #[test]
+    fn runtime_builtins_cover_parser_builtin_stateful_names() {
+        let registry = StatefulFunctionRegistry::default();
+        for name in parser::builtin_stateful_function_names() {
+            assert!(
+                registry.is_registered(name),
+                "runtime registry missing parser builtin stateful function '{name}'"
+            );
+        }
     }
 }

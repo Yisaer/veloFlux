@@ -2,7 +2,9 @@
 
 use crate::expr::ScalarExpr;
 use crate::model::{Collection, RecordBatch};
-use crate::planner::physical::{PhysicalPlan, PhysicalStatefulFunction, StatefulCall};
+use crate::planner::physical::{
+    PartitionGroupKey, PhysicalPlan, PhysicalStatefulFunction, StatefulCall,
+};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure,
@@ -10,7 +12,9 @@ use crate::processor::base::{
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
 use crate::runtime::TaskSpawner;
-use crate::stateful::{StatefulFunction, StatefulFunctionInstance, StatefulFunctionRegistry};
+use crate::stateful::{
+    StatefulEvalInput, StatefulFunction, StatefulFunctionInstance, StatefulFunctionRegistry,
+};
 use datatypes::Value;
 use futures::stream::StreamExt;
 use std::collections::HashMap;
@@ -20,7 +24,6 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 struct StatefulPartitionState {
     instance: Box<dyn StatefulFunctionInstance>,
-    last_output: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -34,13 +37,18 @@ struct StatefulProcessorCall {
     function: Arc<dyn StatefulFunction>,
     arg_scalars: Vec<ScalarExpr>,
     when_scalar: Option<ScalarExpr>,
-    partition_by_scalars: Vec<ScalarExpr>,
+    partition_group_id: usize,
     states: HashMap<PartitionKey, StatefulPartitionState>,
+}
+
+struct PartitionGroup {
+    scalars: Vec<ScalarExpr>,
 }
 
 pub struct StatefulFunctionProcessor {
     id: String,
     physical_stateful: Arc<PhysicalStatefulFunction>,
+    partition_groups: Vec<PartitionGroup>,
     calls: Vec<StatefulProcessorCall>,
     inputs: Vec<broadcast::Receiver<StreamData>>,
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
@@ -74,12 +82,17 @@ impl StatefulFunctionProcessor {
         let (output, _) = broadcast::channel(channel_capacities.data);
         let (control_output, _) = broadcast::channel(channel_capacities.control);
 
+        let mut partition_group_ids: HashMap<PartitionGroupKey, usize> = HashMap::new();
+        let mut partition_groups = vec![PartitionGroup {
+            scalars: Vec::new(),
+        }];
         let mut calls = Vec::with_capacity(physical_stateful.calls.len());
         for StatefulCall {
             output_column,
             func_name,
             arg_scalars,
             when_scalar,
+            partition_group_key,
             partition_by_scalars,
             ..
         } in &physical_stateful.calls
@@ -90,19 +103,31 @@ impl StatefulFunctionProcessor {
                     func_name
                 ))
             })?;
+            let partition_group_id = if partition_by_scalars.is_empty() {
+                0
+            } else if let Some(existing) = partition_group_ids.get(partition_group_key) {
+                *existing
+            } else {
+                let id = partition_groups.len();
+                partition_groups.push(PartitionGroup {
+                    scalars: partition_by_scalars.clone(),
+                });
+                partition_group_ids.insert(partition_group_key.clone(), id);
+                id
+            };
             calls.push(StatefulProcessorCall {
                 output_column: Arc::new(output_column.clone()),
                 function,
                 arg_scalars: arg_scalars.clone(),
                 when_scalar: when_scalar.clone(),
-                partition_by_scalars: partition_by_scalars.clone(),
+                partition_group_id,
                 states: HashMap::new(),
             });
         }
-
         Ok(Self {
             id,
             physical_stateful,
+            partition_groups,
             calls,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
@@ -130,6 +155,7 @@ impl StatefulFunctionProcessor {
 
     fn apply_stateful(
         collection: Box<dyn Collection>,
+        partition_groups: &[PartitionGroup],
         calls: &mut [StatefulProcessorCall],
     ) -> Result<Box<dyn Collection>, ProcessorError> {
         let mut rows = collection.into_rows().map_err(|e| {
@@ -137,12 +163,13 @@ impl StatefulFunctionProcessor {
         })?;
 
         for tuple in rows.iter_mut() {
-            for call in calls.iter_mut() {
-                let partition_key = if call.partition_by_scalars.is_empty() {
+            let mut partition_keys = Vec::with_capacity(partition_groups.len());
+            for group in partition_groups {
+                let key = if group.scalars.is_empty() {
                     PartitionKey::Global
                 } else {
-                    let mut key_values = Vec::with_capacity(call.partition_by_scalars.len());
-                    for scalar in &call.partition_by_scalars {
+                    let mut key_values = Vec::with_capacity(group.scalars.len());
+                    for scalar in &group.scalars {
                         key_values.push(scalar.eval_with_tuple(tuple).map_err(|e| {
                             ProcessorError::ProcessingError(format!(
                                 "failed to evaluate stateful function partition key: {e}"
@@ -151,6 +178,11 @@ impl StatefulFunctionProcessor {
                     }
                     PartitionKey::Values(key_values)
                 };
+                partition_keys.push(key);
+            }
+
+            for call in calls.iter_mut() {
+                let partition_key = &partition_keys[call.partition_group_id];
 
                 let should_apply = match call.when_scalar.as_ref() {
                     Some(scalar) => match scalar.eval_with_tuple(tuple) {
@@ -170,16 +202,6 @@ impl StatefulFunctionProcessor {
                     None => true,
                 };
 
-                if !should_apply {
-                    let held_output = call
-                        .states
-                        .get(&partition_key)
-                        .map(|state| state.last_output.clone())
-                        .unwrap_or(Value::Null);
-                    tuple.add_affiliate_column(Arc::clone(&call.output_column), held_output);
-                    continue;
-                }
-
                 let mut args = Vec::with_capacity(call.arg_scalars.len());
                 for scalar in &call.arg_scalars {
                     args.push(
@@ -189,19 +211,28 @@ impl StatefulFunctionProcessor {
                     );
                 }
 
-                let state =
-                    call.states
-                        .entry(partition_key)
-                        .or_insert_with(|| StatefulPartitionState {
+                let out = if let Some(state) = call.states.get_mut(partition_key) {
+                    state
+                        .instance
+                        .eval(StatefulEvalInput {
+                            args: &args,
+                            should_apply,
+                        })
+                        .map_err(ProcessorError::ProcessingError)?
+                } else {
+                    let state = call.states.entry(partition_key.clone()).or_insert_with(|| {
+                        StatefulPartitionState {
                             instance: call.function.create_instance(),
-                            last_output: Value::Null,
-                        });
-
-                let out = state
-                    .instance
-                    .eval(&args)
-                    .map_err(ProcessorError::ProcessingError)?;
-                state.last_output = out.clone();
+                        }
+                    });
+                    state
+                        .instance
+                        .eval(StatefulEvalInput {
+                            args: &args,
+                            should_apply,
+                        })
+                        .map_err(ProcessorError::ProcessingError)?
+                };
                 tuple.add_affiliate_column(Arc::clone(&call.output_column), out);
             }
         }
@@ -233,6 +264,7 @@ impl Processor for StatefulFunctionProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
+        let partition_groups = std::mem::take(&mut self.partition_groups);
         let mut calls = std::mem::take(&mut self.calls);
         let _physical_stateful = Arc::clone(&self.physical_stateful);
         let stats = Arc::clone(&self.stats);
@@ -271,7 +303,7 @@ impl Processor for StatefulFunctionProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let handle_start = std::time::Instant::now();
-                                        match Self::apply_stateful(collection, &mut calls) {
+                                        match Self::apply_stateful(collection, &partition_groups, &mut calls) {
                                             Ok(out_collection) => {
                                                 let out = StreamData::collection(out_collection);
                                                 let out_rows = out.num_rows_hint();

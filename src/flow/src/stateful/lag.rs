@@ -1,9 +1,11 @@
-use super::{StatefulFunction, StatefulFunctionInstance};
+use super::util::{bool_arg, lag_offset};
+use super::{StatefulEvalInput, StatefulFunction, StatefulFunctionInstance};
 use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionRequirement,
     FunctionSignatureSpec, StatefulFunctionSpec, TypeSpec,
 };
 use datatypes::{ConcreteDatatype, Value};
+use std::collections::VecDeque;
 
 pub struct LagFunction;
 
@@ -13,29 +15,55 @@ pub fn lag_function_def() -> FunctionDef {
         name: "lag".to_string(),
         aliases: vec![],
         signature: FunctionSignatureSpec {
-            args: vec![FunctionArgSpec {
-                name: "x".to_string(),
-                r#type: TypeSpec::Any,
-                optional: false,
-                variadic: false,
-            }],
+            args: vec![
+                FunctionArgSpec {
+                    name: "x".to_string(),
+                    r#type: TypeSpec::Any,
+                    optional: false,
+                    variadic: false,
+                },
+                FunctionArgSpec {
+                    name: "offset".to_string(),
+                    r#type: TypeSpec::Named {
+                        name: "int64".to_string(),
+                    },
+                    optional: true,
+                    variadic: false,
+                },
+                FunctionArgSpec {
+                    name: "ignore_null".to_string(),
+                    r#type: TypeSpec::Named {
+                        name: "bool".to_string(),
+                    },
+                    optional: true,
+                    variadic: false,
+                },
+            ],
             return_type: TypeSpec::Any,
         },
-        description: "Return the previous row's value of the argument.".to_string(),
+        description: "Return the value from offset rows back, optionally skipping NULL inputs."
+            .to_string(),
         allowed_contexts: vec![FunctionContext::Select, FunctionContext::Where],
         requirements: vec![FunctionRequirement::DeterministicOrder],
         constraints: vec![
-            "Requires exactly 1 argument.".to_string(),
+            "Requires 1 to 3 arguments.".to_string(),
             "Return type matches the argument type.".to_string(),
-            "First row returns NULL; subsequent rows return the previous row's value.".to_string(),
+            "First rows return NULL until enough history exists.".to_string(),
+            "The optional offset must be a positive integer.".to_string(),
+            "When ignore_null is true, NULL input values do not advance the lag state."
+                .to_string(),
             "Row order is the pipeline's processing order (no explicit ORDER BY support yet)."
                 .to_string(),
         ],
-        examples: vec!["SELECT lag(x) AS prev_x, x".to_string()],
+        examples: vec![
+            "SELECT lag(x) AS prev_x, x".to_string(),
+            "SELECT lag(x, 2, true) AS prev_x2 FROM stream".to_string(),
+        ],
         aggregate: None,
         stateful: Some(StatefulFunctionSpec {
-            state_semantics: "Maintains the previous observed value per pipeline execution."
-                .to_string(),
+            state_semantics:
+                "Maintains a bounded lag buffer per partition and returns the current visible lag value."
+                    .to_string(),
         }),
     }
 }
@@ -52,20 +80,68 @@ impl Default for LagFunction {
     }
 }
 
+#[derive(Default)]
 struct LagInstance {
-    prev: Option<Value>,
+    config: Option<LagConfig>,
+    queue: Option<VecDeque<Value>>,
+}
+
+#[derive(Clone, Copy)]
+struct LagConfig {
+    offset: usize,
+    ignore_null: bool,
 }
 
 impl StatefulFunctionInstance for LagInstance {
-    fn eval(&mut self, args: &[Value]) -> Result<Value, String> {
-        if args.len() != 1 {
+    fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
+        if input.args.is_empty() || input.args.len() > 3 {
             return Err(format!(
-                "lag() expects exactly 1 argument, got {}",
-                args.len()
+                "lag() expects 1 to 3 arguments, got {}",
+                input.args.len()
             ));
         }
-        let out = self.prev.clone().unwrap_or(Value::Null);
-        self.prev = Some(args[0].clone());
+
+        let config = match self.config {
+            Some(config) => config,
+            None => {
+                let config = LagConfig {
+                    offset: match input.args.get(1) {
+                        Some(value) => lag_offset(value)?,
+                        None => 1,
+                    },
+                    ignore_null: match input.args.get(2) {
+                        Some(value) => bool_arg("lag() third argument", value)?,
+                        None => true,
+                    },
+                };
+                self.config = Some(config);
+                config
+            }
+        };
+
+        let visible = self
+            .queue
+            .as_ref()
+            .and_then(|queue| queue.front().cloned())
+            .unwrap_or(Value::Null);
+        if !input.should_apply {
+            return Ok(visible);
+        }
+
+        let current = &input.args[0];
+        if config.ignore_null && current.is_null() {
+            return Ok(visible);
+        }
+
+        let queue = self.queue.get_or_insert_with(|| {
+            let mut values = VecDeque::with_capacity(config.offset);
+            for _ in 0..config.offset {
+                values.push_back(Value::Null);
+            }
+            values
+        });
+        let out = queue.pop_front().unwrap_or(Value::Null);
+        queue.push_back(current.clone());
         Ok(out)
     }
 }
@@ -76,9 +152,9 @@ impl StatefulFunction for LagFunction {
     }
 
     fn return_type(&self, input_types: &[ConcreteDatatype]) -> Result<ConcreteDatatype, String> {
-        if input_types.len() != 1 {
+        if input_types.is_empty() || input_types.len() > 3 {
             return Err(format!(
-                "lag() expects exactly 1 argument type, got {}",
+                "lag() expects 1 to 3 argument types, got {}",
                 input_types.len()
             ));
         }
@@ -86,7 +162,7 @@ impl StatefulFunction for LagFunction {
     }
 
     fn create_instance(&self) -> Box<dyn StatefulFunctionInstance> {
-        Box::new(LagInstance { prev: None })
+        Box::new(LagInstance::default())
     }
 }
 
@@ -100,16 +176,153 @@ mod tests {
         let function = LagFunction::new();
         let mut instance = function.create_instance();
 
-        assert_eq!(instance.eval(&[Value::Int64(1)]).unwrap(), Value::Null);
-        assert_eq!(instance.eval(&[Value::Int64(2)]).unwrap(), Value::Int64(1));
-        assert_eq!(instance.eval(&[Value::Int64(3)]).unwrap(), Value::Int64(2));
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(1)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(2)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Int64(1)
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(3)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Int64(2)
+        );
+    }
+
+    #[test]
+    fn lag_skip_returns_current_visible_lag_value() {
+        let function = LagFunction::new();
+        let mut instance = function.create_instance();
+
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(1)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(999)],
+                    should_apply: false,
+                })
+                .unwrap(),
+            Value::Int64(1)
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(2)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Int64(1)
+        );
+    }
+
+    #[test]
+    fn lag_supports_offset_and_ignore_null() {
+        let function = LagFunction::new();
+        let mut instance = function.create_instance();
+
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(10), Value::Int64(2), Value::Bool(true)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Null, Value::Int64(2), Value::Bool(true)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(30), Value::Int64(2), Value::Bool(true)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(40), Value::Int64(2), Value::Bool(true)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Int64(10)
+        );
+    }
+
+    #[test]
+    fn lag_does_not_initialize_queue_for_filtered_out_first_row() {
+        let mut instance = LagInstance::default();
+
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Int64(1), Value::Int64(64), Value::Bool(true)],
+                    should_apply: false,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert!(instance.queue.is_none());
+    }
+
+    #[test]
+    fn lag_does_not_initialize_queue_for_ignored_null_input() {
+        let mut instance = LagInstance::default();
+
+        assert_eq!(
+            instance
+                .eval(StatefulEvalInput {
+                    args: &[Value::Null, Value::Int64(64), Value::Bool(true)],
+                    should_apply: true,
+                })
+                .unwrap(),
+            Value::Null
+        );
+        assert!(instance.queue.is_none());
     }
 
     #[test]
     fn lag_type_matches_input() {
         let function = LagFunction::new();
         let ty = function
-            .return_type(&[ConcreteDatatype::Int64(types::Int64Type)])
+            .return_type(&[
+                ConcreteDatatype::Int64(types::Int64Type),
+                ConcreteDatatype::Int64(types::Int64Type),
+                ConcreteDatatype::Bool(types::BooleanType),
+            ])
             .unwrap();
         assert!(matches!(ty, ConcreteDatatype::Int64(_)));
     }

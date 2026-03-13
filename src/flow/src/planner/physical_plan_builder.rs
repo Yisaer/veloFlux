@@ -12,12 +12,12 @@ use crate::planner::logical::{
 use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
-    PhysicalAggregation, PhysicalBatch, PhysicalCompute, PhysicalDataSink, PhysicalDataSource,
-    PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEncoder, PhysicalEventtimeWatermark,
-    PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder, PhysicalOrderKey,
-    PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect,
-    PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector, PhysicalStatefulFunction,
-    StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PartitionGroupKey, PhysicalAggregation, PhysicalBatch, PhysicalCompute, PhysicalDataSink,
+    PhysicalDataSource, PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEncoder,
+    PhysicalEventtimeWatermark, PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
+    PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
+    PhysicalResultCollect, PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector,
+    PhysicalStatefulFunction, StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
@@ -347,6 +347,7 @@ fn create_physical_stateful_function_with_builder(
             func_name,
             arg_scalars,
             when_scalar,
+            partition_group_key: PartitionGroupKey::from_partition_by(&spec.partition_by),
             partition_by_scalars,
             spec: spec.clone(),
             original_expr: spec.original_expr.clone(),

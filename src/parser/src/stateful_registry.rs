@@ -4,7 +4,11 @@ pub trait StatefulRegistry: Send + Sync {
     fn is_stateful_function(&self, name: &str) -> bool;
 }
 
-const BUILTIN_STATEFUL_FUNCTIONS: [&str; 1] = ["lag"];
+pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 4] = ["changed_col", "had_changed", "lag", "latest"];
+
+pub fn builtin_stateful_function_names() -> &'static [&'static str] {
+    &BUILTIN_STATEFUL_FUNCTIONS
+}
 
 #[derive(Default)]
 pub struct StaticStatefulRegistry {
@@ -26,7 +30,9 @@ impl StatefulRegistry for StaticStatefulRegistry {
 }
 
 pub fn default_stateful_registry() -> Arc<dyn StatefulRegistry> {
-    Arc::new(StaticStatefulRegistry::new(BUILTIN_STATEFUL_FUNCTIONS))
+    Arc::new(StaticStatefulRegistry::new(
+        builtin_stateful_function_names().iter().copied(),
+    ))
 }
 
 #[cfg(test)]
@@ -36,7 +42,10 @@ mod tests {
     #[test]
     fn default_registry_includes_builtin_stateful_functions() {
         let registry = default_stateful_registry();
+        assert!(registry.is_stateful_function("changed_col"));
+        assert!(registry.is_stateful_function("had_changed"));
         assert!(registry.is_stateful_function("lag"));
+        assert!(registry.is_stateful_function("latest"));
         assert!(registry.is_stateful_function("LAG"));
         assert!(!registry.is_stateful_function("missing"));
     }

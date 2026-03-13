@@ -48,7 +48,7 @@ pub use physical_project::{PhysicalProject, PhysicalProjectField};
 pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_sampler::PhysicalSampler;
 pub use physical_shared_stream::PhysicalSharedStream;
-pub use physical_stateful_function::{PhysicalStatefulFunction, StatefulCall};
+pub use physical_stateful_function::{PartitionGroupKey, PhysicalStatefulFunction, StatefulCall};
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
 pub use physical_streaming_encoder::PhysicalStreamingEncoder;
 pub use physical_watermark::{PhysicalWatermark, WatermarkConfig, WatermarkStrategy};

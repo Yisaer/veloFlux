@@ -252,7 +252,7 @@ fn case_10_nested_stateful_in_filter_rewrites_inner_first() {
 #[test]
 fn case_11_custom_stateful_in_filter_rewrites_inner_first() {
     let got = parse_to_json_with_stateful(
-        "SELECT lag(ts, 1, ts, true) FILTER (WHERE had_changed(true, statusCode)) FROM demo",
+        "SELECT lag(ts, 1, true) FILTER (WHERE had_changed(true, statusCode)) FROM demo",
         &["lag", "had_changed"],
     );
     let expected = json!({
@@ -271,13 +271,34 @@ fn case_11_custom_stateful_in_filter_rewrites_inner_first() {
             },
             {
                 "col": "col_2",
-                "expr": "lag(ts, 1, ts, true) FILTER (WHERE had_changed(true, statusCode))",
+                "expr": "lag(ts, 1, true) FILTER (WHERE had_changed(true, statusCode))",
                 "func_name": "lag",
-                "args": ["ts", "1", "ts", "true"],
+                "args": ["ts", "1", "true"],
                 "when": "col_1",
                 "partition_by": [],
             }
         ],
     });
     assert_eq!(got, expected);
+}
+
+#[test]
+fn case_12_lag_optional_args_must_be_literals() {
+    let err = parse_sql("SELECT lag(a, b) FROM stream").expect_err("lag offset should be literal");
+    assert!(err.contains("lag() second argument must be a positive integer literal"));
+
+    let err = parse_sql("SELECT lag(a, 1, b) FROM stream")
+        .expect_err("lag ignore_null should be literal");
+    assert!(err.contains("lag() third argument must be a boolean literal"));
+}
+
+#[test]
+fn case_13_changed_functions_ignore_null_must_be_literal() {
+    let err = parse_sql("SELECT changed_col(flag, a) FROM stream")
+        .expect_err("changed_col ignore_null should be literal");
+    assert!(err.contains("changed_col() first argument must be a boolean literal"));
+
+    let err = parse_sql("SELECT had_changed(flag, a, b) FROM stream")
+        .expect_err("had_changed ignore_null should be literal");
+    assert!(err.contains("had_changed() first argument must be a boolean literal"));
 }
