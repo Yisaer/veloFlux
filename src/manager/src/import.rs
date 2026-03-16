@@ -36,11 +36,11 @@ pub async fn import_storage_handler(
     Json(bundle): Json<ExportBundleV1>,
 ) -> impl IntoResponse {
     let audit = ResourceMutationLog::new("storage", "import", "metadata_bundle", None);
-    let _metadata_permit = match state.try_acquire_metadata_op() {
+    let _import_export_permit = match state.try_acquire_import_export_op() {
         Ok(permit) => permit,
-        Err(TryAcquireError::NoPermits) => return metadata_busy_response(),
+        Err(TryAcquireError::NoPermits) => return import_export_busy_response(),
         Err(TryAcquireError::Closed) => {
-            let err = "metadata operation guard closed".to_string();
+            let err = "import/export operation guard closed".to_string();
             audit.log_failure(&err);
             return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
@@ -94,7 +94,7 @@ fn validate_and_build_snapshot(bundle: &ExportBundleV1) -> Result<MetadataExport
     for topic in &bundle.resources.memory_topics {
         validate_memory_topic(topic, &mut memory_topic_names)?;
         memory_topics.push(StoredMemoryTopic {
-            topic: topic.topic.clone(),
+            topic: topic.topic.trim().to_string(),
             kind: topic.kind.clone(),
             capacity: topic.capacity,
         });
@@ -179,12 +179,11 @@ fn validate_stream_request(
     req: &CreateStreamRequest,
     stream_names: &mut BTreeSet<String>,
 ) -> Result<(), String> {
-    let name = req.name.trim();
-    if name.is_empty() {
+    if req.name.trim().is_empty() {
         return Err("stream name must not be empty".to_string());
     }
-    if !stream_names.insert(name.to_string()) {
-        return Err(format!("duplicate stream name in bundle: {name}"));
+    if !stream_names.insert(req.name.clone()) {
+        return Err(format!("duplicate stream name in bundle: {}", req.name));
     }
     Ok(())
 }
@@ -204,18 +203,19 @@ fn validate_pipeline_run_state(
     pipeline_ids: &BTreeSet<String>,
     state_ids: &mut BTreeSet<String>,
 ) -> Result<(), String> {
-    let pipeline_id = run_state.pipeline_id.trim();
-    if pipeline_id.is_empty() {
+    if run_state.pipeline_id.trim().is_empty() {
         return Err("pipeline_run_state pipeline_id must not be empty".to_string());
     }
-    if !state_ids.insert(pipeline_id.to_string()) {
+    if !state_ids.insert(run_state.pipeline_id.clone()) {
         return Err(format!(
-            "duplicate pipeline_run_state entry in bundle: {pipeline_id}"
+            "duplicate pipeline_run_state entry in bundle: {}",
+            run_state.pipeline_id
         ));
     }
-    if !pipeline_ids.contains(pipeline_id) {
+    if !pipeline_ids.contains(&run_state.pipeline_id) {
         return Err(format!(
-            "pipeline_run_state references missing pipeline: {pipeline_id}"
+            "pipeline_run_state references missing pipeline: {}",
+            run_state.pipeline_id
         ));
     }
     Ok(())
@@ -229,10 +229,10 @@ fn canonical_flow_instance_id(value: Option<&str>) -> Result<String, String> {
     Ok(id.to_string())
 }
 
-fn metadata_busy_response() -> axum::response::Response {
+fn import_export_busy_response() -> axum::response::Response {
     (
         StatusCode::CONFLICT,
-        "metadata is busy processing another command".to_string(),
+        "another import/export command is in progress".to_string(),
     )
         .into_response()
 }

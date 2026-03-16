@@ -55,7 +55,7 @@ The import request is rejected with `400 Bad Request` if:
 
 - `200 OK` with `Content-Type: application/json`
 - `400 Bad Request` if request validation fails
-- `409 Conflict` if another metadata mutation is in progress
+- `409 Conflict` if another import/export command is in progress
 - `500 Internal Server Error` if reading or replacing the storage snapshot fails
 
 ### `ImportStorageResponse`

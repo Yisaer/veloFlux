@@ -23,6 +23,7 @@ Response:
 
 - `200 OK` with `Content-Type: application/json`
 - `200 OK` includes `Content-Disposition: attachment; filename="veloflux-metadata-export-<unix_secs>.json"`
+- `409 Conflict` if another import/export command is in progress
 - `500 Internal Server Error` if export snapshot building fails
 
 Example:

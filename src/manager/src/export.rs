@@ -43,19 +43,19 @@ pub struct ExportPipelineRunState {
 }
 
 pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let _metadata_permit = match state.try_acquire_metadata_op() {
+    let _import_export_permit = match state.try_acquire_import_export_op() {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => {
             return (
                 StatusCode::CONFLICT,
-                "metadata import/export is busy processing another command".to_string(),
+                "another import/export command is in progress".to_string(),
             )
                 .into_response();
         }
         Err(TryAcquireError::Closed) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "metadata operation guard closed".to_string(),
+                "import/export operation guard closed".to_string(),
             )
                 .into_response();
         }

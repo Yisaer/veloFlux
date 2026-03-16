@@ -20,7 +20,7 @@ pub struct AppState {
     pub storage: Arc<StorageManager>,
     pub workers: Arc<HashMap<String, FlowWorkerClient>>,
     pub declared_instances: Arc<HashMap<String, FlowInstanceBackend>>,
-    metadata_op_lock: Arc<Semaphore>,
+    import_export_op_lock: Arc<Semaphore>,
     pipeline_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
@@ -40,7 +40,7 @@ impl AppState {
             storage,
             workers: Arc::new(HashMap::new()),
             declared_instances: Arc::new(HashMap::new()),
-            metadata_op_lock: Arc::new(Semaphore::new(1)),
+            import_export_op_lock: Arc::new(Semaphore::new(1)),
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -177,8 +177,8 @@ impl AppState {
         semaphore.try_acquire_owned()
     }
 
-    pub fn try_acquire_metadata_op(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {
-        self.metadata_op_lock.clone().try_acquire_owned()
+    pub fn try_acquire_import_export_op(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        self.import_export_op_lock.clone().try_acquire_owned()
     }
 
     async fn hydrate_workers_from_storage(&self) -> Result<(), String> {
