@@ -8,6 +8,7 @@ use flow::connector::SharedMqttClientConfig;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState};
+use tokio::sync::TryAcquireError;
 
 use crate::pipeline::{AppState, CreatePipelineRequest};
 use crate::storage_bridge;
@@ -42,6 +43,23 @@ pub struct ExportPipelineRunState {
 }
 
 pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let _metadata_permit = match state.try_acquire_metadata_op() {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => {
+            return (
+                StatusCode::CONFLICT,
+                "metadata import/export is busy processing another command".to_string(),
+            )
+                .into_response();
+        }
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "metadata operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
     let bundle = match build_export_bundle(state.storage.as_ref()) {
         Ok(bundle) => bundle,
         Err(err) => {

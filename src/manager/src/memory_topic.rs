@@ -3,7 +3,6 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use flow::connector::{DEFAULT_MEMORY_PUBSUB_CAPACITY, MemoryPubSubError, MemoryTopicKind};
 use serde::{Deserialize, Serialize};
 use storage::{StorageError, StoredMemoryTopic, StoredMemoryTopicKind};
-use tokio::sync::TryAcquireError;
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
@@ -47,17 +46,6 @@ pub async fn create_memory_topic_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateMemoryTopicRequest>,
 ) -> impl IntoResponse {
-    let _metadata_permit = match state.try_acquire_metadata_op() {
-        Ok(permit) => permit,
-        Err(TryAcquireError::NoPermits) => return metadata_busy_response(),
-        Err(TryAcquireError::Closed) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "metadata operation guard closed".to_string(),
-            )
-                .into_response();
-        }
-    };
     let topic = req.topic.trim().to_string();
     if topic.is_empty() {
         return (
@@ -177,12 +165,4 @@ pub async fn list_memory_topics_handler(State(state): State<AppState>) -> impl I
         )
             .into_response(),
     }
-}
-
-fn metadata_busy_response() -> axum::response::Response {
-    (
-        StatusCode::CONFLICT,
-        "metadata is busy processing another command".to_string(),
-    )
-        .into_response()
 }

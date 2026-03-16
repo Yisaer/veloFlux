@@ -37,14 +37,6 @@ fn busy_response(id: &str) -> axum::response::Response {
         .into_response()
 }
 
-fn metadata_busy_response() -> axum::response::Response {
-    (
-        StatusCode::CONFLICT,
-        "metadata is busy processing another command".to_string(),
-    )
-        .into_response()
-}
-
 fn stored_state_label(state: Option<StoredPipelineRunState>) -> String {
     match state.map(|s| s.desired_state) {
         Some(StoredPipelineDesiredState::Running) => "running".to_string(),
@@ -154,17 +146,6 @@ pub async fn create_pipeline_handler(
         req.id.as_str(),
         Some(&flow_instance_id),
     );
-    let _metadata_permit = match state.try_acquire_metadata_op() {
-        Ok(permit) => permit,
-        Err(TryAcquireError::NoPermits) => return metadata_busy_response(),
-        Err(TryAcquireError::Closed) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "metadata operation guard closed".to_string(),
-            )
-                .into_response();
-        }
-    };
 
     if let Err(err) = validate_create_request(&req) {
         audit.log_failure(&err);
@@ -304,17 +285,6 @@ pub async fn upsert_pipeline_handler(
     Json(req): Json<UpsertPipelineRequest>,
 ) -> impl IntoResponse {
     let id = id.trim().to_string();
-    let _metadata_permit = match state.try_acquire_metadata_op() {
-        Ok(permit) => permit,
-        Err(TryAcquireError::NoPermits) => return metadata_busy_response(),
-        Err(TryAcquireError::Closed) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "metadata operation guard closed".to_string(),
-            )
-                .into_response();
-        }
-    };
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&id),
@@ -832,17 +802,6 @@ pub async fn start_pipeline_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let _metadata_permit = match state.try_acquire_metadata_op() {
-        Ok(permit) => permit,
-        Err(TryAcquireError::NoPermits) => return metadata_busy_response(),
-        Err(TryAcquireError::Closed) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "metadata operation guard closed".to_string(),
-            )
-                .into_response();
-        }
-    };
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&id),
@@ -1001,17 +960,6 @@ pub async fn stop_pipeline_handler(
     Path(id): Path<String>,
     Query(query): Query<StopPipelineQuery>,
 ) -> impl IntoResponse {
-    let _metadata_permit = match state.try_acquire_metadata_op() {
-        Ok(permit) => permit,
-        Err(TryAcquireError::NoPermits) => return metadata_busy_response(),
-        Err(TryAcquireError::Closed) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "metadata operation guard closed".to_string(),
-            )
-                .into_response();
-        }
-    };
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&id),
@@ -1101,17 +1049,6 @@ pub async fn delete_pipeline_handler(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let mut audit = ResourceMutationLog::new("pipeline", "delete", id.as_str(), None);
-    let _metadata_permit = match state.try_acquire_metadata_op() {
-        Ok(permit) => permit,
-        Err(TryAcquireError::NoPermits) => return metadata_busy_response(),
-        Err(TryAcquireError::Closed) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "metadata operation guard closed".to_string(),
-            )
-                .into_response();
-        }
-    };
     let _permit = match state.try_acquire_pipeline_op(&id).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return busy_response(&id),

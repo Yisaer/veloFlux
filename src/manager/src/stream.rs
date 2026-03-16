@@ -22,7 +22,6 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::TryAcquireError;
 
 use parking_lot::RwLock;
 
@@ -275,17 +274,6 @@ pub async fn create_stream_handler(
     Json(req): Json<CreateStreamRequest>,
 ) -> impl IntoResponse {
     let audit = ResourceMutationLog::new("stream", "create", req.name.as_str(), None);
-    let _metadata_permit = match state.try_acquire_metadata_op() {
-        Ok(permit) => permit,
-        Err(TryAcquireError::NoPermits) => return metadata_busy_response(),
-        Err(TryAcquireError::Closed) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "metadata operation guard closed".to_string(),
-            )
-                .into_response();
-        }
-    };
     if req.name.trim().is_empty() {
         let err = "stream name must not be empty".to_string();
         audit.log_failure(&err);
@@ -524,17 +512,6 @@ pub async fn delete_stream_handler(
     Path(name): Path<String>,
 ) -> impl IntoResponse {
     let audit = ResourceMutationLog::new("stream", "delete", name.as_str(), None);
-    let _metadata_permit = match state.try_acquire_metadata_op() {
-        Ok(permit) => permit,
-        Err(TryAcquireError::NoPermits) => return metadata_busy_response(),
-        Err(TryAcquireError::Closed) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "metadata operation guard closed".to_string(),
-            )
-                .into_response();
-        }
-    };
     let mut pipelines_using_stream = Vec::new();
     for (_, instance) in state.instances.instances_snapshot() {
         pipelines_using_stream.extend(
@@ -589,14 +566,6 @@ fn build_stream_info(info: StreamRuntimeInfo) -> StreamInfo {
         },
         shared_stream: shared_item,
     }
-}
-
-fn metadata_busy_response() -> axum::response::Response {
-    (
-        StatusCode::CONFLICT,
-        "metadata is busy processing another command".to_string(),
-    )
-        .into_response()
 }
 
 fn map_flow_instance_error(err: FlowInstanceError) -> axum::response::Response {
