@@ -4,7 +4,7 @@ This document describes the **Manager** REST API for exporting persisted metadat
 
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
-## Endpoint
+## Endpoints
 
 ### Export Metadata Bundle
 

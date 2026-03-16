@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState};
 
 use crate::pipeline::{AppState, CreatePipelineRequest};
+use crate::storage_bridge;
 use crate::stream::CreateStreamRequest;
 
 #[derive(Serialize)]
@@ -116,8 +117,7 @@ fn build_export_bundle(storage: &StorageManager) -> Result<ExportBundleV1, Strin
 
     let mut pipelines = Vec::with_capacity(snapshot.pipelines.len());
     for stored in snapshot.pipelines {
-        let req: CreatePipelineRequest = serde_json::from_str(&stored.raw_json)
-            .map_err(|err| format!("decode stored pipeline {}: {err}", stored.id))?;
+        let req = storage_bridge::pipeline_request_from_stored(&stored)?;
         if req.id != stored.id {
             return Err(format!(
                 "stored pipeline {} id mismatch in raw_json: {}",
