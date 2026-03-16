@@ -23,6 +23,7 @@ Response:
 
 - `200 OK` with `Content-Type: application/json`
 - `200 OK` includes `Content-Disposition: attachment; filename="veloflux-metadata-export-<unix_secs>.json"`
+- `409 Conflict` if another import/export command is in progress
 - `500 Internal Server Error` if export snapshot building fails
 
 Example:
@@ -35,7 +36,6 @@ curl -sOJ http://127.0.0.1:8080/storage/export
 
 ### `ExportBundleV1`
 
-- `bundle_version: number` (currently `1`)
 - `exported_at: number` (Unix seconds)
 - `resources: ExportResources`
 
