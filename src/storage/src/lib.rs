@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use redb::{Database, ReadTransaction, ReadableTable, TableDefinition};
+use redb::{Database, ReadTransaction, ReadableTable, TableDefinition, WriteTransaction};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -267,6 +267,36 @@ impl MetadataStorage {
         })
     }
 
+    pub fn replace_snapshot(&self, snapshot: MetadataExportSnapshot) -> Result<(), StorageError> {
+        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        Self::replace_table_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
+            stream.id.as_str()
+        })?;
+        Self::replace_table_entries(&txn, PIPELINES_TABLE, &snapshot.pipelines, |pipeline| {
+            pipeline.id.as_str()
+        })?;
+        Self::replace_table_entries(
+            &txn,
+            PIPELINE_RUN_STATES_TABLE,
+            &snapshot.pipeline_run_states,
+            |state| state.pipeline_id.as_str(),
+        )?;
+        Self::replace_table_entries(
+            &txn,
+            SHARED_MQTT_CONFIGS_TABLE,
+            &snapshot.mqtt_configs,
+            |cfg| cfg.key.as_str(),
+        )?;
+        Self::replace_table_entries(
+            &txn,
+            MEMORY_TOPICS_TABLE,
+            &snapshot.memory_topics,
+            |topic| topic.topic.as_str(),
+        )?;
+        txn.commit().map_err(StorageError::backend)?;
+        Ok(())
+    }
+
     fn db_path(base_dir: &Path) -> PathBuf {
         base_dir.join("metadata.redb")
     }
@@ -361,6 +391,27 @@ impl MetadataStorage {
             items.push(decode_record(value.value())?);
         }
         Ok(items)
+    }
+
+    fn replace_table_entries<T, F>(
+        txn: &WriteTransaction,
+        table: TableDefinition<&str, &[u8]>,
+        values: &[T],
+        key_fn: F,
+    ) -> Result<(), StorageError>
+    where
+        T: Serialize,
+        F: Fn(&T) -> &str,
+    {
+        let mut table = txn.open_table(table).map_err(StorageError::backend)?;
+        drop(table.drain::<&str>(..).map_err(StorageError::backend)?);
+        for value in values {
+            let encoded = encode_record(value)?;
+            table
+                .insert(key_fn(value), encoded.as_slice())
+                .map_err(StorageError::backend)?;
+        }
+        Ok(())
     }
 }
 
@@ -473,6 +524,13 @@ impl StorageManager {
 
     pub fn export_metadata_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
         self.metadata.export_snapshot()
+    }
+
+    pub fn replace_metadata_snapshot(
+        &self,
+        snapshot: MetadataExportSnapshot,
+    ) -> Result<(), StorageError> {
+        self.metadata.replace_snapshot(snapshot)
     }
 }
 

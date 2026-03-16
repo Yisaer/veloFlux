@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
 };
 use flow::connector::SharedMqttClientConfig;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 use storage::{StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState};
 
@@ -13,14 +13,13 @@ use crate::pipeline::{AppState, CreatePipelineRequest};
 use crate::storage_bridge;
 use crate::stream::CreateStreamRequest;
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ExportBundleV1 {
-    pub bundle_version: u32,
     pub exported_at: u64,
     pub resources: ExportResources,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ExportResources {
     pub memory_topics: Vec<ExportMemoryTopic>,
     pub shared_mqtt_clients: Vec<SharedMqttClientConfig>,
@@ -29,14 +28,14 @@ pub struct ExportResources {
     pub pipeline_run_states: Vec<ExportPipelineRunState>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ExportMemoryTopic {
     pub topic: String,
     pub kind: StoredMemoryTopicKind,
     pub capacity: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct ExportPipelineRunState {
     pub pipeline_id: String,
     pub desired_state: StoredPipelineDesiredState,
@@ -66,7 +65,7 @@ pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoR
     ([(header::CONTENT_DISPOSITION, disposition)], Json(bundle)).into_response()
 }
 
-fn build_export_bundle(storage: &StorageManager) -> Result<ExportBundleV1, String> {
+pub(crate) fn build_export_bundle(storage: &StorageManager) -> Result<ExportBundleV1, String> {
     let snapshot = storage
         .export_metadata_snapshot()
         .map_err(|err| format!("read export snapshot from storage: {err}"))?;
@@ -144,7 +143,6 @@ fn build_export_bundle(storage: &StorageManager) -> Result<ExportBundleV1, Strin
         .as_secs();
 
     Ok(ExportBundleV1 {
-        bundle_version: 1,
         exported_at,
         resources: ExportResources {
             memory_topics,
@@ -294,7 +292,6 @@ mod tests {
             .expect("read response body");
         let json: JsonValue = serde_json::from_slice(&body).expect("decode export bundle");
 
-        assert_eq!(json["bundle_version"], 1);
         assert!(json["exported_at"].as_u64().unwrap() > 0);
         assert_eq!(
             json["resources"]["memory_topics"].as_array().unwrap().len(),

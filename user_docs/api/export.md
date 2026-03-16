@@ -35,7 +35,6 @@ curl -sOJ http://127.0.0.1:8080/storage/export
 
 ### `ExportBundleV1`
 
-- `bundle_version: number` (currently `1`)
 - `exported_at: number` (Unix seconds)
 - `resources: ExportResources`
 
