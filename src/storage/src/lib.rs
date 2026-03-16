@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use redb::{Database, ReadableTable, TableDefinition};
+use redb::{Database, ReadTransaction, ReadableTable, TableDefinition};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -94,6 +94,15 @@ pub struct StoredMemoryTopic {
     pub topic: String,
     pub kind: StoredMemoryTopicKind,
     pub capacity: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataExportSnapshot {
+    pub streams: Vec<StoredStream>,
+    pub pipelines: Vec<StoredPipeline>,
+    pub pipeline_run_states: Vec<StoredPipelineRunState>,
+    pub mqtt_configs: Vec<StoredMqttClientConfig>,
+    pub memory_topics: Vec<StoredMemoryTopic>,
 }
 
 pub struct MetadataStorage {
@@ -247,6 +256,17 @@ impl MetadataStorage {
         self.delete_entry(MEMORY_TOPICS_TABLE, topic)
     }
 
+    pub fn export_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
+        let txn = self.db.begin_read().map_err(StorageError::backend)?;
+        Ok(MetadataExportSnapshot {
+            streams: Self::list_entries_in_read_txn(&txn, STREAMS_TABLE)?,
+            pipelines: Self::list_entries_in_read_txn(&txn, PIPELINES_TABLE)?,
+            pipeline_run_states: Self::list_entries_in_read_txn(&txn, PIPELINE_RUN_STATES_TABLE)?,
+            mqtt_configs: Self::list_entries_in_read_txn(&txn, SHARED_MQTT_CONFIGS_TABLE)?,
+            memory_topics: Self::list_entries_in_read_txn(&txn, MEMORY_TOPICS_TABLE)?,
+        })
+    }
+
     fn db_path(base_dir: &Path) -> PathBuf {
         base_dir.join("metadata.redb")
     }
@@ -327,6 +347,13 @@ impl MetadataStorage {
         table: TableDefinition<&str, &[u8]>,
     ) -> Result<Vec<T>, StorageError> {
         let txn = self.db.begin_read().map_err(StorageError::backend)?;
+        Self::list_entries_in_read_txn(&txn, table)
+    }
+
+    fn list_entries_in_read_txn<T: DeserializeOwned>(
+        txn: &ReadTransaction,
+        table: TableDefinition<&str, &[u8]>,
+    ) -> Result<Vec<T>, StorageError> {
         let table = txn.open_table(table).map_err(StorageError::backend)?;
         let mut items = Vec::new();
         for entry in table.range::<&str>(..).map_err(StorageError::backend)? {
@@ -443,6 +470,10 @@ impl StorageManager {
     pub fn delete_memory_topic(&self, topic: &str) -> Result<(), StorageError> {
         self.metadata.delete_memory_topic(topic)
     }
+
+    pub fn export_metadata_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
+        self.metadata.export_snapshot()
+    }
 }
 
 fn encode_record<T: Serialize>(value: &T) -> Result<Vec<u8>, StorageError> {
@@ -476,6 +507,21 @@ mod tests {
         StoredMqttClientConfig {
             key: "shared_a".to_string(),
             raw_json: r#"{"key":"shared_a","broker_url":"tcp://localhost:1883","topic":"foo/bar","client_id":"client_a","qos":1}"#.to_string(),
+        }
+    }
+
+    fn sample_pipeline_run_state() -> StoredPipelineRunState {
+        StoredPipelineRunState {
+            pipeline_id: "pipe_1".to_string(),
+            desired_state: StoredPipelineDesiredState::Running,
+        }
+    }
+
+    fn sample_memory_topic() -> StoredMemoryTopic {
+        StoredMemoryTopic {
+            topic: "topic_1".to_string(),
+            kind: StoredMemoryTopicKind::Bytes,
+            capacity: 16,
         }
     }
 
@@ -553,5 +599,31 @@ mod tests {
         manager.delete_stream(&stream.id).unwrap();
         manager.delete_pipeline(&pipeline.id).unwrap();
         manager.delete_mqtt_config(&mqtt.key).unwrap();
+    }
+
+    #[test]
+    fn export_snapshot_captures_all_metadata_tables() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        let stream = sample_stream();
+        let pipeline = sample_pipeline();
+        let mqtt = sample_mqtt_config();
+        let run_state = sample_pipeline_run_state();
+        let memory_topic = sample_memory_topic();
+
+        storage.create_stream(stream.clone()).unwrap();
+        storage.create_pipeline(pipeline.clone()).unwrap();
+        storage.create_mqtt_config(mqtt.clone()).unwrap();
+        storage.put_pipeline_run_state(run_state.clone()).unwrap();
+        storage.create_memory_topic(memory_topic.clone()).unwrap();
+
+        let snapshot = storage.export_metadata_snapshot().unwrap();
+
+        assert_eq!(snapshot.streams, vec![stream]);
+        assert_eq!(snapshot.pipelines, vec![pipeline]);
+        assert_eq!(snapshot.mqtt_configs, vec![mqtt]);
+        assert_eq!(snapshot.pipeline_run_states, vec![run_state]);
+        assert_eq!(snapshot.memory_topics, vec![memory_topic]);
     }
 }
