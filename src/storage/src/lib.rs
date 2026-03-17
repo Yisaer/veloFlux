@@ -13,6 +13,8 @@ const PIPELINE_RUN_STATES_TABLE: TableDefinition<&str, &[u8]> =
 const SHARED_MQTT_CONFIGS_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("shared_mqtt_client_configs");
 const MEMORY_TOPICS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("memory_topics");
+const INIT_APPLY_META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("init_apply_meta");
+const INIT_APPLY_META_KEY: &str = "init.json";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageNamespace {
@@ -94,6 +96,12 @@ pub struct StoredMemoryTopic {
     pub topic: String,
     pub kind: StoredMemoryTopicKind,
     pub capacity: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredInitApplyMeta {
+    pub last_applied_at_ms: u64,
+    pub last_init_json_modified_at_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,6 +305,74 @@ impl MetadataStorage {
         Ok(())
     }
 
+    pub fn get_init_apply_meta(&self) -> Result<Option<StoredInitApplyMeta>, StorageError> {
+        self.get_entry(INIT_APPLY_META_TABLE, INIT_APPLY_META_KEY)
+    }
+
+    pub fn put_init_apply_meta(&self, meta: StoredInitApplyMeta) -> Result<(), StorageError> {
+        self.put_entry(INIT_APPLY_META_TABLE, INIT_APPLY_META_KEY, &meta)
+    }
+
+    pub fn apply_init_snapshot(
+        &self,
+        snapshot: MetadataExportSnapshot,
+        meta: StoredInitApplyMeta,
+    ) -> Result<(), StorageError> {
+        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        Self::ensure_entries_absent(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
+            stream.id.as_str()
+        })?;
+        Self::ensure_entries_absent(&txn, PIPELINES_TABLE, &snapshot.pipelines, |pipeline| {
+            pipeline.id.as_str()
+        })?;
+        Self::ensure_entries_absent(
+            &txn,
+            PIPELINE_RUN_STATES_TABLE,
+            &snapshot.pipeline_run_states,
+            |state| state.pipeline_id.as_str(),
+        )?;
+        Self::ensure_entries_absent(
+            &txn,
+            SHARED_MQTT_CONFIGS_TABLE,
+            &snapshot.mqtt_configs,
+            |cfg| cfg.key.as_str(),
+        )?;
+        Self::ensure_entries_absent(
+            &txn,
+            MEMORY_TOPICS_TABLE,
+            &snapshot.memory_topics,
+            |topic| topic.topic.as_str(),
+        )?;
+
+        Self::insert_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
+            stream.id.as_str()
+        })?;
+        Self::insert_entries(&txn, PIPELINES_TABLE, &snapshot.pipelines, |pipeline| {
+            pipeline.id.as_str()
+        })?;
+        Self::insert_entries(
+            &txn,
+            PIPELINE_RUN_STATES_TABLE,
+            &snapshot.pipeline_run_states,
+            |state| state.pipeline_id.as_str(),
+        )?;
+        Self::insert_entries(
+            &txn,
+            SHARED_MQTT_CONFIGS_TABLE,
+            &snapshot.mqtt_configs,
+            |cfg| cfg.key.as_str(),
+        )?;
+        Self::insert_entries(
+            &txn,
+            MEMORY_TOPICS_TABLE,
+            &snapshot.memory_topics,
+            |topic| topic.topic.as_str(),
+        )?;
+        Self::put_entry_in_txn(&txn, INIT_APPLY_META_TABLE, INIT_APPLY_META_KEY, &meta)?;
+        txn.commit().map_err(StorageError::backend)?;
+        Ok(())
+    }
+
     fn db_path(base_dir: &Path) -> PathBuf {
         base_dir.join("metadata.redb")
     }
@@ -312,6 +388,8 @@ impl MetadataStorage {
         txn.open_table(SHARED_MQTT_CONFIGS_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(MEMORY_TOPICS_TABLE)
+            .map_err(StorageError::backend)?;
+        txn.open_table(INIT_APPLY_META_TABLE)
             .map_err(StorageError::backend)?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
@@ -334,6 +412,18 @@ impl MetadataStorage {
                 .insert(key, encoded.as_slice())
                 .map_err(StorageError::backend)?;
         }
+        txn.commit().map_err(StorageError::backend)?;
+        Ok(())
+    }
+
+    fn put_entry<T: Serialize>(
+        &self,
+        table: TableDefinition<&str, &[u8]>,
+        key: &str,
+        value: &T,
+    ) -> Result<(), StorageError> {
+        let txn = self.db.begin_write().map_err(StorageError::backend)?;
+        Self::put_entry_in_txn(&txn, table, key, value)?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
     }
@@ -411,6 +501,59 @@ impl MetadataStorage {
                 .insert(key_fn(value), encoded.as_slice())
                 .map_err(StorageError::backend)?;
         }
+        Ok(())
+    }
+
+    fn ensure_entries_absent<T, F>(
+        txn: &WriteTransaction,
+        table: TableDefinition<&str, &[u8]>,
+        values: &[T],
+        key_fn: F,
+    ) -> Result<(), StorageError>
+    where
+        F: Fn(&T) -> &str,
+    {
+        let table = txn.open_table(table).map_err(StorageError::backend)?;
+        for value in values {
+            let key = key_fn(value);
+            if table.get(key).map_err(StorageError::backend)?.is_some() {
+                return Err(StorageError::AlreadyExists(key.to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_entries<T, F>(
+        txn: &WriteTransaction,
+        table: TableDefinition<&str, &[u8]>,
+        values: &[T],
+        key_fn: F,
+    ) -> Result<(), StorageError>
+    where
+        T: Serialize,
+        F: Fn(&T) -> &str,
+    {
+        let mut table = txn.open_table(table).map_err(StorageError::backend)?;
+        for value in values {
+            let encoded = encode_record(value)?;
+            table
+                .insert(key_fn(value), encoded.as_slice())
+                .map_err(StorageError::backend)?;
+        }
+        Ok(())
+    }
+
+    fn put_entry_in_txn<T: Serialize>(
+        txn: &WriteTransaction,
+        table: TableDefinition<&str, &[u8]>,
+        key: &str,
+        value: &T,
+    ) -> Result<(), StorageError> {
+        let mut table = txn.open_table(table).map_err(StorageError::backend)?;
+        let encoded = encode_record(value)?;
+        table
+            .insert(key, encoded.as_slice())
+            .map_err(StorageError::backend)?;
         Ok(())
     }
 }
@@ -532,6 +675,22 @@ impl StorageManager {
     ) -> Result<(), StorageError> {
         self.metadata.replace_snapshot(snapshot)
     }
+
+    pub fn get_init_apply_meta(&self) -> Result<Option<StoredInitApplyMeta>, StorageError> {
+        self.metadata.get_init_apply_meta()
+    }
+
+    pub fn put_init_apply_meta(&self, meta: StoredInitApplyMeta) -> Result<(), StorageError> {
+        self.metadata.put_init_apply_meta(meta)
+    }
+
+    pub fn apply_init_snapshot(
+        &self,
+        snapshot: MetadataExportSnapshot,
+        meta: StoredInitApplyMeta,
+    ) -> Result<(), StorageError> {
+        self.metadata.apply_init_snapshot(snapshot, meta)
+    }
 }
 
 fn encode_record<T: Serialize>(value: &T) -> Result<Vec<u8>, StorageError> {
@@ -580,6 +739,13 @@ mod tests {
             topic: "topic_1".to_string(),
             kind: StoredMemoryTopicKind::Bytes,
             capacity: 16,
+        }
+    }
+
+    fn sample_init_apply_meta() -> StoredInitApplyMeta {
+        StoredInitApplyMeta {
+            last_applied_at_ms: 1234,
+            last_init_json_modified_at_ms: 5678,
         }
     }
 
@@ -683,5 +849,73 @@ mod tests {
         assert_eq!(snapshot.mqtt_configs, vec![mqtt]);
         assert_eq!(snapshot.pipeline_run_states, vec![run_state]);
         assert_eq!(snapshot.memory_topics, vec![memory_topic]);
+    }
+
+    #[test]
+    fn init_apply_snapshot_is_atomic_on_duplicate_conflict() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let existing_stream = sample_stream();
+        storage.create_stream(existing_stream).unwrap();
+
+        let snapshot = MetadataExportSnapshot {
+            streams: vec![sample_stream()],
+            pipelines: vec![sample_pipeline()],
+            pipeline_run_states: vec![sample_pipeline_run_state()],
+            mqtt_configs: vec![sample_mqtt_config()],
+            memory_topics: vec![sample_memory_topic()],
+        };
+
+        let result = storage.apply_init_snapshot(snapshot, sample_init_apply_meta());
+        match result {
+            Err(StorageError::AlreadyExists(id)) => assert_eq!(id, "stream_1"),
+            other => panic!("expected AlreadyExists, got {other:?}"),
+        }
+
+        assert_eq!(
+            storage.list_pipelines().unwrap(),
+            Vec::<StoredPipeline>::new()
+        );
+        assert_eq!(
+            storage.list_mqtt_configs().unwrap(),
+            Vec::<StoredMqttClientConfig>::new()
+        );
+        assert_eq!(
+            storage.list_memory_topics().unwrap(),
+            Vec::<StoredMemoryTopic>::new()
+        );
+        assert_eq!(storage.get_init_apply_meta().unwrap(), None);
+    }
+
+    #[test]
+    fn init_apply_snapshot_persists_resources_and_meta() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let stream = sample_stream();
+        let pipeline = sample_pipeline();
+        let mqtt = sample_mqtt_config();
+        let run_state = sample_pipeline_run_state();
+        let memory_topic = sample_memory_topic();
+        let meta = sample_init_apply_meta();
+
+        let snapshot = MetadataExportSnapshot {
+            streams: vec![stream.clone()],
+            pipelines: vec![pipeline.clone()],
+            pipeline_run_states: vec![run_state.clone()],
+            mqtt_configs: vec![mqtt.clone()],
+            memory_topics: vec![memory_topic.clone()],
+        };
+
+        storage.apply_init_snapshot(snapshot, meta.clone()).unwrap();
+
+        assert_eq!(storage.list_streams().unwrap(), vec![stream]);
+        assert_eq!(storage.list_pipelines().unwrap(), vec![pipeline]);
+        assert_eq!(storage.list_mqtt_configs().unwrap(), vec![mqtt]);
+        assert_eq!(storage.list_memory_topics().unwrap(), vec![memory_topic]);
+        assert_eq!(
+            storage.get_pipeline_run_state("pipe_1").unwrap(),
+            Some(run_state)
+        );
+        assert_eq!(storage.get_init_apply_meta().unwrap(), Some(meta));
     }
 }

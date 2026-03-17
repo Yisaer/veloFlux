@@ -3,6 +3,7 @@ mod capabilities;
 mod export;
 mod function;
 mod import;
+mod init_process;
 mod instances;
 mod memory_topic;
 mod pipeline;
