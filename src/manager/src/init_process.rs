@@ -12,7 +12,13 @@ use crate::startup::StartupPhase;
 const INIT_JSON_FILE: &str = "init.json";
 const INIT_JSON_APPLY_PHASE: &str = "init_json_apply";
 
-pub(crate) fn apply_init_json_if_needed(storage: &StorageManager) -> Result<(), String> {
+pub(crate) fn apply_init_json_if_needed<F>(
+    storage: &StorageManager,
+    is_declared_instance: &F,
+) -> Result<(), String>
+where
+    F: Fn(&str) -> bool,
+{
     let init_path = init_json_path(storage);
     if !init_path.exists() {
         tracing::info!(
@@ -49,7 +55,12 @@ pub(crate) fn apply_init_json_if_needed(storage: &StorageManager) -> Result<(), 
     }
 
     let phase = StartupPhase::new("manager", DEFAULT_FLOW_INSTANCE_ID, INIT_JSON_APPLY_PHASE);
-    let result = apply_init_json(storage, &init_path, init_modified_at_ms);
+    let result = apply_init_json(
+        storage,
+        &init_path,
+        init_modified_at_ms,
+        is_declared_instance,
+    );
     match result {
         Ok(summary) => {
             tracing::info!(
@@ -76,17 +87,21 @@ pub(crate) fn apply_init_json_if_needed(storage: &StorageManager) -> Result<(), 
     }
 }
 
-fn apply_init_json(
+fn apply_init_json<F>(
     storage: &StorageManager,
     init_path: &Path,
     init_modified_at_ms: u64,
-) -> Result<ApplySummary, String> {
+    is_declared_instance: &F,
+) -> Result<ApplySummary, String>
+where
+    F: Fn(&str) -> bool,
+{
     let raw = fs::read(init_path)
         .map_err(|err| format!("read init.json {}: {err}", init_path.display()))?;
     let bundle: ExportBundleV1 = serde_json::from_slice(&raw)
         .map_err(|err| format!("parse init.json {}: {err}", init_path.display()))?;
     let summary = ApplySummary::from_resources(&bundle.resources);
-    let snapshot = validate_and_build_snapshot(&bundle)?;
+    let snapshot = validate_and_build_snapshot(&bundle, is_declared_instance)?;
     let meta = StoredInitApplyMeta {
         last_applied_at_ms: unix_time_ms(SystemTime::now())?,
         last_init_json_modified_at_ms: init_modified_at_ms,
@@ -183,7 +198,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
 
-        apply_init_json_if_needed(&storage).unwrap();
+        apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap();
 
         assert_eq!(
             storage.list_streams().unwrap(),
@@ -198,7 +213,7 @@ mod tests {
         let storage = StorageManager::new(dir.path()).unwrap();
         write_init_json(dir.path(), &sample_bundle("stream_1"));
 
-        apply_init_json_if_needed(&storage).unwrap();
+        apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap();
         let meta = storage
             .get_init_apply_meta()
             .unwrap()
@@ -206,7 +221,7 @@ mod tests {
 
         assert_eq!(storage.list_streams().unwrap().len(), 1);
 
-        apply_init_json_if_needed(&storage).unwrap();
+        apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap();
 
         assert_eq!(storage.list_streams().unwrap().len(), 1);
         assert_eq!(storage.get_init_apply_meta().unwrap(), Some(meta));
@@ -218,7 +233,7 @@ mod tests {
         let storage = StorageManager::new(dir.path()).unwrap();
         write_init_json(dir.path(), &sample_bundle("stream_1"));
 
-        apply_init_json_if_needed(&storage).unwrap();
+        apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap();
         let meta = storage
             .get_init_apply_meta()
             .unwrap()
@@ -229,7 +244,8 @@ mod tests {
         };
         storage.put_init_apply_meta(stale_meta.clone()).unwrap();
 
-        let err = apply_init_json_if_needed(&storage).unwrap_err();
+        let err =
+            apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap_err();
         assert!(err.contains("already exists: stream_1"));
         assert_eq!(storage.list_streams().unwrap().len(), 1);
         assert_eq!(storage.get_init_apply_meta().unwrap(), Some(stale_meta));

@@ -46,7 +46,8 @@ pub async fn import_storage_handler(
         }
     };
 
-    let snapshot = match validate_and_build_snapshot(&bundle) {
+    let snapshot = match validate_and_build_snapshot(&bundle, &|id| state.is_declared_instance(id))
+    {
         Ok(snapshot) => snapshot,
         Err(err) => {
             audit.log_failure(&err);
@@ -88,9 +89,13 @@ pub async fn import_storage_handler(
         .into_response()
 }
 
-pub(crate) fn validate_and_build_snapshot(
+pub(crate) fn validate_and_build_snapshot<F>(
     bundle: &ExportBundleV1,
-) -> Result<MetadataExportSnapshot, String> {
+    is_declared_instance: &F,
+) -> Result<MetadataExportSnapshot, String>
+where
+    F: Fn(&str) -> bool,
+{
     let mut memory_topics = Vec::with_capacity(bundle.resources.memory_topics.len());
     let mut memory_topic_names = BTreeSet::new();
     for topic in &bundle.resources.memory_topics {
@@ -131,6 +136,11 @@ pub(crate) fn validate_and_build_snapshot(
     let mut pipeline_ids = BTreeSet::new();
     for req in &bundle.resources.pipelines {
         let normalized = normalize_pipeline_request(req)?;
+        let flow_instance_id = normalized
+            .flow_instance_id
+            .as_deref()
+            .ok_or_else(|| "flow_instance_id must not be empty".to_string())?;
+        validate_declared_flow_instance(flow_instance_id, is_declared_instance)?;
         let id = normalized.id.clone();
         if !pipeline_ids.insert(id.clone()) {
             return Err(format!("duplicate pipeline id in bundle: {id}"));
@@ -198,6 +208,21 @@ fn normalize_pipeline_request(
         Some(canonical_flow_instance_id(req.flow_instance_id.as_deref())?);
     validate_create_request(&normalized)?;
     Ok(normalized)
+}
+
+fn validate_declared_flow_instance<F>(
+    flow_instance_id: &str,
+    is_declared_instance: &F,
+) -> Result<(), String>
+where
+    F: Fn(&str) -> bool,
+{
+    if !is_declared_instance(flow_instance_id) {
+        return Err(format!(
+            "flow instance {flow_instance_id} is not declared by config"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_pipeline_run_state(
@@ -339,6 +364,10 @@ mod tests {
         }
     }
 
+    fn is_default_instance(id: &str) -> bool {
+        id == DEFAULT_FLOW_INSTANCE_ID
+    }
+
     #[tokio::test]
     async fn import_storage_handler_replaces_snapshot_and_returns_previous_bundle() {
         let dir = tempdir().expect("create tempdir");
@@ -348,7 +377,8 @@ mod tests {
 
         storage
             .replace_metadata_snapshot(
-                validate_and_build_snapshot(&old_bundle).expect("build old snapshot"),
+                validate_and_build_snapshot(&old_bundle, &is_default_instance)
+                    .expect("build old snapshot"),
             )
             .expect("seed old snapshot");
 
