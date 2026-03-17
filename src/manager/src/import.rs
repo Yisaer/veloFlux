@@ -88,7 +88,9 @@ pub async fn import_storage_handler(
         .into_response()
 }
 
-fn validate_and_build_snapshot(bundle: &ExportBundleV1) -> Result<MetadataExportSnapshot, String> {
+pub(crate) fn validate_and_build_snapshot(
+    bundle: &ExportBundleV1,
+) -> Result<MetadataExportSnapshot, String> {
     let mut memory_topics = Vec::with_capacity(bundle.resources.memory_topics.len());
     let mut memory_topic_names = BTreeSet::new();
     for topic in &bundle.resources.memory_topics {

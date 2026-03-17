@@ -145,6 +145,7 @@ impl AppState {
     }
 
     pub async fn bootstrap_from_storage(&self) -> Result<(), String> {
+        crate::init_process::apply_init_json_if_needed(self.storage.as_ref())?;
         let phase = StartupPhase::new("manager", DEFAULT_FLOW_INSTANCE_ID, "storage_hydrate");
         if let Err(err) = crate::storage_bridge::hydrate_runtime_from_storage(
             self.storage.as_ref(),
