@@ -70,7 +70,7 @@ pub fn default_init_options(
         let cfg = AppConfig::load_required(path)?;
         (cfg, Some(path.to_string()))
     } else {
-        (AppConfig::default(), None)
+        (AppConfig::load_default_with_env()?, None)
     };
 
     let logging_guard = crate::logging::init_logging(&config.logging)?;
