@@ -4,6 +4,10 @@ use serde::Deserialize;
 use std::fs;
 use std::path::Path;
 
+mod env;
+
+type ConfigResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -146,25 +150,28 @@ impl Default for ServerConfig {
 }
 
 impl AppConfig {
-    pub fn load_required(
-        path: impl AsRef<Path>,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn load_required(path: impl AsRef<Path>) -> ConfigResult<Self> {
         let path = path.as_ref();
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read config file {}: {}", path.display(), err))?;
-        let cfg: AppConfig = serde_yaml::from_str(&raw)
+        let mut cfg: AppConfig = serde_yaml::from_str(&raw)
             .map_err(|err| format!("failed to parse yaml config {}: {}", path.display(), err))?;
+        env::apply_env_overrides(&mut cfg)?;
         Ok(cfg)
     }
 
-    pub fn load_optional(
-        path: impl AsRef<Path>,
-    ) -> Result<Option<Self>, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn load_optional(path: impl AsRef<Path>) -> ConfigResult<Option<Self>> {
         let path = path.as_ref();
         if !path.exists() {
             return Ok(None);
         }
         Ok(Some(Self::load_required(path)?))
+    }
+
+    pub fn load_default_with_env() -> ConfigResult<Self> {
+        let mut cfg = Self::default();
+        env::apply_env_overrides(&mut cfg)?;
+        Ok(cfg)
     }
 
     pub fn apply_to_server_options(&self, opts: &mut ServerOptions) {
@@ -201,7 +208,17 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    const ENV_LOGGING_OUTPUT: &str = "VELOFLUX_LOGGING__OUTPUT";
+    const ENV_LOGGING_LEVEL: &str = "VELOFLUX_LOGGING__LEVEL";
+    const ENV_LOGGING_INCLUDE_SOURCE: &str = "VELOFLUX_LOGGING__INCLUDE_SOURCE";
+    const ENV_METRICS_ADDR: &str = "VELOFLUX_METRICS__ADDR";
+    const ENV_METRICS_POLL_INTERVAL_SECS: &str = "VELOFLUX_METRICS__POLL_INTERVAL_SECS";
+    const ENV_SERVER_MANAGER_ADDR: &str = "VELOFLUX_SERVER__MANAGER_ADDR";
 
     fn unique_temp_path(name: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -209,6 +226,46 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         std::env::temp_dir().join(format!("veloflux_test.{}.{}.yaml", name, nanos))
+    }
+
+    struct EnvTestGuard {
+        _lock: MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvTestGuard {
+        fn new() -> Self {
+            let lock = ENV_MUTEX.lock().expect("lock env mutex");
+            let supported = super::env::supported_env_var_names();
+            let mut saved = Vec::with_capacity(supported.len());
+            for key in supported {
+                saved.push((key, std::env::var_os(key)));
+                std::env::remove_var(key);
+            }
+            Self { _lock: lock, saved }
+        }
+
+        fn set(&mut self, key: &'static str, value: &str) {
+            std::env::set_var(key, value);
+        }
+
+        fn set_any(&mut self, key: &'static str, value: &str) {
+            if !self.saved.iter().any(|(saved_key, _)| *saved_key == key) {
+                self.saved.push((key, std::env::var_os(key)));
+            }
+            std::env::set_var(key, value);
+        }
+    }
+
+    impl Drop for EnvTestGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
     }
 
     #[test]
@@ -220,6 +277,7 @@ mod tests {
 
     #[test]
     fn applies_only_present_fields() {
+        let _env = EnvTestGuard::new();
         let yaml = r#"
 profiling:
   enabled: true
@@ -243,7 +301,24 @@ server:
     }
 
     #[test]
+    fn loads_default_with_env_overrides() {
+        let mut env = EnvTestGuard::new();
+        env.set(ENV_LOGGING_LEVEL, "debug");
+        env.set(ENV_LOGGING_INCLUDE_SOURCE, "false");
+        env.set(ENV_METRICS_ADDR, "127.0.0.1:19000");
+        env.set(ENV_SERVER_MANAGER_ADDR, "127.0.0.1:18080");
+
+        let cfg = AppConfig::load_default_with_env().unwrap();
+
+        assert!(matches!(cfg.logging.level, LogLevel::Debug));
+        assert!(!cfg.logging.include_source);
+        assert_eq!(cfg.metrics.addr.as_deref(), Some("127.0.0.1:19000"));
+        assert_eq!(cfg.server.manager_addr.as_deref(), Some("127.0.0.1:18080"));
+    }
+
+    #[test]
     fn loads_addresses_and_intervals() {
+        let _env = EnvTestGuard::new();
         let yaml = r#"
 profiling:
   addr: "127.0.0.1:6060"
@@ -259,6 +334,33 @@ metrics:
         assert_eq!(opts.profile_addr.as_deref(), Some("127.0.0.1:6060"));
         assert_eq!(opts.metrics_addr.as_deref(), Some("127.0.0.1:9898"));
         assert_eq!(opts.metrics_poll_interval_secs, Some(2));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn env_overrides_file_values() {
+        let yaml = r#"
+logging:
+  output: stdout
+metrics:
+  addr: "127.0.0.1:9898"
+server:
+  manager_addr: "127.0.0.1:8080"
+"#;
+        let path = unique_temp_path("env_override_file");
+        std::fs::write(&path, yaml).unwrap();
+
+        let mut env = EnvTestGuard::new();
+        env.set(ENV_LOGGING_OUTPUT, "file");
+        env.set(ENV_METRICS_ADDR, "127.0.0.1:19998");
+        env.set(ENV_SERVER_MANAGER_ADDR, "127.0.0.1:18080");
+
+        let cfg = AppConfig::load_required(&path).unwrap();
+
+        assert!(matches!(cfg.logging.output, LoggingOutput::File));
+        assert_eq!(cfg.metrics.addr.as_deref(), Some("127.0.0.1:19998"));
+        assert_eq!(cfg.server.manager_addr.as_deref(), Some("127.0.0.1:18080"));
 
         let _ = std::fs::remove_file(&path);
     }
@@ -288,6 +390,7 @@ metrics:
 
     #[test]
     fn loads_logging_config() {
+        let _env = EnvTestGuard::new();
         let yaml = r#"
 logging:
   output: file
@@ -321,5 +424,39 @@ logging:
         assert_eq!(cfg.logging.file.rotation.max_size_mb, 16);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unsupported_env_vars_are_ignored() {
+        let yaml = r#"
+server:
+  flow_instances:
+    - id: "default"
+      backend: "in_process"
+"#;
+        let path = unique_temp_path("unsupported_env");
+        std::fs::write(&path, yaml).unwrap();
+
+        let mut env = EnvTestGuard::new();
+        let unsupported_key = "VELOFLUX_SERVER__FLOW_INSTANCES";
+        env.set_any(unsupported_key, "[]");
+
+        let cfg = AppConfig::load_required(&path).unwrap();
+
+        assert_eq!(cfg.server.flow_instances.len(), 1);
+        assert_eq!(cfg.server.flow_instances[0].id, "default");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn invalid_supported_env_value_fails_loading() {
+        let mut env = EnvTestGuard::new();
+        env.set(ENV_METRICS_POLL_INTERVAL_SECS, "abc");
+
+        let err = AppConfig::load_default_with_env().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("failed to parse environment variable"));
     }
 }
