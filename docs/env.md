@@ -20,13 +20,15 @@ those sections are easier to review and maintain in versioned config files.
 - Allow a small, explicit whitelist of deployment-oriented config fields to be overridden by OS
   environment variables.
 - Keep environment-variable naming stable and predictable.
-- Apply the same override semantics in both manager and worker startup paths.
+- Apply the same override semantics in both manager and worker startup paths for process-global
+  fields.
 - Preserve `config.yaml` as the source of truth for structured topology configuration.
 
 ## Non-Goals
 
 - Provide a generic environment-variable mirror for the entire config schema.
 - Support overriding `server.flow_instances` from environment variables.
+- Support overriding per-worker bind addresses from environment variables.
 - Support partial overrides for arrays or nested structured objects.
 - Introduce runtime hot reload for environment-variable changes.
 
@@ -41,9 +43,7 @@ Only the following environment variables are recognized:
 | `logging.include_source` | `VELOFLUX_LOGGING__INCLUDE_SOURCE` |
 | `logging.file.dir` | `VELOFLUX_LOGGING__FILE__DIR` |
 | `profiling.enabled` | `VELOFLUX_PROFILING__ENABLED` |
-| `profiling.addr` | `VELOFLUX_PROFILING__ADDR` |
 | `profiling.cpu_profile_freq_hz` | `VELOFLUX_PROFILING__CPU_PROFILE_FREQ_HZ` |
-| `metrics.addr` | `VELOFLUX_METRICS__ADDR` |
 | `metrics.poll_interval_secs` | `VELOFLUX_METRICS__POLL_INTERVAL_SECS` |
 | `server.manager_addr` | `VELOFLUX_SERVER__MANAGER_ADDR` |
 
@@ -52,6 +52,10 @@ All other `config.yaml` fields remain file-only configuration.
 In particular, `server.flow_instances` is intentionally excluded because it describes instance
 topology and backend-specific runtime structure. That section is better maintained in `config.yaml`
 where it can be reviewed as one coherent unit.
+
+The same reasoning applies to worker-process `metrics_addr` and `profile_addr`: they are
+instance-scoped bind addresses under `server.flow_instances`, so they remain file-only
+configuration.
 
 ## Naming Rules
 
@@ -93,7 +97,7 @@ Examples:
 export VELOFLUX_LOGGING__LEVEL=debug
 export VELOFLUX_LOGGING__OUTPUT=stdout
 export VELOFLUX_PROFILING__ENABLED=false
-export VELOFLUX_METRICS__ADDR=0.0.0.0:19998
+export VELOFLUX_METRICS__POLL_INTERVAL_SECS=30
 export VELOFLUX_SERVER__MANAGER_ADDR=0.0.0.0:18080
 ```
 
@@ -102,13 +106,19 @@ export VELOFLUX_SERVER__MANAGER_ADDR=0.0.0.0:18080
 Worker processes reload configuration during their own startup path.
 
 To keep behavior consistent, environment-variable overrides are applied in the shared config loader
-instead of being patched only in the manager bootstrap path. This ensures that:
+instead of being patched only in the manager bootstrap path. This ensures that supported
+process-global overrides behave the same way in both paths.
 
-- manager startup sees the same effective config as before spawning workers
-- worker processes inherit the same supported overrides from the parent process environment
+Worker bind addresses remain file-only:
 
-Because `server.flow_instances` remains file-only configuration, deployments that use
-`worker_process` instances still require a config file.
+- `worker_process` metrics and profiling endpoints are instance-scoped addresses under
+  `server.flow_instances`
+- those addresses must stay explicit in the reviewed topology config
+- a single top-level environment variable cannot safely represent distinct bind addresses for
+  multiple worker processes
+
+Because `server.flow_instances` remains file-only configuration, deployments that use worker
+processes still require a config file.
 
 ## Implementation Outline
 

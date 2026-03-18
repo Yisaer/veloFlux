@@ -216,7 +216,6 @@ mod tests {
     const ENV_LOGGING_OUTPUT: &str = "VELOFLUX_LOGGING__OUTPUT";
     const ENV_LOGGING_LEVEL: &str = "VELOFLUX_LOGGING__LEVEL";
     const ENV_LOGGING_INCLUDE_SOURCE: &str = "VELOFLUX_LOGGING__INCLUDE_SOURCE";
-    const ENV_METRICS_ADDR: &str = "VELOFLUX_METRICS__ADDR";
     const ENV_METRICS_POLL_INTERVAL_SECS: &str = "VELOFLUX_METRICS__POLL_INTERVAL_SECS";
     const ENV_SERVER_MANAGER_ADDR: &str = "VELOFLUX_SERVER__MANAGER_ADDR";
 
@@ -305,14 +304,14 @@ server:
         let mut env = EnvTestGuard::new();
         env.set(ENV_LOGGING_LEVEL, "debug");
         env.set(ENV_LOGGING_INCLUDE_SOURCE, "false");
-        env.set(ENV_METRICS_ADDR, "127.0.0.1:19000");
+        env.set(ENV_METRICS_POLL_INTERVAL_SECS, "30");
         env.set(ENV_SERVER_MANAGER_ADDR, "127.0.0.1:18080");
 
         let cfg = AppConfig::load_default_with_env().unwrap();
 
         assert!(matches!(cfg.logging.level, LogLevel::Debug));
         assert!(!cfg.logging.include_source);
-        assert_eq!(cfg.metrics.addr.as_deref(), Some("127.0.0.1:19000"));
+        assert_eq!(cfg.metrics.poll_interval_secs, Some(30));
         assert_eq!(cfg.server.manager_addr.as_deref(), Some("127.0.0.1:18080"));
     }
 
@@ -344,7 +343,7 @@ metrics:
 logging:
   output: stdout
 metrics:
-  addr: "127.0.0.1:9898"
+  poll_interval_secs: 5
 server:
   manager_addr: "127.0.0.1:8080"
 "#;
@@ -353,13 +352,13 @@ server:
 
         let mut env = EnvTestGuard::new();
         env.set(ENV_LOGGING_OUTPUT, "file");
-        env.set(ENV_METRICS_ADDR, "127.0.0.1:19998");
+        env.set(ENV_METRICS_POLL_INTERVAL_SECS, "30");
         env.set(ENV_SERVER_MANAGER_ADDR, "127.0.0.1:18080");
 
         let cfg = AppConfig::load_required(&path).unwrap();
 
         assert!(matches!(cfg.logging.output, LoggingOutput::File));
-        assert_eq!(cfg.metrics.addr.as_deref(), Some("127.0.0.1:19998"));
+        assert_eq!(cfg.metrics.poll_interval_secs, Some(30));
         assert_eq!(cfg.server.manager_addr.as_deref(), Some("127.0.0.1:18080"));
 
         let _ = std::fs::remove_file(&path);
@@ -445,6 +444,29 @@ server:
 
         assert_eq!(cfg.server.flow_instances.len(), 1);
         assert_eq!(cfg.server.flow_instances[0].id, "default");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn unsupported_bind_addr_env_vars_are_ignored() {
+        let yaml = r#"
+profiling:
+  addr: "127.0.0.1:6060"
+metrics:
+  addr: "127.0.0.1:9898"
+"#;
+        let path = unique_temp_path("unsupported_bind_addr_env");
+        std::fs::write(&path, yaml).unwrap();
+
+        let mut env = EnvTestGuard::new();
+        env.set_any("VELOFLUX_PROFILING__ADDR", "127.0.0.1:16060");
+        env.set_any("VELOFLUX_METRICS__ADDR", "127.0.0.1:19898");
+
+        let cfg = AppConfig::load_required(&path).unwrap();
+
+        assert_eq!(cfg.profiling.addr.as_deref(), Some("127.0.0.1:6060"));
+        assert_eq!(cfg.metrics.addr.as_deref(), Some("127.0.0.1:9898"));
 
         let _ = std::fs::remove_file(&path);
     }
