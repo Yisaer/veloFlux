@@ -516,37 +516,6 @@ mod tests {
 
     const EPS: f64 = 1e-9;
 
-    fn assert_float_eq(actual: Value, expected: f64) {
-        match actual {
-            Value::Float64(v) => {
-                assert!((v - expected).abs() < EPS, "expected {expected}, got {v}");
-            }
-            other => panic!("expected Float64({expected}), got {:?}", other),
-        }
-    }
-
-    fn assert_int_eq(actual: Value, expected: i64) {
-        match actual {
-            Value::Int64(v) => assert_eq!(v, expected),
-            other => panic!("expected Int64({expected}), got {:?}", other),
-        }
-    }
-
-    fn assert_string_eq(actual: Value, expected: &str) {
-        match actual {
-            Value::String(v) => assert_eq!(v, expected),
-            other => panic!("expected String({expected:?}), got {:?}", other),
-        }
-    }
-
-    fn assert_null(actual: Value) {
-        assert!(
-            matches!(actual, Value::Null),
-            "expected Null, got {:?}",
-            actual
-        );
-    }
-
     fn eval<F: CustomFunc>(f: &F, args: &[Value]) -> Value {
         f.eval_row(args).unwrap()
     }
@@ -557,33 +526,33 @@ mod tests {
 
     #[test]
     fn test_unary_math_correctness() {
-        assert_float_eq(eval(&AcosFunc, &[Value::Float64(1.0)]), 0.0);
-        assert_float_eq(eval(&AsinFunc, &[Value::Float64(0.0)]), 0.0);
-        assert_float_eq(
+        assert_float(eval(&AcosFunc, &[Value::Float64(1.0)]), 0.0);
+        assert_float(eval(&AsinFunc, &[Value::Float64(0.0)]), 0.0);
+        assert_float(
             eval(&AtanFunc, &[Value::Float64(1.0)]),
             std::f64::consts::FRAC_PI_4,
         );
-        assert_float_eq(eval(&CosFunc, &[Value::Float64(0.0)]), 1.0);
-        assert_float_eq(eval(&CoshFunc, &[Value::Float64(0.0)]), 1.0);
-        assert_float_eq(eval(&ExpFunc, &[Value::Float64(1.0)]), std::f64::consts::E);
-        assert_float_eq(eval(&FloorFunc, &[Value::Float64(3.8)]), 3.0);
-        assert_float_eq(eval(&LnFunc, &[Value::Float64(1.0)]), 0.0);
-        assert_float_eq(eval(&SinFunc, &[Value::Float64(0.0)]), 0.0);
-        assert_float_eq(eval(&SinhFunc, &[Value::Float64(0.0)]), 0.0);
-        assert_float_eq(eval(&SqrtFunc, &[Value::Float64(9.0)]), 3.0);
-        assert_float_eq(eval(&TanFunc, &[Value::Float64(0.0)]), 0.0);
-        assert_float_eq(eval(&TanhFunc, &[Value::Float64(0.0)]), 0.0);
-        assert_float_eq(eval(&CeilingFunc, &[Value::Float64(3.2)]), 4.0);
-        assert_float_eq(eval(&CeilFunc, &[Value::Float64(3.2)]), 4.0);
-        assert_float_eq(
+        assert_float(eval(&CosFunc, &[Value::Float64(0.0)]), 1.0);
+        assert_float(eval(&CoshFunc, &[Value::Float64(0.0)]), 1.0);
+        assert_float(eval(&ExpFunc, &[Value::Float64(1.0)]), std::f64::consts::E);
+        assert_float(eval(&FloorFunc, &[Value::Float64(3.8)]), 3.0);
+        assert_float(eval(&LnFunc, &[Value::Float64(1.0)]), 0.0);
+        assert_float(eval(&SinFunc, &[Value::Float64(0.0)]), 0.0);
+        assert_float(eval(&SinhFunc, &[Value::Float64(0.0)]), 0.0);
+        assert_float(eval(&SqrtFunc, &[Value::Float64(9.0)]), 3.0);
+        assert_float(eval(&TanFunc, &[Value::Float64(0.0)]), 0.0);
+        assert_float(eval(&TanhFunc, &[Value::Float64(0.0)]), 0.0);
+        assert_float(eval(&CeilingFunc, &[Value::Float64(3.2)]), 4.0);
+        assert_float(eval(&CeilFunc, &[Value::Float64(3.2)]), 4.0);
+        assert_float(
             eval(&RadiansFunc, &[Value::Float64(180.0)]),
             std::f64::consts::PI,
         );
-        assert_float_eq(
+        assert_float(
             eval(&DegreesFunc, &[Value::Float64(std::f64::consts::PI)]),
             180.0,
         );
-        assert_float_eq(
+        assert_float(
             eval(&CotFunc, &[Value::Float64(std::f64::consts::FRAC_PI_4)]),
             1.0,
         );
@@ -591,19 +560,19 @@ mod tests {
 
     #[test]
     fn test_binary_math_correctness() {
-        assert_float_eq(
+        assert_float(
             eval(&Atan2Func, &[Value::Float64(1.0), Value::Float64(1.0)]),
             std::f64::consts::FRAC_PI_4,
         );
-        assert_float_eq(
+        assert_float(
             eval(&ModFunc, &[Value::Float64(10.5), Value::Float64(3.0)]),
             10.5 % 3.0,
         );
-        assert_float_eq(
+        assert_float(
             eval(&PowerFunc, &[Value::Float64(2.0), Value::Float64(3.0)]),
             8.0,
         );
-        assert_float_eq(
+        assert_float(
             eval(&PowFunc, &[Value::Float64(2.0), Value::Float64(4.0)]),
             16.0,
         );
@@ -611,19 +580,19 @@ mod tests {
 
     #[test]
     fn test_abs_bit_sign_pi_rand_correctness() {
-        assert_int_eq(eval(&AbsFunc, &[Value::Int64(-12)]), 12);
-        assert_float_eq(eval(&AbsFunc, &[Value::Float64(-12.5)]), 12.5);
+        assert_int(eval(&AbsFunc, &[Value::Int64(-12)]), 12);
+        assert_float(eval(&AbsFunc, &[Value::Float64(-12.5)]), 12.5);
 
-        assert_int_eq(eval(&BitAndFunc, &[Value::Int64(6), Value::Int64(3)]), 2);
-        assert_int_eq(eval(&BitOrFunc, &[Value::Int64(6), Value::Int64(3)]), 7);
-        assert_int_eq(eval(&BitXorFunc, &[Value::Int64(6), Value::Int64(3)]), 5);
-        assert_int_eq(eval(&BitNotFunc, &[Value::Int64(6)]), !6);
+        assert_int(eval(&BitAndFunc, &[Value::Int64(6), Value::Int64(3)]), 2);
+        assert_int(eval(&BitOrFunc, &[Value::Int64(6), Value::Int64(3)]), 7);
+        assert_int(eval(&BitXorFunc, &[Value::Int64(6), Value::Int64(3)]), 5);
+        assert_int(eval(&BitNotFunc, &[Value::Int64(6)]), !6);
 
-        assert_int_eq(eval(&SignFunc, &[Value::Int64(9)]), 1);
-        assert_int_eq(eval(&SignFunc, &[Value::Int64(-9)]), -1);
-        assert_int_eq(eval(&SignFunc, &[Value::Int64(0)]), 0);
+        assert_int(eval(&SignFunc, &[Value::Int64(9)]), 1);
+        assert_int(eval(&SignFunc, &[Value::Int64(-9)]), -1);
+        assert_int(eval(&SignFunc, &[Value::Int64(0)]), 0);
 
-        assert_float_eq(eval(&PiFunc, &[]), std::f64::consts::PI);
+        assert_float(eval(&PiFunc, &[]), std::f64::consts::PI);
 
         let rand_v = eval(&RandFunc, &[]);
         match rand_v {
@@ -650,24 +619,24 @@ mod tests {
 
     #[test]
     fn test_log_round_conv_correctness() {
-        assert_float_eq(eval(&LogFunc, &[Value::Float64(1000.0)]), 3.0);
+        assert_float(eval(&LogFunc, &[Value::Float64(1000.0)]), 3.0);
 
-        assert_float_eq(
+        assert_float(
             eval(&LogFunc, &[Value::Float64(2.0), Value::Float64(8.0)]),
             3.0,
         );
 
-        assert_float_eq(eval(&RoundFunc, &[Value::Float64(3.6)]), 4.0);
-        assert_float_eq(
+        assert_float(eval(&RoundFunc, &[Value::Float64(3.6)]), 4.0);
+        assert_float(
             eval(&RoundFunc, &[Value::Float64(3.14159), Value::Int64(2)]),
             3.14,
         );
-        assert_float_eq(
+        assert_float(
             eval(&RoundFunc, &[Value::Float64(1234.56), Value::Int64(-2)]),
             1200.0,
         );
 
-        assert_string_eq(
+        assert_string(
             eval(
                 &ConvFunc,
                 &[
@@ -679,7 +648,7 @@ mod tests {
             "10",
         );
 
-        assert_string_eq(
+        assert_string(
             eval(
                 &ConvFunc,
                 &[
@@ -714,7 +683,7 @@ mod tests {
             ],
         ));
 
-        assert_string_eq(
+        assert_string(
             eval(
                 &ConvFunc,
                 &[
@@ -731,7 +700,7 @@ mod tests {
 
     #[test]
     fn test_conv_edge_cases() {
-        assert_string_eq(
+        assert_string(
             eval(
                 &ConvFunc,
                 &[
@@ -743,7 +712,7 @@ mod tests {
             "33",
         );
 
-        assert_string_eq(
+        assert_string(
             eval(
                 &ConvFunc,
                 &[
@@ -755,7 +724,7 @@ mod tests {
             "FFFFFFFFFFFFFFF6",
         );
 
-        assert_string_eq(
+        assert_string(
             eval(
                 &ConvFunc,
                 &[
@@ -877,41 +846,41 @@ mod tests {
 
     #[test]
     fn test_mixed_numeric_types_for_unary_funcs() {
-        assert_float_eq(eval(&SinFunc, &[Value::Int64(0)]), 0.0);
-        assert_float_eq(eval(&SqrtFunc, &[Value::Int64(16)]), 4.0);
-        assert_float_eq(eval(&CeilingFunc, &[Value::Int64(3)]), 3.0);
+        assert_float(eval(&SinFunc, &[Value::Int64(0)]), 0.0);
+        assert_float(eval(&SqrtFunc, &[Value::Int64(16)]), 4.0);
+        assert_float(eval(&CeilingFunc, &[Value::Int64(3)]), 3.0);
 
-        assert_int_eq(eval(&AbsFunc, &[Value::Int64(-7)]), 7);
-        assert_float_eq(eval(&AbsFunc, &[Value::Float64(-7.25)]), 7.25);
+        assert_int(eval(&AbsFunc, &[Value::Int64(-7)]), 7);
+        assert_float(eval(&AbsFunc, &[Value::Float64(-7.25)]), 7.25);
     }
 
     #[test]
     fn test_mixed_numeric_types_for_binary_funcs() {
-        assert_float_eq(
+        assert_float(
             eval(&Atan2Func, &[Value::Int64(1), Value::Float64(1.0)]),
             std::f64::consts::FRAC_PI_4,
         );
-        assert_float_eq(
+        assert_float(
             eval(&ModFunc, &[Value::Int64(10), Value::Float64(4.0)]),
             10.0 % 4.0,
         );
-        assert_float_eq(
+        assert_float(
             eval(&PowerFunc, &[Value::Float64(2.5), Value::Int64(2)]),
             6.25,
         );
-        assert_float_eq(eval(&PowFunc, &[Value::Int64(9), Value::Float64(0.5)]), 3.0);
+        assert_float(eval(&PowFunc, &[Value::Int64(9), Value::Float64(0.5)]), 3.0);
     }
 
     #[test]
     fn test_mixed_numeric_types_for_variable_arity_funcs() {
-        assert_float_eq(eval(&LogFunc, &[Value::Int64(10)]), 1.0);
-        assert_float_eq(eval(&LogFunc, &[Value::Int64(2), Value::Float64(8.0)]), 3.0);
+        assert_float(eval(&LogFunc, &[Value::Int64(10)]), 1.0);
+        assert_float(eval(&LogFunc, &[Value::Int64(2), Value::Float64(8.0)]), 3.0);
 
-        assert_float_eq(
+        assert_float(
             eval(&RoundFunc, &[Value::Int64(1234), Value::Int64(-2)]),
             1200.0,
         );
-        assert_float_eq(
+        assert_float(
             eval(&RoundFunc, &[Value::Float64(12.345), Value::Int64(2)]),
             12.35,
         );
@@ -965,8 +934,8 @@ mod tests {
 
     #[test]
     fn test_round_half_away_from_zero() {
-        assert_float_eq(eval(&RoundFunc, &[Value::Float64(2.5)]), 3.0);
-        assert_float_eq(eval(&RoundFunc, &[Value::Float64(-2.5)]), -3.0);
+        assert_float(eval(&RoundFunc, &[Value::Float64(2.5)]), 3.0);
+        assert_float(eval(&RoundFunc, &[Value::Float64(-2.5)]), -3.0);
     }
 
     #[test]

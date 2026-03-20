@@ -2,12 +2,16 @@ pub mod helpers;
 pub mod math_func;
 pub mod registry;
 pub mod string_func;
+pub mod array_func;
 use crate::catalog::FunctionDef;
 use crate::expr::func::EvalError;
 use datatypes::Value;
-pub use math_func::*;
+
 pub use registry::CustomFuncRegistry;
-pub use string_func::ConcatFunc;
+
+pub use math_func::*;
+pub use string_func::*;
+pub use array_func::*;
 
 /// Custom function that can be implemented by users
 /// This trait allows users to define their own functions for evaluation
