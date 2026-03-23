@@ -28,6 +28,18 @@ impl AggregateRegistry for StaticAggregateRegistry {
 
 pub fn default_aggregate_registry() -> Arc<dyn AggregateRegistry> {
     Arc::new(StaticAggregateRegistry::new([
-        "sum", "count", "last_row", "ndv",
+        "avg",
+        "count",
+        "deduplicate",
+        "last_row",
+        "max",
+        "median",
+        "min",
+        "ndv",
+        "stddev",
+        "stddevs",
+        "sum",
+        "var",
+        "vars",
     ]))
 }
