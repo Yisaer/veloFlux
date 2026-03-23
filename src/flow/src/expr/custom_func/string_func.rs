@@ -600,6 +600,10 @@ impl CustomFunc for FormatFunc {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::expr::custom_func::helpers::{
+        a, assert_array, assert_bool, assert_float, assert_int, assert_map, assert_null,
+        assert_string, b, f, i, m, n, s,
+    };
     use datatypes::Value;
 
     #[test]

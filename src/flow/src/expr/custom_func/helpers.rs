@@ -1,5 +1,6 @@
 use crate::expr::func::EvalError;
-use datatypes::Value;
+use crate::Arc;
+use datatypes::{ConcreteDatatype, ListValue, StructField, StructType, StructValue, Value};
 use regex::Regex;
 use std::collections::BTreeMap;
 
@@ -21,7 +22,7 @@ pub fn b(v: bool) -> Value {
 }
 
 pub fn a(v: Vec<Value>) -> Value {
-    Value::List(v)
+    array_to_value(v).unwrap()
 }
 
 pub fn n() -> Value {
@@ -33,7 +34,7 @@ pub fn m(entries: Vec<(&str, Value)>) -> Value {
     for (k, v) in entries {
         map.insert(k.to_string(), v);
     }
-    Value::Struct(map)
+    map_to_value(map).unwrap()
 }
 
 pub fn assert_int(actual: Value, expected: i64) {
@@ -42,6 +43,30 @@ pub fn assert_int(actual: Value, expected: i64) {
             assert_eq!(v, expected, "expected Int64({expected}), got Int64({v})");
         }
         other => panic!("expected Int64({expected}), got {:?}", other),
+    }
+}
+
+pub fn assert_float(v: Value, expected: f64) {
+    match v {
+        Value::Float64(actual) => {
+            let eps = 1e-9;
+            assert!(
+                (actual - expected).abs() < eps,
+                "expected Float64({}), got Float64({})",
+                expected,
+                actual
+            );
+        }
+        Value::Float32(actual) => {
+            let eps = 1e-6;
+            assert!(
+                ((actual as f64) - expected).abs() < eps,
+                "expected Float32/64 near {}, got Float32({})",
+                expected,
+                actual
+            );
+        }
+        other => panic!("expected float {}, got {:?}", expected, other),
     }
 }
 
@@ -66,15 +91,10 @@ pub fn assert_string(actual: Value, expected: &str) {
     }
 }
 
-pub fn assert_array(actual: Value, expected: Vec<Value>) {
-    match actual {
-        Value::List(v) => {
-            assert_eq!(
-                v, expected,
-                "expected Array({expected:?}), got Array({v:?})"
-            );
-        }
-        other => panic!("expected Array({expected:?}), got {:?}", other),
+pub fn assert_array(v: Value, expected: Vec<Value>) {
+    match v {
+        Value::List(v) => assert_eq!(v.items().to_vec(), expected),
+        other => panic!("expected array, got {:?}", other),
     }
 }
 
@@ -86,21 +106,23 @@ pub fn assert_null(actual: Value) {
     );
 }
 
-pub fn assert_map(actual: Value, expected: Vec<(&str, Value)>) {
-    let mut expected_map = std::collections::BTreeMap::new();
-    for (k, v) in expected {
-        expected_map.insert(k.to_string(), v);
-    }
+pub fn assert_map(v: Value, expected_entries: Vec<(&str, Value)>) {
+    let expected_map: BTreeMap<String, Value> = expected_entries
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
 
-    match actual {
-        Value::Struct(v) => {
-            assert_eq!(
-                v, expected_map,
-                "expected Map({:?}), got Map({:?})",
-                expected_map, v
-            );
+    match v {
+        Value::Struct(s) => {
+            let mut actual = BTreeMap::new();
+
+            for (field, value) in s.fields().fields().iter().zip(s.items().iter()) {
+                actual.insert(field.name().to_string(), value.clone());
+            }
+
+            assert_eq!(actual, expected_map);
         }
-        other => panic!("expected Map({:?}), got {:?}", expected_map, other),
+        other => panic!("expected map, got {:?}", other),
     }
 }
 
@@ -606,9 +628,9 @@ pub fn substring_by_char_start_length(
 }
 
 // array helpers
-pub fn value_to_array(value: &Value) -> Result<Vec<Value>, EvalError> {
-    match value {
-        Value::List(v) => Ok(v.clone()),
+pub fn value_to_array(v: &Value) -> Result<Vec<Value>, EvalError> {
+    match v {
+        Value::List(list) => Ok(list.items().to_vec()),
         other => Err(EvalError::TypeMismatch {
             expected: "array".to_string(),
             actual: format!("{:?}", other),
@@ -616,9 +638,59 @@ pub fn value_to_array(value: &Value) -> Result<Vec<Value>, EvalError> {
     }
 }
 
-pub fn value_to_map(value: &Value) -> Result<BTreeMap<String, Value>, EvalError> {
-    match value {
-        Value::Struct(m) => Ok(m.clone()),
+pub fn infer_list_datatype(items: &[Value]) -> Result<Arc<ConcreteDatatype>, EvalError> {
+    if items.is_empty() {
+        return Ok(Arc::new(ConcreteDatatype::Null));
+    }
+
+    let first_non_null = items.iter().find(|v| !v.is_null());
+
+    match first_non_null {
+        None => Ok(Arc::new(ConcreteDatatype::Null)),
+        Some(v) => {
+            let dt = v.datatype();
+            for item in items.iter().filter(|x| !x.is_null()) {
+                if item.datatype() != dt {
+                    return Err(EvalError::TypeMismatch {
+                        expected: format!("homogeneous array with datatype {:?}", dt),
+                        actual: format!("mixed datatypes in array: {:?}", items),
+                    });
+                }
+            }
+            Ok(Arc::new(dt))
+        }
+    }
+}
+
+pub fn array_to_value(items: Vec<Value>) -> Result<Value, EvalError> {
+    let datatype = infer_list_datatype(&items)?;
+    Ok(Value::List(ListValue::new(items, datatype)))
+}
+
+pub fn map_to_value(map: BTreeMap<String, Value>) -> Result<Value, EvalError> {
+    let mut items = Vec::with_capacity(map.len());
+    let mut fields = Vec::with_capacity(map.len());
+
+    for (name, value) in map {
+        fields.push(StructField::new(name, value.datatype(), true));
+        items.push(value);
+    }
+
+    let struct_type = StructType::new(Arc::new(fields));
+    Ok(Value::Struct(StructValue::new(items, struct_type)))
+}
+
+pub fn value_to_map(v: &Value) -> Result<BTreeMap<String, Value>, EvalError> {
+    match v {
+        Value::Struct(s) => {
+            let mut out = BTreeMap::new();
+
+            for (field, value) in s.fields().fields().iter().zip(s.items().iter()) {
+                out.insert(field.name().to_string(), value.clone());
+            }
+
+            Ok(out)
+        }
         other => Err(EvalError::TypeMismatch {
             expected: "object".to_string(),
             actual: format!("{:?}", other),
@@ -627,14 +699,18 @@ pub fn value_to_map(value: &Value) -> Result<BTreeMap<String, Value>, EvalError>
 }
 
 pub fn nth_array_or_null(args: &[Value], idx: usize) -> Result<Option<Vec<Value>>, EvalError> {
-    nth_converted_or_null(args, idx, value_to_array)
-}
-
-pub fn nth_map_or_null(
-    args: &[Value],
-    idx: usize,
-) -> Result<Option<BTreeMap<String, Value>>, EvalError> {
-    nth_converted_or_null(args, idx, value_to_map)
+    match args.get(idx) {
+        Some(Value::Null) => Ok(None),
+        Some(Value::List(list)) => Ok(Some(list.items().to_vec())),
+        Some(other) => Err(EvalError::TypeMismatch {
+            expected: format!("array argument {}", idx),
+            actual: format!("{:?}", other),
+        }),
+        None => Err(EvalError::TypeMismatch {
+            expected: format!("argument {}", idx),
+            actual: format!("missing argument {}", idx),
+        }),
+    }
 }
 
 pub fn validate_one_array_or_null(args: &[Value]) -> Result<(), EvalError> {
