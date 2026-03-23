@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -105,7 +106,7 @@ func main() {
 		if veloFluxSQL == "" {
 			return
 		}
-		sqliteSQL := mapAggFuncsUpper(veloFluxSQL)
+		sqliteSQL := buildSQLiteSQL(veloFluxSQL)
 		_, _ = writer.WriteString(veloFluxSQL + "\t" + sqliteSQL + "\n")
 		count++
 	}, cfg.SQLGen.Queries)
@@ -196,4 +197,11 @@ func mapAggFuncsUpper(sql string) string {
 	sql = strings.ReplaceAll(sql, "sum(", "SUM(")
 	sql = strings.ReplaceAll(sql, "count(", "COUNT(")
 	return sql
+}
+
+var countWindowInGroupByPattern = regexp.MustCompile(`(?i)GROUP BY\s+countwindow\s*\(\s*\d+\s*\)\s*,\s*`)
+
+func buildSQLiteSQL(sql string) string {
+	sql = countWindowInGroupByPattern.ReplaceAllString(sql, "GROUP BY ")
+	return mapAggFuncsUpper(sql)
 }

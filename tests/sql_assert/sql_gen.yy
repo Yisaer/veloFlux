@@ -95,6 +95,7 @@ end
 
 current_group_key = nil
 current_group_expr = nil
+current_window_size = nil
 
 function agg_select_list()
   if current_group_key == nil then
@@ -105,11 +106,14 @@ function agg_select_list()
       current_group_expr = current_group_key .. " + 1"
     end
   end
-  return current_group_expr .. " AS k"
+  if current_window_size == nil then
+    current_window_size = tostring(math.random(2, 4))
+  end
+  return current_group_expr .. " AS k, count(" .. current_group_key .. ") AS c"
 end
 
 function group_by_list()
-  return current_group_expr
+  return "countwindow(" .. current_window_size .. "), " .. current_group_expr
 end
 
 
@@ -129,7 +133,10 @@ function order_items_unique()
 end
 
 function agg_order_items_unique()
-  return "k " .. pick(order_dirs)
+  if math.random(2) == 1 then
+    return "k " .. pick(order_dirs)
+  end
+  return "c " .. pick(order_dirs)
 end
 
 function select_expr_list()
@@ -158,7 +165,7 @@ order_opt:
   | ORDER BY {print(order_items_unique())}
 
 agg_select_stmt:
-  {current_group_key = nil; current_group_expr = nil}
+  {current_group_key = nil; current_group_expr = nil; current_window_size = nil}
   SELECT {print(agg_select_list())}
   FROM {{table_name}}
   where_opt

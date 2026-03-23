@@ -1,6 +1,7 @@
 name: Daily (SQL Assert + Perf)
 
 on:
+  pull_request:
   schedule:
     # 07:00 (UTC+8) == 23:00 UTC (previous day)
     - cron: "0 23 * * *"
@@ -27,8 +28,8 @@ jobs:
     name: Daily
     runs-on: ubuntu-latest
     env:
-      # schedule: always run "all"; workflow_dispatch: run selected task.
-      DAILY_TASK: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.task || 'all' }}
+      # pull_request: run sql-assert only; schedule: always run all; workflow_dispatch: run selected task.
+      DAILY_TASK: ${{ github.event_name == 'pull_request' && 'sql-assert' || (github.event_name == 'workflow_dispatch' && github.event.inputs.task || 'all') }}
     services:
       emqx:
         image: emqx/emqx:5.6.1
