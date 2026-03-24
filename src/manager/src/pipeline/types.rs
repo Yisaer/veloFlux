@@ -127,6 +127,8 @@ pub struct EncoderConfigRequest {
     #[serde(rename = "type")]
     pub encode_type: String,
     pub props: JsonMap<String, JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transform: Option<EncoderTransformRequest>,
 }
 
 impl EncoderConfigRequest {
@@ -134,6 +136,7 @@ impl EncoderConfigRequest {
         Self {
             encode_type: encode_type.into(),
             props,
+            transform: None,
         }
     }
 }
@@ -142,6 +145,12 @@ impl Default for EncoderConfigRequest {
     fn default() -> Self {
         Self::new("json", JsonMap::new())
     }
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EncoderTransformRequest {
+    pub template: String,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]

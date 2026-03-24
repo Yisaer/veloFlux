@@ -127,6 +127,7 @@ pub struct NopSinkConfig {
 pub struct SinkEncoderConfig {
     kind: SinkEncoderKind,
     props: JsonMap<String, JsonValue>,
+    transform: Option<SinkEncoderTransformConfig>,
 }
 
 /// Supported encoder kinds.
@@ -135,6 +136,26 @@ pub enum SinkEncoderKind {
     Json,
     None,
     Custom(String),
+}
+
+/// Supported encoder transform kinds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SinkEncoderTransformConfig {
+    Template { template: String },
+}
+
+impl SinkEncoderTransformConfig {
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            SinkEncoderTransformConfig::Template { .. } => "template",
+        }
+    }
+
+    pub fn template(&self) -> &str {
+        match self {
+            SinkEncoderTransformConfig::Template { template } => template.as_str(),
+        }
+    }
 }
 
 impl SinkEncoderKind {
@@ -172,11 +193,16 @@ impl SinkEncoderConfig {
         Self {
             kind: kind.into(),
             props,
+            transform: None,
         }
     }
 
     pub fn json() -> Self {
         Self::new(SinkEncoderKind::Json, JsonMap::new())
+    }
+
+    pub fn json_with_transform_template(template: impl Into<String>) -> Self {
+        Self::json().with_transform_template(template)
     }
 
     pub fn kind(&self) -> &SinkEncoderKind {
@@ -190,6 +216,52 @@ impl SinkEncoderConfig {
     pub fn props(&self) -> &JsonMap<String, JsonValue> {
         &self.props
     }
+
+    pub fn transform(&self) -> Option<&SinkEncoderTransformConfig> {
+        if matches!(self.kind, SinkEncoderKind::None) {
+            return None;
+        }
+        self.transform.as_ref()
+    }
+
+    pub fn with_transform_template(mut self, template: impl Into<String>) -> Self {
+        self.transform = Some(SinkEncoderTransformConfig::Template {
+            template: template.into(),
+        });
+        self
+    }
+
+    pub fn transform_template(&self) -> Option<&str> {
+        self.transform().map(SinkEncoderTransformConfig::template)
+    }
+
+    pub fn transform_kind(&self) -> Option<&'static str> {
+        self.transform().map(SinkEncoderTransformConfig::kind_str)
+    }
+
+    pub fn with_transform(mut self, transform: SinkEncoderTransformConfig) -> Self {
+        self.transform = Some(transform);
+        self
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let Some(_transform) = self.transform.as_ref() else {
+            return Ok(());
+        };
+
+        if matches!(self.kind, SinkEncoderKind::None) {
+            return Ok(());
+        }
+
+        if !matches!(self.kind, SinkEncoderKind::Json) {
+            return Err(format!(
+                "encoder transform is only supported for encoder.type=json, got `{}`",
+                self.kind.as_str()
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 /// Common sink-level properties (batching, etc.).
@@ -202,5 +274,38 @@ pub struct CommonSinkProps {
 impl CommonSinkProps {
     pub fn is_batching_enabled(&self) -> bool {
         self.batch_count.is_some() || self.batch_duration.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoder_none_transform_is_ignored() {
+        let config = SinkEncoderConfig::new("none", JsonMap::new())
+            .with_transform_template("{\"x\":{{ json(.row.a) }} }");
+
+        assert_eq!(config.transform(), None);
+        assert_eq!(config.transform_template(), None);
+        assert_eq!(config.transform_kind(), None);
+        assert!(
+            config.validate().is_ok(),
+            "none+transform should be ignored"
+        );
+    }
+
+    #[test]
+    fn custom_encoder_transform_is_rejected() {
+        let config = SinkEncoderConfig::new("custom_encoder", JsonMap::new())
+            .with_transform_template("{\"x\":{{ json(.row.a) }} }");
+
+        let err = config
+            .validate()
+            .expect_err("custom encoder should reject transform");
+        assert!(
+            err.contains("only supported for encoder.type=json"),
+            "unexpected error: {err}"
+        );
     }
 }
