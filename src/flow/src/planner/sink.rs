@@ -218,6 +218,9 @@ impl SinkEncoderConfig {
     }
 
     pub fn transform(&self) -> Option<&SinkEncoderTransformConfig> {
+        if matches!(self.kind, SinkEncoderKind::None) {
+            return None;
+        }
         self.transform.as_ref()
     }
 
@@ -229,15 +232,11 @@ impl SinkEncoderConfig {
     }
 
     pub fn transform_template(&self) -> Option<&str> {
-        self.transform
-            .as_ref()
-            .map(SinkEncoderTransformConfig::template)
+        self.transform().map(SinkEncoderTransformConfig::template)
     }
 
     pub fn transform_kind(&self) -> Option<&'static str> {
-        self.transform
-            .as_ref()
-            .map(SinkEncoderTransformConfig::kind_str)
+        self.transform().map(SinkEncoderTransformConfig::kind_str)
     }
 
     pub fn with_transform(mut self, transform: SinkEncoderTransformConfig) -> Self {
@@ -249,6 +248,10 @@ impl SinkEncoderConfig {
         let Some(_transform) = self.transform.as_ref() else {
             return Ok(());
         };
+
+        if matches!(self.kind, SinkEncoderKind::None) {
+            return Ok(());
+        }
 
         if !matches!(self.kind, SinkEncoderKind::Json) {
             return Err(format!(
@@ -271,5 +274,38 @@ pub struct CommonSinkProps {
 impl CommonSinkProps {
     pub fn is_batching_enabled(&self) -> bool {
         self.batch_count.is_some() || self.batch_duration.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encoder_none_transform_is_ignored() {
+        let config = SinkEncoderConfig::new("none", JsonMap::new())
+            .with_transform_template("{\"x\":{{ json(.row.a) }} }");
+
+        assert_eq!(config.transform(), None);
+        assert_eq!(config.transform_template(), None);
+        assert_eq!(config.transform_kind(), None);
+        assert!(
+            config.validate().is_ok(),
+            "none+transform should be ignored"
+        );
+    }
+
+    #[test]
+    fn custom_encoder_transform_is_rejected() {
+        let config = SinkEncoderConfig::new("custom_encoder", JsonMap::new())
+            .with_transform_template("{\"x\":{{ json(.row.a) }} }");
+
+        let err = config
+            .validate()
+            .expect_err("custom encoder should reject transform");
+        assert!(
+            err.contains("only supported for encoder.type=json"),
+            "unexpected error: {err}"
+        );
     }
 }

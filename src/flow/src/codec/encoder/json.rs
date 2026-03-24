@@ -435,6 +435,20 @@ mod tests {
     }
 
     #[test]
+    fn json_encoder_rejects_malformed_transform_template() {
+        let config = SinkEncoderConfig::json_with_transform_template("{{ json(.row.amount) ");
+        let err = match JsonEncoder::new("json", &config) {
+            Ok(_) => panic!("invalid template should fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string().contains("invalid template"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn json_encoder_transform_disables_index_lazy_materialization() {
         let config =
             SinkEncoderConfig::json_with_transform_template("{\"value\":{{ json(.row.amount) }} }");
