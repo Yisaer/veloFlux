@@ -5,6 +5,9 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fmt;
 use std::time::Duration;
 
+const ENCODER_TRANSFORM_KEY: &str = "transform";
+const ENCODER_TRANSFORM_TEMPLATE_KEY: &str = "template";
+
 /// Declarative description of a sink processor in the logical/physical plans.
 #[derive(Clone)]
 pub struct PipelineSink {
@@ -179,6 +182,10 @@ impl SinkEncoderConfig {
         Self::new(SinkEncoderKind::Json, JsonMap::new())
     }
 
+    pub fn json_with_transform_template(template: impl Into<String>) -> Self {
+        Self::json().with_transform_template(template)
+    }
+
     pub fn kind(&self) -> &SinkEncoderKind {
         &self.kind
     }
@@ -189,6 +196,46 @@ impl SinkEncoderConfig {
 
     pub fn props(&self) -> &JsonMap<String, JsonValue> {
         &self.props
+    }
+
+    pub fn with_transform_template(mut self, template: impl Into<String>) -> Self {
+        let mut transform = JsonMap::new();
+        transform.insert(
+            ENCODER_TRANSFORM_TEMPLATE_KEY.to_string(),
+            JsonValue::String(template.into()),
+        );
+        self.props.insert(
+            ENCODER_TRANSFORM_KEY.to_string(),
+            JsonValue::Object(transform),
+        );
+        self
+    }
+
+    pub fn transform_template(&self) -> Option<&str> {
+        self.props
+            .get(ENCODER_TRANSFORM_KEY)
+            .and_then(|value| value.as_object())
+            .and_then(|obj| obj.get(ENCODER_TRANSFORM_TEMPLATE_KEY))
+            .and_then(|value| value.as_str())
+    }
+
+    pub fn transform_kind(&self) -> Option<&'static str> {
+        self.transform_template().map(|_| "template")
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let Some(_template) = self.transform_template() else {
+            return Ok(());
+        };
+
+        if !matches!(self.kind, SinkEncoderKind::Json) {
+            return Err(format!(
+                "encoder transform is only supported for encoder.type=json, got `{}`",
+                self.kind.as_str()
+            ));
+        }
+
+        Ok(())
     }
 }
 

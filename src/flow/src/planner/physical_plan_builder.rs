@@ -1004,6 +1004,10 @@ fn add_regular_encoder_with_builder(
             ),
         ))
     } else {
+        connector
+            .encoder
+            .validate()
+            .map_err(|err| format!("invalid encoder config for sink `{}`: {err}", sink.sink_id))?;
         let encoder_kind = connector.encoder.kind_str();
         if !registries.encoder_registry().is_registered(encoder_kind) {
             return Err(format!(
