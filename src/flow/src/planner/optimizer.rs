@@ -302,8 +302,16 @@ impl PhysicalOptRule for ByIndexProjectionIntoEncoderRewrite {
 
 #[derive(Clone, Debug)]
 enum ProjectConsumer {
-    Encoder { encoder_index: i64, kind: String },
-    StreamingEncoder { encoder_index: i64, kind: String },
+    Encoder {
+        encoder_index: i64,
+        kind: String,
+        transform_enabled: bool,
+    },
+    StreamingEncoder {
+        encoder_index: i64,
+        kind: String,
+        transform_enabled: bool,
+    },
     Other,
 }
 
@@ -365,12 +373,16 @@ fn rewrite_by_index_projection_into_encoder(
         // Design constraint: when a `Project` is shared (DAG), only apply this rewrite
         // if every consumer is an encoder that can honor delayed materialization.
         if !consumers.iter().all(|consumer| match consumer {
-            ProjectConsumer::Encoder { kind, .. } => {
-                supports_by_index_projection(kind, encoder_registry)
-            }
-            ProjectConsumer::StreamingEncoder { kind, .. } => {
-                supports_by_index_projection(kind, encoder_registry)
-            }
+            ProjectConsumer::Encoder {
+                kind,
+                transform_enabled,
+                ..
+            } => !transform_enabled && supports_by_index_projection(kind, encoder_registry),
+            ProjectConsumer::StreamingEncoder {
+                kind,
+                transform_enabled,
+                ..
+            } => !transform_enabled && supports_by_index_projection(kind, encoder_registry),
             ProjectConsumer::Other => false,
         }) {
             continue;
@@ -403,8 +415,8 @@ fn rewrite_by_index_projection_into_encoder(
     rewrite_by_index_nodes(plan, &state, &mut memo)
 }
 
-fn supports_by_index_projection(kind: &str, _encoder_registry: &EncoderRegistry) -> bool {
-    _encoder_registry.supports_by_index_projection(kind)
+fn supports_by_index_projection(kind: &str, encoder_registry: &EncoderRegistry) -> bool {
+    encoder_registry.supports_by_index_projection(kind)
 }
 
 fn by_index_projection_column_from_field(
@@ -447,10 +459,12 @@ fn build_node_and_consumer_maps(
                 PhysicalPlan::Encoder(encoder) => ProjectConsumer::Encoder {
                     encoder_index: encoder.base.index(),
                     kind: encoder.encoder.kind_str().to_string(),
+                    transform_enabled: encoder.encoder.transform_kind().is_some(),
                 },
                 PhysicalPlan::StreamingEncoder(encoder) => ProjectConsumer::StreamingEncoder {
                     encoder_index: encoder.base.index(),
                     kind: encoder.encoder.kind_str().to_string(),
+                    transform_enabled: encoder.encoder.transform_kind().is_some(),
                 },
                 _ => ProjectConsumer::Other,
             };

@@ -94,7 +94,7 @@ The intended configuration model is:
   "encoder": {
     "type": "json",
     "transform": {
-      "template": "{\"c\":{{json .a}},\"d\":{{json .b}}}"
+      "template": "{\"c\":{{ json(.row.a) }},\"d\":{{ json(.row.b) }} }"
     }
   }
 }
@@ -104,7 +104,7 @@ The exact config field names may evolve, but the semantics should stay:
 
 - `type = json` means the outer payload is still encoded by the JSON encoder.
 - `transform` currently means a template-based transform.
-- The template input context is the current SQL output row by default.
+- The template input context is the current SQL output row under `.row`.
 
 ## Template Contract
 
@@ -112,14 +112,14 @@ The row template is interpreted as a renderer for a single JSON item.
 
 Current constraints:
 
-- `.` or field access must refer to the current SQL output row.
+- `.row` must refer to the current SQL output row.
 - The rendered result must be one valid JSON item.
 - For the first iteration, it is recommended to restrict the output to one valid JSON object.
 
 Example:
 
-```gotemplate
-{"c":{{json .a}},"d":{{json .b}}}
+```text
+{"c":{{ json(.row.a) }},"d":{{ json(.row.b) }} }
 ```
 
 Given the input row:
@@ -135,6 +135,11 @@ The row template produces:
 ```
 
 The JSON encoder then appends that item into the outer collection payload.
+
+The runtime template engine is `upon`, and the current implementation exposes a
+single helper:
+
+- `json(value)`: render a value as a JSON literal inside the template output
 
 ## Execution Semantics
 

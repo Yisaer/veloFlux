@@ -174,10 +174,10 @@ impl EncoderRegistry {
         self.register_encoder_with_caps(
             "json",
             Arc::new(|config| {
-                Ok(Arc::new(JsonEncoder::new(
-                    config.kind_str().to_string(),
-                    config.props().clone(),
-                )) as Arc<_>)
+                Ok(Arc::new(
+                    JsonEncoder::new(config.kind_str().to_string(), config.props().clone())
+                        .map_err(|err| CodecError::Other(err.to_string()))?,
+                ) as Arc<_>)
             }),
             true,
             true,
