@@ -2,6 +2,7 @@ use super::template_transform::JsonTemplateTransform;
 use super::{CollectionEncoder, CollectionEncoderStream, EncodeError};
 use crate::model::{Collection, Tuple};
 use crate::planner::physical::ByIndexProjection;
+use crate::planner::sink::{SinkEncoderConfig, SinkEncoderTransformConfig};
 use datatypes::Value;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use std::sync::Arc;
@@ -16,15 +17,12 @@ pub struct JsonEncoder {
 
 impl JsonEncoder {
     /// Create a new JSON encoder with the provided identifier.
-    pub fn new(
-        id: impl Into<String>,
-        props: JsonMap<String, JsonValue>,
-    ) -> Result<Self, EncodeError> {
+    pub fn new(id: impl Into<String>, config: &SinkEncoderConfig) -> Result<Self, EncodeError> {
         let id = id.into();
         Ok(Self {
             id,
-            transform: json_template_transform_from_props(&props)?,
-            props,
+            transform: json_template_transform_from_config(config)?,
+            props: config.props().clone(),
             by_index_projection: None,
         })
     }
@@ -231,19 +229,15 @@ fn append_tuple_to_payload(
     Ok(())
 }
 
-fn json_template_transform_from_props(
-    props: &JsonMap<String, JsonValue>,
+fn json_template_transform_from_config(
+    config: &SinkEncoderConfig,
 ) -> Result<Option<Arc<JsonTemplateTransform>>, EncodeError> {
-    let template = props
-        .get("transform")
-        .and_then(|value| value.as_object())
-        .and_then(|transform| transform.get("template"))
-        .and_then(|value| value.as_str());
-
-    match template {
-        Some(template) => JsonTemplateTransform::compile(template)
-            .map(Arc::new)
-            .map(Some),
+    match config.transform() {
+        Some(SinkEncoderTransformConfig::Template { template }) => {
+            JsonTemplateTransform::compile(template)
+                .map(Arc::new)
+                .map(Some)
+        }
         None => Ok(None),
     }
 }
@@ -258,6 +252,7 @@ fn number_from_f64(value: f64) -> JsonValue {
 mod tests {
     use super::*;
     use crate::model::batch_from_columns_simple;
+    use crate::planner::sink::SinkEncoderConfig;
 
     #[test]
     fn json_encoder_emits_single_payload() {
@@ -278,7 +273,7 @@ mod tests {
         ])
         .expect("valid batch");
 
-        let encoder = JsonEncoder::new("json", JsonMap::new()).expect("encoder");
+        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
         let payload = encoder.encode(&batch).expect("encode collection");
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
@@ -293,7 +288,7 @@ mod tests {
 
     #[test]
     fn json_encoder_streaming() {
-        let encoder = JsonEncoder::new("json", JsonMap::new()).expect("encoder");
+        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
         assert!(
             encoder.supports_streaming(),
             "json encoder should be streaming"
@@ -345,7 +340,7 @@ mod tests {
 
     #[test]
     fn json_encoder_streaming_empty_payload_is_array() {
-        let encoder = JsonEncoder::new("json", JsonMap::new()).expect("encoder");
+        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
         let stream = encoder.start_stream().expect("stream");
         let payload = stream.finish().expect("stream finish");
 
@@ -372,14 +367,10 @@ mod tests {
         ])
         .expect("valid batch");
 
-        let mut props = JsonMap::new();
-        props.insert(
-            "transform".to_string(),
-            serde_json::json!({
-                "template": "{\"value\":{{ json(.row.amount) }},\"label\":{{ json(.row.status) }} }"
-            }),
+        let config = SinkEncoderConfig::json_with_transform_template(
+            "{\"value\":{{ json(.row.amount) }},\"label\":{{ json(.row.status) }} }",
         );
-        let encoder = JsonEncoder::new("json", props).expect("encoder");
+        let encoder = JsonEncoder::new("json", &config).expect("encoder");
         let payload = encoder.encode(&batch).expect("encode collection");
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
@@ -394,14 +385,10 @@ mod tests {
 
     #[test]
     fn json_encoder_transform_streaming_renders_each_row() {
-        let mut props = JsonMap::new();
-        props.insert(
-            "transform".to_string(),
-            serde_json::json!({
-                "template": "{\"value\":{{ json(.row.amount) }},\"label\":{{ json(.row.status) }} }"
-            }),
+        let config = SinkEncoderConfig::json_with_transform_template(
+            "{\"value\":{{ json(.row.amount) }},\"label\":{{ json(.row.status) }} }",
         );
-        let encoder = JsonEncoder::new("json", props).expect("encoder");
+        let encoder = JsonEncoder::new("json", &config).expect("encoder");
         let mut stream = encoder.start_stream().expect("stream");
 
         let batch1 = batch_from_columns_simple(vec![
@@ -449,14 +436,9 @@ mod tests {
 
     #[test]
     fn json_encoder_transform_disables_index_lazy_materialization() {
-        let mut props = JsonMap::new();
-        props.insert(
-            "transform".to_string(),
-            serde_json::json!({
-                "template": "{\"value\":{{ json(.row.amount) }} }"
-            }),
-        );
-        let encoder = Arc::new(JsonEncoder::new("json", props).expect("encoder"));
+        let config =
+            SinkEncoderConfig::json_with_transform_template("{\"value\":{{ json(.row.amount) }} }");
+        let encoder = Arc::new(JsonEncoder::new("json", &config).expect("encoder"));
         assert!(
             !encoder.supports_index_lazy_materialization(),
             "transform-enabled encoder should disable by-index lazy materialization"

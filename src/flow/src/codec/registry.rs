@@ -175,7 +175,7 @@ impl EncoderRegistry {
             "json",
             Arc::new(|config| {
                 Ok(Arc::new(
-                    JsonEncoder::new(config.kind_str().to_string(), config.props().clone())
+                    JsonEncoder::new(config.kind_str().to_string(), config)
                         .map_err(|err| CodecError::Other(err.to_string()))?,
                 ) as Arc<_>)
             }),

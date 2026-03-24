@@ -5,9 +5,6 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fmt;
 use std::time::Duration;
 
-const ENCODER_TRANSFORM_KEY: &str = "transform";
-const ENCODER_TRANSFORM_TEMPLATE_KEY: &str = "template";
-
 /// Declarative description of a sink processor in the logical/physical plans.
 #[derive(Clone)]
 pub struct PipelineSink {
@@ -130,6 +127,7 @@ pub struct NopSinkConfig {
 pub struct SinkEncoderConfig {
     kind: SinkEncoderKind,
     props: JsonMap<String, JsonValue>,
+    transform: Option<SinkEncoderTransformConfig>,
 }
 
 /// Supported encoder kinds.
@@ -138,6 +136,26 @@ pub enum SinkEncoderKind {
     Json,
     None,
     Custom(String),
+}
+
+/// Supported encoder transform kinds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SinkEncoderTransformConfig {
+    Template { template: String },
+}
+
+impl SinkEncoderTransformConfig {
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            SinkEncoderTransformConfig::Template { .. } => "template",
+        }
+    }
+
+    pub fn template(&self) -> &str {
+        match self {
+            SinkEncoderTransformConfig::Template { template } => template.as_str(),
+        }
+    }
 }
 
 impl SinkEncoderKind {
@@ -175,6 +193,7 @@ impl SinkEncoderConfig {
         Self {
             kind: kind.into(),
             props,
+            transform: None,
         }
     }
 
@@ -198,33 +217,36 @@ impl SinkEncoderConfig {
         &self.props
     }
 
+    pub fn transform(&self) -> Option<&SinkEncoderTransformConfig> {
+        self.transform.as_ref()
+    }
+
     pub fn with_transform_template(mut self, template: impl Into<String>) -> Self {
-        let mut transform = JsonMap::new();
-        transform.insert(
-            ENCODER_TRANSFORM_TEMPLATE_KEY.to_string(),
-            JsonValue::String(template.into()),
-        );
-        self.props.insert(
-            ENCODER_TRANSFORM_KEY.to_string(),
-            JsonValue::Object(transform),
-        );
+        self.transform = Some(SinkEncoderTransformConfig::Template {
+            template: template.into(),
+        });
         self
     }
 
     pub fn transform_template(&self) -> Option<&str> {
-        self.props
-            .get(ENCODER_TRANSFORM_KEY)
-            .and_then(|value| value.as_object())
-            .and_then(|obj| obj.get(ENCODER_TRANSFORM_TEMPLATE_KEY))
-            .and_then(|value| value.as_str())
+        self.transform
+            .as_ref()
+            .map(SinkEncoderTransformConfig::template)
     }
 
     pub fn transform_kind(&self) -> Option<&'static str> {
-        self.transform_template().map(|_| "template")
+        self.transform
+            .as_ref()
+            .map(SinkEncoderTransformConfig::kind_str)
+    }
+
+    pub fn with_transform(mut self, transform: SinkEncoderTransformConfig) -> Self {
+        self.transform = Some(transform);
+        self
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        let Some(_template) = self.transform_template() else {
+        let Some(_transform) = self.transform.as_ref() else {
             return Ok(());
         };
 
