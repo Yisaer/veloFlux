@@ -16,7 +16,8 @@ use crate::connector::sink::mqtt::MqttSinkConfig;
 use crate::planner::logical::LogicalPlan;
 use crate::planner::sink::{
     CommonSinkProps, CustomSinkConnectorConfig, PipelineSink, PipelineSinkConnector,
-    SinkConnectorConfig, SinkEncoderConfig, SinkEncoderTransformConfig,
+    SinkConnectorConfig, SinkDeltaOutputConfig, SinkEncoderConfig, SinkEncoderTransformConfig,
+    SinkOutputConfig, SinkOutputMode,
 };
 
 #[derive(Debug, Error)]
@@ -38,11 +39,29 @@ pub struct SinkIR {
     pub sink_id: String,
     pub forward_to_result: bool,
     pub common: Option<CommonSinkPropsIR>,
+    pub output: Option<SinkOutputIR>,
     pub connector_kind: String,
     pub connector_settings: JsonValue,
     pub encoder_kind: Option<String>,
     pub encoder_props: Option<JsonMap<String, JsonValue>>,
     pub encoder_transform: Option<SinkEncoderTransformIR>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SinkOutputIR {
+    pub mode: SinkOutputModeIR,
+    pub delta: Option<SinkDeltaOutputIR>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SinkOutputModeIR {
+    Full,
+    Delta,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SinkDeltaOutputIR {
+    pub columns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -363,6 +382,9 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
     if let Some(common) = &sink.common {
         pipeline_sink = pipeline_sink.with_common_props(common_sink_props_from_ir(common));
     }
+    if let Some(output) = &sink.output {
+        pipeline_sink = pipeline_sink.with_output(sink_output_from_ir(output));
+    }
     Ok(pipeline_sink)
 }
 
@@ -641,6 +663,7 @@ fn sink_to_ir(sink: &PipelineSink) -> SinkIR {
         sink_id: sink.sink_id.clone(),
         forward_to_result: sink.forward_to_result,
         common: Some(common_sink_props_to_ir(&sink.common)),
+        output: Some(sink_output_to_ir(&sink.output)),
         connector_kind,
         connector_settings,
         encoder_kind: Some(sink.connector.encoder.kind_str().to_string()),
@@ -658,6 +681,30 @@ fn transform_ir_to_config(transform: &SinkEncoderTransformIR) -> SinkEncoderTran
         SinkEncoderTransformIR::Template { template } => SinkEncoderTransformConfig::Template {
             template: template.clone(),
         },
+    }
+}
+
+fn sink_output_from_ir(output: &SinkOutputIR) -> SinkOutputConfig {
+    SinkOutputConfig {
+        mode: match output.mode {
+            SinkOutputModeIR::Full => SinkOutputMode::Full,
+            SinkOutputModeIR::Delta => SinkOutputMode::Delta,
+        },
+        delta: output.delta.as_ref().map(|delta| SinkDeltaOutputConfig {
+            columns: delta.columns.clone(),
+        }),
+    }
+}
+
+fn sink_output_to_ir(output: &SinkOutputConfig) -> SinkOutputIR {
+    SinkOutputIR {
+        mode: match output.mode {
+            SinkOutputMode::Full => SinkOutputModeIR::Full,
+            SinkOutputMode::Delta => SinkOutputModeIR::Delta,
+        },
+        delta: output.delta.as_ref().map(|delta| SinkDeltaOutputIR {
+            columns: delta.columns.clone(),
+        }),
     }
 }
 

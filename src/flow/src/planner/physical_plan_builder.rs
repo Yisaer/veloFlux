@@ -16,8 +16,9 @@ use crate::planner::physical::{
     PhysicalDataSource, PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEncoder,
     PhysicalEventtimeWatermark, PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
     PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
-    PhysicalResultCollect, PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector,
-    PhysicalStatefulFunction, StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
+    PhysicalSinkConnector, PhysicalStatefulFunction, StatefulCall, WatermarkConfig,
+    WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
@@ -919,7 +920,14 @@ fn build_sink_chain_with_builder(
     registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
-    let batch_processor = create_batch_processor_if_needed_with_builder(sink, input_child, builder);
+    let row_diff_input =
+        create_row_diff_processor_if_needed_with_builder(sink, input_child, builder)?;
+    let batch_input = row_diff_input
+        .as_ref()
+        .map(Arc::clone)
+        .unwrap_or_else(|| Arc::clone(input_child));
+    let batch_processor =
+        create_batch_processor_if_needed_with_builder(sink, &batch_input, builder);
 
     let connector = &sink.connector;
     let connector_kind = connector.connector.kind();
@@ -936,8 +944,119 @@ fn build_sink_chain_with_builder(
     let encoder_input = batch_processor
         .as_ref()
         .map(Arc::clone)
-        .unwrap_or_else(|| Arc::clone(input_child));
+        .unwrap_or(batch_input);
     add_regular_encoder_with_builder(sink, connector, encoder_input, registries, builder)
+}
+
+/// Create row diff processor if needed using centralized index management
+fn create_row_diff_processor_if_needed_with_builder(
+    sink: &PipelineSink,
+    input_child: &Arc<PhysicalPlan>,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Option<Arc<PhysicalPlan>>, String> {
+    if !sink.output.is_delta() {
+        return Ok(None);
+    }
+
+    let (tracked_columns, tracked_column_indexes) =
+        resolve_row_diff_tracked_columns(sink, input_child)?;
+    let row_diff_index = builder.allocate_index();
+    let row_diff_plan = PhysicalRowDiff::new(
+        vec![Arc::clone(input_child)],
+        row_diff_index,
+        sink.sink_id.clone(),
+        sink.output.clone(),
+        tracked_columns,
+        tracked_column_indexes,
+    );
+    Ok(Some(Arc::new(PhysicalPlan::RowDiff(row_diff_plan))))
+}
+
+fn resolve_row_diff_tracked_columns(
+    sink: &PipelineSink,
+    input_child: &Arc<PhysicalPlan>,
+) -> Result<(Vec<Arc<str>>, Vec<usize>), String> {
+    let output_schema = input_child.output_schema()?;
+    if let Some(configured_columns) = sink.output.delta_columns() {
+        return resolve_configured_row_diff_tracked_columns(
+            sink,
+            &output_schema,
+            configured_columns,
+        );
+    }
+
+    Ok((
+        output_schema
+            .columns
+            .iter()
+            .map(|column| Arc::clone(&column.name))
+            .collect(),
+        (0..output_schema.columns.len()).collect(),
+    ))
+}
+
+fn resolve_configured_row_diff_tracked_columns(
+    sink: &PipelineSink,
+    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    configured_columns: &[String],
+) -> Result<(Vec<Arc<str>>, Vec<usize>), String> {
+    let mut seen = HashSet::<&str>::new();
+    let mut tracked_columns = Vec::with_capacity(configured_columns.len());
+    let mut tracked_column_indexes = Vec::with_capacity(configured_columns.len());
+
+    for configured_column in configured_columns {
+        if !seen.insert(configured_column.as_str()) {
+            return Err(format!(
+                "sink `{}` row diff output has duplicate tracked column `{}`",
+                sink.sink_id, configured_column
+            ));
+        }
+
+        let matches = output_schema
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| column.name.as_ref() == configured_column.as_str())
+            .collect::<Vec<_>>();
+
+        if matches.is_empty() {
+            return Err(format!(
+                "sink `{}` row diff output column `{}` is not present in final output schema [{}]",
+                sink.sink_id,
+                configured_column,
+                format_output_column_names(output_schema)
+            ));
+        }
+
+        if matches.len() > 1 {
+            return Err(format!(
+                "sink `{}` row diff output column `{}` is ambiguous in final output schema [{}]",
+                sink.sink_id,
+                configured_column,
+                format_output_column_names(output_schema)
+            ));
+        }
+
+        let (index, column) = matches[0];
+        tracked_columns.push(Arc::clone(&column.name));
+        tracked_column_indexes.push(index);
+    }
+
+    Ok((tracked_columns, tracked_column_indexes))
+}
+
+fn format_output_column_names(
+    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+) -> String {
+    let names = output_schema
+        .columns
+        .iter()
+        .map(|column| column.name.as_ref())
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return "<empty>".to_string();
+    }
+    names.join(", ")
 }
 
 /// Create batch processor if needed using centralized index management

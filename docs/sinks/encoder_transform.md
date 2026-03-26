@@ -1,5 +1,9 @@
 # Encoder Transform
 
+This document lives under `docs/sinks/` because encoder transform is a sink-side output capability.
+It is encoder-local, but it only applies on sink branches and must be understood together with
+batching, sink delivery, and other sink-side output features.
+
 ## Background
 
 We need sink-side payload reshaping for a common scenario:

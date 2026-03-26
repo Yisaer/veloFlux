@@ -1,6 +1,7 @@
 use super::template_transform::JsonTemplateTransform;
 use super::{CollectionEncoder, CollectionEncoderStream, EncodeError};
 use crate::model::{Collection, Tuple};
+use crate::planner::physical::output_schema::{OutputSchema, OutputValueGetter};
 use crate::planner::physical::ByIndexProjection;
 use crate::planner::sink::{SinkEncoderConfig, SinkEncoderTransformConfig};
 use datatypes::Value;
@@ -13,6 +14,7 @@ pub struct JsonEncoder {
     props: JsonMap<String, JsonValue>,
     transform: Option<Arc<JsonTemplateTransform>>,
     by_index_projection: Option<Arc<ByIndexProjection>>,
+    output_schema: Option<Arc<OutputSchema>>,
 }
 
 impl JsonEncoder {
@@ -24,6 +26,7 @@ impl JsonEncoder {
             transform: json_template_transform_from_config(config)?,
             props: config.props().clone(),
             by_index_projection: None,
+            output_schema: None,
         })
     }
 
@@ -40,7 +43,8 @@ impl CollectionEncoder for JsonEncoder {
 
     fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError> {
         if self.transform.is_some() {
-            let mut stream = JsonStreamingEncoder::new(None, self.transform.clone());
+            let mut stream =
+                JsonStreamingEncoder::new(None, self.transform.clone(), self.output_schema.clone());
             stream.append_collection(collection)?;
             return Box::new(stream).finish();
         }
@@ -51,9 +55,10 @@ impl CollectionEncoder for JsonEncoder {
         } else {
             let mut json_rows = Vec::with_capacity(rows.len());
             for tuple in rows {
-                json_rows.push(tuple_to_json_maybe_by_index_projection(
+                json_rows.push(tuple_to_json_with_encoder_state(
                     tuple,
                     self.by_index_projection.as_deref(),
+                    self.output_schema.as_deref(),
                 )?);
             }
             serde_json::to_vec(&JsonValue::Array(json_rows))
@@ -85,6 +90,20 @@ impl CollectionEncoder for JsonEncoder {
             props: self.props.clone(),
             transform: self.transform.clone(),
             by_index_projection: Some(spec),
+            output_schema: self.output_schema.clone(),
+        }))
+    }
+
+    fn with_output_schema(
+        self: Arc<Self>,
+        output_schema: Arc<OutputSchema>,
+    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError> {
+        Ok(Arc::new(Self {
+            id: self.id.clone(),
+            props: self.props.clone(),
+            transform: self.transform.clone(),
+            by_index_projection: self.by_index_projection.clone(),
+            output_schema: Some(output_schema),
         }))
     }
 
@@ -92,6 +111,7 @@ impl CollectionEncoder for JsonEncoder {
         Some(Box::new(JsonStreamingEncoder::new(
             self.by_index_projection.clone(),
             self.transform.clone(),
+            self.output_schema.clone(),
         )))
     }
 }
@@ -101,18 +121,21 @@ struct JsonStreamingEncoder {
     is_first_row: bool,
     by_index_projection: Option<Arc<ByIndexProjection>>,
     transform: Option<Arc<JsonTemplateTransform>>,
+    output_schema: Option<Arc<OutputSchema>>,
 }
 
 impl JsonStreamingEncoder {
     fn new(
         by_index_projection: Option<Arc<ByIndexProjection>>,
         transform: Option<Arc<JsonTemplateTransform>>,
+        output_schema: Option<Arc<OutputSchema>>,
     ) -> Self {
         Self {
             payload: vec![b'['],
             is_first_row: true,
             by_index_projection,
             transform,
+            output_schema,
         }
     }
 }
@@ -125,6 +148,7 @@ impl CollectionEncoderStream for JsonStreamingEncoder {
             tuple,
             self.by_index_projection.as_deref(),
             self.transform.as_deref(),
+            self.output_schema.as_deref(),
         )
     }
 
@@ -173,6 +197,76 @@ fn tuple_to_json(tuple: &Tuple) -> JsonValue {
     JsonValue::Object(json_row)
 }
 
+fn tuple_to_json_with_output_mask(
+    tuple: &Tuple,
+    output_schema: &OutputSchema,
+) -> Result<JsonValue, EncodeError> {
+    let output_mask = tuple.output_mask().ok_or_else(|| {
+        EncodeError::Other("output_mask is required for mask-aware JSON encoding".to_string())
+    })?;
+    if output_mask.len() != output_schema.columns.len() {
+        return Err(EncodeError::Other(format!(
+            "output_mask width {} does not match output schema width {}",
+            output_mask.len(),
+            output_schema.columns.len()
+        )));
+    }
+
+    let mut json_row = JsonMap::new();
+    for (column, selected) in output_schema.columns.iter().zip(output_mask.iter()) {
+        if !selected {
+            continue;
+        }
+        let value = resolve_output_value(tuple, &column.getter).ok_or_else(|| {
+            EncodeError::Other(format!(
+                "output schema column `{}` could not be resolved from runtime tuple",
+                column.name
+            ))
+        })?;
+        json_row.insert(column.name.as_ref().to_string(), value_to_json(value));
+    }
+    Ok(JsonValue::Object(json_row))
+}
+
+fn resolve_output_value<'a>(tuple: &'a Tuple, getter: &OutputValueGetter) -> Option<&'a Value> {
+    match getter {
+        OutputValueGetter::Affiliate { column_name } => tuple
+            .affiliate()
+            .and_then(|affiliate| affiliate.value(column_name)),
+        OutputValueGetter::MessageByName {
+            source_name,
+            column_name,
+        } => tuple.messages().iter().find_map(|message| {
+            if message.source() != source_name.as_ref() {
+                return None;
+            }
+            message.value(column_name)
+        }),
+    }
+}
+
+fn tuple_to_json_with_encoder_state(
+    tuple: &Tuple,
+    by_index_projection: Option<&ByIndexProjection>,
+    output_schema: Option<&OutputSchema>,
+) -> Result<JsonValue, EncodeError> {
+    if tuple.output_mask().is_some() {
+        if by_index_projection.is_some() {
+            return Err(EncodeError::Other(
+                "output_mask is not supported together with by-index projection".to_string(),
+            ));
+        }
+        let output_schema = output_schema.ok_or_else(|| {
+            EncodeError::Other(
+                "output_mask-aware JSON encoding requires the final output schema".to_string(),
+            )
+        })?;
+        return tuple_to_json_with_output_mask(tuple, output_schema);
+    }
+
+    tuple_to_json_maybe_by_index_projection(tuple, by_index_projection)
+}
+
 fn tuple_to_json_maybe_by_index_projection(
     tuple: &Tuple,
     by_index_projection: Option<&ByIndexProjection>,
@@ -213,6 +307,7 @@ fn append_tuple_to_payload(
     tuple: &Tuple,
     by_index_projection: Option<&ByIndexProjection>,
     transform: Option<&JsonTemplateTransform>,
+    output_schema: Option<&OutputSchema>,
 ) -> Result<(), EncodeError> {
     if *is_first_row {
         *is_first_row = false;
@@ -220,7 +315,7 @@ fn append_tuple_to_payload(
         payload.push(b',');
     }
 
-    let row = tuple_to_json_maybe_by_index_projection(tuple, by_index_projection)?;
+    let row = tuple_to_json_with_encoder_state(tuple, by_index_projection, output_schema)?;
     if let Some(transform) = transform {
         payload.extend(transform.render_item(row)?);
     } else {

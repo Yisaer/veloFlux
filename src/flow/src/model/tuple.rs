@@ -116,6 +116,7 @@ impl AffiliateRow {
 pub struct Tuple {
     pub messages: Arc<[Arc<Message>]>,
     affiliate: Option<Arc<AffiliateRow>>,
+    output_mask: Option<Arc<[bool]>>,
     pub timestamp: SystemTime,
 }
 
@@ -132,12 +133,33 @@ impl Tuple {
         Self {
             messages,
             affiliate: None,
+            output_mask: None,
             timestamp,
         }
     }
 
     pub fn affiliate(&self) -> Option<&AffiliateRow> {
         self.affiliate.as_ref().map(|aff| aff.as_ref())
+    }
+
+    pub fn output_mask(&self) -> Option<&[bool]> {
+        self.output_mask.as_deref()
+    }
+
+    pub fn output_mask_shared(&self) -> Option<Arc<[bool]>> {
+        self.output_mask.as_ref().map(Arc::clone)
+    }
+
+    pub fn set_output_mask(&mut self, mask: Vec<bool>) {
+        self.output_mask = Some(Arc::from(mask));
+    }
+
+    pub fn set_output_mask_shared(&mut self, mask: Arc<[bool]>) {
+        self.output_mask = Some(mask);
+    }
+
+    pub fn clear_output_mask(&mut self) {
+        self.output_mask = None;
     }
 
     pub(crate) fn affiliate_mut(&mut self) -> &mut AffiliateRow {

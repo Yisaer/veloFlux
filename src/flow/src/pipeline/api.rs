@@ -1,5 +1,5 @@
 use crate::catalog::Catalog;
-use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
+use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig, SinkOutputConfig};
 use crate::PipelineRegistries;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -154,6 +154,7 @@ pub struct SinkDefinition {
     pub props: SinkProps,
     pub common: CommonSinkProps,
     pub encoder: SinkEncoderConfig,
+    pub output: SinkOutputConfig,
 }
 
 impl SinkDefinition {
@@ -165,6 +166,7 @@ impl SinkDefinition {
             props,
             common: CommonSinkProps::default(),
             encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::default(),
         }
     }
 
@@ -175,6 +177,11 @@ impl SinkDefinition {
 
     pub fn with_encoder(mut self, encoder: SinkEncoderConfig) -> Self {
         self.encoder = encoder;
+        self
+    }
+
+    pub fn with_output(mut self, output: SinkOutputConfig) -> Self {
+        self.output = output;
         self
     }
 }
