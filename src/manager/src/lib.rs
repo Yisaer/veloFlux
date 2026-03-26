@@ -1,6 +1,9 @@
 mod audit;
 mod capabilities;
+mod export;
 mod function;
+mod import;
+mod init_process;
 mod instances;
 mod memory_topic;
 mod pipeline;
@@ -81,6 +84,8 @@ fn build_app(state: AppState) -> Router {
             "/capabilities/syntax",
             axum::routing::get(capabilities::get_syntax_capabilities_handler),
         )
+        .route("/import", post(import::import_storage_handler))
+        .route("/storage/export", get(export::export_storage_handler))
         .route("/streams/:name", delete(stream::delete_stream_handler))
         .route(
             "/memory/topics",

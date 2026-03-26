@@ -58,6 +58,12 @@ enum ColumnKind {
     Str,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowMode {
+    None,
+    Count { size: usize },
+}
+
 #[derive(Clone, Debug)]
 struct ColumnSpec {
     name: String,
@@ -99,6 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tested_sqls = 0usize;
     for (index, (engine_sql, sqlite_sql)) in sqls.iter().enumerate() {
         truncate_sqlite_table(&conn, &table_name)?;
+        let window_mode = detect_window_mode(engine_sql);
         let instance = FlowInstance::new(
             flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
         );
@@ -129,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         instance
             .create_pipeline(CreatePipelineRequest::new(pipeline))
-            .unwrap_or_else(|_| panic!("failed to create pipeline for SQL: {engine_sql}"));
+            .unwrap_or_else(|err| panic!("failed to create pipeline for SQL: {engine_sql}\n{err}"));
 
         instance
             .start_pipeline(&pipeline_id)
@@ -150,17 +157,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let row_values = generate_row(&columns, &mut rng);
             insert_sqlite_row(&conn, &table_name, &columns, &row_values)?;
 
-            let current_rows = query_sqlite_rows(&conn, sqlite_sql, &column_map)?;
+            let sqlite_eval_sql =
+                sqlite_query_for_row(sqlite_sql, &table_name, window_mode, row_index + 1);
+            let current_rows = query_sqlite_rows(&conn, &sqlite_eval_sql, &column_map)?;
             let current_multiset = multiset_from_rows(&current_rows);
-            let expected_multiset = multiset_diff(&current_multiset, &previous_results);
-            previous_results = current_multiset;
+            let (expected_multiset, expect_output) = match window_mode {
+                WindowMode::None => {
+                    let diff = multiset_diff(&current_multiset, &previous_results);
+                    previous_results = current_multiset;
+                    (diff, true)
+                }
+                WindowMode::Count { size } => {
+                    let should_emit = (row_index + 1) % size == 0;
+                    let expected = if should_emit {
+                        current_multiset
+                    } else {
+                        HashMap::new()
+                    };
+                    (expected, should_emit)
+                }
+            };
 
             let input_row = row_as_json_object(&columns, &row_values)?;
             publisher
                 .publish_bytes(serde_json::to_vec(&input_row)?)
                 .expect("publish bytes");
 
-            let actual_rows = recv_next_json_rows(&mut output, timeout_duration).await?;
+            let actual_rows =
+                recv_expected_json_rows(&mut output, timeout_duration, expect_output).await?;
             let actual_multiset = multiset_from_rows(&actual_rows);
 
             if expected_multiset != actual_multiset {
@@ -411,9 +435,12 @@ fn row_to_json(
 ) -> Result<JsonValue, Box<dyn std::error::Error>> {
     let mut obj = JsonMap::with_capacity(column_names.len());
     for (idx, name) in column_names.iter().enumerate() {
-        let kind = column_map.get(name).copied().unwrap_or(ColumnKind::Str);
         let value: SqlValue = row.get(idx)?;
-        let json_value = sqlite_value_to_json(&value, kind)?;
+        let json_value = if let Some(kind) = column_map.get(name).copied() {
+            sqlite_value_to_json(&value, kind)?
+        } else {
+            sqlite_value_to_json_dynamic(&value)?
+        };
         obj.insert(name.clone(), json_value);
     }
     Ok(JsonValue::Object(obj))
@@ -461,6 +488,18 @@ fn sqlite_value_to_string(value: &SqlValue) -> Result<String, Box<dyn std::error
         SqlValue::Real(v) => Ok(v.to_string()),
         SqlValue::Null => Ok(String::new()),
         SqlValue::Blob(_) => Err("unexpected blob value for string".into()),
+    }
+}
+
+fn sqlite_value_to_json_dynamic(value: &SqlValue) -> Result<JsonValue, Box<dyn std::error::Error>> {
+    match value {
+        SqlValue::Integer(v) => Ok(JsonValue::Number((*v).into())),
+        SqlValue::Real(v) => serde_json::Number::from_f64(*v)
+            .map(JsonValue::Number)
+            .ok_or_else(|| "unexpected non-finite float value".into()),
+        SqlValue::Text(s) => Ok(JsonValue::String(s.clone())),
+        SqlValue::Null => Ok(JsonValue::Null),
+        SqlValue::Blob(_) => Err("unexpected blob value".into()),
     }
 }
 
@@ -587,6 +626,74 @@ async fn recv_next_json_rows(
             MemoryData::Collection(_) => {
                 return Err("unexpected collection payload on bytes topic".into());
             }
+        }
+    }
+}
+
+async fn recv_expected_json_rows(
+    output: &mut tokio::sync::broadcast::Receiver<MemoryData>,
+    timeout_duration: Duration,
+    expect_output: bool,
+) -> Result<Vec<JsonValue>, Box<dyn std::error::Error>> {
+    if expect_output {
+        return recv_next_json_rows(output, timeout_duration).await;
+    }
+
+    use tokio::sync::broadcast::error::RecvError;
+
+    let poll_timeout = timeout_duration.min(Duration::from_millis(100));
+    match timeout(poll_timeout, output.recv()).await {
+        Err(_) => Ok(Vec::new()),
+        Ok(Ok(MemoryData::Bytes(payload))) => {
+            let value: JsonValue = serde_json::from_slice(payload.as_ref())?;
+            match value {
+                JsonValue::Array(items) => Ok(items),
+                other => Err(format!("unexpected JSON payload: {other}").into()),
+            }
+        }
+        Ok(Ok(MemoryData::Collection(_))) => {
+            Err("unexpected collection payload on bytes topic".into())
+        }
+        Ok(Err(RecvError::Lagged(_))) => Ok(Vec::new()),
+        Ok(Err(RecvError::Closed)) => Err("pipeline output topic closed".into()),
+    }
+}
+
+fn detect_window_mode(sql: &str) -> WindowMode {
+    let needle = "countwindow(";
+    let Some(start) = sql.find(needle) else {
+        return WindowMode::None;
+    };
+    let count_start = start + needle.len();
+    let rest = &sql[count_start..];
+    let Some(end_offset) = rest.find(')') else {
+        return WindowMode::None;
+    };
+    let raw = rest[..end_offset].trim();
+    let Ok(size) = raw.parse::<usize>() else {
+        return WindowMode::None;
+    };
+    if size == 0 {
+        WindowMode::None
+    } else {
+        WindowMode::Count { size }
+    }
+}
+
+fn sqlite_query_for_row(
+    sql: &str,
+    table_name: &str,
+    window_mode: WindowMode,
+    row_count: usize,
+) -> String {
+    match window_mode {
+        WindowMode::None => sql.to_string(),
+        WindowMode::Count { size } => {
+            let window_rows = row_count.min(size);
+            let source = format!(
+                "(SELECT * FROM {table_name} ORDER BY rowid DESC LIMIT {window_rows}) AS {table_name}"
+            );
+            sql.replacen(&format!("FROM {table_name}"), &format!("FROM {source}"), 1)
         }
     }
 }

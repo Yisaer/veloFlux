@@ -308,6 +308,9 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             info.push(format!("sink_id={}", sink.sink_id));
             info.push(format!("connector={}", sink.connector.connector.kind()));
             info.push(format!("encoder={}", sink.connector.encoder.kind_str()));
+            if let Some(transform_kind) = sink.connector.encoder.transform_kind() {
+                info.push(format!("transform={}", transform_kind));
+            }
             if sink.common.is_batching_enabled() {
                 info.push("batching=true".to_string());
             }
@@ -855,6 +858,9 @@ fn build_physical_node_with_prefix(
         PhysicalPlan::Encoder(encoder) => {
             info.push(format!("sink_id={}", encoder.sink_id));
             info.push(format!("encoder={}", encoder.encoder.kind_str()));
+            if let Some(transform_kind) = encoder.encoder.transform_kind() {
+                info.push(format!("transform={}", transform_kind));
+            }
             if let Some(spec) = &encoder.by_index_projection {
                 if !spec.is_empty() {
                     let cols = spec
@@ -876,6 +882,9 @@ fn build_physical_node_with_prefix(
         PhysicalPlan::StreamingEncoder(streaming) => {
             info.push(format!("sink_id={}", streaming.sink_id));
             info.push(format!("encoder={}", streaming.encoder.kind_str()));
+            if let Some(transform_kind) = streaming.encoder.transform_kind() {
+                info.push(format!("transform={}", transform_kind));
+            }
             if streaming.common.is_batching_enabled() {
                 info.push("batching=true".to_string());
             }

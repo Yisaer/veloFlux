@@ -1,6 +1,9 @@
 use crate::aggregation::{
-    count_function_def, last_row_function_def, ndv_function_def, sum_function_def, CountFunction,
-    LastRowFunction, NdvFunction, SumFunction,
+    avg_function_def, count_function_def, deduplicate_function_def, last_row_function_def,
+    max_function_def, median_function_def, min_function_def, ndv_function_def, stddev_function_def,
+    stddevs_function_def, sum_function_def, var_function_def, vars_function_def, AvgFunction,
+    CountFunction, DeduplicateFunction, LastRowFunction, MaxFunction, MedianFunction, MinFunction,
+    NdvFunction, StddevFunction, StddevsFunction, SumFunction, VarFunction, VarsFunction,
 };
 use crate::catalog::FunctionDef;
 use datatypes::{ConcreteDatatype, Value};
@@ -65,10 +68,19 @@ impl AggregateFunctionRegistry {
     }
 
     fn register_builtin_functions(&self) {
+        self.register_function(Arc::new(AvgFunction::new()));
         self.register_function(Arc::new(CountFunction::new()));
+        self.register_function(Arc::new(DeduplicateFunction::new()));
         self.register_function(Arc::new(SumFunction::new()));
+        self.register_function(Arc::new(MaxFunction::new()));
+        self.register_function(Arc::new(MinFunction::new()));
+        self.register_function(Arc::new(MedianFunction::new()));
         self.register_function(Arc::new(LastRowFunction::new()));
         self.register_function(Arc::new(NdvFunction::new()));
+        self.register_function(Arc::new(StddevFunction::new()));
+        self.register_function(Arc::new(StddevsFunction::new()));
+        self.register_function(Arc::new(VarFunction::new()));
+        self.register_function(Arc::new(VarsFunction::new()));
     }
 }
 
@@ -88,10 +100,19 @@ impl AggregateRegistry for AggregateFunctionRegistry {
 
 pub fn builtin_aggregation_defs() -> Vec<FunctionDef> {
     vec![
+        avg_function_def(),
         count_function_def(),
+        deduplicate_function_def(),
+        max_function_def(),
+        median_function_def(),
+        min_function_def(),
         last_row_function_def(),
         ndv_function_def(),
+        stddev_function_def(),
+        stddevs_function_def(),
         sum_function_def(),
+        var_function_def(),
+        vars_function_def(),
     ]
 }
 
