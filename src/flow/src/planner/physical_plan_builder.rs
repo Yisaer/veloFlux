@@ -958,6 +958,7 @@ fn create_row_diff_processor_if_needed_with_builder(
         return Ok(None);
     }
 
+    validate_row_diff_sink_path(sink)?;
     let (tracked_columns, tracked_column_indexes) =
         resolve_row_diff_tracked_columns(sink, input_child)?;
     let row_diff_index = builder.allocate_index();
@@ -970,6 +971,36 @@ fn create_row_diff_processor_if_needed_with_builder(
         tracked_column_indexes,
     );
     Ok(Some(Arc::new(PhysicalPlan::RowDiff(row_diff_plan))))
+}
+
+fn validate_row_diff_sink_path(sink: &PipelineSink) -> Result<(), String> {
+    if !sink.output.is_delta() {
+        return Ok(());
+    }
+
+    if !matches!(
+        sink.connector.encoder.kind(),
+        crate::planner::sink::SinkEncoderKind::None
+    ) {
+        return Ok(());
+    }
+
+    match &sink.connector.connector {
+        crate::planner::sink::SinkConnectorConfig::Memory(cfg)
+            if matches!(cfg.kind, crate::connector::MemoryTopicKind::Collection) =>
+        {
+            Ok(())
+        }
+        crate::planner::sink::SinkConnectorConfig::Memory(_) => Err(format!(
+            "sink `{}` with output.mode=delta and encoder.type=none must publish to a memory collection topic that preserves output_mask",
+            sink.sink_id
+        )),
+        connector => Err(format!(
+            "sink `{}` with output.mode=delta is not supported for connector `{}` when encoder.type=none because the final sink path does not preserve output_mask",
+            sink.sink_id,
+            connector.kind()
+        )),
+    }
 }
 
 fn resolve_row_diff_tracked_columns(

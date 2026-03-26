@@ -109,6 +109,8 @@ The exact config field names may evolve, but the semantics should stay:
 - `type = json` means the outer payload is still encoded by the JSON encoder.
 - `transform` currently means a template-based transform.
 - The template input context is the current SQL output row under `.row`.
+- On row-diff sink branches, `.row` remains the dense current output row shape; unchanged tracked
+  columns appear as `null` unless a future mask-aware template contract is introduced.
 - `type = none` means no encoder node is built, so any configured `transform` is ignored / has no effect.
 
 ## Template Contract

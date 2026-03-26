@@ -4,7 +4,7 @@ use datatypes::{
 };
 use flow::catalog::MemoryStreamProps;
 use flow::catalog::MockStreamProps;
-use flow::connector::{MemorySinkConfig, MemoryTopicKind};
+use flow::connector::{KuksaSinkConfig, MemorySinkConfig, MemoryTopicKind};
 use flow::planner::logical::create_logical_plan;
 use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::processor::SamplerConfig;
@@ -367,6 +367,19 @@ fn build_memory_collection_delta_sink_with_columns(
         )),
         None => sink.with_output(SinkOutputConfig::delta()),
     }
+}
+
+fn build_kuksa_delta_sink(sink_id: &'static str) -> PipelineSink {
+    let connector = PipelineSinkConnector::new(
+        "test_connector",
+        SinkConnectorConfig::Kuksa(KuksaSinkConfig {
+            sink_name: sink_id.to_string(),
+            addr: "http://127.0.0.1:55555".to_string(),
+            vss_path: "/tmp/test_vss.json".to_string(),
+        }),
+        SinkEncoderConfig::new("none", JsonMap::new()),
+    );
+    PipelineSink::new(sink_id, connector).with_output(SinkOutputConfig::delta())
 }
 
 fn explain_json(sql: &str, sinks: Vec<PipelineSink>) -> String {
@@ -1021,4 +1034,24 @@ fn plan_explain_row_diff_table_driven() {
         assert_eq!(before, case.expected_before, "case={} (before)", case.name);
         assert_eq!(after, case.expected_after, "case={} (after)", case.name);
     }
+}
+
+#[test]
+fn row_diff_kuksa_sink_is_rejected() {
+    let registries = PipelineRegistries::new_with_builtin();
+    let stream_defs = setup_streams();
+    let sql = "SELECT a, b FROM stream";
+    let sinks = vec![build_kuksa_delta_sink("test_sink")];
+
+    let select_stmt = parse_sql(sql).expect("parse sql");
+    let bindings = bindings_for_select(&select_stmt, &stream_defs);
+    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs).expect("logical");
+    let (logical_plan, bindings) = flow::optimize_logical_plan(logical_plan, &bindings);
+
+    let err = flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
+        .expect_err("kuksa delta sink should be rejected");
+    assert!(
+        err.contains("does not preserve output_mask"),
+        "unexpected error: {err}"
+    );
 }

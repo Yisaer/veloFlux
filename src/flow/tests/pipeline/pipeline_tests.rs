@@ -356,6 +356,7 @@ struct RowDiffJsonCase {
     name: &'static str,
     sql: &'static str,
     input_data: Vec<(String, Vec<Value>)>,
+    encoder: SinkEncoderConfig,
     output: SinkOutputConfig,
     expected: JsonValue,
 }
@@ -380,6 +381,7 @@ async fn run_row_diff_json_case(case: RowDiffJsonCase) {
         SinkType::Memory,
         SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
     )
+    .with_encoder(case.encoder)
     .with_output(case.output);
     let pipeline = PipelineDefinition::new(pipeline_id.clone(), case.sql, vec![sink]);
     instance
@@ -850,6 +852,7 @@ async fn pipeline_row_diff_json_table_driven() {
                     vec![Value::Int64(10), Value::Int64(10), Value::Int64(10)],
                 ),
             ],
+            encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta(),
             expected: serde_json::json!([
                 {"a": 1, "b": 10},
@@ -870,6 +873,7 @@ async fn pipeline_row_diff_json_table_driven() {
                     vec![Value::Int64(10), Value::Int64(10), Value::Int64(10)],
                 ),
             ],
+            encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta(),
             expected: serde_json::json!([
                 {"a": 1, "b": 10},
@@ -890,6 +894,7 @@ async fn pipeline_row_diff_json_table_driven() {
                     vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
                 ),
             ],
+            encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta_with_columns(["b"]),
             expected: serde_json::json!([
                 {"a": 1, "b": 10},
@@ -904,11 +909,33 @@ async fn pipeline_row_diff_json_table_driven() {
                 "a".to_string(),
                 vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
             )],
+            encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta_with_columns(["x"]),
             expected: serde_json::json!([
                 {"a": 1, "x": 2},
                 {"a": 1},
                 {"a": 2, "x": 3}
+            ]),
+        },
+        RowDiffJsonCase {
+            name: "template_transform_still_sees_dense_row_on_delta_branch",
+            sql: "SELECT a, b FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(10)],
+                ),
+            ],
+            encoder: SinkEncoderConfig::json_with_transform_template("{{ json(.row) }}"),
+            output: SinkOutputConfig::delta(),
+            expected: serde_json::json!([
+                {"a": 1, "b": 10},
+                {"a": null, "b": null},
+                {"a": 2, "b": null}
             ]),
         },
     ];

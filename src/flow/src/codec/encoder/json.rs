@@ -267,6 +267,21 @@ fn tuple_to_json_with_encoder_state(
     tuple_to_json_maybe_by_index_projection(tuple, by_index_projection)
 }
 
+fn tuple_to_json_for_transform(
+    tuple: &Tuple,
+    by_index_projection: Option<&ByIndexProjection>,
+) -> Result<JsonValue, EncodeError> {
+    if tuple.output_mask().is_some() && by_index_projection.is_some() {
+        return Err(EncodeError::Other(
+            "output_mask is not supported together with by-index projection".to_string(),
+        ));
+    }
+
+    // Row-diff branches still expose `.row` as the dense current output row. Until the template
+    // contract becomes mask-aware, unchanged tracked columns remain visible as `null` here.
+    tuple_to_json_maybe_by_index_projection(tuple, by_index_projection)
+}
+
 fn tuple_to_json_maybe_by_index_projection(
     tuple: &Tuple,
     by_index_projection: Option<&ByIndexProjection>,
@@ -315,7 +330,11 @@ fn append_tuple_to_payload(
         payload.push(b',');
     }
 
-    let row = tuple_to_json_with_encoder_state(tuple, by_index_projection, output_schema)?;
+    let row = if transform.is_some() {
+        tuple_to_json_for_transform(tuple, by_index_projection)?
+    } else {
+        tuple_to_json_with_encoder_state(tuple, by_index_projection, output_schema)?
+    };
     if let Some(transform) = transform {
         payload.extend(transform.render_item(row)?);
     } else {
