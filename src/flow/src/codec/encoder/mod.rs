@@ -4,6 +4,7 @@ mod json;
 mod template_transform;
 
 use crate::model::{Collection, Tuple};
+use crate::planner::physical::output_schema::OutputSchema;
 use crate::planner::physical::ByIndexProjection;
 use std::sync::Arc;
 
@@ -43,6 +44,11 @@ pub trait CollectionEncoder: Send + Sync + 'static {
             "index lazy materialization is not supported for this encoder".to_string(),
         ))
     }
+    /// Attach the final output schema for mask-aware encoding when needed.
+    fn with_output_schema(
+        self: Arc<Self>,
+        _output_schema: Arc<OutputSchema>,
+    ) -> Result<Arc<dyn CollectionEncoder>, EncodeError>;
     /// Start a streaming session if supported.
     fn start_stream(&self) -> Option<Box<dyn CollectionEncoderStream>> {
         None

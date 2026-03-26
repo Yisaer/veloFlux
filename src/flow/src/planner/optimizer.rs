@@ -647,6 +647,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::Project(new))
         }
+        PhysicalPlan::RowDiff(row_diff) => {
+            let mut new = row_diff.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::RowDiff(new))
+        }
         PhysicalPlan::Aggregation(agg) => {
             let mut new = agg.clone();
             new.base.children = children;

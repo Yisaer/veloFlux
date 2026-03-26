@@ -764,6 +764,19 @@ fn build_physical_node_with_prefix(
                 info.push("passthrough_messages=true".to_string());
             }
         }
+        PhysicalPlan::RowDiff(row_diff) => {
+            info.push(format!("sink_id={}", row_diff.sink_id));
+            info.push(format!("mode={}", row_diff.output.mode.as_str()));
+            info.push(format!(
+                "columns=[{}]",
+                row_diff
+                    .tracked_columns
+                    .iter()
+                    .map(|column| column.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         PhysicalPlan::Aggregation(aggregation) => {
             info.push(format!(
                 "calls=[{}]",

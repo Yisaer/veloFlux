@@ -1,6 +1,8 @@
 use crate::worker::WorkerMemoryTopicSpec;
 use flow::connector::SharedMqttClientConfig;
-use flow::planner::sink::CommonSinkProps;
+use flow::planner::sink::{
+    CommonSinkProps, SinkDeltaOutputConfig, SinkOutputConfig, SinkOutputMode,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::BTreeMap;
@@ -119,6 +121,8 @@ pub struct CreatePipelineSinkRequest {
     pub common: CommonSinkPropsRequest,
     #[serde(default)]
     pub encoder: EncoderConfigRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<SinkOutputConfigRequest>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
@@ -151,6 +155,45 @@ impl Default for EncoderConfigRequest {
 #[serde(deny_unknown_fields)]
 pub struct EncoderTransformRequest {
     pub template: String,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SinkOutputConfigRequest {
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<SinkDeltaOutputConfigRequest>,
+}
+
+impl SinkOutputConfigRequest {
+    pub(super) fn to_output_config(&self) -> Result<SinkOutputConfig, String> {
+        match self.mode.trim().to_ascii_lowercase().as_str() {
+            "full" => {
+                if self.delta.is_some() {
+                    return Err(
+                        "sink output.delta is only supported when output.mode=delta".to_string()
+                    );
+                }
+                Ok(SinkOutputConfig::new(SinkOutputMode::Full))
+            }
+            "delta" => Ok(SinkOutputConfig {
+                mode: SinkOutputMode::Delta,
+                delta: self.delta.as_ref().map(|delta| SinkDeltaOutputConfig {
+                    columns: delta.columns.clone(),
+                }),
+            }),
+            other => Err(format!(
+                "invalid sink output.mode `{other}` (expected full|delta)"
+            )),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SinkDeltaOutputConfigRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]

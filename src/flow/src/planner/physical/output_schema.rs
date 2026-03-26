@@ -68,6 +68,7 @@ impl PhysicalPlan {
             | PhysicalPlan::Batch(_)
             | PhysicalPlan::Encoder(_)
             | PhysicalPlan::StreamingEncoder(_)
+            | PhysicalPlan::RowDiff(_)
             | PhysicalPlan::ResultCollect(_)
             | PhysicalPlan::TumblingWindow(_)
             | PhysicalPlan::CountWindow(_)
