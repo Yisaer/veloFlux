@@ -1,16 +1,14 @@
 use super::helpers::*;
+use crate::catalog::FunctionDef;
 use crate::expr::custom_func::CustomFunc;
+use crate::expr::func::EvalError;
+use datatypes::Value;
 use icu::decimal::input::Decimal as IcuDecimal;
 use icu::decimal::DecimalFormatter;
 use icu::locale::LanguageIdentifier;
 use std::str::FromStr;
-use crate::catalog::FunctionDef;
-use crate::expr::func::EvalError;
-use datatypes::Value;
 
 // format_time function is moved to "cast" function in Transform Functions
-
-
 
 #[derive(Debug, Clone)]
 pub struct FormatFunc;
@@ -128,10 +126,7 @@ pub fn format_function_def() -> FunctionDef {
 pub fn concat_function_def() -> FunctionDef {
     scalar_function_def(
         "concat",
-        vec![
-            req_arg("a", string_type()),
-            req_arg("b", string_type()),
-        ],
+        vec![req_arg("a", string_type()), req_arg("b", string_type())],
         string_type(),
         "Concatenate two strings.",
         vec![
@@ -199,10 +194,7 @@ pub fn length_function_def() -> FunctionDef {
             "The argument must be a string or NULL.",
             "Returns NULL if the argument is NULL.",
         ],
-        vec![
-            "SELECT length('hello')",
-            "SELECT length(name)",
-        ],
+        vec!["SELECT length('hello')", "SELECT length(name)"],
     )
 }
 
@@ -216,10 +208,7 @@ pub fn lower_function_def() -> FunctionDef {
             "The argument must be a string or NULL.",
             "Returns NULL if the argument is NULL.",
         ],
-        vec![
-            "SELECT lower('Hello')",
-            "SELECT lower(name)",
-        ],
+        vec!["SELECT lower('Hello')", "SELECT lower(name)"],
     )
 }
 
@@ -238,10 +227,7 @@ pub fn lpad_function_def() -> FunctionDef {
             "The second argument must be a non-negative integer or NULL.",
             "Returns NULL if any argument is NULL.",
         ],
-        vec![
-            "SELECT lpad('x', 3)",
-            "SELECT lpad(code, 5)",
-        ],
+        vec!["SELECT lpad('x', 3)", "SELECT lpad(code, 5)"],
     )
 }
 
@@ -255,10 +241,7 @@ pub fn ltrim_function_def() -> FunctionDef {
             "The argument must be a string or NULL.",
             "Returns NULL if the argument is NULL.",
         ],
-        vec![
-            "SELECT ltrim('  hello')",
-            "SELECT ltrim(name)",
-        ],
+        vec!["SELECT ltrim('  hello')", "SELECT ltrim(name)"],
     )
 }
 
@@ -272,10 +255,7 @@ pub fn numbytes_function_def() -> FunctionDef {
             "The argument must be a string or NULL.",
             "Returns NULL if the argument is NULL.",
         ],
-        vec![
-            "SELECT numbytes('hello')",
-            "SELECT numbytes(name)",
-        ],
+        vec!["SELECT numbytes('hello')", "SELECT numbytes(name)"],
     )
 }
 
@@ -358,10 +338,7 @@ pub fn reverse_function_def() -> FunctionDef {
             "The argument must be a string or NULL.",
             "Returns NULL if the argument is NULL.",
         ],
-        vec![
-            "SELECT reverse('abc')",
-            "SELECT reverse(name)",
-        ],
+        vec!["SELECT reverse('abc')", "SELECT reverse(name)"],
     )
 }
 
@@ -380,10 +357,7 @@ pub fn rpad_function_def() -> FunctionDef {
             "The second argument must be a non-negative integer or NULL.",
             "Returns NULL if any argument is NULL.",
         ],
-        vec![
-            "SELECT rpad('x', 3)",
-            "SELECT rpad(code, 5)",
-        ],
+        vec!["SELECT rpad('x', 3)", "SELECT rpad(code, 5)"],
     )
 }
 
@@ -397,10 +371,7 @@ pub fn rtrim_function_def() -> FunctionDef {
             "The argument must be a string or NULL.",
             "Returns NULL if the argument is NULL.",
         ],
-        vec![
-            "SELECT rtrim('hello  ')",
-            "SELECT rtrim(name)",
-        ],
+        vec!["SELECT rtrim('hello  ')", "SELECT rtrim(name)"],
     )
 }
 
@@ -479,10 +450,7 @@ pub fn trim_function_def() -> FunctionDef {
             "The argument must be a string or NULL.",
             "Returns NULL if the argument is NULL.",
         ],
-        vec![
-            "SELECT trim('  hello  ')",
-            "SELECT trim(name)",
-        ],
+        vec!["SELECT trim('  hello  ')", "SELECT trim(name)"],
     )
 }
 
@@ -496,10 +464,7 @@ pub fn upper_function_def() -> FunctionDef {
             "The argument must be a string or NULL.",
             "Returns NULL if the argument is NULL.",
         ],
-        vec![
-            "SELECT upper('Hello')",
-            "SELECT upper(name)",
-        ],
+        vec!["SELECT upper('Hello')", "SELECT upper(name)"],
     )
 }
 
@@ -968,10 +933,7 @@ impl CustomFunc for FormatFunc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::expr::custom_func::helpers::{
-        assert_bool, assert_int,
-        assert_string, f, i, n, s,
-    };
+    use crate::expr::custom_func::helpers::{assert_bool, assert_int, assert_string, f, i, n, s};
     use datatypes::Value;
 
     #[test]

@@ -1,9 +1,11 @@
+use crate::catalog::{
+    FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionSignatureSpec, TypeSpec,
+};
 use crate::expr::func::EvalError;
 use datatypes::{ConcreteDatatype, ListValue, StructField, StructType, StructValue, Value};
 use regex::Regex;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use crate::catalog::{FunctionDef, TypeSpec, FunctionArgSpec, FunctionSignatureSpec, FunctionContext, FunctionKind};
 
 // helpers for definition
 pub fn int_type() -> TypeSpec {

@@ -1,15 +1,14 @@
+use crate::catalog::FunctionDef;
 use crate::expr::custom_func::helpers::{
     any_null, any_type, array_distinct_values, array_to_value, array_type, binary_array_fn_def,
     bool_type, int_type, map_to_value, nth_array_or_null, nth_i64_or_null, nth_string_or_null,
-    object_type, opt_arg, req_arg, scalar_function_def, 
-    string_type, unary_array_fn_def, unary_array_fn_def_with_aliases, validate_arity,
-    validate_at_least_arity, validate_one_array_or_null, validate_two_arrays_or_null,
-    value_sort_key, value_to_array, value_to_i64, value_to_map, value_to_string,
-    value_to_string_lossy, variadic_arg,
+    object_type, opt_arg, req_arg, scalar_function_def, string_type, unary_array_fn_def,
+    unary_array_fn_def_with_aliases, validate_arity, validate_at_least_arity,
+    validate_one_array_or_null, validate_two_arrays_or_null, value_sort_key, value_to_array,
+    value_to_i64, value_to_map, value_to_string, value_to_string_lossy, variadic_arg,
 };
-use crate::expr::func::EvalError;
 use crate::expr::custom_func::CustomFunc;
-use crate::catalog::FunctionDef;
+use crate::expr::func::EvalError;
 use crate::CustomFuncRegistry;
 use datatypes::Value;
 use rand::seq::SliceRandom;
@@ -1296,8 +1295,7 @@ impl CustomFunc for ArrayMapFunc {
 mod tests {
     use super::*;
     use crate::expr::custom_func::helpers::{
-        a, assert_array, assert_bool, assert_int, assert_map, assert_null,
-        assert_string, i, m, s,
+        a, assert_array, assert_bool, assert_int, assert_map, assert_null, assert_string, i, m, s,
     };
     use datatypes::Value;
     #[test]

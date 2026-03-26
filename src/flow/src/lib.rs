@@ -36,7 +36,8 @@ pub use eventtime::{
 pub use expr::custom_func::{CustomFunc, CustomFuncRegistry};
 pub use expr::sql_conversion;
 pub use expr::{
-    convert_expr_to_scalar, convert_select_stmt_to_scalar, extract_select_expressions, BinaryFunc, ConversionError, EvalContext, ScalarExpr, StreamSqlConverter, UnaryFunc,
+    convert_expr_to_scalar, convert_select_stmt_to_scalar, extract_select_expressions, BinaryFunc,
+    ConversionError, EvalContext, ScalarExpr, StreamSqlConverter, UnaryFunc,
 };
 pub use instance::{
     FlowInstance, FlowInstanceCpuMetricsError, FlowInstanceDedicatedRuntimeOptions,

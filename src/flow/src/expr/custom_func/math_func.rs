@@ -1,9 +1,9 @@
 use super::helpers::*;
+use crate::catalog::FunctionDef;
 use crate::expr::custom_func::CustomFunc;
 use crate::expr::func::EvalError;
 use datatypes::Value;
 use rug::{Float, Integer};
-use crate::catalog::FunctionDef;
 
 pub fn builtin_function_defs() -> Vec<FunctionDef> {
     vec![
