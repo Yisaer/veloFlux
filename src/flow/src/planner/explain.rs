@@ -776,6 +776,31 @@ fn build_physical_node_with_prefix(
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+            if let Some(spec) = &row_diff.late_projection {
+                if !spec.is_empty() {
+                    let cols = spec
+                        .columns()
+                        .iter()
+                        .map(|c| {
+                            if c.source_column_display.as_ref() == c.output_name.as_ref() {
+                                format!(
+                                    "{}.{}",
+                                    c.source_name.as_ref(),
+                                    c.source_column_display.as_ref()
+                                )
+                            } else {
+                                format!(
+                                    "{}.{} as {}",
+                                    c.source_name.as_ref(),
+                                    c.source_column_display.as_ref(),
+                                    c.output_name.as_ref()
+                                )
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    info.push(format!("by_index_projection=[{}]", cols.join("; ")));
+                }
+            }
         }
         PhysicalPlan::Aggregation(aggregation) => {
             info.push(format!(
