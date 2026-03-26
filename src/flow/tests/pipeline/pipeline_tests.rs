@@ -903,6 +903,21 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
+            name: "supports_alias_in_by_index_row_diff_rewrite",
+            sql: "SELECT a AS x FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
+            )],
+            encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::delta(),
+            expected: serde_json::json!([
+                {"x": 1},
+                {},
+                {"x": 2}
+            ]),
+        },
+        RowDiffJsonCase {
             name: "works_with_computed_affiliate_column",
             sql: "SELECT a, a + 1 AS x FROM stream",
             input_data: vec![(
