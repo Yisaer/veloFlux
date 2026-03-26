@@ -1,17 +1,455 @@
 use crate::expr::custom_func::helpers::{
-    any_null, array_distinct_values, array_to_value, map_to_value, nth_array_or_null,
-    nth_i64_or_null, nth_string_or_null, validate_arity, validate_at_least_arity,
-    validate_one_array_or_null, validate_two_arrays_or_null, value_sort_key, value_to_array,
-    value_to_i64, value_to_map, value_to_string, value_to_string_lossy,
+    any_null, any_type, array_distinct_values, array_to_value, array_type, binary_array_fn_def,
+    bool_type, int_type, map_to_value, nth_array_or_null, nth_i64_or_null, nth_string_or_null,
+    object_type, opt_arg, req_arg, scalar_function_def, 
+    string_type, unary_array_fn_def, unary_array_fn_def_with_aliases, validate_arity,
+    validate_at_least_arity, validate_one_array_or_null, validate_two_arrays_or_null,
+    value_sort_key, value_to_array, value_to_i64, value_to_map, value_to_string,
+    value_to_string_lossy, variadic_arg,
 };
-use crate::expr::custom_func::CustomFunc;
 use crate::expr::func::EvalError;
+use crate::expr::custom_func::CustomFunc;
+use crate::catalog::FunctionDef;
 use crate::CustomFuncRegistry;
 use datatypes::Value;
 use rand::seq::SliceRandom;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+pub fn builtin_function_defs() -> Vec<FunctionDef> {
+    vec![
+        cardinality_function_def(),
+        array_position_function_def(),
+        element_at_function_def(),
+        array_contains_function_def(),
+        array_create_function_def(),
+        array_remove_function_def(),
+        array_last_position_function_def(),
+        array_contains_any_function_def(),
+        array_intersect_function_def(),
+        array_union_function_def(),
+        array_max_function_def(),
+        array_min_function_def(),
+        array_except_function_def(),
+        repeat_function_def(),
+        sequence_function_def(),
+        array_cardinality_function_def(),
+        array_flatten_function_def(),
+        array_distinct_function_def(),
+        array_join_function_def(),
+        array_shuffle_function_def(),
+        array_concat_function_def(),
+        array_sort_function_def(),
+        kvpair_array_to_obj_function_def(),
+        array_map_function_def(),
+    ]
+}
+
+pub fn cardinality_function_def() -> FunctionDef {
+    unary_array_fn_def(
+        "cardinality",
+        int_type(),
+        "Return the number of elements in an array.",
+        vec![
+            "Requires exactly 1 array argument.",
+            "Returns 0 when the input is NULL.",
+        ],
+        vec!["SELECT cardinality(arr)", "SELECT cardinality([1, 2, 3])"],
+    )
+}
+
+pub fn array_position_function_def() -> FunctionDef {
+    scalar_function_def(
+        "array_position",
+        vec![req_arg("array", array_type()), req_arg("value", any_type())],
+        int_type(),
+        "Return the index of the first matching element in an array.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "Returns -1 if the value is not found.",
+            "Returns -1 when the array input is NULL.",
+        ],
+        vec![
+            "SELECT array_position(arr, 10)",
+            "SELECT array_position(['a', 'b'], 'b')",
+        ],
+    )
+}
+
+pub fn element_at_function_def() -> FunctionDef {
+    scalar_function_def(
+        "element_at",
+        vec![
+            req_arg("container", any_type()),
+            req_arg("index_or_key", any_type()),
+        ],
+        any_type(),
+        "Return an element from an array by index or from an object by key.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "For arrays, the second argument must be an integer index.",
+            "Negative array indexes are supported.",
+            "For objects, the second argument must be a string key.",
+        ],
+        vec![
+            "SELECT element_at(arr, 0)",
+            "SELECT element_at(obj, 'name')",
+        ],
+    )
+}
+
+pub fn array_contains_function_def() -> FunctionDef {
+    scalar_function_def(
+        "array_contains",
+        vec![req_arg("array", array_type()), req_arg("value", any_type())],
+        bool_type(),
+        "Return whether an array contains the given value.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "Returns NULL when the array input is NULL.",
+        ],
+        vec![
+            "SELECT array_contains(arr, 10)",
+            "SELECT array_contains(['a', 'b'], 'a')",
+        ],
+    )
+}
+
+pub fn array_create_function_def() -> FunctionDef {
+    scalar_function_def(
+        "array_create",
+        vec![variadic_arg("value", any_type())],
+        array_type(),
+        "Create an array from the provided arguments.",
+        vec!["Accepts any number of arguments."],
+        vec![
+            "SELECT array_create(1, 2, 3)",
+            "SELECT array_create(name, age)",
+        ],
+    )
+}
+
+pub fn array_remove_function_def() -> FunctionDef {
+    scalar_function_def(
+        "array_remove",
+        vec![req_arg("array", array_type()), req_arg("value", any_type())],
+        array_type(),
+        "Return a new array with all occurrences of the given value removed.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "Returns NULL when the array input is NULL.",
+        ],
+        vec![
+            "SELECT array_remove(arr, 10)",
+            "SELECT array_remove([1, 2, 2], 2)",
+        ],
+    )
+}
+
+pub fn array_last_position_function_def() -> FunctionDef {
+    scalar_function_def(
+        "array_last_position",
+        vec![req_arg("array", array_type()), req_arg("value", any_type())],
+        int_type(),
+        "Return the index of the last matching element in an array.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "Returns -1 if the value is not found.",
+            "Returns -1 when the array input is NULL.",
+        ],
+        vec![
+            "SELECT array_last_position(arr, 10)",
+            "SELECT array_last_position([1, 2, 1], 1)",
+        ],
+    )
+}
+
+pub fn array_contains_any_function_def() -> FunctionDef {
+    binary_array_fn_def(
+        "array_contains_any",
+        bool_type(),
+        "Return whether two arrays share at least one common element.",
+        vec![
+            "Requires exactly 2 array arguments.",
+            "Returns false when the first array is NULL.",
+        ],
+        vec![
+            "SELECT array_contains_any(a1, a2)",
+            "SELECT array_contains_any([1, 2], [2, 3])",
+        ],
+    )
+}
+
+pub fn array_intersect_function_def() -> FunctionDef {
+    binary_array_fn_def(
+        "array_intersect",
+        array_type(),
+        "Return the distinct intersection of two arrays.",
+        vec![
+            "Requires exactly 2 array arguments.",
+            "Returns NULL if either array is NULL.",
+        ],
+        vec![
+            "SELECT array_intersect(a1, a2)",
+            "SELECT array_intersect([1, 2], [2, 3])",
+        ],
+    )
+}
+
+pub fn array_union_function_def() -> FunctionDef {
+    binary_array_fn_def(
+        "array_union",
+        array_type(),
+        "Return the distinct union of two arrays.",
+        vec![
+            "Requires exactly 2 array arguments.",
+            "NULL inputs are treated as empty arrays.",
+        ],
+        vec![
+            "SELECT array_union(a1, a2)",
+            "SELECT array_union([1, 2], [2, 3])",
+        ],
+    )
+}
+
+pub fn array_max_function_def() -> FunctionDef {
+    unary_array_fn_def(
+        "array_max",
+        any_type(),
+        "Return the maximum non-NULL element in an array.",
+        vec![
+            "Requires exactly 1 array argument.",
+            "Returns NULL for NULL or empty arrays, or if all elements are NULL.",
+        ],
+        vec!["SELECT array_max(arr)", "SELECT array_max([1, 9, 3])"],
+    )
+}
+
+pub fn array_min_function_def() -> FunctionDef {
+    unary_array_fn_def(
+        "array_min",
+        any_type(),
+        "Return the minimum non-NULL element in an array.",
+        vec![
+            "Requires exactly 1 array argument.",
+            "Returns NULL for NULL or empty arrays, or if all elements are NULL.",
+        ],
+        vec!["SELECT array_min(arr)", "SELECT array_min([1, 9, 3])"],
+    )
+}
+
+pub fn array_except_function_def() -> FunctionDef {
+    binary_array_fn_def(
+        "array_except",
+        array_type(),
+        "Return the distinct elements in the first array that are not present in the second.",
+        vec![
+            "Requires exactly 2 array arguments.",
+            "Returns NULL when the first array is NULL.",
+            "A NULL second array is treated as empty.",
+        ],
+        vec![
+            "SELECT array_except(a1, a2)",
+            "SELECT array_except([1, 2, 3], [2])",
+        ],
+    )
+}
+
+pub fn repeat_function_def() -> FunctionDef {
+    scalar_function_def(
+        "repeat",
+        vec![req_arg("value", any_type()), req_arg("count", int_type())],
+        array_type(),
+        "Repeat a value count times and return the results as an array.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "The count must be a non-negative integer.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        vec!["SELECT repeat('x', 3)", "SELECT repeat(1, 5)"],
+    )
+}
+
+pub fn sequence_function_def() -> FunctionDef {
+    scalar_function_def(
+        "sequence",
+        vec![
+            req_arg("start", int_type()),
+            req_arg("stop", int_type()),
+            opt_arg("step", int_type()),
+        ],
+        array_type(),
+        "Generate an integer sequence from start to stop, with an optional step.",
+        vec![
+            "Accepts 2 or 3 integer arguments.",
+            "The optional step must be non-zero.",
+            "Returns NULL if any provided argument is NULL.",
+        ],
+        vec!["SELECT sequence(1, 5)", "SELECT sequence(10, 0, -2)"],
+    )
+}
+
+pub fn array_cardinality_function_def() -> FunctionDef {
+    unary_array_fn_def_with_aliases(
+        "array_cardinality",
+        vec!["cardinality"],
+        int_type(),
+        "Return the number of elements in an array.",
+        vec![
+            "Requires exactly 1 array argument.",
+            "Returns 0 when the input is NULL.",
+        ],
+        vec![
+            "SELECT array_cardinality(arr)",
+            "SELECT array_cardinality([1, 2, 3])",
+        ],
+    )
+}
+
+pub fn array_flatten_function_def() -> FunctionDef {
+    unary_array_fn_def(
+        "array_flatten",
+        array_type(),
+        "Flatten one level of nested arrays.",
+        vec![
+            "Requires exactly 1 array argument.",
+            "Returns NULL when the input is NULL.",
+            "Non-array elements are kept as they are.",
+        ],
+        vec![
+            "SELECT array_flatten(arr)",
+            "SELECT array_flatten([[1, 2], [3]])",
+        ],
+    )
+}
+
+pub fn array_distinct_function_def() -> FunctionDef {
+    unary_array_fn_def(
+        "array_distinct",
+        array_type(),
+        "Return an array with duplicate elements removed.",
+        vec![
+            "Requires exactly 1 array argument.",
+            "Returns NULL when the input is NULL.",
+        ],
+        vec![
+            "SELECT array_distinct(arr)",
+            "SELECT array_distinct([1, 1, 2])",
+        ],
+    )
+}
+
+pub fn array_join_function_def() -> FunctionDef {
+    scalar_function_def(
+        "array_join",
+        vec![
+            req_arg("array", array_type()),
+            req_arg("delimiter", string_type()),
+            opt_arg("null_replacement", string_type()),
+        ],
+        string_type(),
+        "Join array elements into a string using a delimiter.",
+        vec![
+            "Accepts 2 or 3 arguments.",
+            "The second argument must be a string delimiter.",
+            "The optional third argument is used for NULL elements.",
+            "Returns NULL if the array or delimiter is NULL.",
+        ],
+        vec![
+            "SELECT array_join(arr, ',')",
+            "SELECT array_join(arr, ',', 'NULL')",
+        ],
+    )
+}
+
+pub fn array_shuffle_function_def() -> FunctionDef {
+    unary_array_fn_def(
+        "array_shuffle",
+        array_type(),
+        "Return a shuffled copy of an array.",
+        vec![
+            "Requires exactly 1 array argument.",
+            "Returns NULL when the input is NULL.",
+            "This function is non-deterministic.",
+        ],
+        vec![
+            "SELECT array_shuffle(arr)",
+            "SELECT array_shuffle([1, 2, 3])",
+        ],
+    )
+}
+
+pub fn array_concat_function_def() -> FunctionDef {
+    scalar_function_def(
+        "array_concat",
+        vec![variadic_arg("array", array_type())],
+        array_type(),
+        "Concatenate one or more arrays.",
+        vec![
+            "Requires at least 1 array argument.",
+            "NULL array arguments are skipped.",
+        ],
+        vec![
+            "SELECT array_concat(a1, a2)",
+            "SELECT array_concat([1], [2, 3], [4])",
+        ],
+    )
+}
+
+pub fn array_sort_function_def() -> FunctionDef {
+    unary_array_fn_def(
+        "array_sort",
+        array_type(),
+        "Return a sorted copy of an array.",
+        vec![
+            "Requires exactly 1 array argument.",
+            "Returns NULL when the input is NULL.",
+        ],
+        vec!["SELECT array_sort(arr)", "SELECT array_sort([3, 1, 2])"],
+    )
+}
+
+pub fn kvpair_array_to_obj_function_def() -> FunctionDef {
+    scalar_function_def(
+        "kvpair_array_to_obj",
+        vec![req_arg("pairs", array_type())],
+        object_type(),
+        "Convert an array of key-value pair objects into a single object.",
+        vec![
+            "Requires exactly 1 array argument.",
+            "Each array element must be an object containing key and value fields.",
+            "Returns NULL when the input is NULL.",
+        ],
+        vec![
+            "SELECT kvpair_array_to_obj(pairs)",
+            "SELECT kvpair_array_to_obj(array_create(obj1, obj2))",
+        ],
+    )
+}
+
+pub fn array_map_function_def() -> FunctionDef {
+    scalar_function_def(
+        "array_map",
+        vec![
+            req_arg("function_name", string_type()),
+            req_arg("array", array_type()),
+        ],
+        array_type(),
+        "Apply a registered unary function to each element of an array.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "The first argument must be the name of a registered function.",
+            "The second argument must be an array.",
+            "Returns NULL if the function name or array is NULL.",
+            "The mapped function must accept exactly one argument for each array element.",
+        ],
+        vec![
+            "SELECT array_map('abs', arr)",
+            "SELECT array_map('upper', words)",
+        ],
+    )
+}
 
 #[derive(Debug, Clone)]
 pub struct CardinalityFunc;
@@ -840,7 +1278,9 @@ impl CustomFunc for ArrayMapFunc {
         let mut out = Vec::with_capacity(array.len());
 
         for value in array {
-            let mapped = func.eval_row(&[value])?;
+            let args = [value];
+            func.validate_row(&args)?;
+            let mapped = func.eval_row(&args)?;
             out.push(mapped);
         }
 
@@ -856,8 +1296,8 @@ impl CustomFunc for ArrayMapFunc {
 mod tests {
     use super::*;
     use crate::expr::custom_func::helpers::{
-        a, assert_array, assert_bool, assert_float, assert_int, assert_map, assert_null,
-        assert_string, b, f, i, m, n, s,
+        a, assert_array, assert_bool, assert_int, assert_map, assert_null,
+        assert_string, i, m, s,
     };
     use datatypes::Value;
     #[test]

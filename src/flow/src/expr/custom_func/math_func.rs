@@ -3,6 +3,405 @@ use crate::expr::custom_func::CustomFunc;
 use crate::expr::func::EvalError;
 use datatypes::Value;
 use rug::{Float, Integer};
+use crate::catalog::FunctionDef;
+
+pub fn builtin_function_defs() -> Vec<FunctionDef> {
+    vec![
+        acos_function_def(),
+        asin_function_def(),
+        atan_function_def(),
+        cos_function_def(),
+        cosh_function_def(),
+        exp_function_def(),
+        floor_function_def(),
+        ln_function_def(),
+        sin_function_def(),
+        sinh_function_def(),
+        sqrt_function_def(),
+        tan_function_def(),
+        tanh_function_def(),
+        ceiling_function_def(),
+        ceil_function_def(),
+        radians_function_def(),
+        degrees_function_def(),
+        atan2_function_def(),
+        mod_function_def(),
+        power_function_def(),
+        pow_function_def(),
+        abs_function_def(),
+        bitand_function_def(),
+        bitor_function_def(),
+        bitxor_function_def(),
+        bitnot_function_def(),
+        sign_function_def(),
+        pi_function_def(),
+        rand_function_def(),
+        cot_function_def(),
+        log_function_def(),
+        round_function_def(),
+        conv_function_def(),
+    ]
+}
+
+pub fn acos_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "acos",
+        "Return the arc cosine of a numeric value.",
+        vec!["SELECT acos(x)", "SELECT acos(0.5)"],
+    )
+}
+
+pub fn asin_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "asin",
+        "Return the arc sine of a numeric value.",
+        vec!["SELECT asin(x)", "SELECT asin(0.5)"],
+    )
+}
+
+pub fn atan_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "atan",
+        "Return the arc tangent of a numeric value.",
+        vec!["SELECT atan(x)", "SELECT atan(1.0)"],
+    )
+}
+
+pub fn cos_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "cos",
+        "Return the cosine of a numeric value.",
+        vec!["SELECT cos(x)", "SELECT cos(0.0)"],
+    )
+}
+
+pub fn cosh_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "cosh",
+        "Return the hyperbolic cosine of a numeric value.",
+        vec!["SELECT cosh(x)", "SELECT cosh(1.0)"],
+    )
+}
+
+pub fn exp_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "exp",
+        "Return e raised to the given numeric value.",
+        vec!["SELECT exp(x)", "SELECT exp(1.0)"],
+    )
+}
+
+pub fn floor_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "floor",
+        "Round a numeric value down to the nearest integer value in float form.",
+        vec!["SELECT floor(x)", "SELECT floor(3.7)"],
+    )
+}
+
+pub fn ln_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "ln",
+        "Return the natural logarithm of a numeric value.",
+        vec!["SELECT ln(x)", "SELECT ln(10.0)"],
+    )
+}
+
+pub fn sin_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "sin",
+        "Return the sine of a numeric value.",
+        vec!["SELECT sin(x)", "SELECT sin(0.0)"],
+    )
+}
+
+pub fn sinh_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "sinh",
+        "Return the hyperbolic sine of a numeric value.",
+        vec!["SELECT sinh(x)", "SELECT sinh(1.0)"],
+    )
+}
+
+pub fn sqrt_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "sqrt",
+        "Return the square root of a numeric value.",
+        vec!["SELECT sqrt(x)", "SELECT sqrt(9.0)"],
+    )
+}
+
+pub fn tan_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "tan",
+        "Return the tangent of a numeric value.",
+        vec!["SELECT tan(x)", "SELECT tan(1.0)"],
+    )
+}
+
+pub fn tanh_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "tanh",
+        "Return the hyperbolic tangent of a numeric value.",
+        vec!["SELECT tanh(x)", "SELECT tanh(1.0)"],
+    )
+}
+
+pub fn ceiling_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "ceiling",
+        "Round a numeric value up to the nearest integer value in float form.",
+        vec!["SELECT ceiling(x)", "SELECT ceiling(3.2)"],
+    )
+}
+
+pub fn ceil_function_def() -> FunctionDef {
+    scalar_function_def_with_aliases(
+        "ceil",
+        vec!["ceiling"],
+        vec![req_arg("x", float_type())],
+        float_type(),
+        "Round a numeric value up to the nearest integer value in float form.",
+        vec![
+            "Requires exactly 1 numeric argument.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec!["SELECT ceil(x)", "SELECT ceil(3.2)"],
+    )
+}
+
+pub fn radians_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "radians",
+        "Convert degrees to radians.",
+        vec!["SELECT radians(x)", "SELECT radians(180.0)"],
+    )
+}
+
+pub fn degrees_function_def() -> FunctionDef {
+    unary_numeric_fn_def(
+        "degrees",
+        "Convert radians to degrees.",
+        vec!["SELECT degrees(x)", "SELECT degrees(3.1415926)"],
+    )
+}
+
+pub fn atan2_function_def() -> FunctionDef {
+    binary_numeric_fn_def(
+        "atan2",
+        "Return the arc tangent of y/x using the signs of both arguments.",
+        vec!["SELECT atan2(y, x)", "SELECT atan2(1.0, 1.0)"],
+    )
+}
+
+pub fn mod_function_def() -> FunctionDef {
+    binary_numeric_fn_def(
+        "mod",
+        "Return the remainder of dividing the first numeric argument by the second.",
+        vec!["SELECT mod(a, b)", "SELECT mod(10, 3)"],
+    )
+}
+
+pub fn power_function_def() -> FunctionDef {
+    binary_numeric_fn_def(
+        "power",
+        "Raise the first numeric argument to the power of the second.",
+        vec!["SELECT power(a, b)", "SELECT power(2, 3)"],
+    )
+}
+
+pub fn pow_function_def() -> FunctionDef {
+    scalar_function_def_with_aliases(
+        "pow",
+        vec!["power"],
+        vec![req_arg("a", float_type()), req_arg("b", float_type())],
+        float_type(),
+        "Raise the first numeric argument to the power of the second.",
+        vec![
+            "Requires exactly 2 numeric arguments.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        vec!["SELECT pow(a, b)", "SELECT pow(2, 3)"],
+    )
+}
+
+pub fn abs_function_def() -> FunctionDef {
+    scalar_function_def(
+        "abs",
+        vec![req_arg("x", float_type())],
+        float_type(),
+        "Return the absolute value of a numeric argument.",
+        vec![
+            "Requires exactly 1 numeric argument.",
+            "Returns NULL if the argument is NULL.",
+            "Overflow on signed integer absolute value can return an evaluation error.",
+        ],
+        vec!["SELECT abs(x)", "SELECT abs(-42)"],
+    )
+}
+
+pub fn bitand_function_def() -> FunctionDef {
+    scalar_function_def(
+        "bitand",
+        vec![req_arg("a", int_type()), req_arg("b", int_type())],
+        int_type(),
+        "Return the bitwise AND of two integers.",
+        vec![
+            "Requires exactly 2 integer arguments.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        vec!["SELECT bitand(a, b)", "SELECT bitand(6, 3)"],
+    )
+}
+
+pub fn bitor_function_def() -> FunctionDef {
+    scalar_function_def(
+        "bitor",
+        vec![req_arg("a", int_type()), req_arg("b", int_type())],
+        int_type(),
+        "Return the bitwise OR of two integers.",
+        vec![
+            "Requires exactly 2 integer arguments.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        vec!["SELECT bitor(a, b)", "SELECT bitor(6, 3)"],
+    )
+}
+
+pub fn bitxor_function_def() -> FunctionDef {
+    scalar_function_def(
+        "bitxor",
+        vec![req_arg("a", int_type()), req_arg("b", int_type())],
+        int_type(),
+        "Return the bitwise XOR of two integers.",
+        vec![
+            "Requires exactly 2 integer arguments.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        vec!["SELECT bitxor(a, b)", "SELECT bitxor(6, 3)"],
+    )
+}
+
+pub fn bitnot_function_def() -> FunctionDef {
+    scalar_function_def(
+        "bitnot",
+        vec![req_arg("x", int_type())],
+        int_type(),
+        "Return the bitwise NOT of an integer.",
+        vec![
+            "Requires exactly 1 integer argument.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec!["SELECT bitnot(x)", "SELECT bitnot(6)"],
+    )
+}
+
+pub fn sign_function_def() -> FunctionDef {
+    scalar_function_def(
+        "sign",
+        vec![req_arg("x", float_type())],
+        int_type(),
+        "Return the sign of a numeric value as -1, 0, or 1.",
+        vec![
+            "Requires exactly 1 numeric argument.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec!["SELECT sign(x)", "SELECT sign(-12.3)"],
+    )
+}
+
+pub fn pi_function_def() -> FunctionDef {
+    scalar_function_def(
+        "pi",
+        vec![],
+        float_type(),
+        "Return the mathematical constant pi.",
+        vec!["Requires exactly 0 arguments."],
+        vec!["SELECT pi()", "SELECT round(pi(), 2)"],
+    )
+}
+
+pub fn rand_function_def() -> FunctionDef {
+    scalar_function_def(
+        "rand",
+        vec![],
+        float_type(),
+        "Return a random floating-point value.",
+        vec![
+            "Requires exactly 0 arguments.",
+            "This function is non-deterministic.",
+        ],
+        vec!["SELECT rand()", "SELECT rand() AS r"],
+    )
+}
+
+pub fn cot_function_def() -> FunctionDef {
+    scalar_function_def(
+        "cot",
+        vec![req_arg("x", float_type())],
+        float_type(),
+        "Return the cotangent of a numeric value.",
+        vec![
+            "Requires exactly 1 numeric argument.",
+            "Returns NULL if the argument is NULL.",
+            "Division by zero situations can return an evaluation error.",
+        ],
+        vec!["SELECT cot(x)", "SELECT cot(1.0)"],
+    )
+}
+
+pub fn log_function_def() -> FunctionDef {
+    scalar_function_def(
+        "log",
+        vec![opt_arg("base", float_type()), req_arg("x", float_type())],
+        float_type(),
+        "Return the common logarithm of x, or the logarithm of x in the given base.",
+        vec![
+            "Accepts 1 or 2 numeric arguments.",
+            "With 1 argument, computes log10(x).",
+            "With 2 arguments, computes log base `base` of `x`.",
+            "Returns NULL if any provided argument is NULL.",
+        ],
+        vec!["SELECT log(100)", "SELECT log(2, 8)"],
+    )
+}
+
+pub fn round_function_def() -> FunctionDef {
+    scalar_function_def(
+        "round",
+        vec![req_arg("x", float_type()), opt_arg("precision", int_type())],
+        float_type(),
+        "Round a numeric value to the given decimal precision.",
+        vec![
+            "Accepts 1 or 2 arguments.",
+            "The first argument must be numeric.",
+            "The optional second argument must be an integer precision.",
+            "Returns NULL if any provided argument is NULL.",
+        ],
+        vec!["SELECT round(3.14159)", "SELECT round(3.14159, 2)"],
+    )
+}
+
+pub fn conv_function_def() -> FunctionDef {
+    scalar_function_def(
+        "conv",
+        vec![
+            req_arg("value", string_type()),
+            req_arg("from_base", int_type()),
+            req_arg("to_base", int_type()),
+        ],
+        string_type(),
+        "Convert a string representation of an integer from one base to another.",
+        vec![
+            "Requires exactly 3 arguments.",
+            "The first argument must be a string.",
+            "The second and third arguments must be integers.",
+            "Supported bases are in the range 2 to 36.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        vec!["SELECT conv('15', 10, 16)", "SELECT conv('FF', 16, 10)"],
+    )
+}
 
 macro_rules! unary_f64_func {
     ($struct:ident,$name:expr,$op:expr) => {
@@ -513,8 +912,6 @@ fn to_base_string(mut value: u64, base: u32) -> String {
 mod tests {
     use super::*;
     use datatypes::Value;
-
-    const EPS: f64 = 1e-9;
 
     fn eval<F: CustomFunc>(f: &F, args: &[Value]) -> Value {
         f.eval_row(args).unwrap()

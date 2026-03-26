@@ -1,8 +1,255 @@
 use crate::expr::func::EvalError;
-use crate::Arc;
 use datatypes::{ConcreteDatatype, ListValue, StructField, StructType, StructValue, Value};
 use regex::Regex;
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use crate::catalog::{FunctionDef, TypeSpec, FunctionArgSpec, FunctionSignatureSpec, FunctionContext, FunctionKind};
+
+// helpers for definition
+pub fn int_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "int".to_string(),
+    }
+}
+
+pub fn float_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "float".to_string(),
+    }
+}
+
+pub fn string_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "string".to_string(),
+    }
+}
+
+pub fn bool_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "bool".to_string(),
+    }
+}
+
+pub fn any_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "any".to_string(),
+    }
+}
+
+pub fn object_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "object".to_string(),
+    }
+}
+
+pub fn array_type() -> TypeSpec {
+    TypeSpec::List {
+        element: Box::new(any_type()),
+    }
+}
+
+pub fn default_contexts() -> Vec<FunctionContext> {
+    vec![
+        FunctionContext::Select,
+        FunctionContext::Where,
+        FunctionContext::GroupBy,
+    ]
+}
+
+pub fn req_arg(name: &str, ty: TypeSpec) -> FunctionArgSpec {
+    FunctionArgSpec {
+        name: name.to_string(),
+        r#type: ty,
+        optional: false,
+        variadic: false,
+    }
+}
+
+pub fn opt_arg(name: &str, ty: TypeSpec) -> FunctionArgSpec {
+    FunctionArgSpec {
+        name: name.to_string(),
+        r#type: ty,
+        optional: true,
+        variadic: false,
+    }
+}
+
+pub fn variadic_arg(name: &str, ty: TypeSpec) -> FunctionArgSpec {
+    FunctionArgSpec {
+        name: name.to_string(),
+        r#type: ty,
+        optional: true,
+        variadic: true,
+    }
+}
+
+pub fn scalar_function_def(
+    name: &str,
+    args: Vec<FunctionArgSpec>,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    FunctionDef {
+        kind: FunctionKind::Scalar,
+        name: name.to_string(),
+        aliases: vec![],
+        signature: FunctionSignatureSpec { args, return_type },
+        description: description.to_string(),
+        allowed_contexts: default_contexts(),
+        requirements: vec![],
+        constraints: constraints.into_iter().map(|s| s.to_string()).collect(),
+        examples: examples.into_iter().map(|s| s.to_string()).collect(),
+        aggregate: None,
+        stateful: None,
+    }
+}
+
+pub fn scalar_function_def_with_aliases(
+    name: &str,
+    aliases: Vec<&str>,
+    args: Vec<FunctionArgSpec>,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    FunctionDef {
+        kind: FunctionKind::Scalar,
+        name: name.to_string(),
+        aliases: aliases.into_iter().map(|s| s.to_string()).collect(),
+        signature: FunctionSignatureSpec { args, return_type },
+        description: description.to_string(),
+        allowed_contexts: default_contexts(),
+        requirements: vec![],
+        constraints: constraints.into_iter().map(|s| s.to_string()).collect(),
+        examples: examples.into_iter().map(|s| s.to_string()).collect(),
+        aggregate: None,
+        stateful: None,
+    }
+}
+
+pub fn unary_numeric_fn_def(name: &str, description: &str, examples: Vec<&str>) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![req_arg("x", float_type())],
+        float_type(),
+        description,
+        vec![
+            "Requires exactly 1 numeric argument.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        examples,
+    )
+}
+
+pub fn binary_numeric_fn_def(name: &str, description: &str, examples: Vec<&str>) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![req_arg("a", float_type()), req_arg("b", float_type())],
+        float_type(),
+        description,
+        vec![
+            "Requires exactly 2 numeric arguments.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        examples,
+    )
+}
+
+pub fn unary_array_fn_def(
+    name: &str,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![req_arg("array", array_type())],
+        return_type,
+        description,
+        constraints,
+        examples,
+    )
+}
+
+pub fn unary_array_fn_def_with_aliases(
+    name: &str,
+    aliases: Vec<&str>,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    scalar_function_def_with_aliases(
+        name,
+        aliases,
+        vec![req_arg("array", array_type())],
+        return_type,
+        description,
+        constraints,
+        examples,
+    )
+}
+
+pub fn binary_array_fn_def(
+    name: &str,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![
+            req_arg("array1", array_type()),
+            req_arg("array2", array_type()),
+        ],
+        return_type,
+        description,
+        constraints,
+        examples,
+    )
+}
+
+pub fn unary_string_fn_def(
+    name: &str,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![req_arg("value", string_type())],
+        return_type,
+        description,
+        constraints,
+        examples,
+    )
+}
+
+pub fn binary_string_fn_def(
+    name: &str,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![
+            req_arg("value", string_type()),
+            req_arg("other", string_type()),
+        ],
+        return_type,
+        description,
+        constraints,
+        examples,
+    )
+}
 
 // helpers for testing
 pub fn i(v: i64) -> Value {

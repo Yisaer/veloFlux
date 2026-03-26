@@ -9,10 +9,6 @@ use datatypes::Value;
 
 pub use registry::CustomFuncRegistry;
 
-pub use array_func::*;
-pub use math_func::*;
-pub use string_func::*;
-
 /// Custom function that can be implemented by users
 /// This trait allows users to define their own functions for evaluation
 pub trait CustomFunc: Send + Sync + std::fmt::Debug {
@@ -43,5 +39,11 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
 }
 
 pub fn builtin_custom_function_defs() -> Vec<FunctionDef> {
-    vec![string_func::concat_function_def()]
+    let mut defs = Vec::new();
+
+    defs.extend(math_func::builtin_function_defs());
+    defs.extend(string_func::builtin_function_defs());
+    defs.extend(array_func::builtin_function_defs());
+
+    defs
 }

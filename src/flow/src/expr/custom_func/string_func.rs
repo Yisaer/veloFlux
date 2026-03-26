@@ -1,24 +1,16 @@
-use crate::expr::custom_func::helpers::{
-    binary_string_to_bool, binary_string_to_bool_result, binary_string_to_i64_result,
-    binary_string_to_string_result, compile_regex, nth_f64_or_null, nth_i64_or_null,
-    nth_string_or_null, nth_string_strict, string_nonnegative_i64_to_string,
-    substring_by_char_start_length, ternary_string_to_string, unary_string_to_i64,
-    unary_string_to_string, validate_arity, validate_one_string_or_null,
-    validate_string_i64_or_null, validate_two_strict_strings, validate_two_strings_or_null,
-};
+use super::helpers::*;
 use crate::expr::custom_func::CustomFunc;
 use icu::decimal::input::Decimal as IcuDecimal;
 use icu::decimal::DecimalFormatter;
 use icu::locale::LanguageIdentifier;
 use std::str::FromStr;
+use crate::catalog::FunctionDef;
+use crate::expr::func::EvalError;
+use datatypes::Value;
 
 // format_time function is moved to "cast" function in Transform Functions
 
-use crate::catalog::{
-    FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionSignatureSpec, TypeSpec,
-};
-use crate::expr::func::EvalError;
-use datatypes::Value;
+
 
 #[derive(Debug, Clone)]
 pub struct FormatFunc;
@@ -80,59 +72,435 @@ pub struct TrimFunc;
 #[derive(Debug, Clone)]
 pub struct UpperFunc;
 
+pub fn builtin_function_defs() -> Vec<FunctionDef> {
+    vec![
+        format_function_def(),
+        concat_function_def(),
+        endswith_function_def(),
+        indexof_function_def(),
+        length_function_def(),
+        lower_function_def(),
+        lpad_function_def(),
+        ltrim_function_def(),
+        numbytes_function_def(),
+        regexp_matches_function_def(),
+        regexp_replace_function_def(),
+        regexp_substr_function_def(),
+        reverse_function_def(),
+        rpad_function_def(),
+        rtrim_function_def(),
+        substring_function_def(),
+        startswith_function_def(),
+        split_value_function_def(),
+        trim_function_def(),
+        upper_function_def(),
+    ]
+}
+
 fn reverse_by_chars(s: &str) -> String {
     s.chars().rev().collect()
 }
 
-/// Custom implementation of the concat function
-/// This function concatenates exactly 2 String arguments
+pub fn format_function_def() -> FunctionDef {
+    scalar_function_def(
+        "format",
+        vec![
+            req_arg("value", float_type()),
+            req_arg("precision", int_type()),
+            opt_arg("locale", string_type()),
+        ],
+        string_type(),
+        "Format a numeric value as a string, optionally using a locale.",
+        vec![
+            "Requires 2 or 3 arguments.",
+            "The first argument must be numeric.",
+            "The second argument must be an integer precision >= 0.",
+            "The optional third argument must be a locale string such as en_US.",
+            "Returns NULL if any provided argument is NULL.",
+        ],
+        vec![
+            "SELECT format(12.3456, 2) AS s",
+            "SELECT format(price, 2, 'en_US')",
+        ],
+    )
+}
+
 pub fn concat_function_def() -> FunctionDef {
-    FunctionDef {
-        kind: FunctionKind::Scalar,
-        name: "concat".to_string(),
-        aliases: vec![],
-        signature: FunctionSignatureSpec {
-            args: vec![
-                FunctionArgSpec {
-                    name: "a".to_string(),
-                    r#type: TypeSpec::Named {
-                        name: "string".to_string(),
-                    },
-                    optional: false,
-                    variadic: false,
-                },
-                FunctionArgSpec {
-                    name: "b".to_string(),
-                    r#type: TypeSpec::Named {
-                        name: "string".to_string(),
-                    },
-                    optional: false,
-                    variadic: false,
-                },
-            ],
-            return_type: TypeSpec::Named {
-                name: "string".to_string(),
-            },
-        },
-        description: "Concatenate two strings.".to_string(),
-        allowed_contexts: vec![
-            FunctionContext::Select,
-            FunctionContext::Where,
-            FunctionContext::GroupBy,
+    scalar_function_def(
+        "concat",
+        vec![
+            req_arg("a", string_type()),
+            req_arg("b", string_type()),
         ],
-        requirements: vec![],
-        constraints: vec![
-            "Requires exactly 2 arguments.".to_string(),
-            "Both arguments must be strings.".to_string(),
-            "NULL is not accepted as a string argument in the current implementation.".to_string(),
+        string_type(),
+        "Concatenate two strings.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "Both arguments must be strings.",
+            "NULL is not accepted as a string argument in the current implementation.",
         ],
-        examples: vec![
-            "SELECT concat('hello', 'world') AS s".to_string(),
-            "SELECT concat(a, b)".to_string(),
+        vec![
+            "SELECT concat('hello', 'world') AS s",
+            "SELECT concat(a, b)",
         ],
-        aggregate: None,
-        stateful: None,
-    }
+    )
+}
+
+pub fn endswith_function_def() -> FunctionDef {
+    scalar_function_def(
+        "endswith",
+        vec![
+            req_arg("value", string_type()),
+            req_arg("suffix", string_type()),
+        ],
+        bool_type(),
+        "Return whether a string ends with the given suffix.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "Both arguments must be strings or NULL.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        vec![
+            "SELECT endswith('hello', 'lo')",
+            "SELECT endswith(name, '.csv')",
+        ],
+    )
+}
+
+pub fn indexof_function_def() -> FunctionDef {
+    scalar_function_def(
+        "indexof",
+        vec![
+            req_arg("value", string_type()),
+            req_arg("substr", string_type()),
+        ],
+        int_type(),
+        "Return the character index of the first occurrence of a substring, or -1 if not found.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "Both arguments must be strings or NULL.",
+            "Returns NULL if any argument is NULL.",
+            "Character positions are counted by chars, not raw bytes.",
+        ],
+        vec![
+            "SELECT indexof('banana', 'na')",
+            "SELECT indexof(message, ':')",
+        ],
+    )
+}
+
+pub fn length_function_def() -> FunctionDef {
+    unary_string_fn_def(
+        "length",
+        int_type(),
+        "Return the number of characters in a string.",
+        vec![
+            "Requires exactly 1 argument.",
+            "The argument must be a string or NULL.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec![
+            "SELECT length('hello')",
+            "SELECT length(name)",
+        ],
+    )
+}
+
+pub fn lower_function_def() -> FunctionDef {
+    unary_string_fn_def(
+        "lower",
+        string_type(),
+        "Convert a string to lowercase.",
+        vec![
+            "Requires exactly 1 argument.",
+            "The argument must be a string or NULL.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec![
+            "SELECT lower('Hello')",
+            "SELECT lower(name)",
+        ],
+    )
+}
+
+pub fn lpad_function_def() -> FunctionDef {
+    scalar_function_def(
+        "lpad",
+        vec![
+            req_arg("value", string_type()),
+            req_arg("count", int_type()),
+        ],
+        string_type(),
+        "Pad a string on the left with spaces.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "The first argument must be a string or NULL.",
+            "The second argument must be a non-negative integer or NULL.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        vec![
+            "SELECT lpad('x', 3)",
+            "SELECT lpad(code, 5)",
+        ],
+    )
+}
+
+pub fn ltrim_function_def() -> FunctionDef {
+    unary_string_fn_def(
+        "ltrim",
+        string_type(),
+        "Trim leading whitespace from a string.",
+        vec![
+            "Requires exactly 1 argument.",
+            "The argument must be a string or NULL.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec![
+            "SELECT ltrim('  hello')",
+            "SELECT ltrim(name)",
+        ],
+    )
+}
+
+pub fn numbytes_function_def() -> FunctionDef {
+    unary_string_fn_def(
+        "numbytes",
+        int_type(),
+        "Return the UTF-8 byte length of a string.",
+        vec![
+            "Requires exactly 1 argument.",
+            "The argument must be a string or NULL.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec![
+            "SELECT numbytes('hello')",
+            "SELECT numbytes(name)",
+        ],
+    )
+}
+
+pub fn regexp_matches_function_def() -> FunctionDef {
+    scalar_function_def(
+        "regexp_matches",
+        vec![
+            req_arg("value", string_type()),
+            req_arg("pattern", string_type()),
+        ],
+        bool_type(),
+        "Return whether a string matches a regular expression.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "Both arguments must be strings or NULL.",
+            "Returns NULL if any argument is NULL.",
+            "Invalid regex patterns return an evaluation error.",
+        ],
+        vec![
+            "SELECT regexp_matches('abc123', '[0-9]+')",
+            "SELECT regexp_matches(message, '^ERR')",
+        ],
+    )
+}
+
+pub fn regexp_replace_function_def() -> FunctionDef {
+    scalar_function_def(
+        "regexp_replace",
+        vec![
+            req_arg("value", string_type()),
+            req_arg("pattern", string_type()),
+            req_arg("replacement", string_type()),
+        ],
+        string_type(),
+        "Replace all matches of a regular expression in a string.",
+        vec![
+            "Requires exactly 3 arguments.",
+            "All arguments must be strings or NULL.",
+            "Returns NULL if any argument is NULL.",
+            "Invalid regex patterns return an evaluation error.",
+        ],
+        vec![
+            "SELECT regexp_replace('abc123', '[0-9]+', '_')",
+            "SELECT regexp_replace(message, '\\\\s+', ' ')",
+        ],
+    )
+}
+
+pub fn regexp_substr_function_def() -> FunctionDef {
+    scalar_function_def_with_aliases(
+        "regexp_substring",
+        vec!["regexp_substr"],
+        vec![
+            req_arg("value", string_type()),
+            req_arg("pattern", string_type()),
+        ],
+        string_type(),
+        "Return the first substring matching a regular expression.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "Both arguments must be strings or NULL.",
+            "Returns NULL if any argument is NULL.",
+            "Returns an empty string if there is no match.",
+            "Invalid regex patterns return an evaluation error.",
+        ],
+        vec![
+            "SELECT regexp_substring('abc123', '[0-9]+')",
+            "SELECT regexp_substring(message, 'ERR[0-9]+')",
+        ],
+    )
+}
+
+pub fn reverse_function_def() -> FunctionDef {
+    unary_string_fn_def(
+        "reverse",
+        string_type(),
+        "Reverse a string by characters.",
+        vec![
+            "Requires exactly 1 argument.",
+            "The argument must be a string or NULL.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec![
+            "SELECT reverse('abc')",
+            "SELECT reverse(name)",
+        ],
+    )
+}
+
+pub fn rpad_function_def() -> FunctionDef {
+    scalar_function_def(
+        "rpad",
+        vec![
+            req_arg("value", string_type()),
+            req_arg("count", int_type()),
+        ],
+        string_type(),
+        "Pad a string on the right with spaces.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "The first argument must be a string or NULL.",
+            "The second argument must be a non-negative integer or NULL.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        vec![
+            "SELECT rpad('x', 3)",
+            "SELECT rpad(code, 5)",
+        ],
+    )
+}
+
+pub fn rtrim_function_def() -> FunctionDef {
+    unary_string_fn_def(
+        "rtrim",
+        string_type(),
+        "Trim trailing whitespace from a string.",
+        vec![
+            "Requires exactly 1 argument.",
+            "The argument must be a string or NULL.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec![
+            "SELECT rtrim('hello  ')",
+            "SELECT rtrim(name)",
+        ],
+    )
+}
+
+pub fn substring_function_def() -> FunctionDef {
+    scalar_function_def(
+        "substring",
+        vec![
+            req_arg("value", string_type()),
+            req_arg("start", int_type()),
+            opt_arg("length", int_type()),
+        ],
+        string_type(),
+        "Extract a substring starting at a character index, with an optional length.",
+        vec![
+            "Requires 2 or 3 arguments.",
+            "The first argument must be a string or NULL.",
+            "The start argument must be an integer or NULL.",
+            "The optional length argument must be an integer or NULL.",
+            "Returns NULL if any provided argument is NULL.",
+        ],
+        vec![
+            "SELECT substring('abcdef', 2)",
+            "SELECT substring('abcdef', 2, 3)",
+        ],
+    )
+}
+
+pub fn startswith_function_def() -> FunctionDef {
+    binary_string_fn_def(
+        "startswith",
+        bool_type(),
+        "Return whether a string starts with the given prefix.",
+        vec![
+            "Requires exactly 2 arguments.",
+            "Both arguments must be strings or NULL.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        vec![
+            "SELECT startswith('hello', 'he')",
+            "SELECT startswith(name, 'tmp_')",
+        ],
+    )
+}
+
+pub fn split_value_function_def() -> FunctionDef {
+    scalar_function_def(
+        "split_value",
+        vec![
+            req_arg("value", string_type()),
+            req_arg("delimiter", string_type()),
+            req_arg("index", int_type()),
+        ],
+        string_type(),
+        "Split a string by a delimiter and return one element by index.",
+        vec![
+            "Requires exactly 3 arguments.",
+            "The first two arguments must be strings or NULL.",
+            "The third argument must be an integer or NULL.",
+            "Returns NULL if any argument is NULL.",
+            "Negative indexes are allowed if they stay within bounds.",
+        ],
+        vec![
+            "SELECT split_value('a,b,c', ',', 1)",
+            "SELECT split_value(path, '/', -1)",
+        ],
+    )
+}
+
+pub fn trim_function_def() -> FunctionDef {
+    unary_string_fn_def(
+        "trim",
+        string_type(),
+        "Trim leading and trailing whitespace from a string.",
+        vec![
+            "Requires exactly 1 argument.",
+            "The argument must be a string or NULL.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec![
+            "SELECT trim('  hello  ')",
+            "SELECT trim(name)",
+        ],
+    )
+}
+
+pub fn upper_function_def() -> FunctionDef {
+    unary_string_fn_def(
+        "upper",
+        string_type(),
+        "Convert a string to uppercase.",
+        vec![
+            "Requires exactly 1 argument.",
+            "The argument must be a string or NULL.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        vec![
+            "SELECT upper('Hello')",
+            "SELECT upper(name)",
+        ],
+    )
 }
 
 impl CustomFunc for ConcatFunc {
@@ -601,8 +969,8 @@ impl CustomFunc for FormatFunc {
 mod tests {
     use super::*;
     use crate::expr::custom_func::helpers::{
-        a, assert_array, assert_bool, assert_float, assert_int, assert_map, assert_null,
-        assert_string, b, f, i, m, n, s,
+        assert_bool, assert_int,
+        assert_string, f, i, n, s,
     };
     use datatypes::Value;
 

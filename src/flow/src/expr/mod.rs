@@ -7,7 +7,6 @@ pub mod sql_conversion;
 pub(crate) mod value_compare;
 
 pub use context::EvalContext;
-pub use custom_func::ConcatFunc;
 pub use func::{BinaryFunc, UnaryFunc};
 pub use scalar::ScalarExpr;
 pub use sql_conversion::{
