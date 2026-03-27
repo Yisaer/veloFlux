@@ -36,6 +36,11 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
 
     /// Get the function name for debugging purposes
     fn name(&self) -> &str;
+
+    /// Additional SQL-visible aliases for this function.
+    fn aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 pub fn builtin_custom_function_defs() -> Vec<FunctionDef> {

@@ -644,6 +644,10 @@ impl CustomFunc for RegexpSubstrFunc {
     fn name(&self) -> &str {
         "regexp_substring"
     }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["regexp_substr"]
+    }
 }
 
 impl CustomFunc for ReverseFunc {

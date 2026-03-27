@@ -69,7 +69,10 @@ impl CustomFuncRegistry {
 }
 
 fn register(functions: &mut HashMap<String, Arc<dyn CustomFunc>>, func: Arc<dyn CustomFunc>) {
-    functions.insert(func.name().to_lowercase(), func);
+    functions.insert(func.name().to_lowercase(), Arc::clone(&func));
+    for alias in func.aliases() {
+        functions.insert(alias.to_lowercase(), Arc::clone(&func));
+    }
 }
 
 fn register_math_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>) {
@@ -216,6 +219,7 @@ mod tests {
         assert!(registry.is_registered("regexp_matches"));
         assert!(registry.is_registered("regexp_replace"));
         assert!(registry.is_registered("regexp_substring"));
+        assert!(registry.is_registered("regexp_substr"));
         assert!(registry.is_registered("reverse"));
         assert!(registry.is_registered("rpad"));
         assert!(registry.is_registered("rtrim"));
@@ -262,5 +266,19 @@ mod tests {
         assert!(!registry.is_registered("dummy"));
         assert!(registry.get("dummy").is_none());
         assert!(registry.get("missing").is_none());
+    }
+
+    #[test]
+    fn registry_resolves_runtime_aliases() {
+        let registry = CustomFuncRegistry::default();
+
+        let canonical = registry
+            .get("regexp_substring")
+            .expect("canonical regexp_substring should be registered");
+        let alias = registry
+            .get("regexp_substr")
+            .expect("regexp_substr alias should be registered");
+
+        assert_eq!(canonical.name(), alias.name());
     }
 }

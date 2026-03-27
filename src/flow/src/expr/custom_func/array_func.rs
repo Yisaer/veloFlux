@@ -4,11 +4,12 @@ use crate::expr::custom_func::helpers::{
     bool_type, int_type, map_to_value, nth_array_or_null, nth_i64_or_null, nth_string_or_null,
     object_type, opt_arg, req_arg, scalar_function_def, string_type, unary_array_fn_def,
     unary_array_fn_def_with_aliases, validate_arity, validate_at_least_arity,
-    validate_one_array_or_null, validate_two_arrays_or_null, value_sort_key, value_to_array,
-    value_to_i64, value_to_map, value_to_string, value_to_string_lossy, variadic_arg,
+    validate_one_array_or_null, validate_two_arrays_or_null, value_to_array, value_to_i64,
+    value_to_map, value_to_string, value_to_string_lossy, variadic_arg,
 };
 use crate::expr::custom_func::CustomFunc;
 use crate::expr::func::EvalError;
+use crate::expr::value_compare::compare_values;
 use crate::CustomFuncRegistry;
 use datatypes::Value;
 use rand::seq::SliceRandom;
@@ -538,9 +539,15 @@ fn array_or_null_arg(args: &[Value], idx: usize) -> Result<Option<Vec<Value>>, E
 }
 
 fn cmp_values_for_order(a: &Value, b: &Value) -> Result<Ordering, EvalError> {
-    let ka = value_sort_key(a)?;
-    let kb = value_sort_key(b)?;
-    Ok(ka.cmp(&kb))
+    match (a.is_null(), b.is_null()) {
+        (true, true) => Ok(Ordering::Equal),
+        (true, false) => Ok(Ordering::Less),
+        (false, true) => Ok(Ordering::Greater),
+        (false, false) => compare_values(a, b).ok_or_else(|| EvalError::TypeMismatch {
+            expected: "comparable sortable scalar values".to_string(),
+            actual: format!("{:?} vs {:?}", a, b),
+        }),
+    }
 }
 
 impl CustomFunc for CardinalityFunc {
@@ -1628,9 +1635,9 @@ mod tests {
         let array_sort = ArraySortFunc;
         assert_array(
             array_sort
-                .eval_row(&[a(vec![i(3), i(2), i(5), i(1)])])
+                .eval_row(&[a(vec![i(3), i(2), i(10), i(5), i(1)])])
                 .unwrap(),
-            vec![i(1), i(2), i(3), i(5)],
+            vec![i(1), i(2), i(3), i(5), i(10)],
         );
         assert_null(array_sort.eval_row(&[Value::Null]).unwrap());
 

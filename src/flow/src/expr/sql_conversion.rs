@@ -819,6 +819,18 @@ mod tests {
             other => panic!("unexpected scalar expr: {:?}", other),
         }
     }
+
+    #[test]
+    fn extract_select_expressions_accepts_custom_function_aliases() {
+        let exprs =
+            extract_select_expressions("SELECT regexp_substr('abc123', '\\\\d+')").expect("sql");
+        assert_eq!(exprs.len(), 1);
+
+        match &exprs[0] {
+            ScalarExpr::CallFunc { func, .. } => assert_eq!(func.name(), "regexp_substring"),
+            other => panic!("unexpected scalar expr: {:?}", other),
+        }
+    }
 }
 
 /// Convert SelectStmt to ScalarExpr with aliases
