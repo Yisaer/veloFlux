@@ -3,7 +3,6 @@ use crate::planner::physical::output_schema::{OutputSchema, OutputValueGetter};
 use crate::processor::ProcessorError;
 use datatypes::Value;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 #[derive(Clone)]
 struct OutputRowColumn {
@@ -74,6 +73,22 @@ impl OutputRowAccessor {
         &mut self,
         tuple: &Tuple,
     ) -> Result<ExtractedOutputRow, ProcessorError> {
+        self.extract_row_with_selection(tuple, None)
+    }
+
+    pub(crate) fn extract_selected_row(
+        &mut self,
+        tuple: &Tuple,
+        selected: &[bool],
+    ) -> Result<ExtractedOutputRow, ProcessorError> {
+        self.extract_row_with_selection(tuple, Some(selected))
+    }
+
+    fn extract_row_with_selection(
+        &mut self,
+        tuple: &Tuple,
+        selected: Option<&[bool]>,
+    ) -> Result<ExtractedOutputRow, ProcessorError> {
         if self.resolved.is_none() {
             self.resolved = Some(resolve_getters(self.columns.as_ref(), tuple));
         }
@@ -87,6 +102,14 @@ impl OutputRowAccessor {
         let mut values = Vec::with_capacity(self.columns.len());
         let mut missing_columns = Vec::new();
         for (idx, column) in self.columns.iter().enumerate() {
+            if let Some(selected) = selected {
+                let is_selected = selected.get(idx).copied().unwrap_or(false);
+                if !is_selected {
+                    values.push(None);
+                    continue;
+                }
+            }
+
             let resolved_item = resolved.get(idx).cloned();
             let value = match resolved_item {
                 Some(ResolvedGetter::Missing) => None,
@@ -120,22 +143,45 @@ impl OutputRowAccessor {
         })
     }
 
-    pub(crate) fn materialize_tuple(
+    pub(crate) fn overlay_tuple(
         &self,
-        timestamp: SystemTime,
+        base_tuple: &Tuple,
         values: &[Arc<Value>],
+        selected: &[bool],
         output_mask: Option<Arc<[bool]>>,
     ) -> Tuple {
         debug_assert_eq!(
             values.len(),
             self.columns.len(),
-            "materialized row width must match output layout"
+            "overlay row width must match output layout"
+        );
+        debug_assert_eq!(
+            selected.len(),
+            self.columns.len(),
+            "overlay selection width must match output layout"
         );
 
         let mut message_builders = Vec::<MessageBuilder>::new();
-        let mut affiliate_entries = Vec::<(Arc<String>, Value)>::new();
+        let mut output_tuple =
+            Tuple::with_timestamp(Arc::clone(&base_tuple.messages), base_tuple.timestamp);
+        if let Some(base_affiliate) = base_tuple.affiliate() {
+            output_tuple.add_affiliate_columns(
+                base_affiliate
+                    .entries()
+                    .map(|(key, value)| (Arc::new(key.as_ref().to_string()), value.clone())),
+            );
+        }
 
-        for (column, value) in self.columns.iter().zip(values.iter()) {
+        for ((column, value), selected) in self
+            .columns
+            .iter()
+            .zip(values.iter())
+            .zip(selected.iter().copied())
+        {
+            if !selected {
+                continue;
+            }
+
             match &column.getter {
                 OutputValueGetter::MessageByName { source_name, .. } => {
                     if let Some(builder) = message_builders
@@ -152,61 +198,38 @@ impl OutputRowAccessor {
                         });
                     }
                 }
-                OutputValueGetter::Affiliate { .. } => affiliate_entries.push((
+                OutputValueGetter::Affiliate { .. } => output_tuple.add_affiliate_column(
                     Arc::new(column.name.as_ref().to_string()),
                     value.as_ref().clone(),
-                )),
+                ),
             }
         }
 
-        let messages = message_builders
-            .into_iter()
-            .map(|builder| {
-                Arc::new(Message::new_shared_keys(
-                    builder.source_name,
-                    Arc::from(builder.keys),
-                    builder.values,
-                ))
-            })
-            .collect::<Vec<_>>();
+        if !message_builders.is_empty() {
+            let mut messages = message_builders
+                .into_iter()
+                .map(|builder| {
+                    Arc::new(Message::new_shared_keys(
+                        builder.source_name,
+                        Arc::from(builder.keys),
+                        builder.values,
+                    ))
+                })
+                .collect::<Vec<_>>();
+            messages.extend(base_tuple.messages.iter().cloned());
+            output_tuple.messages = Arc::from(messages);
+        }
 
-        let mut tuple = Tuple::with_timestamp(Arc::from(messages), timestamp);
-        if !affiliate_entries.is_empty() {
-            tuple.add_affiliate_columns(affiliate_entries);
-        }
         if let Some(mask) = output_mask {
-            tuple.set_output_mask_shared(mask);
+            output_tuple.set_output_mask_shared(mask);
         }
-        tuple
+        output_tuple
     }
 }
 
 impl ExtractedOutputRow {
     pub(crate) fn missing_columns(&self) -> &[Arc<str>] {
         self.missing_columns.as_slice()
-    }
-
-    pub(crate) fn into_required_values(
-        self,
-        context: &'static str,
-    ) -> Result<Vec<Arc<Value>>, ProcessorError> {
-        if !self.missing_columns.is_empty() {
-            let missing = self
-                .missing_columns
-                .iter()
-                .map(|name| name.as_ref())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(ProcessorError::ProcessingError(format!(
-                "{context} failed to resolve output columns [{missing}] from runtime tuple"
-            )));
-        }
-
-        Ok(self
-            .values
-            .into_iter()
-            .map(|value| value.expect("missing columns handled above"))
-            .collect())
     }
 
     pub(crate) fn into_values_with_null_fill(self) -> Vec<Arc<Value>> {
