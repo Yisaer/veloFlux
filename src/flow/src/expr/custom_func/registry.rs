@@ -1,11 +1,3 @@
-use super::array_func::{
-    ArrayCardinalityFunc, ArrayConcatFunc, ArrayContainsAnyFunc, ArrayContainsFunc,
-    ArrayCreateFunc, ArrayDistinctFunc, ArrayExceptFunc, ArrayFlattenFunc, ArrayIntersectFunc,
-    ArrayJoinFunc, ArrayLastPositionFunc, ArrayMapFunc, ArrayMaxFunc, ArrayMinFunc,
-    ArrayPositionFunc, ArrayRemoveFunc, ArrayShuffleFunc, ArraySortFunc, ArrayUnionFunc,
-    CardinalityFunc, ElementAtFunc, KvpairArrayToObjFunc, RepeatFunc, SequenceFunc,
-};
-
 use super::math_func::{
     AbsFunc, AcosFunc, AsinFunc, Atan2Func, AtanFunc, BitAndFunc, BitNotFunc, BitOrFunc,
     BitXorFunc, CeilFunc, CeilingFunc, ConvFunc, CosFunc, CoshFunc, CotFunc, DegreesFunc, ExpFunc,
@@ -53,16 +45,6 @@ impl CustomFuncRegistry {
 
         register_math_functions(&mut functions);
         register_string_functions(&mut functions);
-        register_array_functions(&mut functions);
-
-        let registry_for_array_map = Arc::new(CustomFuncRegistry {
-            functions: functions.clone(),
-        });
-
-        register(
-            &mut functions,
-            Arc::new(ArrayMapFunc::new(registry_for_array_map)),
-        );
 
         Self { functions }
     }
@@ -142,37 +124,6 @@ fn register_string_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>
     }
 }
 
-// handles registration except array_map
-fn register_array_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>) {
-    for func in [
-        Arc::new(CardinalityFunc) as Arc<dyn CustomFunc>,
-        Arc::new(ArrayPositionFunc),
-        Arc::new(ElementAtFunc),
-        Arc::new(ArrayContainsFunc),
-        Arc::new(ArrayCreateFunc),
-        Arc::new(ArrayRemoveFunc),
-        Arc::new(ArrayLastPositionFunc),
-        Arc::new(ArrayContainsAnyFunc),
-        Arc::new(ArrayIntersectFunc),
-        Arc::new(ArrayUnionFunc),
-        Arc::new(ArrayMaxFunc),
-        Arc::new(ArrayMinFunc),
-        Arc::new(ArrayExceptFunc),
-        Arc::new(RepeatFunc),
-        Arc::new(SequenceFunc),
-        Arc::new(ArrayCardinalityFunc),
-        Arc::new(ArrayFlattenFunc),
-        Arc::new(ArrayDistinctFunc),
-        Arc::new(ArrayJoinFunc),
-        Arc::new(ArrayShuffleFunc),
-        Arc::new(ArrayConcatFunc),
-        Arc::new(ArraySortFunc),
-        Arc::new(KvpairArrayToObjFunc),
-    ] {
-        register(functions, func);
-    }
-}
-
 impl Default for CustomFuncRegistry {
     fn default() -> Self {
         Self::builtins()
@@ -228,36 +179,6 @@ mod tests {
         assert!(registry.is_registered("split_value"));
         assert!(registry.is_registered("trim"));
         assert!(registry.is_registered("upper"));
-    }
-
-    #[test]
-    fn builtins_include_array_functions() {
-        let registry = CustomFuncRegistry::default();
-
-        assert!(registry.is_registered("cardinality"));
-        assert!(registry.is_registered("array_position"));
-        assert!(registry.is_registered("element_at"));
-        assert!(registry.is_registered("array_contains"));
-        assert!(registry.is_registered("array_create"));
-        assert!(registry.is_registered("array_remove"));
-        assert!(registry.is_registered("array_last_position"));
-        assert!(registry.is_registered("array_contains_any"));
-        assert!(registry.is_registered("array_intersect"));
-        assert!(registry.is_registered("array_union"));
-        assert!(registry.is_registered("array_max"));
-        assert!(registry.is_registered("array_min"));
-        assert!(registry.is_registered("array_except"));
-        assert!(registry.is_registered("repeat"));
-        assert!(registry.is_registered("sequence"));
-        assert!(registry.is_registered("array_cardinality"));
-        assert!(registry.is_registered("array_flatten"));
-        assert!(registry.is_registered("array_distinct"));
-        assert!(registry.is_registered("array_map"));
-        assert!(registry.is_registered("array_join"));
-        assert!(registry.is_registered("array_shuffle"));
-        assert!(registry.is_registered("array_concat"));
-        assert!(registry.is_registered("array_sort"));
-        assert!(registry.is_registered("kvpair_array_to_obj"));
     }
 
     #[test]

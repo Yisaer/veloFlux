@@ -1,4 +1,3 @@
-pub mod array_func;
 pub mod helpers;
 pub mod math_func;
 pub mod registry;
@@ -48,7 +47,6 @@ pub fn builtin_custom_function_defs() -> Vec<FunctionDef> {
 
     defs.extend(math_func::builtin_function_defs());
     defs.extend(string_func::builtin_function_defs());
-    defs.extend(array_func::builtin_function_defs());
 
     defs
 }
