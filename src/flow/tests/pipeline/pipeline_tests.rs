@@ -18,7 +18,8 @@ use tokio::time::Duration;
 use super::common::ColumnCheck;
 use super::common::{
     build_expected_json, declare_memory_input_output_topics, install_memory_stream_schema,
-    make_memory_topics, normalize_json, publish_input_collection, recv_next_json,
+    install_memory_stream_schema_with_name, make_memory_topics, normalize_json,
+    publish_input_collection, recv_next_json,
 };
 use super::common::{declare_memory_input_output_topics_with_output_kind, recv_next_collection};
 
@@ -354,6 +355,7 @@ async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
 
 struct RowDiffJsonCase {
     name: &'static str,
+    source_name: &'static str,
     sql: &'static str,
     input_data: Vec<(String, Vec<Value>)>,
     encoder: SinkEncoderConfig,
@@ -369,7 +371,13 @@ async fn run_row_diff_json_case(case: RowDiffJsonCase) {
     ));
     let (input_topic, output_topic) = make_memory_topics("pipeline_row_diff_json", case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
-    install_memory_stream_schema(&instance, &input_topic, &case.input_data).await;
+    install_memory_stream_schema_with_name(
+        &instance,
+        &input_topic,
+        case.source_name,
+        &case.input_data,
+    )
+    .await;
 
     let mut output = instance
         .open_memory_subscribe_bytes(&output_topic)
@@ -395,7 +403,7 @@ async fn run_row_diff_json_case(case: RowDiffJsonCase) {
     let columns = case
         .input_data
         .into_iter()
-        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .map(|(col_name, values)| (case.source_name.to_string(), col_name, values))
         .collect();
     let batch = batch_from_columns_simple(columns)
         .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", case.name));
@@ -841,6 +849,7 @@ async fn pipeline_row_diff_json_table_driven() {
     let cases = vec![
         RowDiffJsonCase {
             name: "emits_sparse_object_for_unchanged_columns",
+            source_name: "stream",
             sql: "SELECT a, b FROM stream",
             input_data: vec![
                 (
@@ -862,6 +871,7 @@ async fn pipeline_row_diff_json_table_driven() {
         },
         RowDiffJsonCase {
             name: "preserves_changed_to_null",
+            source_name: "stream",
             sql: "SELECT a, b FROM stream",
             input_data: vec![
                 (
@@ -883,6 +893,7 @@ async fn pipeline_row_diff_json_table_driven() {
         },
         RowDiffJsonCase {
             name: "respects_tracked_column_subset",
+            source_name: "stream",
             sql: "SELECT a, b FROM stream",
             input_data: vec![
                 (
@@ -904,6 +915,7 @@ async fn pipeline_row_diff_json_table_driven() {
         },
         RowDiffJsonCase {
             name: "supports_alias_in_by_index_row_diff_rewrite",
+            source_name: "stream",
             sql: "SELECT a AS x FROM stream",
             input_data: vec![(
                 "a".to_string(),
@@ -919,6 +931,7 @@ async fn pipeline_row_diff_json_table_driven() {
         },
         RowDiffJsonCase {
             name: "works_with_computed_affiliate_column",
+            source_name: "stream",
             sql: "SELECT a, a + 1 AS x FROM stream",
             input_data: vec![(
                 "a".to_string(),
@@ -933,7 +946,30 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
+            name: "supports_mixed_alias_partial_by_index_row_diff_rewrite",
+            source_name: "stream_ab",
+            sql: "SELECT a AS x, b + 1 AS y FROM stream_ab",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(11), Value::Int64(11)],
+                ),
+            ],
+            encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::delta(),
+            expected: serde_json::json!([
+                {"x": 1, "y": 11},
+                {"y": 12},
+                {"x": 2}
+            ]),
+        },
+        RowDiffJsonCase {
             name: "template_transform_still_sees_dense_row_on_delta_branch",
+            source_name: "stream",
             sql: "SELECT a, b FROM stream",
             input_data: vec![
                 (

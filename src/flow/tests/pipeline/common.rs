@@ -81,6 +81,15 @@ pub async fn install_memory_stream_schema(
     input_topic: &str,
     columns: &[(String, Vec<Value>)],
 ) {
+    install_memory_stream_schema_with_name(instance, input_topic, "stream", columns).await;
+}
+
+pub async fn install_memory_stream_schema_with_name(
+    instance: &FlowInstance,
+    input_topic: &str,
+    source_name: &str,
+    columns: &[(String, Vec<Value>)],
+) {
     let schema_columns = columns
         .iter()
         .map(|(name, values)| {
@@ -89,12 +98,12 @@ pub async fn install_memory_stream_schema(
                 .find(|v| !matches!(v, Value::Null))
                 .map(Value::datatype)
                 .unwrap_or(ConcreteDatatype::Null);
-            ColumnSchema::new("stream".to_string(), name.clone(), datatype)
+            ColumnSchema::new(source_name.to_string(), name.clone(), datatype)
         })
         .collect();
     let schema = Schema::new(schema_columns);
     let definition = StreamDefinition::new(
-        "stream".to_string(),
+        source_name.to_string(),
         Arc::new(schema),
         StreamProps::Memory(MemoryStreamProps::new(input_topic.to_string())),
         StreamDecoderConfig::new("none".to_string(), JsonMap::new()),

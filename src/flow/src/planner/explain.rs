@@ -308,6 +308,12 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             info.push(format!("sink_id={}", sink.sink_id));
             info.push(format!("connector={}", sink.connector.connector.kind()));
             info.push(format!("encoder={}", sink.connector.encoder.kind_str()));
+            if sink.output.is_delta() {
+                info.push(format!("output.mode={}", sink.output.mode.as_str()));
+                if let Some(columns) = sink.output.delta_columns() {
+                    info.push(format!("output.columns=[{}]", columns.join(", ")));
+                }
+            }
             if let Some(transform_kind) = sink.connector.encoder.transform_kind() {
                 info.push(format!("transform={}", transform_kind));
             }
