@@ -1,7 +1,7 @@
 //! RowDiffProcessor - computes sink-side row diffs while preserving stable row schema.
 
-use crate::model::{Collection, RecordBatch};
-use crate::planner::physical::PhysicalRowDiff;
+use crate::model::{Collection, RecordBatch, Tuple};
+use crate::planner::physical::{ByIndexProjection, PhysicalRowDiff};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure,
@@ -21,9 +21,24 @@ struct RowDiffState {
     previous_full_row: Option<Vec<Arc<Value>>>,
 }
 
+#[derive(Clone)]
+enum RowDiffInputExtractor {
+    Materialized(OutputRowAccessor),
+    LateProjection {
+        spec: Arc<ByIndexProjection>,
+        output_width: usize,
+    },
+    Hybrid {
+        materialized: OutputRowAccessor,
+        late_projection: Arc<ByIndexProjection>,
+        output_column_names: Arc<[Arc<str>]>,
+    },
+}
+
 pub struct RowDiffProcessor {
     id: String,
-    row_accessor: OutputRowAccessor,
+    input_extractor: RowDiffInputExtractor,
+    output_accessor: OutputRowAccessor,
     tracked_flags: Arc<[bool]>,
     inputs: Vec<broadcast::Receiver<StreamData>>,
     control_inputs: Vec<broadcast::Receiver<ControlSignal>>,
@@ -46,26 +61,47 @@ impl RowDiffProcessor {
         physical_row_diff: Arc<PhysicalRowDiff>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Result<Self, ProcessorError> {
-        let input_child = physical_row_diff.base.children().first().ok_or_else(|| {
-            ProcessorError::InvalidConfiguration(
+        if physical_row_diff.base.children().len() != 1 {
+            return Err(ProcessorError::InvalidConfiguration(
                 "row diff processor requires exactly one input child".to_string(),
-            )
-        })?;
-        let output_schema = input_child.output_schema().map_err(|err| {
-            ProcessorError::InvalidConfiguration(format!(
-                "row diff processor failed to resolve output schema: {err}"
-            ))
-        })?;
-        let row_accessor = OutputRowAccessor::from_output_schema(&output_schema);
+            ));
+        }
+
+        let output_accessor =
+            OutputRowAccessor::from_output_schema(physical_row_diff.output_schema.as_ref());
+        let output_width = output_accessor.width();
+        let input_extractor = match physical_row_diff.late_projection.as_ref() {
+            Some(spec) => {
+                validate_late_projection(spec.as_ref(), output_width)?;
+                if spec.columns().len() == output_width {
+                    RowDiffInputExtractor::LateProjection {
+                        spec: Arc::clone(spec),
+                        output_width,
+                    }
+                } else {
+                    RowDiffInputExtractor::Hybrid {
+                        materialized: OutputRowAccessor::from_output_schema(
+                            physical_row_diff.output_schema.as_ref(),
+                        ),
+                        late_projection: Arc::clone(spec),
+                        output_column_names: output_accessor.column_names(),
+                    }
+                }
+            }
+            None => RowDiffInputExtractor::Materialized(OutputRowAccessor::from_output_schema(
+                physical_row_diff.output_schema.as_ref(),
+            )),
+        };
         let tracked_flags = build_tracked_flags(
-            row_accessor.width(),
+            output_width,
             physical_row_diff.tracked_column_indexes.as_ref(),
         )?;
         let (output, _) = broadcast::channel(channel_capacities.data);
         let (control_output, _) = broadcast::channel(channel_capacities.control);
         Ok(Self {
             id: id.into(),
-            row_accessor,
+            input_extractor,
+            output_accessor,
             tracked_flags,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
@@ -95,6 +131,157 @@ fn build_tracked_flags(
         flags[index] = true;
     }
     Ok(flags.into())
+}
+
+fn validate_late_projection(
+    spec: &ByIndexProjection,
+    output_width: usize,
+) -> Result<(), ProcessorError> {
+    if spec.is_empty() {
+        return Err(ProcessorError::InvalidConfiguration(
+            "row diff late projection cannot be empty".to_string(),
+        ));
+    }
+    if spec.columns().len() > output_width {
+        return Err(ProcessorError::InvalidConfiguration(format!(
+            "row diff late projection width {} exceeds output width {}",
+            spec.columns().len(),
+            output_width
+        )));
+    }
+
+    let mut seen_output_indexes = vec![false; output_width];
+    for column in spec.columns() {
+        if column.output_index >= output_width {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "row diff late projection output index {} out of bounds for output width {}",
+                column.output_index, output_width
+            )));
+        }
+        if std::mem::replace(&mut seen_output_indexes[column.output_index], true) {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "row diff late projection has duplicate output index {}",
+                column.output_index
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_row_from_materialized(
+    row_accessor: &mut OutputRowAccessor,
+    tuple: &Tuple,
+) -> Result<Vec<Arc<Value>>, ProcessorError> {
+    row_accessor
+        .extract_row(tuple)?
+        .into_required_values("row diff processor")
+}
+
+fn extract_projected_values(
+    spec: &ByIndexProjection,
+    output_width: usize,
+    tuple: &Tuple,
+) -> Result<Vec<Option<Arc<Value>>>, ProcessorError> {
+    let mut values = vec![None; output_width];
+    let mut missing_columns = Vec::new();
+
+    for column in spec.columns() {
+        let value = tuple
+            .message_by_source(column.source_name.as_ref())
+            .and_then(|message| message.entry_by_index(column.column_index))
+            .map(|(_, value)| Arc::clone(value));
+
+        match value {
+            Some(value) => values[column.output_index] = Some(value),
+            None => missing_columns.push(format!(
+                "{}#{}->{}",
+                column.source_name.as_ref(),
+                column.column_index,
+                column.output_name.as_ref()
+            )),
+        }
+    }
+
+    if !missing_columns.is_empty() {
+        return Err(ProcessorError::ProcessingError(format!(
+            "row diff processor failed to resolve late projection columns [{}] from runtime tuple",
+            missing_columns.join(", ")
+        )));
+    }
+
+    Ok(values)
+}
+
+fn extract_row_from_late_projection(
+    spec: &ByIndexProjection,
+    output_width: usize,
+    tuple: &Tuple,
+) -> Result<Vec<Arc<Value>>, ProcessorError> {
+    Ok(extract_projected_values(spec, output_width, tuple)?
+        .into_iter()
+        .map(|value| {
+            value.expect("full-width row diff late projection must fill every output column")
+        })
+        .collect())
+}
+
+fn extract_row_from_hybrid(
+    row_accessor: &mut OutputRowAccessor,
+    spec: &ByIndexProjection,
+    output_column_names: &[Arc<str>],
+    tuple: &Tuple,
+) -> Result<Vec<Arc<Value>>, ProcessorError> {
+    let mut values = row_accessor.extract_row(tuple)?.into_optional_values();
+    let projected_values = extract_projected_values(spec, output_column_names.len(), tuple)?;
+
+    for (index, value) in projected_values.into_iter().enumerate() {
+        if let Some(value) = value {
+            values[index] = Some(value);
+        }
+    }
+
+    let missing_output_columns = values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| value.is_none())
+        .map(|(index, _)| output_column_names[index].as_ref())
+        .collect::<Vec<_>>();
+    if !missing_output_columns.is_empty() {
+        return Err(ProcessorError::ProcessingError(format!(
+            "row diff processor failed to resolve output columns [{}] from runtime tuple",
+            missing_output_columns.join(", ")
+        )));
+    }
+
+    Ok(values
+        .into_iter()
+        .map(|value| value.expect("missing output columns handled above"))
+        .collect())
+}
+
+fn extract_current_row(
+    input_extractor: &mut RowDiffInputExtractor,
+    tuple: &Tuple,
+) -> Result<Vec<Arc<Value>>, ProcessorError> {
+    match input_extractor {
+        RowDiffInputExtractor::Materialized(row_accessor) => {
+            extract_row_from_materialized(row_accessor, tuple)
+        }
+        RowDiffInputExtractor::LateProjection { spec, output_width } => {
+            extract_row_from_late_projection(spec, *output_width, tuple)
+        }
+        RowDiffInputExtractor::Hybrid {
+            materialized,
+            late_projection,
+            output_column_names,
+        } => extract_row_from_hybrid(
+            materialized,
+            late_projection,
+            output_column_names.as_ref(),
+            tuple,
+        ),
+    }
 }
 
 fn build_diff_row(
@@ -130,7 +317,8 @@ fn build_diff_row(
 
 fn apply_row_diff(
     input_collection: Box<dyn Collection>,
-    row_accessor: &mut OutputRowAccessor,
+    input_extractor: &mut RowDiffInputExtractor,
+    output_accessor: &OutputRowAccessor,
     tracked_flags: &[bool],
     state: &mut RowDiffState,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
@@ -140,16 +328,14 @@ fn apply_row_diff(
     let mut output_rows = Vec::with_capacity(input_rows.len());
 
     for tuple in input_rows {
-        let current_values = row_accessor
-            .extract_row(&tuple)?
-            .into_required_values("row diff processor")?;
+        let current_values = extract_current_row(input_extractor, &tuple)?;
         let (diff_values, output_mask) = build_diff_row(
             current_values.as_slice(),
             state.previous_full_row.as_deref(),
             tracked_flags,
         );
         let output_tuple =
-            row_accessor.materialize_tuple(tuple.timestamp, &diff_values, Some(output_mask));
+            output_accessor.materialize_tuple(tuple.timestamp, &diff_values, Some(output_mask));
         state.previous_full_row = Some(current_values);
         output_rows.push(output_tuple);
     }
@@ -176,7 +362,8 @@ impl Processor for RowDiffProcessor {
         let mut control_active = !control_streams.is_empty();
         let output = self.output.clone();
         let control_output = self.control_output.clone();
-        let mut row_accessor = self.row_accessor.clone();
+        let mut input_extractor = self.input_extractor.clone();
+        let output_accessor = self.output_accessor.clone();
         let tracked_flags = Arc::clone(&self.tracked_flags);
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
@@ -218,7 +405,8 @@ impl Processor for RowDiffProcessor {
                                         let handle_start = std::time::Instant::now();
                                         match apply_row_diff(
                                             collection,
-                                            &mut row_accessor,
+                                            &mut input_extractor,
+                                            &output_accessor,
                                             tracked_flags.as_ref(),
                                             &mut state,
                                         ) {

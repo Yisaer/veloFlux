@@ -308,6 +308,12 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             info.push(format!("sink_id={}", sink.sink_id));
             info.push(format!("connector={}", sink.connector.connector.kind()));
             info.push(format!("encoder={}", sink.connector.encoder.kind_str()));
+            if sink.output.is_delta() {
+                info.push(format!("output.mode={}", sink.output.mode.as_str()));
+                if let Some(columns) = sink.output.delta_columns() {
+                    info.push(format!("output.columns=[{}]", columns.join(", ")));
+                }
+            }
             if let Some(transform_kind) = sink.connector.encoder.transform_kind() {
                 info.push(format!("transform={}", transform_kind));
             }
@@ -776,6 +782,31 @@ fn build_physical_node_with_prefix(
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+            if let Some(spec) = &row_diff.late_projection {
+                if !spec.is_empty() {
+                    let cols = spec
+                        .columns()
+                        .iter()
+                        .map(|c| {
+                            if c.source_column_display.as_ref() == c.output_name.as_ref() {
+                                format!(
+                                    "{}.{}",
+                                    c.source_name.as_ref(),
+                                    c.source_column_display.as_ref()
+                                )
+                            } else {
+                                format!(
+                                    "{}.{} as {}",
+                                    c.source_name.as_ref(),
+                                    c.source_column_display.as_ref(),
+                                    c.output_name.as_ref()
+                                )
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    info.push(format!("by_index_projection=[{}]", cols.join("; ")));
+                }
+            }
         }
         PhysicalPlan::Aggregation(aggregation) => {
             info.push(format!(

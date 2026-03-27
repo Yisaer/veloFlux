@@ -68,7 +68,6 @@ impl PhysicalPlan {
             | PhysicalPlan::Batch(_)
             | PhysicalPlan::Encoder(_)
             | PhysicalPlan::StreamingEncoder(_)
-            | PhysicalPlan::RowDiff(_)
             | PhysicalPlan::ResultCollect(_)
             | PhysicalPlan::TumblingWindow(_)
             | PhysicalPlan::CountWindow(_)
@@ -146,6 +145,8 @@ impl PhysicalPlan {
                 let _ = plan;
                 passthrough_single_child(self)
             }
+
+            PhysicalPlan::RowDiff(plan) => Ok(plan.output_schema.as_ref().clone()),
 
             PhysicalPlan::Project(plan) => {
                 let input = passthrough_single_child(self)?;

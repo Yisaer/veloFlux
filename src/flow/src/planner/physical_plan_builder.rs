@@ -959,14 +959,16 @@ fn create_row_diff_processor_if_needed_with_builder(
     }
 
     validate_row_diff_sink_path(sink)?;
+    let output_schema = input_child.output_schema()?;
     let (tracked_columns, tracked_column_indexes) =
-        resolve_row_diff_tracked_columns(sink, input_child)?;
+        resolve_row_diff_tracked_columns(sink, &output_schema)?;
     let row_diff_index = builder.allocate_index();
     let row_diff_plan = PhysicalRowDiff::new(
         vec![Arc::clone(input_child)],
         row_diff_index,
         sink.sink_id.clone(),
         sink.output.clone(),
+        output_schema,
         tracked_columns,
         tracked_column_indexes,
     );
@@ -1005,13 +1007,12 @@ fn validate_row_diff_sink_path(sink: &PipelineSink) -> Result<(), String> {
 
 fn resolve_row_diff_tracked_columns(
     sink: &PipelineSink,
-    input_child: &Arc<PhysicalPlan>,
+    output_schema: &crate::planner::physical::output_schema::OutputSchema,
 ) -> Result<(Vec<Arc<str>>, Vec<usize>), String> {
-    let output_schema = input_child.output_schema()?;
     if let Some(configured_columns) = sink.output.delta_columns() {
         return resolve_configured_row_diff_tracked_columns(
             sink,
-            &output_schema,
+            output_schema,
             configured_columns,
         );
     }

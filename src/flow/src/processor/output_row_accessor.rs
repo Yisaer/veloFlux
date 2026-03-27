@@ -215,6 +215,10 @@ impl ExtractedOutputRow {
             .map(|value| value.unwrap_or_else(|| Arc::new(Value::Null)))
             .collect()
     }
+
+    pub(crate) fn into_optional_values(self) -> Vec<Option<Arc<Value>>> {
+        self.values
+    }
 }
 
 fn resolve_getters(columns: &[OutputRowColumn], sample: &Tuple) -> Vec<ResolvedGetter> {
