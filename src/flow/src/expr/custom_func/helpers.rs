@@ -3,9 +3,11 @@ use crate::catalog::{
 };
 use crate::expr::func::EvalError;
 use datatypes::{ConcreteDatatype, ListValue, StructField, StructType, StructValue, Value};
+use parking_lot::RwLock;
 use regex::Regex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 // helpers for definition
 pub fn int_type() -> TypeSpec {
@@ -775,10 +777,24 @@ pub fn ternary_string_to_string(
 }
 
 pub fn compile_regex(pattern: &str) -> Result<Regex, EvalError> {
-    Regex::new(pattern).map_err(|e| EvalError::TypeMismatch {
+    static REGEX_CACHE: OnceLock<RwLock<HashMap<String, Regex>>> = OnceLock::new();
+    let cache = REGEX_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+
+    if let Some(regex) = cache.read().get(pattern).cloned() {
+        return Ok(regex);
+    }
+
+    let compiled = Regex::new(pattern).map_err(|e| EvalError::TypeMismatch {
         expected: "valid regex".to_string(),
         actual: e.to_string(),
-    })
+    })?;
+
+    let mut cache = cache.write();
+    let regex = cache
+        .entry(pattern.to_string())
+        .or_insert_with(|| compiled.clone());
+
+    Ok(regex.clone())
 }
 
 pub fn validate_one_string_or_null(args: &[Value]) -> Result<(), EvalError> {
