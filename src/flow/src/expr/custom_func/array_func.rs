@@ -1634,6 +1634,10 @@ mod tests {
 
         let array_sort = ArraySortFunc;
         assert_array(
+            array_sort.eval_row(&[a(vec![i(2), i(10)])]).unwrap(),
+            vec![i(2), i(10)],
+        );
+        assert_array(
             array_sort
                 .eval_row(&[a(vec![i(3), i(2), i(10), i(5), i(1)])])
                 .unwrap(),
