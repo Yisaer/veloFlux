@@ -31,6 +31,8 @@ humantime-serde = "1"
 libc = "0.2"
 rand = "0.10.0"
 rug = "1.28.1"
+regex = "1.12.3"
+icu = { version = "2.1.1", features = ["compiled_data"] }
 upon = "0.10"
 
 [dev-dependencies]

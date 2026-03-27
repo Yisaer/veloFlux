@@ -5,9 +5,8 @@ pub mod string_func;
 use crate::catalog::FunctionDef;
 use crate::expr::func::EvalError;
 use datatypes::Value;
-pub use math_func::*;
+
 pub use registry::CustomFuncRegistry;
-pub use string_func::ConcatFunc;
 
 /// Custom function that can be implemented by users
 /// This trait allows users to define their own functions for evaluation
@@ -36,8 +35,18 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
 
     /// Get the function name for debugging purposes
     fn name(&self) -> &str;
+
+    /// Additional SQL-visible aliases for this function.
+    fn aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 pub fn builtin_custom_function_defs() -> Vec<FunctionDef> {
-    vec![string_func::concat_function_def()]
+    let mut defs = Vec::new();
+
+    defs.extend(math_func::builtin_function_defs());
+    defs.extend(string_func::builtin_function_defs());
+
+    defs
 }

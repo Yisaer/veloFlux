@@ -1,10 +1,17 @@
-use super::{
+use super::math_func::{
     AbsFunc, AcosFunc, AsinFunc, Atan2Func, AtanFunc, BitAndFunc, BitNotFunc, BitOrFunc,
-    BitXorFunc, CeilFunc, CeilingFunc, ConcatFunc, ConvFunc, CosFunc, CoshFunc, CotFunc,
-    CustomFunc, DegreesFunc, ExpFunc, FloorFunc, LnFunc, LogFunc, ModFunc, PiFunc, PowFunc,
-    PowerFunc, RadiansFunc, RandFunc, RoundFunc, SignFunc, SinFunc, SinhFunc, SqrtFunc, TanFunc,
-    TanhFunc,
+    BitXorFunc, CeilFunc, CeilingFunc, ConvFunc, CosFunc, CoshFunc, CotFunc, DegreesFunc, ExpFunc,
+    FloorFunc, LnFunc, LogFunc, ModFunc, PiFunc, PowFunc, PowerFunc, RadiansFunc, RandFunc,
+    RoundFunc, SignFunc, SinFunc, SinhFunc, SqrtFunc, TanFunc, TanhFunc,
 };
+
+use super::string_func::{
+    ConcatFunc, EndsWithFunc, FormatFunc, IndexOfFunc, LPadFunc, LTrimFunc, LengthFunc, LowerFunc,
+    NumBytesFunc, RPadFunc, RTrimFunc, RegexpMatchesFunc, RegexpReplaceFunc, RegexpSubstrFunc,
+    ReverseFunc, SplitValueFunc, StartsWithFunc, SubstringFunc, TrimFunc, UpperFunc,
+};
+
+use super::CustomFunc;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,15 +43,18 @@ impl CustomFuncRegistry {
     fn builtins() -> Self {
         let mut functions: HashMap<String, Arc<dyn CustomFunc>> = HashMap::new();
 
-        register(&mut functions, Arc::new(ConcatFunc));
         register_math_functions(&mut functions);
+        register_string_functions(&mut functions);
 
         Self { functions }
     }
 }
 
 fn register(functions: &mut HashMap<String, Arc<dyn CustomFunc>>, func: Arc<dyn CustomFunc>) {
-    functions.insert(func.name().to_lowercase(), func);
+    functions.insert(func.name().to_lowercase(), Arc::clone(&func));
+    for alias in func.aliases() {
+        functions.insert(alias.to_lowercase(), Arc::clone(&func));
+    }
 }
 
 fn register_math_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>) {
@@ -87,6 +97,33 @@ fn register_math_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>)
     }
 }
 
+fn register_string_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>) {
+    for func in [
+        Arc::new(FormatFunc) as Arc<dyn CustomFunc>,
+        Arc::new(ConcatFunc),
+        Arc::new(EndsWithFunc),
+        Arc::new(IndexOfFunc),
+        Arc::new(LengthFunc),
+        Arc::new(LowerFunc),
+        Arc::new(LPadFunc),
+        Arc::new(LTrimFunc),
+        Arc::new(NumBytesFunc),
+        Arc::new(RegexpMatchesFunc),
+        Arc::new(RegexpReplaceFunc),
+        Arc::new(RegexpSubstrFunc),
+        Arc::new(ReverseFunc),
+        Arc::new(RPadFunc),
+        Arc::new(RTrimFunc),
+        Arc::new(SubstringFunc),
+        Arc::new(StartsWithFunc),
+        Arc::new(SplitValueFunc),
+        Arc::new(TrimFunc),
+        Arc::new(UpperFunc),
+    ] {
+        register(functions, func);
+    }
+}
+
 impl Default for CustomFuncRegistry {
     fn default() -> Self {
         Self::builtins()
@@ -118,10 +155,51 @@ mod tests {
     }
 
     #[test]
+    fn builtins_include_string_functions() {
+        let registry = CustomFuncRegistry::default();
+
+        assert!(registry.is_registered("concat"));
+        assert!(registry.is_registered("format"));
+        assert!(registry.is_registered("endswith"));
+        assert!(registry.is_registered("indexof"));
+        assert!(registry.is_registered("length"));
+        assert!(registry.is_registered("lower"));
+        assert!(registry.is_registered("lpad"));
+        assert!(registry.is_registered("ltrim"));
+        assert!(registry.is_registered("numbytes"));
+        assert!(registry.is_registered("regexp_matches"));
+        assert!(registry.is_registered("regexp_replace"));
+        assert!(registry.is_registered("regexp_substring"));
+        assert!(registry.is_registered("regexp_substr"));
+        assert!(registry.is_registered("reverse"));
+        assert!(registry.is_registered("rpad"));
+        assert!(registry.is_registered("rtrim"));
+        assert!(registry.is_registered("substring"));
+        assert!(registry.is_registered("startswith"));
+        assert!(registry.is_registered("split_value"));
+        assert!(registry.is_registered("trim"));
+        assert!(registry.is_registered("upper"));
+    }
+
+    #[test]
     fn registry_rejects_unknown_functions() {
         let registry = CustomFuncRegistry::default();
         assert!(!registry.is_registered("dummy"));
         assert!(registry.get("dummy").is_none());
         assert!(registry.get("missing").is_none());
+    }
+
+    #[test]
+    fn registry_resolves_runtime_aliases() {
+        let registry = CustomFuncRegistry::default();
+
+        let canonical = registry
+            .get("regexp_substring")
+            .expect("canonical regexp_substring should be registered");
+        let alias = registry
+            .get("regexp_substr")
+            .expect("regexp_substr alias should be registered");
+
+        assert_eq!(canonical.name(), alias.name());
     }
 }

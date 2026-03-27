@@ -1,6 +1,381 @@
+use crate::catalog::{
+    FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionSignatureSpec, TypeSpec,
+};
 use crate::expr::func::EvalError;
-use datatypes::Value;
+use datatypes::{ConcreteDatatype, ListValue, StructField, StructType, StructValue, Value};
+use regex::Regex;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
+// helpers for definition
+pub fn int_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "int".to_string(),
+    }
+}
+
+pub fn float_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "float".to_string(),
+    }
+}
+
+pub fn string_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "string".to_string(),
+    }
+}
+
+pub fn bool_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "bool".to_string(),
+    }
+}
+
+pub fn any_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "any".to_string(),
+    }
+}
+
+pub fn object_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "object".to_string(),
+    }
+}
+
+pub fn array_type() -> TypeSpec {
+    TypeSpec::List {
+        element: Box::new(any_type()),
+    }
+}
+
+pub fn default_contexts() -> Vec<FunctionContext> {
+    vec![
+        FunctionContext::Select,
+        FunctionContext::Where,
+        FunctionContext::GroupBy,
+    ]
+}
+
+pub fn req_arg(name: &str, ty: TypeSpec) -> FunctionArgSpec {
+    FunctionArgSpec {
+        name: name.to_string(),
+        r#type: ty,
+        optional: false,
+        variadic: false,
+    }
+}
+
+pub fn opt_arg(name: &str, ty: TypeSpec) -> FunctionArgSpec {
+    FunctionArgSpec {
+        name: name.to_string(),
+        r#type: ty,
+        optional: true,
+        variadic: false,
+    }
+}
+
+pub fn variadic_arg(name: &str, ty: TypeSpec) -> FunctionArgSpec {
+    FunctionArgSpec {
+        name: name.to_string(),
+        r#type: ty,
+        optional: true,
+        variadic: true,
+    }
+}
+
+pub fn scalar_function_def(
+    name: &str,
+    args: Vec<FunctionArgSpec>,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    FunctionDef {
+        kind: FunctionKind::Scalar,
+        name: name.to_string(),
+        aliases: vec![],
+        signature: FunctionSignatureSpec { args, return_type },
+        description: description.to_string(),
+        allowed_contexts: default_contexts(),
+        requirements: vec![],
+        constraints: constraints.into_iter().map(|s| s.to_string()).collect(),
+        examples: examples.into_iter().map(|s| s.to_string()).collect(),
+        aggregate: None,
+        stateful: None,
+    }
+}
+
+pub fn scalar_function_def_with_aliases(
+    name: &str,
+    aliases: Vec<&str>,
+    args: Vec<FunctionArgSpec>,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    FunctionDef {
+        kind: FunctionKind::Scalar,
+        name: name.to_string(),
+        aliases: aliases.into_iter().map(|s| s.to_string()).collect(),
+        signature: FunctionSignatureSpec { args, return_type },
+        description: description.to_string(),
+        allowed_contexts: default_contexts(),
+        requirements: vec![],
+        constraints: constraints.into_iter().map(|s| s.to_string()).collect(),
+        examples: examples.into_iter().map(|s| s.to_string()).collect(),
+        aggregate: None,
+        stateful: None,
+    }
+}
+
+pub fn unary_numeric_fn_def(name: &str, description: &str, examples: Vec<&str>) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![req_arg("x", float_type())],
+        float_type(),
+        description,
+        vec![
+            "Requires exactly 1 numeric argument.",
+            "Returns NULL if the argument is NULL.",
+        ],
+        examples,
+    )
+}
+
+pub fn binary_numeric_fn_def(name: &str, description: &str, examples: Vec<&str>) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![req_arg("a", float_type()), req_arg("b", float_type())],
+        float_type(),
+        description,
+        vec![
+            "Requires exactly 2 numeric arguments.",
+            "Returns NULL if any argument is NULL.",
+        ],
+        examples,
+    )
+}
+
+pub fn unary_array_fn_def(
+    name: &str,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![req_arg("array", array_type())],
+        return_type,
+        description,
+        constraints,
+        examples,
+    )
+}
+
+pub fn unary_array_fn_def_with_aliases(
+    name: &str,
+    aliases: Vec<&str>,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    scalar_function_def_with_aliases(
+        name,
+        aliases,
+        vec![req_arg("array", array_type())],
+        return_type,
+        description,
+        constraints,
+        examples,
+    )
+}
+
+pub fn binary_array_fn_def(
+    name: &str,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![
+            req_arg("array1", array_type()),
+            req_arg("array2", array_type()),
+        ],
+        return_type,
+        description,
+        constraints,
+        examples,
+    )
+}
+
+pub fn unary_string_fn_def(
+    name: &str,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![req_arg("value", string_type())],
+        return_type,
+        description,
+        constraints,
+        examples,
+    )
+}
+
+pub fn binary_string_fn_def(
+    name: &str,
+    return_type: TypeSpec,
+    description: &str,
+    constraints: Vec<&str>,
+    examples: Vec<&str>,
+) -> FunctionDef {
+    scalar_function_def(
+        name,
+        vec![
+            req_arg("value", string_type()),
+            req_arg("other", string_type()),
+        ],
+        return_type,
+        description,
+        constraints,
+        examples,
+    )
+}
+
+// helpers for testing
+pub fn i(v: i64) -> Value {
+    Value::Int64(v)
+}
+
+pub fn f(v: f64) -> Value {
+    Value::Float64(v)
+}
+
+pub fn s(v: &str) -> Value {
+    Value::String(v.to_string())
+}
+
+pub fn b(v: bool) -> Value {
+    Value::Bool(v)
+}
+
+pub fn a(v: Vec<Value>) -> Value {
+    array_to_value(v).unwrap()
+}
+
+pub fn n() -> Value {
+    Value::Null
+}
+
+pub fn m(entries: Vec<(&str, Value)>) -> Value {
+    let mut map = std::collections::BTreeMap::new();
+    for (k, v) in entries {
+        map.insert(k.to_string(), v);
+    }
+    map_to_value(map).unwrap()
+}
+
+pub fn assert_int(actual: Value, expected: i64) {
+    match actual {
+        Value::Int64(v) => {
+            assert_eq!(v, expected, "expected Int64({expected}), got Int64({v})");
+        }
+        other => panic!("expected Int64({expected}), got {:?}", other),
+    }
+}
+
+pub fn assert_float(v: Value, expected: f64) {
+    match v {
+        Value::Float64(actual) => {
+            let eps = 1e-9;
+            assert!(
+                (actual - expected).abs() < eps,
+                "expected Float64({}), got Float64({})",
+                expected,
+                actual
+            );
+        }
+        Value::Float32(actual) => {
+            let eps = 1e-6;
+            assert!(
+                ((actual as f64) - expected).abs() < eps,
+                "expected Float32/64 near {}, got Float32({})",
+                expected,
+                actual
+            );
+        }
+        other => panic!("expected float {}, got {:?}", expected, other),
+    }
+}
+
+pub fn assert_bool(actual: Value, expected: bool) {
+    match actual {
+        Value::Bool(v) => {
+            assert_eq!(v, expected, "expected Bool({expected}), got Bool({v})");
+        }
+        other => panic!("expected Bool({expected}), got {:?}", other),
+    }
+}
+
+pub fn assert_string(actual: Value, expected: &str) {
+    match actual {
+        Value::String(v) => {
+            assert_eq!(
+                v, expected,
+                "expected String({expected:?}), got String({v:?})"
+            );
+        }
+        other => panic!("expected String({expected:?}), got {:?}", other),
+    }
+}
+
+pub fn assert_array(v: Value, expected: Vec<Value>) {
+    match v {
+        Value::List(v) => assert_eq!(v.items().to_vec(), expected),
+        other => panic!("expected array, got {:?}", other),
+    }
+}
+
+pub fn assert_null(actual: Value) {
+    assert!(
+        matches!(actual, Value::Null),
+        "expected Null, got {:?}",
+        actual
+    );
+}
+
+pub fn assert_map(v: Value, expected_entries: Vec<(&str, Value)>) {
+    let expected_map: BTreeMap<String, Value> = expected_entries
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+
+    match v {
+        Value::Struct(s) => {
+            let mut actual = BTreeMap::new();
+
+            for (field, value) in s.fields().fields().iter().zip(s.items().iter()) {
+                actual.insert(field.name().to_string(), value.clone());
+            }
+
+            assert_eq!(actual, expected_map);
+        }
+        other => panic!("expected map, got {:?}", other),
+    }
+}
+
+// general helpers
 pub fn validate_arity(args: &[Value], allowed: &[usize]) -> Result<(), EvalError> {
     if allowed.contains(&args.len()) {
         Ok(())
@@ -33,17 +408,7 @@ pub fn value_to_string(value: &Value) -> Result<String, EvalError> {
     }
 }
 
-pub fn nth_string_or_null(args: &[Value], idx: usize) -> Result<Option<String>, EvalError> {
-    match args.get(idx) {
-        Some(Value::Null) => Ok(None),
-        Some(v) => value_to_string(v).map(Some),
-        None => Err(EvalError::TypeMismatch {
-            expected: format!("argument {}", idx),
-            actual: format!("missing argument {}", idx),
-        }),
-    }
-}
-
+// math funcs helpers
 pub fn map_numeric_value(
     v: &Value,
     map_i: impl FnOnce(i64) -> Result<i64, EvalError>,
@@ -115,10 +480,14 @@ pub fn value_to_i64(value: &Value) -> Result<i64, EvalError> {
     }
 }
 
-pub fn nth_f64_or_null(args: &[Value], idx: usize) -> Result<Option<f64>, EvalError> {
+pub fn nth_converted_or_null<T>(
+    args: &[Value],
+    idx: usize,
+    convert: impl FnOnce(&Value) -> Result<T, EvalError>,
+) -> Result<Option<T>, EvalError> {
     match args.get(idx) {
         Some(Value::Null) => Ok(None),
-        Some(v) => value_to_f64(v).map(Some),
+        Some(v) => convert(v).map(Some),
         None => Err(EvalError::TypeMismatch {
             expected: format!("argument {}", idx),
             actual: format!("missing argument {}", idx),
@@ -126,15 +495,16 @@ pub fn nth_f64_or_null(args: &[Value], idx: usize) -> Result<Option<f64>, EvalEr
     }
 }
 
+pub fn nth_string_or_null(args: &[Value], idx: usize) -> Result<Option<String>, EvalError> {
+    nth_converted_or_null(args, idx, value_to_string)
+}
+
+pub fn nth_f64_or_null(args: &[Value], idx: usize) -> Result<Option<f64>, EvalError> {
+    nth_converted_or_null(args, idx, value_to_f64)
+}
+
 pub fn nth_i64_or_null(args: &[Value], idx: usize) -> Result<Option<i64>, EvalError> {
-    match args.get(idx) {
-        Some(Value::Null) => Ok(None),
-        Some(v) => value_to_i64(v).map(Some),
-        None => Err(EvalError::TypeMismatch {
-            expected: format!("argument {}", idx),
-            actual: format!("missing argument {}", idx),
-        }),
-    }
+    nth_converted_or_null(args, idx, value_to_i64)
 }
 
 pub fn f64_to_value_nan_null(v: f64) -> Value {
@@ -263,4 +633,379 @@ pub fn sign_numeric(args: &[Value]) -> Result<Value, EvalError> {
         0
     };
     Ok(Value::Int64(v))
+}
+
+pub fn validate_at_least_arity(args: &[Value], min: usize) -> Result<(), EvalError> {
+    if args.len() >= min {
+        Ok(())
+    } else {
+        Err(EvalError::TypeMismatch {
+            expected: format!("at least {} arguments", min),
+            actual: format!("{} arguments", args.len()),
+        })
+    }
+}
+
+// string helpers
+pub fn nth_string_strict(args: &[Value], idx: usize) -> Result<String, EvalError> {
+    match args.get(idx) {
+        Some(v) => value_to_string(v),
+        None => Err(EvalError::TypeMismatch {
+            expected: format!("argument {}", idx),
+            actual: format!("missing argument {}", idx),
+        }),
+    }
+}
+
+pub fn unary_string_to_string(
+    args: &[Value],
+    op: impl FnOnce(&str) -> String,
+) -> Result<Value, EvalError> {
+    validate_arity(args, &[1])?;
+    let Some(s) = nth_string_or_null(args, 0)? else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::String(op(&s)))
+}
+
+pub fn unary_string_to_i64(
+    args: &[Value],
+    op: impl FnOnce(&str) -> i64,
+) -> Result<Value, EvalError> {
+    validate_arity(args, &[1])?;
+    let Some(s) = nth_string_or_null(args, 0)? else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Int64(op(&s)))
+}
+
+fn binary_string_map<T>(
+    args: &[Value],
+    op: impl FnOnce(&str, &str) -> T,
+    wrap: impl FnOnce(T) -> Value,
+) -> Result<Value, EvalError> {
+    validate_arity(args, &[2])?;
+    let Some(a) = nth_string_or_null(args, 0)? else {
+        return Ok(Value::Null);
+    };
+    let Some(b) = nth_string_or_null(args, 1)? else {
+        return Ok(Value::Null);
+    };
+    Ok(wrap(op(&a, &b)))
+}
+
+pub fn binary_string_to_string(
+    args: &[Value],
+    op: impl FnOnce(&str, &str) -> String,
+) -> Result<Value, EvalError> {
+    binary_string_map(args, op, Value::String)
+}
+
+pub fn binary_string_to_bool(
+    args: &[Value],
+    op: impl FnOnce(&str, &str) -> bool,
+) -> Result<Value, EvalError> {
+    binary_string_map(args, op, Value::Bool)
+}
+
+pub fn binary_string_to_i64(
+    args: &[Value],
+    op: impl FnOnce(&str, &str) -> i64,
+) -> Result<Value, EvalError> {
+    binary_string_map(args, op, Value::Int64)
+}
+
+pub fn binary_string_to_string_result(
+    args: &[Value],
+    op: impl FnOnce(&str, &str) -> Result<String, EvalError>,
+) -> Result<Value, EvalError> {
+    validate_arity(args, &[2])?;
+    let Some(a) = nth_string_or_null(args, 0)? else {
+        return Ok(Value::Null);
+    };
+    let Some(b) = nth_string_or_null(args, 1)? else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::String(op(&a, &b)?))
+}
+
+pub fn binary_string_to_bool_result(
+    args: &[Value],
+    op: impl FnOnce(&str, &str) -> Result<bool, EvalError>,
+) -> Result<Value, EvalError> {
+    validate_arity(args, &[2])?;
+    let Some(a) = nth_string_or_null(args, 0)? else {
+        return Ok(Value::Null);
+    };
+    let Some(b) = nth_string_or_null(args, 1)? else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Bool(op(&a, &b)?))
+}
+
+pub fn binary_string_to_i64_result(
+    args: &[Value],
+    op: impl FnOnce(&str, &str) -> Result<i64, EvalError>,
+) -> Result<Value, EvalError> {
+    validate_arity(args, &[2])?;
+    let Some(a) = nth_string_or_null(args, 0)? else {
+        return Ok(Value::Null);
+    };
+    let Some(b) = nth_string_or_null(args, 1)? else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::Int64(op(&a, &b)?))
+}
+
+pub fn ternary_string_to_string(
+    args: &[Value],
+    op: impl FnOnce(&str, &str, &str) -> Result<String, EvalError>,
+) -> Result<Value, EvalError> {
+    validate_arity(args, &[3])?;
+    let Some(a) = nth_string_or_null(args, 0)? else {
+        return Ok(Value::Null);
+    };
+    let Some(b) = nth_string_or_null(args, 1)? else {
+        return Ok(Value::Null);
+    };
+    let Some(c) = nth_string_or_null(args, 2)? else {
+        return Ok(Value::Null);
+    };
+    Ok(Value::String(op(&a, &b, &c)?))
+}
+
+pub fn compile_regex(pattern: &str) -> Result<Regex, EvalError> {
+    Regex::new(pattern).map_err(|e| EvalError::TypeMismatch {
+        expected: "valid regex".to_string(),
+        actual: e.to_string(),
+    })
+}
+
+pub fn validate_one_string_or_null(args: &[Value]) -> Result<(), EvalError> {
+    validate_arity(args, &[1])?;
+    nth_string_or_null(args, 0)?;
+    Ok(())
+}
+
+pub fn validate_two_strings_or_null(args: &[Value]) -> Result<(), EvalError> {
+    validate_arity(args, &[2])?;
+    nth_string_or_null(args, 0)?;
+    nth_string_or_null(args, 1)?;
+    Ok(())
+}
+
+pub fn validate_two_strict_strings(args: &[Value]) -> Result<(), EvalError> {
+    validate_arity(args, &[2])?;
+    nth_string_strict(args, 0)?;
+    nth_string_strict(args, 1)?;
+    Ok(())
+}
+
+pub fn validate_string_i64_or_null(args: &[Value]) -> Result<(), EvalError> {
+    validate_arity(args, &[2])?;
+    nth_string_or_null(args, 0)?;
+    nth_i64_or_null(args, 1)?;
+    Ok(())
+}
+
+pub fn string_nonnegative_i64_to_string(
+    args: &[Value],
+    op: impl FnOnce(&str, usize) -> String,
+) -> Result<Value, EvalError> {
+    validate_arity(args, &[2])?;
+
+    let Some(s) = nth_string_or_null(args, 0)? else {
+        return Ok(Value::Null);
+    };
+    let Some(n) = nth_i64_or_null(args, 1)? else {
+        return Ok(Value::Null);
+    };
+
+    if n < 0 {
+        return Err(EvalError::TypeMismatch {
+            expected: "non-negative integer".to_string(),
+            actual: n.to_string(),
+        });
+    }
+
+    Ok(Value::String(op(&s, n as usize)))
+}
+
+pub fn substring_by_char_start_length(
+    s: &str,
+    start: i64,
+    length: Option<i64>,
+) -> Result<String, EvalError> {
+    if start < 0 {
+        return Err(EvalError::TypeMismatch {
+            expected: "non-negative start index".to_string(),
+            actual: start.to_string(),
+        });
+    }
+
+    if let Some(l) = length {
+        if l < 0 {
+            return Err(EvalError::TypeMismatch {
+                expected: "non-negative length".to_string(),
+                actual: l.to_string(),
+            });
+        }
+    }
+
+    let chars: Vec<char> = s.chars().collect();
+    let n = chars.len() as i64;
+
+    if start >= n {
+        return Ok(String::new());
+    }
+
+    let start_usize = start as usize;
+
+    let end_usize = match length {
+        Some(l) => {
+            let end = start + l;
+            if end > n {
+                n as usize
+            } else {
+                end as usize
+            }
+        }
+        None => n as usize,
+    };
+
+    Ok(chars[start_usize..end_usize].iter().collect())
+}
+
+// array helpers
+pub fn value_to_array(v: &Value) -> Result<Vec<Value>, EvalError> {
+    match v {
+        Value::List(list) => Ok(list.items().to_vec()),
+        other => Err(EvalError::TypeMismatch {
+            expected: "array".to_string(),
+            actual: format!("{:?}", other),
+        }),
+    }
+}
+
+pub fn infer_list_datatype(items: &[Value]) -> Result<Arc<ConcreteDatatype>, EvalError> {
+    if items.is_empty() {
+        return Ok(Arc::new(ConcreteDatatype::Null));
+    }
+
+    let first_non_null = items.iter().find(|v| !v.is_null());
+
+    match first_non_null {
+        None => Ok(Arc::new(ConcreteDatatype::Null)),
+        Some(v) => {
+            let dt = v.datatype();
+            for item in items.iter().filter(|x| !x.is_null()) {
+                if item.datatype() != dt {
+                    return Err(EvalError::TypeMismatch {
+                        expected: format!("homogeneous array with datatype {:?}", dt),
+                        actual: format!("mixed datatypes in array: {:?}", items),
+                    });
+                }
+            }
+            Ok(Arc::new(dt))
+        }
+    }
+}
+
+pub fn array_to_value(items: Vec<Value>) -> Result<Value, EvalError> {
+    let datatype = infer_list_datatype(&items)?;
+    Ok(Value::List(ListValue::new(items, datatype)))
+}
+
+pub fn map_to_value(map: BTreeMap<String, Value>) -> Result<Value, EvalError> {
+    let mut items = Vec::with_capacity(map.len());
+    let mut fields = Vec::with_capacity(map.len());
+
+    for (name, value) in map {
+        fields.push(StructField::new(name, value.datatype(), true));
+        items.push(value);
+    }
+
+    let struct_type = StructType::new(Arc::new(fields));
+    Ok(Value::Struct(StructValue::new(items, struct_type)))
+}
+
+pub fn value_to_map(v: &Value) -> Result<BTreeMap<String, Value>, EvalError> {
+    match v {
+        Value::Struct(s) => {
+            let mut out = BTreeMap::new();
+
+            for (field, value) in s.fields().fields().iter().zip(s.items().iter()) {
+                out.insert(field.name().to_string(), value.clone());
+            }
+
+            Ok(out)
+        }
+        other => Err(EvalError::TypeMismatch {
+            expected: "object".to_string(),
+            actual: format!("{:?}", other),
+        }),
+    }
+}
+
+pub fn nth_array_or_null(args: &[Value], idx: usize) -> Result<Option<Vec<Value>>, EvalError> {
+    match args.get(idx) {
+        Some(Value::Null) => Ok(None),
+        Some(Value::List(list)) => Ok(Some(list.items().to_vec())),
+        Some(other) => Err(EvalError::TypeMismatch {
+            expected: format!("array argument {}", idx),
+            actual: format!("{:?}", other),
+        }),
+        None => Err(EvalError::TypeMismatch {
+            expected: format!("argument {}", idx),
+            actual: format!("missing argument {}", idx),
+        }),
+    }
+}
+
+pub fn validate_one_array_or_null(args: &[Value]) -> Result<(), EvalError> {
+    validate_arity(args, &[1])?;
+    nth_array_or_null(args, 0)?;
+    Ok(())
+}
+
+pub fn validate_two_arrays_or_null(args: &[Value]) -> Result<(), EvalError> {
+    validate_arity(args, &[2])?;
+    nth_array_or_null(args, 0)?;
+    nth_array_or_null(args, 1)?;
+    Ok(())
+}
+
+pub fn value_to_string_lossy(value: &Value) -> Result<String, EvalError> {
+    match value {
+        Value::String(s) => Ok(s.clone()),
+        Value::Bool(v) => Ok(v.to_string()),
+        Value::Int8(v) => Ok(v.to_string()),
+        Value::Int16(v) => Ok(v.to_string()),
+        Value::Int32(v) => Ok(v.to_string()),
+        Value::Int64(v) => Ok(v.to_string()),
+        Value::Uint8(v) => Ok(v.to_string()),
+        Value::Uint16(v) => Ok(v.to_string()),
+        Value::Uint32(v) => Ok(v.to_string()),
+        Value::Uint64(v) => Ok(v.to_string()),
+        Value::Float32(v) => Ok(v.to_string()),
+        Value::Float64(v) => Ok(v.to_string()),
+        other => Err(EvalError::TypeMismatch {
+            expected: "string-convertible scalar".to_string(),
+            actual: format!("{:?}", other),
+        }),
+    }
+}
+
+pub fn value_sort_key(value: &Value) -> Result<String, EvalError> {
+    value_to_string_lossy(value)
+}
+
+pub fn array_distinct_values(values: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for v in values {
+        if !out.iter().any(|x| x == &v) {
+            out.push(v);
+        }
+    }
+    out
 }

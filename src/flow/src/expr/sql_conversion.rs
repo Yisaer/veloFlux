@@ -1,3 +1,4 @@
+use super::custom_func::string_func::maybe_specialize_literal_regex_func;
 use super::custom_func::CustomFuncRegistry;
 use super::func::{BinaryFunc, UnaryFunc};
 use super::internal_columns::is_internal_derived;
@@ -602,6 +603,10 @@ fn convert_function_call(
         }
     }
 
+    let custom_func = maybe_specialize_literal_regex_func(custom_func.name(), &scalar_args)
+        .map_err(|err| ConversionError::TypeConversionError(err.to_string()))?
+        .unwrap_or(custom_func);
+
     Ok(ScalarExpr::CallFunc {
         func: custom_func,
         args: scalar_args,
@@ -817,6 +822,34 @@ mod tests {
                 source_name: Some(prefix),
             } => assert_eq!(prefix, "orders"),
             other => panic!("unexpected scalar expr: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_select_expressions_accepts_custom_function_aliases() {
+        let exprs =
+            extract_select_expressions("SELECT regexp_substr('abc123', '\\\\d+')").expect("sql");
+        assert_eq!(exprs.len(), 1);
+
+        match &exprs[0] {
+            ScalarExpr::CallFunc { func, .. } => {
+                assert_eq!(func.name(), "regexp_substring");
+                assert_eq!(format!("{:?}", func), "CompiledRegexpSubstrFunc");
+            }
+            other => panic!("unexpected scalar expr: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_select_expressions_rejects_invalid_literal_regex_patterns() {
+        let err = extract_select_expressions("SELECT regexp_matches('abc', '(')")
+            .expect_err("invalid literal regex should fail during conversion");
+
+        match err {
+            ConversionError::TypeConversionError(msg) => {
+                assert!(msg.contains("valid regex"), "unexpected error: {msg}");
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 }
