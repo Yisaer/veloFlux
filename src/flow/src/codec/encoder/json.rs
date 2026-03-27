@@ -228,6 +228,70 @@ fn tuple_to_json_with_output_mask(
     Ok(JsonValue::Object(json_row))
 }
 
+fn resolve_by_index_output_value<'a>(
+    tuple: &'a Tuple,
+    by_index_projection: &ByIndexProjection,
+    output_name: &str,
+) -> Option<&'a Value> {
+    by_index_projection.columns().iter().find_map(|column| {
+        if column.output_name.as_ref() != output_name {
+            return None;
+        }
+        tuple.messages().iter().find_map(|message| {
+            if message.source() != column.source_name.as_ref() {
+                return None;
+            }
+            message.value(column.source_column_display.as_ref())
+        })
+    })
+}
+
+fn tuple_to_json_with_output_mask_and_by_index_projection(
+    tuple: &Tuple,
+    output_schema: &OutputSchema,
+    by_index_projection: &ByIndexProjection,
+) -> Result<JsonValue, EncodeError> {
+    let output_mask = tuple.output_mask().ok_or_else(|| {
+        EncodeError::Other("output_mask is required for mask-aware JSON encoding".to_string())
+    })?;
+    if output_mask.len() != output_schema.columns.len() {
+        return Err(EncodeError::Other(format!(
+            "output_mask width {} does not match output schema width {}",
+            output_mask.len(),
+            output_schema.columns.len()
+        )));
+    }
+
+    let mut json_row = JsonMap::new();
+    for (column, selected) in output_schema.columns.iter().zip(output_mask.iter()) {
+        if !selected {
+            continue;
+        }
+        let value = resolve_by_index_output_value(tuple, by_index_projection, column.name.as_ref())
+            .or_else(|| resolve_output_value(tuple, &column.getter))
+            .ok_or_else(|| {
+                EncodeError::Other(format!(
+                    "output schema column `{}` could not be resolved from runtime tuple",
+                    column.name
+                ))
+            })?;
+        json_row.insert(column.name.as_ref().to_string(), value_to_json(value));
+    }
+    Ok(JsonValue::Object(json_row))
+}
+
+fn tuple_to_json_dense_with_output_schema(
+    tuple: &Tuple,
+    output_schema: &OutputSchema,
+) -> Result<JsonValue, EncodeError> {
+    let mut json_row = JsonMap::new();
+    for column in output_schema.columns.iter() {
+        let value = resolve_output_value(tuple, &column.getter).unwrap_or(&Value::Null);
+        json_row.insert(column.name.as_ref().to_string(), value_to_json(value));
+    }
+    Ok(JsonValue::Object(json_row))
+}
+
 fn resolve_output_value<'a>(tuple: &'a Tuple, getter: &OutputValueGetter) -> Option<&'a Value> {
     match getter {
         OutputValueGetter::Affiliate { column_name } => tuple
@@ -251,16 +315,18 @@ fn tuple_to_json_with_encoder_state(
     output_schema: Option<&OutputSchema>,
 ) -> Result<JsonValue, EncodeError> {
     if tuple.output_mask().is_some() {
-        if by_index_projection.is_some() {
-            return Err(EncodeError::Other(
-                "output_mask is not supported together with by-index projection".to_string(),
-            ));
-        }
         let output_schema = output_schema.ok_or_else(|| {
             EncodeError::Other(
                 "output_mask-aware JSON encoding requires the final output schema".to_string(),
             )
         })?;
+        if let Some(by_index_projection) = by_index_projection {
+            return tuple_to_json_with_output_mask_and_by_index_projection(
+                tuple,
+                output_schema,
+                by_index_projection,
+            );
+        }
         return tuple_to_json_with_output_mask(tuple, output_schema);
     }
 
@@ -270,15 +336,20 @@ fn tuple_to_json_with_encoder_state(
 fn tuple_to_json_for_transform(
     tuple: &Tuple,
     by_index_projection: Option<&ByIndexProjection>,
+    output_schema: Option<&OutputSchema>,
 ) -> Result<JsonValue, EncodeError> {
-    if tuple.output_mask().is_some() && by_index_projection.is_some() {
-        return Err(EncodeError::Other(
-            "output_mask is not supported together with by-index projection".to_string(),
-        ));
-    }
-
     // Row-diff branches still expose `.row` as the dense current output row. Until the template
     // contract becomes mask-aware, unchanged tracked columns remain visible as `null` here.
+    if tuple.output_mask().is_some() {
+        let output_schema = output_schema.ok_or_else(|| {
+            EncodeError::Other(
+                "output_mask-aware JSON template encoding requires the final output schema"
+                    .to_string(),
+            )
+        })?;
+        return tuple_to_json_dense_with_output_schema(tuple, output_schema);
+    }
+
     tuple_to_json_maybe_by_index_projection(tuple, by_index_projection)
 }
 
@@ -331,7 +402,7 @@ fn append_tuple_to_payload(
     }
 
     let row = if transform.is_some() {
-        tuple_to_json_for_transform(tuple, by_index_projection)?
+        tuple_to_json_for_transform(tuple, by_index_projection, output_schema)?
     } else {
         tuple_to_json_with_encoder_state(tuple, by_index_projection, output_schema)?
     };

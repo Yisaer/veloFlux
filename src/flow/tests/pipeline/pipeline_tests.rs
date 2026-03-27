@@ -914,6 +914,32 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
+            name: "splits_partial_late_materialization_between_row_diff_and_encoder",
+            source_name: "stream",
+            sql: "SELECT a, b, flag AS c FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![Value::Int64(100), Value::Int64(101), Value::Int64(102)],
+                ),
+            ],
+            encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::delta_with_columns(["b"]),
+            expected: serde_json::json!([
+                {"a": 1, "b": 10, "c": 100},
+                {"a": 2, "c": 101},
+                {"a": 3, "b": 11, "c": 102}
+            ]),
+        },
+        RowDiffJsonCase {
             name: "supports_alias_in_by_index_row_diff_rewrite",
             source_name: "stream",
             sql: "SELECT a AS x FROM stream",

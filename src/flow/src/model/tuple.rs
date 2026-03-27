@@ -209,20 +209,24 @@ impl Tuple {
             }
             return None;
         }
-        self.messages
-            .iter()
-            .find(|msg| msg.source() == source)
-            .and_then(|msg| msg.value(column))
+        self.messages.iter().find_map(|msg| {
+            if msg.source() != source {
+                return None;
+            }
+            msg.value(column)
+        })
     }
 
     pub fn value_by_index(&self, source: &str, index: usize) -> Option<&Value> {
         if source.is_empty() {
             return None;
         }
-        self.messages
-            .iter()
-            .find(|msg| msg.source() == source)
-            .and_then(|msg| msg.value_by_index(index))
+        self.messages.iter().find_map(|msg| {
+            if msg.source() != source {
+                return None;
+            }
+            msg.value_by_index(index)
+        })
     }
 
     pub fn len(&self) -> usize {

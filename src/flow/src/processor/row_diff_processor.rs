@@ -18,7 +18,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 #[derive(Default)]
 struct RowDiffState {
-    previous_full_row: Option<Vec<Arc<Value>>>,
+    previous_tracked_row: Option<Vec<Option<Arc<Value>>>>,
 }
 
 #[derive(Clone)]
@@ -31,7 +31,6 @@ enum RowDiffInputExtractor {
     Hybrid {
         materialized: OutputRowAccessor,
         late_projection: Arc<ByIndexProjection>,
-        output_column_names: Arc<[Arc<str>]>,
     },
 }
 
@@ -84,7 +83,6 @@ impl RowDiffProcessor {
                             physical_row_diff.output_schema.as_ref(),
                         ),
                         late_projection: Arc::clone(spec),
-                        output_column_names: output_accessor.column_names(),
                     }
                 }
             }
@@ -169,13 +167,14 @@ fn validate_late_projection(
     Ok(())
 }
 
-fn extract_row_from_materialized(
+fn extract_selected_row_from_materialized(
     row_accessor: &mut OutputRowAccessor,
     tuple: &Tuple,
-) -> Result<Vec<Arc<Value>>, ProcessorError> {
-    row_accessor
-        .extract_row(tuple)?
-        .into_required_values("row diff processor")
+    selected: &[bool],
+) -> Result<Vec<Option<Arc<Value>>>, ProcessorError> {
+    Ok(row_accessor
+        .extract_selected_row(tuple, selected)?
+        .into_optional_values())
 }
 
 fn extract_projected_values(
@@ -213,94 +212,69 @@ fn extract_projected_values(
     Ok(values)
 }
 
-fn extract_row_from_late_projection(
-    spec: &ByIndexProjection,
-    output_width: usize,
-    tuple: &Tuple,
-) -> Result<Vec<Arc<Value>>, ProcessorError> {
-    Ok(extract_projected_values(spec, output_width, tuple)?
-        .into_iter()
-        .map(|value| {
-            value.expect("full-width row diff late projection must fill every output column")
-        })
-        .collect())
-}
-
-fn extract_row_from_hybrid(
-    row_accessor: &mut OutputRowAccessor,
-    spec: &ByIndexProjection,
-    output_column_names: &[Arc<str>],
-    tuple: &Tuple,
-) -> Result<Vec<Arc<Value>>, ProcessorError> {
-    let mut values = row_accessor.extract_row(tuple)?.into_optional_values();
-    let projected_values = extract_projected_values(spec, output_column_names.len(), tuple)?;
-
-    for (index, value) in projected_values.into_iter().enumerate() {
-        if let Some(value) = value {
-            values[index] = Some(value);
-        }
-    }
-
-    let missing_output_columns = values
-        .iter()
-        .enumerate()
-        .filter(|(_, value)| value.is_none())
-        .map(|(index, _)| output_column_names[index].as_ref())
-        .collect::<Vec<_>>();
-    if !missing_output_columns.is_empty() {
-        return Err(ProcessorError::ProcessingError(format!(
-            "row diff processor failed to resolve output columns [{}] from runtime tuple",
-            missing_output_columns.join(", ")
-        )));
-    }
-
-    Ok(values
-        .into_iter()
-        .map(|value| value.expect("missing output columns handled above"))
-        .collect())
-}
-
-fn extract_current_row(
+fn extract_tracked_row(
     input_extractor: &mut RowDiffInputExtractor,
     tuple: &Tuple,
-) -> Result<Vec<Arc<Value>>, ProcessorError> {
+    tracked_flags: &[bool],
+) -> Result<Vec<Option<Arc<Value>>>, ProcessorError> {
     match input_extractor {
         RowDiffInputExtractor::Materialized(row_accessor) => {
-            extract_row_from_materialized(row_accessor, tuple)
+            extract_selected_row_from_materialized(row_accessor, tuple, tracked_flags)
         }
         RowDiffInputExtractor::LateProjection { spec, output_width } => {
-            extract_row_from_late_projection(spec, *output_width, tuple)
+            Ok(extract_projected_values(spec, *output_width, tuple)?
+                .into_iter()
+                .enumerate()
+                .map(|(idx, value)| {
+                    if tracked_flags.get(idx).copied().unwrap_or(false) {
+                        value
+                    } else {
+                        None
+                    }
+                })
+                .collect())
         }
         RowDiffInputExtractor::Hybrid {
             materialized,
             late_projection,
-            output_column_names,
-        } => extract_row_from_hybrid(
-            materialized,
-            late_projection,
-            output_column_names.as_ref(),
-            tuple,
-        ),
+        } => {
+            let mut values = materialized
+                .extract_selected_row(tuple, tracked_flags)?
+                .into_optional_values();
+            let projected_values =
+                extract_projected_values(late_projection, tracked_flags.len(), tuple)?;
+            for (index, value) in projected_values.into_iter().enumerate() {
+                if let Some(value) = value {
+                    values[index] = Some(value);
+                }
+            }
+            Ok(values)
+        }
     }
 }
 
 fn build_diff_row(
-    current_values: &[Arc<Value>],
-    previous_full_row: Option<&[Arc<Value>]>,
+    tracked_current_values: &[Option<Arc<Value>>],
+    previous_tracked_row: Option<&[Option<Arc<Value>>]>,
     tracked_flags: &[bool],
 ) -> (Vec<Arc<Value>>, Arc<[bool]>) {
-    let mut diff_values = Vec::with_capacity(current_values.len());
-    let mut output_mask = Vec::with_capacity(current_values.len());
+    let mut diff_values = Vec::with_capacity(tracked_current_values.len());
+    let mut output_mask = Vec::with_capacity(tracked_current_values.len());
 
-    for (idx, current_value) in current_values.iter().enumerate() {
+    for (idx, current_value) in tracked_current_values.iter().enumerate() {
         if !tracked_flags.get(idx).copied().unwrap_or(false) {
-            diff_values.push(Arc::clone(current_value));
+            diff_values.push(Arc::new(Value::Null));
             output_mask.push(true);
             continue;
         }
 
-        let changed = previous_full_row
+        let current_value = current_value.as_ref().unwrap_or_else(|| {
+            panic!("tracked row diff column at index {idx} must be resolved before comparison")
+        });
+
+        let changed = previous_tracked_row
             .and_then(|previous| previous.get(idx))
+            .and_then(|previous| previous.as_ref())
             .is_none_or(|previous| previous.as_ref() != current_value.as_ref());
 
         if changed {
@@ -328,15 +302,15 @@ fn apply_row_diff(
     let mut output_rows = Vec::with_capacity(input_rows.len());
 
     for tuple in input_rows {
-        let current_values = extract_current_row(input_extractor, &tuple)?;
+        let tracked_current_values = extract_tracked_row(input_extractor, &tuple, tracked_flags)?;
         let (diff_values, output_mask) = build_diff_row(
-            current_values.as_slice(),
-            state.previous_full_row.as_deref(),
+            tracked_current_values.as_slice(),
+            state.previous_tracked_row.as_deref(),
             tracked_flags,
         );
         let output_tuple =
-            output_accessor.materialize_tuple(tuple.timestamp, &diff_values, Some(output_mask));
-        state.previous_full_row = Some(current_values);
+            output_accessor.overlay_tuple(&tuple, &diff_values, tracked_flags, Some(output_mask));
+        state.previous_tracked_row = Some(tracked_current_values);
         output_rows.push(output_tuple);
     }
 
