@@ -146,6 +146,8 @@ impl PhysicalPlan {
                 passthrough_single_child(self)
             }
 
+            PhysicalPlan::RowDiff(plan) => Ok(plan.output_schema.as_ref().clone()),
+
             PhysicalPlan::Project(plan) => {
                 let input = passthrough_single_child(self)?;
                 let mut out = Vec::new();

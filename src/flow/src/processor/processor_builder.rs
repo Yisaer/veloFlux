@@ -19,7 +19,7 @@ use crate::processor::{
     CollectionLayoutNormalizeProcessor, ComputeProcessor, ControlSignal, ControlSourceProcessor,
     DataSourceProcessor, DecoderProcessor, EncoderProcessor, FilterProcessor, Ingress,
     InstantControlSignal, MemoryCollectionMaterializeProcessor, OrderProcessor, Processor,
-    ProcessorError, ProjectProcessor, ResultCollectProcessor, SamplerProcessor,
+    ProcessorError, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor, SamplerProcessor,
     SharedStreamProcessor, SinkProcessor, SlidingWindowProcessor, StateWindowProcessor,
     StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
     StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
@@ -67,6 +67,8 @@ pub(crate) enum PlanProcessor {
     Order(OrderProcessor),
     /// ProjectProcessor created from PhysicalProject
     Project(ProjectProcessor),
+    /// RowDiffProcessor created from PhysicalRowDiff
+    RowDiff(RowDiffProcessor),
     /// StatefulFunctionProcessor created from PhysicalStatefulFunction
     StatefulFunction(StatefulFunctionProcessor),
     /// FilterProcessor created from PhysicalFilter
@@ -286,6 +288,7 @@ impl PlanProcessor {
             PlanProcessor::Compute(p) => p.id(),
             PlanProcessor::Order(p) => p.id(),
             PlanProcessor::Project(p) => p.id(),
+            PlanProcessor::RowDiff(p) => p.id(),
             PlanProcessor::StatefulFunction(p) => p.id(),
             PlanProcessor::Filter(p) => p.id(),
             PlanProcessor::Batch(p) => p.id(),
@@ -314,6 +317,7 @@ impl PlanProcessor {
             PlanProcessor::Compute(_) => "compute",
             PlanProcessor::Order(_) => "order",
             PlanProcessor::Project(_) => "project",
+            PlanProcessor::RowDiff(_) => "row_diff",
             PlanProcessor::StatefulFunction(_) => "stateful_function",
             PlanProcessor::Filter(_) => "filter",
             PlanProcessor::Batch(_) => "batch",
@@ -348,6 +352,7 @@ impl PlanProcessor {
             PlanProcessor::Compute(p) => p.set_stats(stats),
             PlanProcessor::Order(p) => p.set_stats(stats),
             PlanProcessor::Project(p) => p.set_stats(stats),
+            PlanProcessor::RowDiff(p) => p.set_stats(stats),
             PlanProcessor::StatefulFunction(p) => p.set_stats(stats),
             PlanProcessor::Filter(p) => p.set_stats(stats),
             PlanProcessor::Batch(p) => p.set_stats(stats),
@@ -380,6 +385,7 @@ impl PlanProcessor {
             PlanProcessor::Compute(p) => p.start(spawner),
             PlanProcessor::Order(p) => p.start(spawner),
             PlanProcessor::Project(p) => p.start(spawner),
+            PlanProcessor::RowDiff(p) => p.start(spawner),
             PlanProcessor::StatefulFunction(p) => p.start(spawner),
             PlanProcessor::Filter(p) => p.start(spawner),
             PlanProcessor::Batch(p) => p.start(spawner),
@@ -409,6 +415,7 @@ impl PlanProcessor {
             PlanProcessor::Compute(p) => p.subscribe_output(),
             PlanProcessor::Order(p) => p.subscribe_output(),
             PlanProcessor::Project(p) => p.subscribe_output(),
+            PlanProcessor::RowDiff(p) => p.subscribe_output(),
             PlanProcessor::StatefulFunction(p) => p.subscribe_output(),
             PlanProcessor::Filter(p) => p.subscribe_output(),
             PlanProcessor::Batch(p) => p.subscribe_output(),
@@ -438,6 +445,7 @@ impl PlanProcessor {
             PlanProcessor::Compute(p) => p.subscribe_control_output(),
             PlanProcessor::Order(p) => p.subscribe_control_output(),
             PlanProcessor::Project(p) => p.subscribe_control_output(),
+            PlanProcessor::RowDiff(p) => p.subscribe_control_output(),
             PlanProcessor::StatefulFunction(p) => p.subscribe_control_output(),
             PlanProcessor::Filter(p) => p.subscribe_control_output(),
             PlanProcessor::Batch(p) => p.subscribe_control_output(),
@@ -467,6 +475,7 @@ impl PlanProcessor {
             PlanProcessor::Compute(p) => p.add_input(receiver),
             PlanProcessor::Order(p) => p.add_input(receiver),
             PlanProcessor::Project(p) => p.add_input(receiver),
+            PlanProcessor::RowDiff(p) => p.add_input(receiver),
             PlanProcessor::StatefulFunction(p) => p.add_input(receiver),
             PlanProcessor::Filter(p) => p.add_input(receiver),
             PlanProcessor::Batch(p) => p.add_input(receiver),
@@ -496,6 +505,7 @@ impl PlanProcessor {
             PlanProcessor::Compute(p) => p.add_control_input(receiver),
             PlanProcessor::Order(p) => p.add_control_input(receiver),
             PlanProcessor::Project(p) => p.add_control_input(receiver),
+            PlanProcessor::RowDiff(p) => p.add_control_input(receiver),
             PlanProcessor::StatefulFunction(p) => p.add_control_input(receiver),
             PlanProcessor::Filter(p) => p.add_control_input(receiver),
             PlanProcessor::Batch(p) => p.add_control_input(receiver),
@@ -1040,6 +1050,16 @@ fn create_processor_from_plan_node(
                 PlanProcessor::Project(processor),
             ))
         }
+        PhysicalPlan::RowDiff(spec) => {
+            let processor = RowDiffProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Arc::new(spec.clone()),
+                channel_capacities,
+            )?;
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::RowDiff(processor),
+            ))
+        }
         PhysicalPlan::StatefulFunction(stateful) => {
             let processor = StatefulFunctionProcessor::new_with_channel_capacities(
                 processor_id.clone(),
@@ -1092,6 +1112,7 @@ fn create_processor_from_plan_node(
                 .encoder_registry()?
                 .instantiate(&encoder.encoder)
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+            let encoder_impl = attach_encoder_output_schema(plan, encoder_impl)?;
             let encoder_impl = if let Some(spec) = encoder.by_index_projection.as_ref() {
                 if !encoder_impl.supports_index_lazy_materialization() {
                     return Err(ProcessorError::InvalidConfiguration(format!(
@@ -1130,6 +1151,7 @@ fn create_processor_from_plan_node(
                 .encoder_registry()?
                 .instantiate(&streaming.encoder)
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+            let encoder_impl = attach_encoder_output_schema(plan, encoder_impl)?;
             let encoder_impl = if let Some(spec) = streaming.by_index_projection.as_ref() {
                 if !encoder_impl.supports_index_lazy_materialization() {
                     return Err(ProcessorError::InvalidConfiguration(format!(
@@ -1278,6 +1300,25 @@ fn create_processor_from_plan_node(
             ))
         }
     }
+}
+
+fn attach_encoder_output_schema(
+    plan: &Arc<PhysicalPlan>,
+    encoder_impl: Arc<dyn crate::codec::encoder::CollectionEncoder>,
+) -> Result<Arc<dyn crate::codec::encoder::CollectionEncoder>, ProcessorError> {
+    let input_child = plan.children().first().ok_or_else(|| {
+        ProcessorError::InvalidConfiguration(
+            "encoder processor requires exactly one input child".to_string(),
+        )
+    })?;
+    let output_schema = input_child.output_schema().map_err(|err| {
+        ProcessorError::InvalidConfiguration(format!(
+            "encoder processor failed to resolve output schema: {err}"
+        ))
+    })?;
+    encoder_impl
+        .with_output_schema(Arc::new(output_schema))
+        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))
 }
 
 /// Internal structure to track processors created from PhysicalPlan nodes

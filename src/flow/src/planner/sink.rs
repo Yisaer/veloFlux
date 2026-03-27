@@ -11,6 +11,7 @@ pub struct PipelineSink {
     pub sink_id: String,
     pub forward_to_result: bool,
     pub common: CommonSinkProps,
+    pub output: SinkOutputConfig,
     pub connector: PipelineSinkConnector,
 }
 
@@ -21,6 +22,7 @@ impl PipelineSink {
             sink_id: sink_id.into(),
             forward_to_result: false,
             common: CommonSinkProps::default(),
+            output: SinkOutputConfig::default(),
             connector,
         }
     }
@@ -35,6 +37,11 @@ impl PipelineSink {
         self.common = common;
         self
     }
+
+    pub fn with_output(mut self, output: SinkOutputConfig) -> Self {
+        self.output = output;
+        self
+    }
 }
 
 impl fmt::Debug for PipelineSink {
@@ -43,9 +50,75 @@ impl fmt::Debug for PipelineSink {
             .field("sink_id", &self.sink_id)
             .field("forward_to_result", &self.forward_to_result)
             .field("common", &self.common)
+            .field("output", &self.output)
             .field("connector", &self.connector)
             .finish()
     }
+}
+
+/// Sink-level output behavior configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SinkOutputConfig {
+    pub mode: SinkOutputMode,
+    pub delta: Option<SinkDeltaOutputConfig>,
+}
+
+impl SinkOutputConfig {
+    pub fn new(mode: SinkOutputMode) -> Self {
+        Self { mode, delta: None }
+    }
+
+    pub fn delta() -> Self {
+        Self::new(SinkOutputMode::Delta)
+    }
+
+    pub fn delta_with_columns(columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self::delta().with_delta_columns(columns)
+    }
+
+    pub fn is_delta(&self) -> bool {
+        matches!(self.mode, SinkOutputMode::Delta)
+    }
+
+    pub fn with_delta_columns(
+        mut self,
+        columns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.mode = SinkOutputMode::Delta;
+        self.delta = Some(SinkDeltaOutputConfig {
+            columns: Some(columns.into_iter().map(Into::into).collect()),
+        });
+        self
+    }
+
+    pub fn delta_columns(&self) -> Option<&[String]> {
+        self.delta
+            .as_ref()
+            .and_then(|delta| delta.columns.as_deref())
+    }
+}
+
+/// Output delivery mode for a sink branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SinkOutputMode {
+    #[default]
+    Full,
+    Delta,
+}
+
+impl SinkOutputMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SinkOutputMode::Full => "full",
+            SinkOutputMode::Delta => "delta",
+        }
+    }
+}
+
+/// Delta-mode-specific sink output configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct SinkDeltaOutputConfig {
+    pub columns: Option<Vec<String>>,
 }
 
 /// Declarative description of a connector bound to a sink.

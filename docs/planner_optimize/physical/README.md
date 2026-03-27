@@ -20,3 +20,5 @@ Implementation entrypoint: `src/flow/src/planner/optimizer.rs` (`optimize_physic
   [`streaming_encoder_rewrite.md`](streaming_encoder_rewrite.md)
 - `ByIndexProjectionIntoEncoderRewrite` (`by_index_projection_into_encoder_rewrite`):
   [`by_index_projection_into_encoder_rewrite.md`](by_index_projection_into_encoder_rewrite.md)
+- `ByIndexProjectionIntoRowDiffRewrite` (`by_index_projection_into_row_diff_rewrite`, proposed):
+  [`by_index_projection_into_row_diff_rewrite.md`](by_index_projection_into_row_diff_rewrite.md)

@@ -31,6 +31,9 @@ pub fn optimize_physical_plan(
             aggregate_registry: Arc::clone(&aggregate_registry),
         }),
         Box::new(StreamingEncoderRewrite),
+        Box::new(ByIndexProjectionAcrossMixedConsumersRewrite),
+        Box::new(PartialByIndexRowDiffAndEncoderRewrite),
+        Box::new(ByIndexProjectionIntoRowDiffRewrite),
         Box::new(ByIndexProjectionIntoEncoderRewrite),
         Box::new(InsertBarrierForFanIn),
     ];
@@ -66,6 +69,19 @@ struct InsertBarrierForFanIn;
 /// Note: The actual rewrite (removing `Project` and attaching projection specs to encoders)
 /// is implemented in subsequent steps once encoder-side support is wired up.
 struct ByIndexProjectionIntoEncoderRewrite;
+
+/// Rule: detect shared `Project` nodes that are pure `ColumnRef::ByIndex` projections directly
+/// upstream of row-diff nodes, and prepare them for row-diff-side delayed materialization.
+struct ByIndexProjectionIntoRowDiffRewrite;
+
+/// Rule: detect shared `Project` nodes whose direct consumers are a mix of row-diff and encoder
+/// branches, and rewrite the shared `Project` into passthrough while letting each branch delay
+/// the same by-index fields to its own first eligible consumer.
+struct ByIndexProjectionAcrossMixedConsumersRewrite;
+
+/// Rule: split a pure by-index `Project -> RowDiff -> Encoder` branch so row diff only late-reads
+/// tracked columns and the downstream encoder late-reads the remaining pass-through columns.
+struct PartialByIndexRowDiffAndEncoderRewrite;
 
 impl PhysicalOptRule for StreamingAggregationRewrite {
     fn name(&self) -> &str {
@@ -300,8 +316,53 @@ impl PhysicalOptRule for ByIndexProjectionIntoEncoderRewrite {
     }
 }
 
+impl PhysicalOptRule for ByIndexProjectionIntoRowDiffRewrite {
+    fn name(&self) -> &str {
+        "by_index_projection_into_row_diff_rewrite"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        _encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        rewrite_by_index_projection_into_row_diff(plan)
+    }
+}
+
+impl PhysicalOptRule for ByIndexProjectionAcrossMixedConsumersRewrite {
+    fn name(&self) -> &str {
+        "by_index_projection_across_mixed_consumers_rewrite"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        rewrite_by_index_projection_across_mixed_consumers(plan, encoder_registry)
+    }
+}
+
+impl PhysicalOptRule for PartialByIndexRowDiffAndEncoderRewrite {
+    fn name(&self) -> &str {
+        "partial_by_index_row_diff_and_encoder_rewrite"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        rewrite_partial_by_index_row_diff_and_encoder(plan, encoder_registry)
+    }
+}
+
 #[derive(Clone, Debug)]
 enum ProjectConsumer {
+    RowDiff {
+        row_diff_index: i64,
+    },
     Encoder {
         encoder_index: i64,
         kind: String,
@@ -322,6 +383,303 @@ struct ByIndexRewriteState {
     encoder_to_projection: HashMap<i64, Arc<ByIndexProjection>>,
 }
 
+#[derive(Clone, Debug)]
+struct ByIndexRowDiffRewriteState {
+    projects_to_passthrough: HashSet<i64>,
+    project_to_remaining_fields: HashMap<i64, Vec<PhysicalProjectField>>,
+    row_diff_to_projection: HashMap<i64, Arc<ByIndexProjection>>,
+}
+
+#[derive(Clone, Debug)]
+struct ByIndexMixedRewriteState {
+    projects_to_passthrough: HashSet<i64>,
+    project_to_remaining_fields: HashMap<i64, Vec<PhysicalProjectField>>,
+    encoder_to_projection: HashMap<i64, Arc<ByIndexProjection>>,
+    row_diff_to_projection: HashMap<i64, Arc<ByIndexProjection>>,
+}
+
+#[derive(Clone, Debug)]
+struct ByIndexRowDiffEncoderRewriteState {
+    projects_to_passthrough: HashSet<i64>,
+    project_to_remaining_fields: HashMap<i64, Vec<PhysicalProjectField>>,
+    encoder_to_projection: HashMap<i64, Arc<ByIndexProjection>>,
+    row_diff_to_projection: HashMap<i64, Arc<ByIndexProjection>>,
+}
+
+fn rewrite_by_index_projection_across_mixed_consumers(
+    plan: Arc<PhysicalPlan>,
+    encoder_registry: &EncoderRegistry,
+) -> Arc<PhysicalPlan> {
+    let (node_map, consumer_map) = build_node_and_consumer_maps(&plan);
+
+    let mut state = ByIndexMixedRewriteState {
+        projects_to_passthrough: HashSet::new(),
+        project_to_remaining_fields: HashMap::new(),
+        encoder_to_projection: HashMap::new(),
+        row_diff_to_projection: HashMap::new(),
+    };
+
+    'project_loop: for (node_index, node) in node_map.iter() {
+        let PhysicalPlan::Project(project) = node.as_ref() else {
+            continue;
+        };
+        let Some((columns, remaining_fields)) =
+            split_by_index_projection_fields(project.fields.as_ref())
+        else {
+            continue;
+        };
+
+        let consumers = consumer_map.get(node_index).cloned().unwrap_or_default();
+        if consumers.is_empty() {
+            continue;
+        }
+
+        let has_row_diff = consumers
+            .iter()
+            .any(|consumer| matches!(consumer, ProjectConsumer::RowDiff { .. }));
+        let has_encoder = consumers.iter().any(|consumer| {
+            matches!(
+                consumer,
+                ProjectConsumer::Encoder { .. } | ProjectConsumer::StreamingEncoder { .. }
+            )
+        });
+        if !has_row_diff || !has_encoder {
+            continue;
+        }
+
+        if !consumers.iter().all(|consumer| match consumer {
+            ProjectConsumer::RowDiff { .. } => true,
+            ProjectConsumer::Encoder {
+                kind,
+                transform_enabled,
+                ..
+            } => !transform_enabled && supports_by_index_projection(kind, encoder_registry),
+            ProjectConsumer::StreamingEncoder {
+                kind,
+                transform_enabled,
+                ..
+            } => !transform_enabled && supports_by_index_projection(kind, encoder_registry),
+            ProjectConsumer::Other => false,
+        }) {
+            continue;
+        }
+
+        let spec = Arc::new(ByIndexProjection::new(columns));
+        state.projects_to_passthrough.insert(*node_index);
+        state
+            .project_to_remaining_fields
+            .insert(*node_index, remaining_fields);
+        for consumer in consumers {
+            match consumer {
+                ProjectConsumer::RowDiff { row_diff_index } => {
+                    let downstream_consumers = consumer_map
+                        .get(&row_diff_index)
+                        .cloned()
+                        .unwrap_or_default();
+                    if downstream_consumers.is_empty()
+                        || !downstream_consumers
+                            .iter()
+                            .all(|downstream| match downstream {
+                                ProjectConsumer::Encoder {
+                                    kind,
+                                    transform_enabled,
+                                    ..
+                                } => {
+                                    !transform_enabled
+                                        && supports_by_index_projection(kind, encoder_registry)
+                                }
+                                ProjectConsumer::StreamingEncoder {
+                                    kind,
+                                    transform_enabled,
+                                    ..
+                                } => {
+                                    !transform_enabled
+                                        && supports_by_index_projection(kind, encoder_registry)
+                                }
+                                ProjectConsumer::RowDiff { .. } | ProjectConsumer::Other => false,
+                            })
+                    {
+                        continue 'project_loop;
+                    }
+                    state
+                        .row_diff_to_projection
+                        .insert(row_diff_index, Arc::clone(&spec));
+                    for downstream in downstream_consumers {
+                        match downstream {
+                            ProjectConsumer::Encoder { encoder_index, .. }
+                            | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
+                                state
+                                    .encoder_to_projection
+                                    .insert(encoder_index, Arc::clone(&spec));
+                            }
+                            ProjectConsumer::RowDiff { .. } | ProjectConsumer::Other => {}
+                        }
+                    }
+                }
+                ProjectConsumer::Encoder { encoder_index, .. }
+                | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
+                    state
+                        .encoder_to_projection
+                        .insert(encoder_index, Arc::clone(&spec));
+                }
+                ProjectConsumer::Other => {}
+            }
+        }
+    }
+
+    if state.projects_to_passthrough.is_empty()
+        && state.encoder_to_projection.is_empty()
+        && state.row_diff_to_projection.is_empty()
+    {
+        return plan;
+    }
+
+    let mut memo = HashMap::new();
+    rewrite_by_index_mixed_nodes(plan, &state, &mut memo)
+}
+
+fn rewrite_partial_by_index_row_diff_and_encoder(
+    plan: Arc<PhysicalPlan>,
+    encoder_registry: &EncoderRegistry,
+) -> Arc<PhysicalPlan> {
+    let (node_map, consumer_map) = build_node_and_consumer_maps(&plan);
+
+    let mut state = ByIndexRowDiffEncoderRewriteState {
+        projects_to_passthrough: HashSet::new(),
+        project_to_remaining_fields: HashMap::new(),
+        encoder_to_projection: HashMap::new(),
+        row_diff_to_projection: HashMap::new(),
+    };
+
+    'project_loop: for (node_index, node) in node_map.iter() {
+        let PhysicalPlan::Project(project) = node.as_ref() else {
+            continue;
+        };
+        let Some((columns, remaining_fields)) =
+            split_by_index_projection_fields(project.fields.as_ref())
+        else {
+            continue;
+        };
+        if !remaining_fields.is_empty() {
+            continue;
+        }
+
+        let consumers = consumer_map.get(node_index).cloned().unwrap_or_default();
+        if consumers.is_empty()
+            || !consumers
+                .iter()
+                .all(|consumer| matches!(consumer, ProjectConsumer::RowDiff { .. }))
+        {
+            continue;
+        }
+
+        let mut row_diff_specs = Vec::<(i64, Arc<ByIndexProjection>)>::new();
+        let mut encoder_specs = Vec::<(i64, Arc<ByIndexProjection>)>::new();
+
+        for consumer in consumers {
+            let ProjectConsumer::RowDiff { row_diff_index } = consumer else {
+                continue;
+            };
+            let Some(row_diff_node) = node_map.get(&row_diff_index) else {
+                continue 'project_loop;
+            };
+            let PhysicalPlan::RowDiff(row_diff) = row_diff_node.as_ref() else {
+                continue 'project_loop;
+            };
+            if row_diff.tracked_column_indexes.is_empty()
+                || row_diff.tracked_column_indexes.len() >= columns.len()
+            {
+                continue 'project_loop;
+            }
+
+            let downstream_consumers = consumer_map
+                .get(&row_diff_index)
+                .cloned()
+                .unwrap_or_default();
+            if downstream_consumers.is_empty() {
+                continue 'project_loop;
+            }
+            if !downstream_consumers
+                .iter()
+                .all(|downstream| match downstream {
+                    ProjectConsumer::Encoder {
+                        kind,
+                        transform_enabled,
+                        ..
+                    } => !transform_enabled && supports_by_index_projection(kind, encoder_registry),
+                    ProjectConsumer::StreamingEncoder {
+                        kind,
+                        transform_enabled,
+                        ..
+                    } => !transform_enabled && supports_by_index_projection(kind, encoder_registry),
+                    ProjectConsumer::RowDiff { .. } | ProjectConsumer::Other => false,
+                })
+            {
+                continue 'project_loop;
+            }
+
+            let tracked_indexes = row_diff
+                .tracked_column_indexes
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let row_diff_columns = columns
+                .iter()
+                .filter(|column| tracked_indexes.contains(&column.output_index))
+                .cloned()
+                .collect::<Vec<_>>();
+            let encoder_columns = columns
+                .iter()
+                .filter(|column| !tracked_indexes.contains(&column.output_index))
+                .cloned()
+                .collect::<Vec<_>>();
+            if row_diff_columns.is_empty() || encoder_columns.is_empty() {
+                continue 'project_loop;
+            }
+
+            row_diff_specs.push((
+                row_diff_index,
+                Arc::new(ByIndexProjection::new(row_diff_columns)),
+            ));
+            let encoder_spec = Arc::new(ByIndexProjection::new(encoder_columns));
+            for downstream in downstream_consumers {
+                match downstream {
+                    ProjectConsumer::Encoder { encoder_index, .. }
+                    | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
+                        encoder_specs.push((encoder_index, Arc::clone(&encoder_spec)));
+                    }
+                    ProjectConsumer::RowDiff { .. } | ProjectConsumer::Other => {}
+                }
+            }
+        }
+
+        if row_diff_specs.is_empty() || encoder_specs.is_empty() {
+            continue;
+        }
+
+        state.projects_to_passthrough.insert(*node_index);
+        state
+            .project_to_remaining_fields
+            .insert(*node_index, remaining_fields);
+        for (row_diff_index, spec) in row_diff_specs {
+            state.row_diff_to_projection.insert(row_diff_index, spec);
+        }
+        for (encoder_index, spec) in encoder_specs {
+            state.encoder_to_projection.insert(encoder_index, spec);
+        }
+    }
+
+    if state.projects_to_passthrough.is_empty()
+        && state.encoder_to_projection.is_empty()
+        && state.row_diff_to_projection.is_empty()
+    {
+        return plan;
+    }
+
+    let mut memo = HashMap::new();
+    rewrite_by_index_row_diff_encoder_nodes(plan, &state, &mut memo)
+}
+
 fn rewrite_by_index_projection_into_encoder(
     plan: Arc<PhysicalPlan>,
     encoder_registry: &EncoderRegistry,
@@ -338,32 +696,11 @@ fn rewrite_by_index_projection_into_encoder(
         let PhysicalPlan::Project(project) = node.as_ref() else {
             continue;
         };
-        if project.fields.is_empty() {
+        let Some((columns, remaining_fields)) =
+            split_by_index_projection_fields(project.fields.as_ref())
+        else {
             continue;
-        }
-        if project
-            .fields
-            .iter()
-            .any(|field| matches!(&field.compiled_expr, ScalarExpr::Wildcard { .. }))
-        {
-            continue;
-        }
-
-        let mut columns = Vec::new();
-        let mut remaining_fields = Vec::new();
-        for field in project.fields.iter() {
-            if is_by_index_field(field) {
-                if let Some(column) = by_index_projection_column_from_field(field) {
-                    columns.push(column);
-                }
-            } else {
-                remaining_fields.push(field.clone());
-            }
-        }
-
-        if columns.is_empty() {
-            continue;
-        }
+        };
 
         let consumers = consumer_map.get(node_index).cloned().unwrap_or_default();
         if consumers.is_empty() {
@@ -373,6 +710,7 @@ fn rewrite_by_index_projection_into_encoder(
         // Design constraint: when a `Project` is shared (DAG), only apply this rewrite
         // if every consumer is an encoder that can honor delayed materialization.
         if !consumers.iter().all(|consumer| match consumer {
+            ProjectConsumer::RowDiff { .. } => false,
             ProjectConsumer::Encoder {
                 kind,
                 transform_enabled,
@@ -396,6 +734,7 @@ fn rewrite_by_index_projection_into_encoder(
             .insert(*node_index, remaining_fields);
         for consumer in consumers {
             match consumer {
+                ProjectConsumer::RowDiff { .. } => {}
                 ProjectConsumer::Encoder { encoder_index, .. }
                 | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
                     state
@@ -415,12 +754,66 @@ fn rewrite_by_index_projection_into_encoder(
     rewrite_by_index_nodes(plan, &state, &mut memo)
 }
 
+fn rewrite_by_index_projection_into_row_diff(plan: Arc<PhysicalPlan>) -> Arc<PhysicalPlan> {
+    let (node_map, consumer_map) = build_node_and_consumer_maps(&plan);
+
+    let mut state = ByIndexRowDiffRewriteState {
+        projects_to_passthrough: HashSet::new(),
+        project_to_remaining_fields: HashMap::new(),
+        row_diff_to_projection: HashMap::new(),
+    };
+
+    for (node_index, node) in node_map.iter() {
+        let PhysicalPlan::Project(project) = node.as_ref() else {
+            continue;
+        };
+        let Some((columns, remaining_fields)) =
+            split_by_index_projection_fields(project.fields.as_ref())
+        else {
+            continue;
+        };
+
+        let consumers = consumer_map.get(node_index).cloned().unwrap_or_default();
+        if consumers.is_empty() {
+            continue;
+        }
+
+        if !consumers
+            .iter()
+            .all(|consumer| matches!(consumer, ProjectConsumer::RowDiff { .. }))
+        {
+            continue;
+        }
+
+        let spec = Arc::new(ByIndexProjection::new(columns));
+        state.projects_to_passthrough.insert(*node_index);
+        state
+            .project_to_remaining_fields
+            .insert(*node_index, remaining_fields);
+        for consumer in consumers {
+            if let ProjectConsumer::RowDiff { row_diff_index } = consumer {
+                state
+                    .row_diff_to_projection
+                    .insert(row_diff_index, Arc::clone(&spec));
+            }
+        }
+    }
+
+    if state.projects_to_passthrough.is_empty() && state.row_diff_to_projection.is_empty() {
+        return plan;
+    }
+
+    let mut memo = HashMap::new();
+    rewrite_by_index_row_diff_nodes(plan, &state, &mut memo)
+}
+
 fn supports_by_index_projection(kind: &str, encoder_registry: &EncoderRegistry) -> bool {
     encoder_registry.supports_by_index_projection(kind)
 }
 
 fn by_index_projection_column_from_field(
     field: &PhysicalProjectField,
+    output_index: usize,
 ) -> Option<ByIndexProjectionColumn> {
     let ScalarExpr::Column(ColumnRef::ByIndex {
         source_name,
@@ -433,8 +826,43 @@ fn by_index_projection_column_from_field(
     Some(ByIndexProjectionColumn::new(
         source_name.as_str(),
         *column_index,
+        output_index,
+        field.original_expr.to_string(),
         Arc::clone(&field.field_name),
     ))
+}
+
+fn split_by_index_projection_fields(
+    fields: &[PhysicalProjectField],
+) -> Option<(Vec<ByIndexProjectionColumn>, Vec<PhysicalProjectField>)> {
+    if fields.is_empty() {
+        return None;
+    }
+
+    if fields
+        .iter()
+        .any(|field| matches!(&field.compiled_expr, ScalarExpr::Wildcard { .. }))
+    {
+        return None;
+    }
+
+    let mut columns = Vec::new();
+    let mut remaining_fields = Vec::new();
+    for (output_index, field) in fields.iter().enumerate() {
+        if is_by_index_field(field) {
+            if let Some(column) = by_index_projection_column_from_field(field, output_index) {
+                columns.push(column);
+            }
+        } else {
+            remaining_fields.push(field.clone());
+        }
+    }
+
+    if columns.is_empty() {
+        return None;
+    }
+
+    Some((columns, remaining_fields))
 }
 
 fn build_node_and_consumer_maps(
@@ -456,6 +884,9 @@ fn build_node_and_consumer_maps(
         for child in plan.children() {
             let child_index = child.get_plan_index();
             let consumer = match plan.as_ref() {
+                PhysicalPlan::RowDiff(row_diff) => ProjectConsumer::RowDiff {
+                    row_diff_index: row_diff.base.index(),
+                },
                 PhysicalPlan::Encoder(encoder) => ProjectConsumer::Encoder {
                     encoder_index: encoder.base.index(),
                     kind: encoder.encoder.kind_str().to_string(),
@@ -511,6 +942,160 @@ fn rewrite_by_index_nodes(
                 .into();
             new.passthrough_messages = true;
             Arc::new(PhysicalPlan::Project(new))
+        }
+        PhysicalPlan::Encoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
+            let mut new = encoder.clone();
+            new.base.children = rewritten_children;
+            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::Encoder(new))
+        }
+        PhysicalPlan::StreamingEncoder(encoder)
+            if state.encoder_to_projection.contains_key(&index) =>
+        {
+            let mut new = encoder.clone();
+            new.base.children = rewritten_children;
+            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::StreamingEncoder(new))
+        }
+        _ => rebuild_with_children(plan.as_ref(), rewritten_children),
+    };
+
+    memo.insert(index, Arc::clone(&rebuilt));
+    rebuilt
+}
+
+fn rewrite_by_index_row_diff_nodes(
+    plan: Arc<PhysicalPlan>,
+    state: &ByIndexRowDiffRewriteState,
+    memo: &mut HashMap<i64, Arc<PhysicalPlan>>,
+) -> Arc<PhysicalPlan> {
+    let index = plan.get_plan_index();
+    if let Some(rewritten) = memo.get(&index) {
+        return Arc::clone(rewritten);
+    }
+
+    let rewritten_children = plan
+        .children()
+        .iter()
+        .map(|child| rewrite_by_index_row_diff_nodes(Arc::clone(child), state, memo))
+        .collect::<Vec<_>>();
+
+    let rebuilt = match plan.as_ref() {
+        PhysicalPlan::Project(project) if state.projects_to_passthrough.contains(&index) => {
+            let mut new = project.clone();
+            new.base.children = rewritten_children;
+            new.fields = state
+                .project_to_remaining_fields
+                .get(&index)
+                .cloned()
+                .unwrap_or_default()
+                .into();
+            new.passthrough_messages = true;
+            Arc::new(PhysicalPlan::Project(new))
+        }
+        PhysicalPlan::RowDiff(row_diff) if state.row_diff_to_projection.contains_key(&index) => {
+            let mut new = row_diff.clone();
+            new.base.children = rewritten_children;
+            new.late_projection = state.row_diff_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::RowDiff(new))
+        }
+        _ => rebuild_with_children(plan.as_ref(), rewritten_children),
+    };
+
+    memo.insert(index, Arc::clone(&rebuilt));
+    rebuilt
+}
+
+fn rewrite_by_index_mixed_nodes(
+    plan: Arc<PhysicalPlan>,
+    state: &ByIndexMixedRewriteState,
+    memo: &mut HashMap<i64, Arc<PhysicalPlan>>,
+) -> Arc<PhysicalPlan> {
+    let index = plan.get_plan_index();
+    if let Some(rewritten) = memo.get(&index) {
+        return Arc::clone(rewritten);
+    }
+
+    let rewritten_children = plan
+        .children()
+        .iter()
+        .map(|child| rewrite_by_index_mixed_nodes(Arc::clone(child), state, memo))
+        .collect::<Vec<_>>();
+
+    let rebuilt = match plan.as_ref() {
+        PhysicalPlan::Project(project) if state.projects_to_passthrough.contains(&index) => {
+            let mut new = project.clone();
+            new.base.children = rewritten_children;
+            new.fields = state
+                .project_to_remaining_fields
+                .get(&index)
+                .cloned()
+                .unwrap_or_default()
+                .into();
+            new.passthrough_messages = true;
+            Arc::new(PhysicalPlan::Project(new))
+        }
+        PhysicalPlan::RowDiff(row_diff) if state.row_diff_to_projection.contains_key(&index) => {
+            let mut new = row_diff.clone();
+            new.base.children = rewritten_children;
+            new.late_projection = state.row_diff_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::RowDiff(new))
+        }
+        PhysicalPlan::Encoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
+            let mut new = encoder.clone();
+            new.base.children = rewritten_children;
+            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::Encoder(new))
+        }
+        PhysicalPlan::StreamingEncoder(encoder)
+            if state.encoder_to_projection.contains_key(&index) =>
+        {
+            let mut new = encoder.clone();
+            new.base.children = rewritten_children;
+            new.by_index_projection = state.encoder_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::StreamingEncoder(new))
+        }
+        _ => rebuild_with_children(plan.as_ref(), rewritten_children),
+    };
+
+    memo.insert(index, Arc::clone(&rebuilt));
+    rebuilt
+}
+
+fn rewrite_by_index_row_diff_encoder_nodes(
+    plan: Arc<PhysicalPlan>,
+    state: &ByIndexRowDiffEncoderRewriteState,
+    memo: &mut HashMap<i64, Arc<PhysicalPlan>>,
+) -> Arc<PhysicalPlan> {
+    let index = plan.get_plan_index();
+    if let Some(rewritten) = memo.get(&index) {
+        return Arc::clone(rewritten);
+    }
+
+    let rewritten_children = plan
+        .children()
+        .iter()
+        .map(|child| rewrite_by_index_row_diff_encoder_nodes(Arc::clone(child), state, memo))
+        .collect::<Vec<_>>();
+
+    let rebuilt = match plan.as_ref() {
+        PhysicalPlan::Project(project) if state.projects_to_passthrough.contains(&index) => {
+            let mut new = project.clone();
+            new.base.children = rewritten_children;
+            new.fields = state
+                .project_to_remaining_fields
+                .get(&index)
+                .cloned()
+                .unwrap_or_default()
+                .into();
+            new.passthrough_messages = true;
+            Arc::new(PhysicalPlan::Project(new))
+        }
+        PhysicalPlan::RowDiff(row_diff) if state.row_diff_to_projection.contains_key(&index) => {
+            let mut new = row_diff.clone();
+            new.base.children = rewritten_children;
+            new.late_projection = state.row_diff_to_projection.get(&index).cloned();
+            Arc::new(PhysicalPlan::RowDiff(new))
         }
         PhysicalPlan::Encoder(encoder) if state.encoder_to_projection.contains_key(&index) => {
             let mut new = encoder.clone();
@@ -646,6 +1231,11 @@ fn rebuild_with_children(
             let mut new = project.clone();
             new.base.children = children;
             Arc::new(PhysicalPlan::Project(new))
+        }
+        PhysicalPlan::RowDiff(row_diff) => {
+            let mut new = row_diff.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::RowDiff(new))
         }
         PhysicalPlan::Aggregation(agg) => {
             let mut new = agg.clone();

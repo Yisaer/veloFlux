@@ -631,7 +631,8 @@ fn build_sinks_from_definition(
                     sink.encoder.clone(),
                 );
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
-                    .with_common_props(sink.common.clone());
+                    .with_common_props(sink.common.clone())
+                    .with_output(sink.output.clone());
                 sinks.push(pipeline_sink);
             }
             SinkType::Nop => {
@@ -652,7 +653,8 @@ fn build_sinks_from_definition(
                     sink.encoder.clone(),
                 );
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
-                    .with_common_props(sink.common.clone());
+                    .with_common_props(sink.common.clone())
+                    .with_output(sink.output.clone());
                 sinks.push(pipeline_sink);
             }
             SinkType::Kuksa => {
@@ -682,7 +684,8 @@ fn build_sinks_from_definition(
                     sink.encoder.clone(),
                 );
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
-                    .with_common_props(sink.common.clone());
+                    .with_common_props(sink.common.clone())
+                    .with_output(sink.output.clone());
                 sinks.push(pipeline_sink);
             }
             SinkType::Memory => {
@@ -714,7 +717,8 @@ fn build_sinks_from_definition(
                     sink.encoder.clone(),
                 );
                 let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
-                    .with_common_props(sink.common.clone());
+                    .with_common_props(sink.common.clone())
+                    .with_output(sink.output.clone());
                 sinks.push(pipeline_sink);
             }
         }

@@ -60,7 +60,7 @@ pub use planner::optimize_logical_plan;
 pub use planner::optimize_physical_plan;
 pub use planner::sink::{
     CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
-    SinkEncoderConfig,
+    SinkDeltaOutputConfig, SinkEncoderConfig, SinkOutputConfig, SinkOutputMode,
 };
 pub use processor::{ControlSignal, ProcessorError, StreamData};
 pub use shared_stream::{

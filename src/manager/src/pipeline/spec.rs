@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use super::types::{
     CreatePipelineRequest, EncoderTransformRequest, MemorySinkPropsRequest, MqttSinkPropsRequest,
-    NopSinkPropsRequest,
+    NopSinkPropsRequest, SinkOutputConfigRequest,
 };
 
 #[derive(Deserialize)]
@@ -155,9 +155,16 @@ pub(crate) fn build_pipeline_definition(
         encoder_config
             .validate()
             .map_err(|err| format!("invalid encoder config for sink `{sink_id}`: {err}"))?;
+        let output_config = sink_req
+            .output
+            .as_ref()
+            .map(SinkOutputConfigRequest::to_output_config)
+            .transpose()?
+            .unwrap_or_default();
 
         let sink_definition = sink_definition
             .with_encoder(encoder_config)
+            .with_output(output_config)
             .with_common_props(sink_req.common.to_common_props());
         sinks.push(sink_definition);
     }
@@ -299,6 +306,47 @@ mod tests {
         assert_eq!(sink.encoder.transform_template(), None);
     }
 
+    #[tokio::test]
+    async fn build_pipeline_definition_wires_sink_output_request() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_1",
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "sink_1",
+                    "type": "nop",
+                    "props": { "log": false },
+                    "encoder": {
+                        "type": "json"
+                    },
+                    "output": {
+                        "mode": "delta",
+                        "delta": {
+                            "columns": ["a"]
+                        }
+                    }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("build pipeline definition");
+        let sink = &definition.sinks()[0];
+
+        assert_eq!(sink.output.mode.as_str(), "delta");
+        assert_eq!(sink.output.delta_columns(), Some(&["a".to_string()][..]));
+    }
+
     #[test]
     fn create_pipeline_request_rejects_non_object_encoder_transform() {
         let result = serde_json::from_value::<CreatePipelineRequest>(json!({
@@ -360,6 +408,79 @@ mod tests {
         assert!(
             result.is_err(),
             "missing template should fail deserialization"
+        );
+    }
+
+    #[test]
+    fn create_pipeline_request_rejects_missing_sink_output_mode() {
+        let result = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_1",
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "sink_1",
+                    "type": "nop",
+                    "props": { "log": false },
+                    "encoder": {
+                        "type": "json"
+                    },
+                    "output": {
+                        "delta": {
+                            "columns": ["a"]
+                        }
+                    }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }));
+
+        assert!(
+            result.is_err(),
+            "missing output.mode should fail deserialization"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_rejects_invalid_sink_output_mode() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_1",
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "sink_1",
+                    "type": "nop",
+                    "props": { "log": false },
+                    "encoder": {
+                        "type": "json"
+                    },
+                    "output": {
+                        "mode": "patch"
+                    }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let err =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect_err("invalid output mode should fail");
+        assert!(
+            err.contains("invalid sink output.mode"),
+            "unexpected error: {err}"
         );
     }
 }

@@ -116,6 +116,7 @@ impl AffiliateRow {
 pub struct Tuple {
     pub messages: Arc<[Arc<Message>]>,
     affiliate: Option<Arc<AffiliateRow>>,
+    output_mask: Option<Arc<[bool]>>,
     pub timestamp: SystemTime,
 }
 
@@ -132,12 +133,33 @@ impl Tuple {
         Self {
             messages,
             affiliate: None,
+            output_mask: None,
             timestamp,
         }
     }
 
     pub fn affiliate(&self) -> Option<&AffiliateRow> {
         self.affiliate.as_ref().map(|aff| aff.as_ref())
+    }
+
+    pub fn output_mask(&self) -> Option<&[bool]> {
+        self.output_mask.as_deref()
+    }
+
+    pub fn output_mask_shared(&self) -> Option<Arc<[bool]>> {
+        self.output_mask.as_ref().map(Arc::clone)
+    }
+
+    pub fn set_output_mask(&mut self, mask: Vec<bool>) {
+        self.output_mask = Some(Arc::from(mask));
+    }
+
+    pub fn set_output_mask_shared(&mut self, mask: Arc<[bool]>) {
+        self.output_mask = Some(mask);
+    }
+
+    pub fn clear_output_mask(&mut self) {
+        self.output_mask = None;
     }
 
     pub(crate) fn affiliate_mut(&mut self) -> &mut AffiliateRow {
@@ -187,20 +209,24 @@ impl Tuple {
             }
             return None;
         }
-        self.messages
-            .iter()
-            .find(|msg| msg.source() == source)
-            .and_then(|msg| msg.value(column))
+        self.messages.iter().find_map(|msg| {
+            if msg.source() != source {
+                return None;
+            }
+            msg.value(column)
+        })
     }
 
     pub fn value_by_index(&self, source: &str, index: usize) -> Option<&Value> {
         if source.is_empty() {
             return None;
         }
-        self.messages
-            .iter()
-            .find(|msg| msg.source() == source)
-            .and_then(|msg| msg.value_by_index(index))
+        self.messages.iter().find_map(|msg| {
+            if msg.source() != source {
+                return None;
+            }
+            msg.value_by_index(index)
+        })
     }
 
     pub fn len(&self) -> usize {
