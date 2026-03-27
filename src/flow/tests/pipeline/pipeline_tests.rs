@@ -5,7 +5,7 @@ use flow::connector::MemoryTopicKind;
 use flow::model::{batch_from_columns_simple, Message, RecordBatch, Tuple};
 use flow::pipeline::MemorySinkProps;
 use flow::pipeline::PipelineDefinition;
-use flow::planner::sink::SinkOutputConfig;
+use flow::planner::sink::{CommonSinkProps, SinkOutputConfig};
 use flow::Collection;
 use flow::FlowInstance;
 use flow::SinkEncoderConfig;
@@ -358,6 +358,7 @@ struct RowDiffJsonCase {
     source_name: &'static str,
     sql: &'static str,
     input_data: Vec<(String, Vec<Value>)>,
+    sink_common: CommonSinkProps,
     encoder: SinkEncoderConfig,
     output: SinkOutputConfig,
     expected: JsonValue,
@@ -389,6 +390,7 @@ async fn run_row_diff_json_case(case: RowDiffJsonCase) {
         SinkType::Memory,
         SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
     )
+    .with_common_props(case.sink_common)
     .with_encoder(case.encoder)
     .with_output(case.output);
     let pipeline = PipelineDefinition::new(pipeline_id.clone(), case.sql, vec![sink]);
@@ -861,6 +863,7 @@ async fn pipeline_row_diff_json_table_driven() {
                     vec![Value::Int64(10), Value::Int64(10), Value::Int64(10)],
                 ),
             ],
+            sink_common: CommonSinkProps::default(),
             encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta(),
             expected: serde_json::json!([
@@ -883,6 +886,7 @@ async fn pipeline_row_diff_json_table_driven() {
                     vec![Value::Int64(10), Value::Int64(10), Value::Int64(10)],
                 ),
             ],
+            sink_common: CommonSinkProps::default(),
             encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta(),
             expected: serde_json::json!([
@@ -905,6 +909,33 @@ async fn pipeline_row_diff_json_table_driven() {
                     vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
                 ),
             ],
+            sink_common: CommonSinkProps::default(),
+            encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::delta_with_columns(["b"]),
+            expected: serde_json::json!([
+                {"a": 1, "b": 10},
+                {"a": 2},
+                {"a": 3, "b": 11}
+            ]),
+        },
+        RowDiffJsonCase {
+            name: "row_diff_with_batch_keeps_row_diff_and_rewrites_to_streaming_encoder",
+            source_name: "stream_ab",
+            sql: "SELECT a, b FROM stream_ab",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
+                ),
+            ],
+            sink_common: CommonSinkProps {
+                batch_count: Some(16),
+                batch_duration: Some(Duration::from_millis(50)),
+            },
             encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta_with_columns(["b"]),
             expected: serde_json::json!([
@@ -931,6 +962,7 @@ async fn pipeline_row_diff_json_table_driven() {
                     vec![Value::Int64(100), Value::Int64(101), Value::Int64(102)],
                 ),
             ],
+            sink_common: CommonSinkProps::default(),
             encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta_with_columns(["b"]),
             expected: serde_json::json!([
@@ -947,6 +979,7 @@ async fn pipeline_row_diff_json_table_driven() {
                 "a".to_string(),
                 vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
             )],
+            sink_common: CommonSinkProps::default(),
             encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta(),
             expected: serde_json::json!([
@@ -963,6 +996,7 @@ async fn pipeline_row_diff_json_table_driven() {
                 "a".to_string(),
                 vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
             )],
+            sink_common: CommonSinkProps::default(),
             encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta_with_columns(["x"]),
             expected: serde_json::json!([
@@ -985,6 +1019,7 @@ async fn pipeline_row_diff_json_table_driven() {
                     vec![Value::Int64(10), Value::Int64(11), Value::Int64(11)],
                 ),
             ],
+            sink_common: CommonSinkProps::default(),
             encoder: SinkEncoderConfig::json(),
             output: SinkOutputConfig::delta(),
             expected: serde_json::json!([
@@ -1007,6 +1042,7 @@ async fn pipeline_row_diff_json_table_driven() {
                     vec![Value::Int64(10), Value::Int64(10), Value::Int64(10)],
                 ),
             ],
+            sink_common: CommonSinkProps::default(),
             encoder: SinkEncoderConfig::json_with_transform_template("{{ json(.row) }}"),
             output: SinkOutputConfig::delta(),
             expected: serde_json::json!([
@@ -1019,6 +1055,145 @@ async fn pipeline_row_diff_json_table_driven() {
 
     for case in cases {
         run_row_diff_json_case(case).await;
+    }
+}
+
+struct MixedConsumersJsonCase {
+    name: &'static str,
+    source_name: &'static str,
+    sql: &'static str,
+    input_data: Vec<(String, Vec<Value>)>,
+    expected_regular: JsonValue,
+    expected_delta: JsonValue,
+}
+
+async fn run_mixed_consumers_json_case(case: MixedConsumersJsonCase) {
+    println!("Running test: {}", case.name);
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ));
+    let (input_topic, regular_output_topic) =
+        make_memory_topics("pipeline_mixed_consumers_json_regular", case.name);
+    let (_, delta_output_topic) =
+        make_memory_topics("pipeline_mixed_consumers_json_delta", case.name);
+    declare_memory_input_output_topics(&instance, &input_topic, &regular_output_topic);
+    instance
+        .declare_memory_topic(
+            &delta_output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare delta output memory topic");
+    install_memory_stream_schema_with_name(
+        &instance,
+        &input_topic,
+        case.source_name,
+        &case.input_data,
+    )
+    .await;
+
+    let mut regular_output = instance
+        .open_memory_subscribe_bytes(&regular_output_topic)
+        .expect("subscribe regular output bytes");
+    let mut delta_output = instance
+        .open_memory_subscribe_bytes(&delta_output_topic)
+        .expect("subscribe delta output bytes");
+
+    let pipeline_id = format!("pipe_{}", regular_output_topic);
+    let regular_sink = SinkDefinition::new(
+        "mem_sink_regular",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(regular_output_topic.clone())),
+    )
+    .with_encoder(SinkEncoderConfig::json());
+    let delta_sink = SinkDefinition::new(
+        "mem_sink_delta",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(delta_output_topic.clone())),
+    )
+    .with_encoder(SinkEncoderConfig::json())
+    .with_output(SinkOutputConfig::delta_with_columns(["b"]));
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        case.sql,
+        vec![regular_sink, delta_sink],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
+
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
+
+    let columns = case
+        .input_data
+        .into_iter()
+        .map(|(col_name, values)| (case.source_name.to_string(), col_name, values))
+        .collect();
+    let batch = batch_from_columns_simple(columns)
+        .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", case.name));
+
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+
+    let actual_regular = recv_next_json(&mut regular_output, timeout_duration).await;
+    assert_eq!(
+        normalize_json(actual_regular),
+        normalize_json(case.expected_regular),
+        "Wrong regular JSON for test: {}",
+        case.name
+    );
+
+    let actual_delta = recv_next_json(&mut delta_output, timeout_duration).await;
+    assert_eq!(
+        normalize_json(actual_delta),
+        normalize_json(case.expected_delta),
+        "Wrong delta JSON for test: {}",
+        case.name
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to stop pipeline for test: {}", case.name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
+}
+
+#[tokio::test]
+async fn pipeline_mixed_consumers_json_table_driven() {
+    let cases = vec![MixedConsumersJsonCase {
+        name: "shared_project_with_encoder_branch_and_row_diff_branch",
+        source_name: "stream_ab",
+        sql: "SELECT a, b FROM stream_ab",
+        input_data: vec![
+            (
+                "a".to_string(),
+                vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+            ),
+            (
+                "b".to_string(),
+                vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
+            ),
+        ],
+        expected_regular: serde_json::json!([
+            {"a": 1, "b": 10},
+            {"a": 2, "b": 10},
+            {"a": 3, "b": 11}
+        ]),
+        expected_delta: serde_json::json!([
+            {"a": 1, "b": 10},
+            {"a": 2},
+            {"a": 3, "b": 11}
+        ]),
+    }];
+
+    for case in cases {
+        run_mixed_consumers_json_case(case).await;
     }
 }
 
