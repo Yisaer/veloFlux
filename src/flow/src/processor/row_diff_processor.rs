@@ -21,6 +21,8 @@ struct RowDiffState {
     previous_tracked_row: Option<Vec<Option<Arc<Value>>>>,
 }
 
+type RowDiffOutput = (Vec<Arc<Value>>, Arc<[bool]>);
+
 #[derive(Clone)]
 enum RowDiffInputExtractor {
     Materialized(OutputRowAccessor),
@@ -258,7 +260,7 @@ fn build_diff_row(
     previous_tracked_row: Option<&[Option<Arc<Value>>]>,
     tracked_flags: &[bool],
     output_column_names: &[Arc<str>],
-) -> Result<(Vec<Arc<Value>>, Arc<[bool]>), ProcessorError> {
+) -> Result<RowDiffOutput, ProcessorError> {
     let missing_tracked_columns = tracked_current_values
         .iter()
         .enumerate()
@@ -269,13 +271,12 @@ fn build_diff_row(
                 .unwrap_or(false)
                 .then_some((idx, current_value))
         })
-        .filter_map(|(idx, current_value)| {
-            current_value.as_ref().is_none().then(|| {
-                output_column_names
-                    .get(idx)
-                    .map(|name| name.to_string())
-                    .unwrap_or_else(|| format!("#{idx}"))
-            })
+        .filter(|(_, current_value)| current_value.as_ref().is_none())
+        .map(|(idx, _)| {
+            output_column_names
+                .get(idx)
+                .map(|name| name.to_string())
+                .unwrap_or_else(|| format!("#{idx}"))
         })
         .collect::<Vec<_>>();
     if !missing_tracked_columns.is_empty() {

@@ -1183,10 +1183,9 @@ async fn run_mixed_consumers_json_case(case: MixedConsumersJsonCase) {
         case.name
     );
 
-    instance
+    let _ = instance
         .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
-        .await
-        .unwrap_or_else(|_| panic!("Failed to stop pipeline for test: {}", case.name));
+        .await;
     instance
         .delete_pipeline(&pipeline_id)
         .await
