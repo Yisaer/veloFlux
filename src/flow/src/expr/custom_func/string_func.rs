@@ -2,11 +2,14 @@ use super::helpers::*;
 use crate::catalog::FunctionDef;
 use crate::expr::custom_func::CustomFunc;
 use crate::expr::func::EvalError;
+use crate::expr::scalar::ScalarExpr;
 use datatypes::Value;
 use icu::decimal::input::Decimal as IcuDecimal;
 use icu::decimal::DecimalFormatter;
 use icu::locale::LanguageIdentifier;
+use regex::Regex;
 use std::str::FromStr;
+use std::sync::Arc;
 
 // format_time function is moved to "cast" function in Transform Functions
 
@@ -45,6 +48,21 @@ pub struct RegexpReplaceFunc;
 
 #[derive(Debug, Clone)]
 pub struct RegexpSubstrFunc;
+
+#[derive(Clone)]
+struct CompiledRegexpMatchesFunc {
+    regex: Regex,
+}
+
+#[derive(Clone)]
+struct CompiledRegexpReplaceFunc {
+    regex: Regex,
+}
+
+#[derive(Clone)]
+struct CompiledRegexpSubstrFunc {
+    regex: Regex,
+}
 
 #[derive(Debug, Clone)]
 pub struct ReverseFunc;
@@ -97,6 +115,55 @@ pub fn builtin_function_defs() -> Vec<FunctionDef> {
 
 fn reverse_by_chars(s: &str) -> String {
     s.chars().rev().collect()
+}
+
+fn literal_pattern_arg(args: &[ScalarExpr], idx: usize) -> Option<&str> {
+    match args.get(idx) {
+        Some(ScalarExpr::Literal(Value::String(pattern), _)) => Some(pattern.as_str()),
+        _ => None,
+    }
+}
+
+pub fn maybe_specialize_literal_regex_func(
+    func_name: &str,
+    args: &[ScalarExpr],
+) -> Result<Option<Arc<dyn CustomFunc>>, EvalError> {
+    let Some(pattern) = literal_pattern_arg(args, 1) else {
+        return Ok(None);
+    };
+
+    let func: Arc<dyn CustomFunc> = match func_name {
+        "regexp_matches" => Arc::new(CompiledRegexpMatchesFunc {
+            regex: compile_regex(pattern)?,
+        }),
+        "regexp_replace" => Arc::new(CompiledRegexpReplaceFunc {
+            regex: compile_regex(pattern)?,
+        }),
+        "regexp_substring" => Arc::new(CompiledRegexpSubstrFunc {
+            regex: compile_regex(pattern)?,
+        }),
+        _ => return Ok(None),
+    };
+
+    Ok(Some(func))
+}
+
+impl std::fmt::Debug for CompiledRegexpMatchesFunc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CompiledRegexpMatchesFunc")
+    }
+}
+
+impl std::fmt::Debug for CompiledRegexpReplaceFunc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CompiledRegexpReplaceFunc")
+    }
+}
+
+impl std::fmt::Debug for CompiledRegexpSubstrFunc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CompiledRegexpSubstrFunc")
+    }
 }
 
 pub fn format_function_def() -> FunctionDef {
@@ -635,6 +702,64 @@ impl CustomFunc for RegexpSubstrFunc {
         binary_string_to_string_result(args, |s, pat| {
             let re = compile_regex(pat)?;
             Ok(re
+                .find(s)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default())
+        })
+    }
+
+    fn name(&self) -> &str {
+        "regexp_substring"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["regexp_substr"]
+    }
+}
+
+impl CustomFunc for CompiledRegexpMatchesFunc {
+    fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
+        validate_two_strings_or_null(args)
+    }
+
+    fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
+        binary_string_to_bool_result(args, |s, _pat| Ok(self.regex.is_match(s)))
+    }
+
+    fn name(&self) -> &str {
+        "regexp_matches"
+    }
+}
+
+impl CustomFunc for CompiledRegexpReplaceFunc {
+    fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
+        validate_arity(args, &[3])?;
+        nth_string_or_null(args, 0)?;
+        nth_string_or_null(args, 1)?;
+        nth_string_or_null(args, 2)?;
+        Ok(())
+    }
+
+    fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
+        ternary_string_to_string(args, |s, _pat, repl| {
+            Ok(self.regex.replace_all(s, repl).to_string())
+        })
+    }
+
+    fn name(&self) -> &str {
+        "regexp_replace"
+    }
+}
+
+impl CustomFunc for CompiledRegexpSubstrFunc {
+    fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
+        validate_two_strings_or_null(args)
+    }
+
+    fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
+        binary_string_to_string_result(args, |s, _pat| {
+            Ok(self
+                .regex
                 .find(s)
                 .map(|m| m.as_str().to_string())
                 .unwrap_or_default())
