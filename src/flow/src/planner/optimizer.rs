@@ -347,6 +347,7 @@ struct ByIndexRewriteState {
 #[derive(Clone, Debug)]
 struct ByIndexRowDiffRewriteState {
     projects_to_passthrough: HashSet<i64>,
+    project_to_remaining_fields: HashMap<i64, Vec<PhysicalProjectField>>,
     row_diff_to_projection: HashMap<i64, Arc<ByIndexProjection>>,
 }
 
@@ -366,32 +367,11 @@ fn rewrite_by_index_projection_into_encoder(
         let PhysicalPlan::Project(project) = node.as_ref() else {
             continue;
         };
-        if project.fields.is_empty() {
+        let Some((columns, remaining_fields)) =
+            split_by_index_projection_fields(project.fields.as_ref())
+        else {
             continue;
-        }
-        if project
-            .fields
-            .iter()
-            .any(|field| matches!(&field.compiled_expr, ScalarExpr::Wildcard { .. }))
-        {
-            continue;
-        }
-
-        let mut columns = Vec::new();
-        let mut remaining_fields = Vec::new();
-        for field in project.fields.iter() {
-            if is_by_index_field(field) {
-                if let Some(column) = by_index_projection_column_from_field(field) {
-                    columns.push(column);
-                }
-            } else {
-                remaining_fields.push(field.clone());
-            }
-        }
-
-        if columns.is_empty() {
-            continue;
-        }
+        };
 
         let consumers = consumer_map.get(node_index).cloned().unwrap_or_default();
         if consumers.is_empty() {
@@ -450,6 +430,7 @@ fn rewrite_by_index_projection_into_row_diff(plan: Arc<PhysicalPlan>) -> Arc<Phy
 
     let mut state = ByIndexRowDiffRewriteState {
         projects_to_passthrough: HashSet::new(),
+        project_to_remaining_fields: HashMap::new(),
         row_diff_to_projection: HashMap::new(),
     };
 
@@ -457,7 +438,9 @@ fn rewrite_by_index_projection_into_row_diff(plan: Arc<PhysicalPlan>) -> Arc<Phy
         let PhysicalPlan::Project(project) = node.as_ref() else {
             continue;
         };
-        let Some(columns) = full_by_index_projection_columns(project.fields.as_ref()) else {
+        let Some((columns, remaining_fields)) =
+            split_by_index_projection_fields(project.fields.as_ref())
+        else {
             continue;
         };
 
@@ -475,6 +458,9 @@ fn rewrite_by_index_projection_into_row_diff(plan: Arc<PhysicalPlan>) -> Arc<Phy
 
         let spec = Arc::new(ByIndexProjection::new(columns));
         state.projects_to_passthrough.insert(*node_index);
+        state
+            .project_to_remaining_fields
+            .insert(*node_index, remaining_fields);
         for consumer in consumers {
             if let ProjectConsumer::RowDiff { row_diff_index } = consumer {
                 state
@@ -498,6 +484,7 @@ fn supports_by_index_projection(kind: &str, encoder_registry: &EncoderRegistry) 
 
 fn by_index_projection_column_from_field(
     field: &PhysicalProjectField,
+    output_index: usize,
 ) -> Option<ByIndexProjectionColumn> {
     let ScalarExpr::Column(ColumnRef::ByIndex {
         source_name,
@@ -510,22 +497,43 @@ fn by_index_projection_column_from_field(
     Some(ByIndexProjectionColumn::new(
         source_name.as_str(),
         *column_index,
+        output_index,
         field.original_expr.to_string(),
         Arc::clone(&field.field_name),
     ))
 }
 
-fn full_by_index_projection_columns(
+fn split_by_index_projection_fields(
     fields: &[PhysicalProjectField],
-) -> Option<Vec<ByIndexProjectionColumn>> {
+) -> Option<(Vec<ByIndexProjectionColumn>, Vec<PhysicalProjectField>)> {
     if fields.is_empty() {
         return None;
     }
 
-    fields
+    if fields
         .iter()
-        .map(by_index_projection_column_from_field)
-        .collect()
+        .any(|field| matches!(&field.compiled_expr, ScalarExpr::Wildcard { .. }))
+    {
+        return None;
+    }
+
+    let mut columns = Vec::new();
+    let mut remaining_fields = Vec::new();
+    for (output_index, field) in fields.iter().enumerate() {
+        if is_by_index_field(field) {
+            if let Some(column) = by_index_projection_column_from_field(field, output_index) {
+                columns.push(column);
+            }
+        } else {
+            remaining_fields.push(field.clone());
+        }
+    }
+
+    if columns.is_empty() {
+        return None;
+    }
+
+    Some((columns, remaining_fields))
 }
 
 fn build_node_and_consumer_maps(
@@ -647,7 +655,12 @@ fn rewrite_by_index_row_diff_nodes(
         PhysicalPlan::Project(project) if state.projects_to_passthrough.contains(&index) => {
             let mut new = project.clone();
             new.base.children = rewritten_children;
-            new.fields = Arc::from(Vec::<PhysicalProjectField>::new());
+            new.fields = state
+                .project_to_remaining_fields
+                .get(&index)
+                .cloned()
+                .unwrap_or_default()
+                .into();
             new.passthrough_messages = true;
             Arc::new(PhysicalPlan::Project(new))
         }

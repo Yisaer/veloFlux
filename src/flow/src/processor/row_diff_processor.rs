@@ -24,7 +24,15 @@ struct RowDiffState {
 #[derive(Clone)]
 enum RowDiffInputExtractor {
     Materialized(OutputRowAccessor),
-    LateProjection(Arc<ByIndexProjection>),
+    LateProjection {
+        spec: Arc<ByIndexProjection>,
+        output_width: usize,
+    },
+    Hybrid {
+        materialized: OutputRowAccessor,
+        late_projection: Arc<ByIndexProjection>,
+        output_column_names: Arc<[Arc<str>]>,
+    },
 }
 
 pub struct RowDiffProcessor {
@@ -61,23 +69,31 @@ impl RowDiffProcessor {
 
         let output_accessor =
             OutputRowAccessor::from_output_schema(physical_row_diff.output_schema.as_ref());
+        let output_width = output_accessor.width();
         let input_extractor = match physical_row_diff.late_projection.as_ref() {
             Some(spec) => {
-                if spec.columns().len() != output_accessor.width() {
-                    return Err(ProcessorError::InvalidConfiguration(format!(
-                        "row diff late projection width {} does not match output width {}",
-                        spec.columns().len(),
-                        output_accessor.width()
-                    )));
+                validate_late_projection(spec.as_ref(), output_width)?;
+                if spec.columns().len() == output_width {
+                    RowDiffInputExtractor::LateProjection {
+                        spec: Arc::clone(spec),
+                        output_width,
+                    }
+                } else {
+                    RowDiffInputExtractor::Hybrid {
+                        materialized: OutputRowAccessor::from_output_schema(
+                            physical_row_diff.output_schema.as_ref(),
+                        ),
+                        late_projection: Arc::clone(spec),
+                        output_column_names: output_accessor.column_names(),
+                    }
                 }
-                RowDiffInputExtractor::LateProjection(Arc::clone(spec))
             }
             None => RowDiffInputExtractor::Materialized(OutputRowAccessor::from_output_schema(
                 physical_row_diff.output_schema.as_ref(),
             )),
         };
         let tracked_flags = build_tracked_flags(
-            output_accessor.width(),
+            output_width,
             physical_row_diff.tracked_column_indexes.as_ref(),
         )?;
         let (output, _) = broadcast::channel(channel_capacities.data);
@@ -117,6 +133,42 @@ fn build_tracked_flags(
     Ok(flags.into())
 }
 
+fn validate_late_projection(
+    spec: &ByIndexProjection,
+    output_width: usize,
+) -> Result<(), ProcessorError> {
+    if spec.is_empty() {
+        return Err(ProcessorError::InvalidConfiguration(
+            "row diff late projection cannot be empty".to_string(),
+        ));
+    }
+    if spec.columns().len() > output_width {
+        return Err(ProcessorError::InvalidConfiguration(format!(
+            "row diff late projection width {} exceeds output width {}",
+            spec.columns().len(),
+            output_width
+        )));
+    }
+
+    let mut seen_output_indexes = vec![false; output_width];
+    for column in spec.columns() {
+        if column.output_index >= output_width {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "row diff late projection output index {} out of bounds for output width {}",
+                column.output_index, output_width
+            )));
+        }
+        if std::mem::replace(&mut seen_output_indexes[column.output_index], true) {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "row diff late projection has duplicate output index {}",
+                column.output_index
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 fn extract_row_from_materialized(
     row_accessor: &mut OutputRowAccessor,
     tuple: &Tuple,
@@ -126,11 +178,12 @@ fn extract_row_from_materialized(
         .into_required_values("row diff processor")
 }
 
-fn extract_row_from_late_projection(
+fn extract_projected_values(
     spec: &ByIndexProjection,
+    output_width: usize,
     tuple: &Tuple,
-) -> Result<Vec<Arc<Value>>, ProcessorError> {
-    let mut values = Vec::with_capacity(spec.columns().len());
+) -> Result<Vec<Option<Arc<Value>>>, ProcessorError> {
+    let mut values = vec![None; output_width];
     let mut missing_columns = Vec::new();
 
     for column in spec.columns() {
@@ -140,7 +193,7 @@ fn extract_row_from_late_projection(
             .map(|(_, value)| Arc::clone(value));
 
         match value {
-            Some(value) => values.push(value),
+            Some(value) => values[column.output_index] = Some(value),
             None => missing_columns.push(format!(
                 "{}#{}->{}",
                 column.source_name.as_ref(),
@@ -160,6 +213,53 @@ fn extract_row_from_late_projection(
     Ok(values)
 }
 
+fn extract_row_from_late_projection(
+    spec: &ByIndexProjection,
+    output_width: usize,
+    tuple: &Tuple,
+) -> Result<Vec<Arc<Value>>, ProcessorError> {
+    Ok(extract_projected_values(spec, output_width, tuple)?
+        .into_iter()
+        .map(|value| {
+            value.expect("full-width row diff late projection must fill every output column")
+        })
+        .collect())
+}
+
+fn extract_row_from_hybrid(
+    row_accessor: &mut OutputRowAccessor,
+    spec: &ByIndexProjection,
+    output_column_names: &[Arc<str>],
+    tuple: &Tuple,
+) -> Result<Vec<Arc<Value>>, ProcessorError> {
+    let mut values = row_accessor.extract_row(tuple)?.into_optional_values();
+    let projected_values = extract_projected_values(spec, output_column_names.len(), tuple)?;
+
+    for (index, value) in projected_values.into_iter().enumerate() {
+        if let Some(value) = value {
+            values[index] = Some(value);
+        }
+    }
+
+    let missing_output_columns = values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| value.is_none())
+        .map(|(index, _)| output_column_names[index].as_ref())
+        .collect::<Vec<_>>();
+    if !missing_output_columns.is_empty() {
+        return Err(ProcessorError::ProcessingError(format!(
+            "row diff processor failed to resolve output columns [{}] from runtime tuple",
+            missing_output_columns.join(", ")
+        )));
+    }
+
+    Ok(values
+        .into_iter()
+        .map(|value| value.expect("missing output columns handled above"))
+        .collect())
+}
+
 fn extract_current_row(
     input_extractor: &mut RowDiffInputExtractor,
     tuple: &Tuple,
@@ -168,9 +268,19 @@ fn extract_current_row(
         RowDiffInputExtractor::Materialized(row_accessor) => {
             extract_row_from_materialized(row_accessor, tuple)
         }
-        RowDiffInputExtractor::LateProjection(spec) => {
-            extract_row_from_late_projection(spec, tuple)
+        RowDiffInputExtractor::LateProjection { spec, output_width } => {
+            extract_row_from_late_projection(spec, *output_width, tuple)
         }
+        RowDiffInputExtractor::Hybrid {
+            materialized,
+            late_projection,
+            output_column_names,
+        } => extract_row_from_hybrid(
+            materialized,
+            late_projection,
+            output_column_names.as_ref(),
+            tuple,
+        ),
     }
 }
 
