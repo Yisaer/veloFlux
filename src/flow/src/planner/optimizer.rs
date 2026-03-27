@@ -419,7 +419,7 @@ fn rewrite_by_index_projection_across_mixed_consumers(
         row_diff_to_projection: HashMap::new(),
     };
 
-    for (node_index, node) in node_map.iter() {
+    'project_loop: for (node_index, node) in node_map.iter() {
         let PhysicalPlan::Project(project) = node.as_ref() else {
             continue;
         };
@@ -472,9 +472,49 @@ fn rewrite_by_index_projection_across_mixed_consumers(
         for consumer in consumers {
             match consumer {
                 ProjectConsumer::RowDiff { row_diff_index } => {
+                    let downstream_consumers = consumer_map
+                        .get(&row_diff_index)
+                        .cloned()
+                        .unwrap_or_default();
+                    if downstream_consumers.is_empty()
+                        || !downstream_consumers
+                            .iter()
+                            .all(|downstream| match downstream {
+                                ProjectConsumer::Encoder {
+                                    kind,
+                                    transform_enabled,
+                                    ..
+                                } => {
+                                    !transform_enabled
+                                        && supports_by_index_projection(kind, encoder_registry)
+                                }
+                                ProjectConsumer::StreamingEncoder {
+                                    kind,
+                                    transform_enabled,
+                                    ..
+                                } => {
+                                    !transform_enabled
+                                        && supports_by_index_projection(kind, encoder_registry)
+                                }
+                                ProjectConsumer::RowDiff { .. } | ProjectConsumer::Other => false,
+                            })
+                    {
+                        continue 'project_loop;
+                    }
                     state
                         .row_diff_to_projection
                         .insert(row_diff_index, Arc::clone(&spec));
+                    for downstream in downstream_consumers {
+                        match downstream {
+                            ProjectConsumer::Encoder { encoder_index, .. }
+                            | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {
+                                state
+                                    .encoder_to_projection
+                                    .insert(encoder_index, Arc::clone(&spec));
+                            }
+                            ProjectConsumer::RowDiff { .. } | ProjectConsumer::Other => {}
+                        }
+                    }
                 }
                 ProjectConsumer::Encoder { encoder_index, .. }
                 | ProjectConsumer::StreamingEncoder { encoder_index, .. } => {

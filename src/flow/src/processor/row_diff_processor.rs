@@ -257,7 +257,34 @@ fn build_diff_row(
     tracked_current_values: &[Option<Arc<Value>>],
     previous_tracked_row: Option<&[Option<Arc<Value>>]>,
     tracked_flags: &[bool],
-) -> (Vec<Arc<Value>>, Arc<[bool]>) {
+    output_column_names: &[Arc<str>],
+) -> Result<(Vec<Arc<Value>>, Arc<[bool]>), ProcessorError> {
+    let missing_tracked_columns = tracked_current_values
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, current_value)| {
+            tracked_flags
+                .get(idx)
+                .copied()
+                .unwrap_or(false)
+                .then_some((idx, current_value))
+        })
+        .filter_map(|(idx, current_value)| {
+            current_value.as_ref().is_none().then(|| {
+                output_column_names
+                    .get(idx)
+                    .map(|name| name.to_string())
+                    .unwrap_or_else(|| format!("#{idx}"))
+            })
+        })
+        .collect::<Vec<_>>();
+    if !missing_tracked_columns.is_empty() {
+        return Err(ProcessorError::ProcessingError(format!(
+            "row diff processor failed to resolve tracked output columns [{}] from runtime tuple",
+            missing_tracked_columns.join(", ")
+        )));
+    }
+
     let mut diff_values = Vec::with_capacity(tracked_current_values.len());
     let mut output_mask = Vec::with_capacity(tracked_current_values.len());
 
@@ -268,9 +295,15 @@ fn build_diff_row(
             continue;
         }
 
-        let current_value = current_value.as_ref().unwrap_or_else(|| {
-            panic!("tracked row diff column at index {idx} must be resolved before comparison")
-        });
+        let Some(current_value) = current_value.as_ref() else {
+            return Err(ProcessorError::ProcessingError(format!(
+                "row diff processor failed to resolve tracked output column {} from runtime tuple",
+                output_column_names
+                    .get(idx)
+                    .map(|name| name.as_ref())
+                    .unwrap_or("unknown")
+            )));
+        };
 
         let changed = previous_tracked_row
             .and_then(|previous| previous.get(idx))
@@ -286,13 +319,14 @@ fn build_diff_row(
         }
     }
 
-    (diff_values, output_mask.into())
+    Ok((diff_values, output_mask.into()))
 }
 
 fn apply_row_diff(
     input_collection: Box<dyn Collection>,
     input_extractor: &mut RowDiffInputExtractor,
     output_accessor: &OutputRowAccessor,
+    output_column_names: &[Arc<str>],
     tracked_flags: &[bool],
     state: &mut RowDiffState,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
@@ -307,7 +341,8 @@ fn apply_row_diff(
             tracked_current_values.as_slice(),
             state.previous_tracked_row.as_deref(),
             tracked_flags,
-        );
+            output_column_names,
+        )?;
         let output_tuple =
             output_accessor.overlay_tuple(&tuple, &diff_values, tracked_flags, Some(output_mask));
         state.previous_tracked_row = Some(tracked_current_values);
@@ -338,6 +373,7 @@ impl Processor for RowDiffProcessor {
         let control_output = self.control_output.clone();
         let mut input_extractor = self.input_extractor.clone();
         let output_accessor = self.output_accessor.clone();
+        let output_column_names = output_accessor.column_names();
         let tracked_flags = Arc::clone(&self.tracked_flags);
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
@@ -381,6 +417,7 @@ impl Processor for RowDiffProcessor {
                                             collection,
                                             &mut input_extractor,
                                             &output_accessor,
+                                            output_column_names.as_ref(),
                                             tracked_flags.as_ref(),
                                             &mut state,
                                         ) {
@@ -452,5 +489,26 @@ impl Processor for RowDiffProcessor {
 
     fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_diff_row_returns_processing_error_for_missing_tracked_columns() {
+        let output_column_names = [Arc::<str>::from("x")];
+        let err = build_diff_row(&[None], None, &[true], &output_column_names).unwrap_err();
+
+        match err {
+            ProcessorError::ProcessingError(message) => {
+                assert_eq!(
+                    message,
+                    "row diff processor failed to resolve tracked output columns [x] from runtime tuple"
+                );
+            }
+            other => panic!("unexpected error: {other}"),
+        }
     }
 }

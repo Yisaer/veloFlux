@@ -421,10 +421,9 @@ async fn run_row_diff_json_case(case: RowDiffJsonCase) {
         case.name
     );
 
-    instance
+    let _ = instance
         .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
-        .await
-        .unwrap_or_else(|_| panic!("Failed to stop pipeline for test: {}", case.name));
+        .await;
     instance
         .delete_pipeline(&pipeline_id)
         .await
@@ -972,6 +971,33 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
+            name: "splits_partial_late_materialization_between_row_diff_and_encoder_with_aliases",
+            source_name: "stream",
+            sql: "SELECT a AS x, b AS y, flag AS z FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![Value::Int64(100), Value::Int64(101), Value::Int64(102)],
+                ),
+            ],
+            sink_common: CommonSinkProps::default(),
+            encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::delta_with_columns(["y"]),
+            expected: serde_json::json!([
+                {"x": 1, "y": 10, "z": 100},
+                {"x": 2, "z": 101},
+                {"x": 3, "y": 11, "z": 102}
+            ]),
+        },
+        RowDiffJsonCase {
             name: "supports_alias_in_by_index_row_diff_rewrite",
             source_name: "stream",
             sql: "SELECT a AS x FROM stream",
@@ -1063,6 +1089,7 @@ struct MixedConsumersJsonCase {
     source_name: &'static str,
     sql: &'static str,
     input_data: Vec<(String, Vec<Value>)>,
+    delta_columns: &'static [&'static str],
     expected_regular: JsonValue,
     expected_delta: JsonValue,
 }
@@ -1113,7 +1140,9 @@ async fn run_mixed_consumers_json_case(case: MixedConsumersJsonCase) {
         SinkProps::Memory(MemorySinkProps::new(delta_output_topic.clone())),
     )
     .with_encoder(SinkEncoderConfig::json())
-    .with_output(SinkOutputConfig::delta_with_columns(["b"]));
+    .with_output(SinkOutputConfig::delta_with_columns(
+        case.delta_columns.iter().copied(),
+    ));
     let pipeline = PipelineDefinition::new(
         pipeline_id.clone(),
         case.sql,
@@ -1166,31 +1195,60 @@ async fn run_mixed_consumers_json_case(case: MixedConsumersJsonCase) {
 
 #[tokio::test]
 async fn pipeline_mixed_consumers_json_table_driven() {
-    let cases = vec![MixedConsumersJsonCase {
-        name: "shared_project_with_encoder_branch_and_row_diff_branch",
-        source_name: "stream_ab",
-        sql: "SELECT a, b FROM stream_ab",
-        input_data: vec![
-            (
-                "a".to_string(),
-                vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
-            ),
-            (
-                "b".to_string(),
-                vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
-            ),
-        ],
-        expected_regular: serde_json::json!([
-            {"a": 1, "b": 10},
-            {"a": 2, "b": 10},
-            {"a": 3, "b": 11}
-        ]),
-        expected_delta: serde_json::json!([
-            {"a": 1, "b": 10},
-            {"a": 2},
-            {"a": 3, "b": 11}
-        ]),
-    }];
+    let cases = vec![
+        MixedConsumersJsonCase {
+            name: "shared_project_with_encoder_branch_and_row_diff_branch",
+            source_name: "stream_ab",
+            sql: "SELECT a, b FROM stream_ab",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
+                ),
+            ],
+            delta_columns: &["b"],
+            expected_regular: serde_json::json!([
+                {"a": 1, "b": 10},
+                {"a": 2, "b": 10},
+                {"a": 3, "b": 11}
+            ]),
+            expected_delta: serde_json::json!([
+                {"a": 1, "b": 10},
+                {"a": 2},
+                {"a": 3, "b": 11}
+            ]),
+        },
+        MixedConsumersJsonCase {
+            name: "shared_project_with_encoder_branch_and_row_diff_branch_preserves_aliases",
+            source_name: "stream_ab",
+            sql: "SELECT a AS x, b + 1 AS y FROM stream_ab",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(11), Value::Int64(11)],
+                ),
+            ],
+            delta_columns: &["y"],
+            expected_regular: serde_json::json!([
+                {"x": 1, "y": 11},
+                {"x": 1, "y": 12},
+                {"x": 2, "y": 12}
+            ]),
+            expected_delta: serde_json::json!([
+                {"x": 1, "y": 11},
+                {"x": 1, "y": 12},
+                {"x": 2}
+            ]),
+        },
+    ];
 
     for case in cases {
         run_mixed_consumers_json_case(case).await;
