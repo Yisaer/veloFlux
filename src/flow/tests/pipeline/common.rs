@@ -146,6 +146,32 @@ pub async fn recv_next_json(
     }
 }
 
+pub async fn assert_no_json_output(
+    output: &mut tokio::sync::broadcast::Receiver<MemoryData>,
+    timeout_duration: Duration,
+) {
+    use tokio::sync::broadcast::error::RecvError;
+
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match timeout(remaining, output.recv()).await {
+            Err(_) => return,
+            Ok(Ok(MemoryData::Bytes(payload))) => {
+                panic!(
+                    "unexpected JSON payload when no output expected: {}",
+                    String::from_utf8_lossy(payload.as_ref())
+                );
+            }
+            Ok(Ok(MemoryData::Collection(_))) => {
+                panic!("unexpected collection payload on bytes topic")
+            }
+            Ok(Err(RecvError::Lagged(_))) => continue,
+            Ok(Err(RecvError::Closed)) => panic!("pipeline output topic closed"),
+        }
+    }
+}
+
 pub async fn recv_next_collection(
     output: &mut tokio::sync::broadcast::Receiver<MemoryData>,
     timeout_duration: Duration,

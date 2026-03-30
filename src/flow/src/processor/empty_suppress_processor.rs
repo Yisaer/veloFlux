@@ -1,12 +1,15 @@
 //! EmptySuppressProcessor - suppresses empty collections on sink branches.
 
+use crate::model::Collection;
 use crate::planner::physical::PhysicalEmptySuppress;
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure,
     ProcessorChannelCapacities,
 };
-use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{
+    ControlSignal, MetricKind, MetricSpec, Processor, ProcessorError, ProcessorStats, StreamData,
+};
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
@@ -72,6 +75,21 @@ impl Processor for EmptySuppressProcessor {
         let channel_capacities = self.channel_capacities;
         let omit_if_empty = self.omit_if_empty;
         let stats = Arc::clone(&self.stats);
+        let collections_in = stats.register_counter(MetricSpec {
+            id: "empty_suppress.collections_in",
+            flat_name: "collections_in",
+            kind: MetricKind::Counter,
+        });
+        let collections_forwarded = stats.register_counter(MetricSpec {
+            id: "empty_suppress.collections_forwarded",
+            flat_name: "collections_forwarded",
+            kind: MetricKind::Counter,
+        });
+        let collections_suppressed = stats.register_counter(MetricSpec {
+            id: "empty_suppress.collections_suppressed",
+            flat_name: "collections_suppressed",
+            kind: MetricKind::Counter,
+        });
 
         spawner.spawn(async move {
             loop {
@@ -104,13 +122,29 @@ impl Processor for EmptySuppressProcessor {
                                 }
 
                                 match data {
-                                    StreamData::Collection(collection)
-                                        if omit_if_empty && collection.num_rows() == 0 =>
-                                    {
-                                        tracing::debug!(
-                                            processor_id = %processor_id,
-                                            "suppressed empty collection"
-                                        );
+                                    StreamData::Collection(collection) => {
+                                        collections_in.inc_by(1);
+                                        if omit_if_empty
+                                            && collection_is_effectively_empty(collection.as_ref())
+                                        {
+                                            collections_suppressed.inc_by(1);
+                                            tracing::debug!(
+                                                processor_id = %processor_id,
+                                                "suppressed empty collection"
+                                            );
+                                            continue;
+                                        }
+
+                                        let out_rows = collection.num_rows() as u64;
+                                        collections_forwarded.inc_by(1);
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            StreamData::collection(collection),
+                                            Some(stats.as_ref()),
+                                        )
+                                        .await?;
+                                        stats.record_out(out_rows);
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
@@ -166,5 +200,20 @@ impl Processor for EmptySuppressProcessor {
 
     fn add_control_input(&mut self, receiver: broadcast::Receiver<ControlSignal>) {
         self.control_inputs.push(receiver);
+    }
+}
+
+fn collection_is_effectively_empty(collection: &dyn Collection) -> bool {
+    if collection.num_rows() == 0 {
+        return true;
+    }
+
+    collection.rows().iter().all(tuple_is_effectively_empty)
+}
+
+fn tuple_is_effectively_empty(tuple: &crate::model::Tuple) -> bool {
+    match tuple.output_mask() {
+        Some(mask) => mask.iter().all(|selected| !selected),
+        None => false,
     }
 }
