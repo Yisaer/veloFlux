@@ -1,5 +1,6 @@
 pub mod helpers;
 pub mod math_func;
+pub mod null_func;
 pub mod registry;
 pub mod string_func;
 use crate::catalog::FunctionDef;
@@ -46,6 +47,7 @@ pub fn builtin_custom_function_defs() -> Vec<FunctionDef> {
     let mut defs = Vec::new();
 
     defs.extend(math_func::builtin_function_defs());
+    defs.extend(null_func::builtin_function_defs());
     defs.extend(string_func::builtin_function_defs());
 
     defs
