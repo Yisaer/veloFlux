@@ -65,6 +65,7 @@ impl PhysicalPlan {
 
             PhysicalPlan::Filter(_)
             | PhysicalPlan::Order(_)
+            | PhysicalPlan::EmptySuppress(_)
             | PhysicalPlan::Batch(_)
             | PhysicalPlan::Encoder(_)
             | PhysicalPlan::StreamingEncoder(_)

@@ -61,11 +61,16 @@ impl fmt::Debug for PipelineSink {
 pub struct SinkOutputConfig {
     pub mode: SinkOutputMode,
     pub delta: Option<SinkDeltaOutputConfig>,
+    pub omit_if_empty: bool,
 }
 
 impl SinkOutputConfig {
     pub fn new(mode: SinkOutputMode) -> Self {
-        Self { mode, delta: None }
+        Self {
+            mode,
+            delta: None,
+            omit_if_empty: false,
+        }
     }
 
     pub fn delta() -> Self {
@@ -95,6 +100,15 @@ impl SinkOutputConfig {
         self.delta
             .as_ref()
             .and_then(|delta| delta.columns.as_deref())
+    }
+
+    pub fn with_omit_if_empty(mut self, omit_if_empty: bool) -> Self {
+        self.omit_if_empty = omit_if_empty;
+        self
+    }
+
+    pub fn omit_if_empty(&self) -> bool {
+        self.omit_if_empty
     }
 }
 

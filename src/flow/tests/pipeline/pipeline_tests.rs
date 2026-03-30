@@ -17,9 +17,9 @@ use tokio::time::Duration;
 
 use super::common::ColumnCheck;
 use super::common::{
-    build_expected_json, declare_memory_input_output_topics, install_memory_stream_schema,
-    install_memory_stream_schema_with_name, make_memory_topics, normalize_json,
-    publish_input_collection, recv_next_json,
+    assert_no_json_output, build_expected_json, declare_memory_input_output_topics,
+    install_memory_stream_schema, install_memory_stream_schema_with_name, make_memory_topics,
+    normalize_json, publish_input_collection, recv_next_json,
 };
 use super::common::{declare_memory_input_output_topics_with_output_kind, recv_next_collection};
 
@@ -420,6 +420,109 @@ async fn run_row_diff_json_case(case: RowDiffJsonCase) {
         "Wrong row diff JSON for test: {}",
         case.name
     );
+
+    let _ = instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await;
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
+}
+
+struct OmitIfEmptyJsonCase {
+    name: &'static str,
+    source_name: &'static str,
+    sql: &'static str,
+    schema_hint: Vec<(String, Vec<Value>)>,
+    input_batches: Vec<Vec<(String, Vec<Value>)>>,
+    sink_common: CommonSinkProps,
+    encoder: SinkEncoderConfig,
+    output: SinkOutputConfig,
+    expected_outputs: Vec<Option<JsonValue>>,
+}
+
+async fn run_omit_if_empty_json_case(case: OmitIfEmptyJsonCase) {
+    println!("Running test: {}", case.name);
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ));
+    let (input_topic, output_topic) = make_memory_topics("pipeline_omit_if_empty_json", case.name);
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    install_memory_stream_schema_with_name(
+        &instance,
+        &input_topic,
+        case.source_name,
+        &case.schema_hint,
+    )
+    .await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    )
+    .with_common_props(case.sink_common)
+    .with_encoder(case.encoder)
+    .with_output(case.output);
+    let pipeline = PipelineDefinition::new(pipeline_id.clone(), case.sql, vec![sink]);
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
+
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
+
+    let timeout_duration = Duration::from_secs(5);
+    assert_eq!(
+        case.input_batches.len(),
+        case.expected_outputs.len(),
+        "input_batches and expected_outputs length mismatch for test: {}",
+        case.name
+    );
+
+    for (batch_idx, (input_data, expected_output)) in case
+        .input_batches
+        .into_iter()
+        .zip(case.expected_outputs.into_iter())
+        .enumerate()
+    {
+        let columns = input_data
+            .into_iter()
+            .map(|(col_name, values)| (case.source_name.to_string(), col_name, values))
+            .collect();
+        let batch = batch_from_columns_simple(columns).unwrap_or_else(|_| {
+            panic!(
+                "Failed to create test RecordBatch for: {} batch={}",
+                case.name, batch_idx
+            )
+        });
+
+        publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+
+        match expected_output {
+            Some(expected) => {
+                let actual = recv_next_json(&mut output, timeout_duration).await;
+                assert_eq!(
+                    normalize_json(actual),
+                    normalize_json(expected),
+                    "Wrong omit_if_empty JSON for test: {} batch={}",
+                    case.name,
+                    batch_idx
+                );
+            }
+            None => {
+                assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+            }
+        }
+    }
 
     let _ = instance
         .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
@@ -1081,6 +1184,117 @@ async fn pipeline_row_diff_json_table_driven() {
 
     for case in cases {
         run_row_diff_json_case(case).await;
+    }
+}
+
+#[tokio::test]
+async fn pipeline_omit_if_empty_json_table_driven() {
+    let cases = vec![
+        OmitIfEmptyJsonCase {
+            name: "full_non_empty_collection_is_forwarded",
+            source_name: "stream",
+            sql: "SELECT a, b FROM stream",
+            schema_hint: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                ),
+            ],
+            input_batches: vec![vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                ),
+            ]],
+            sink_common: CommonSinkProps::default(),
+            encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::default().with_omit_if_empty(true),
+            expected_outputs: vec![Some(serde_json::json!([
+                {"a": 1, "b": 10},
+                {"a": 2, "b": 20},
+                {"a": 3, "b": 30}
+            ]))],
+        },
+        OmitIfEmptyJsonCase {
+            name: "full_empty_collection_is_suppressed",
+            source_name: "stream",
+            sql: "SELECT a, b FROM stream",
+            schema_hint: vec![
+                ("a".to_string(), vec![Value::Int64(1)]),
+                ("b".to_string(), vec![Value::Int64(10)]),
+            ],
+            input_batches: vec![vec![("a".to_string(), vec![]), ("b".to_string(), vec![])]],
+            sink_common: CommonSinkProps::default(),
+            encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::default().with_omit_if_empty(true),
+            expected_outputs: vec![None],
+        },
+        OmitIfEmptyJsonCase {
+            name: "delta_non_empty_collection_is_forwarded",
+            source_name: "stream",
+            sql: "SELECT a, b FROM stream",
+            schema_hint: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
+                ),
+            ],
+            input_batches: vec![vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
+                ),
+            ]],
+            sink_common: CommonSinkProps::default(),
+            encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::delta_with_columns(["b"]).with_omit_if_empty(true),
+            expected_outputs: vec![Some(serde_json::json!([
+                {"a": 1, "b": 10},
+                {"a": 2},
+                {"a": 3, "b": 11}
+            ]))],
+        },
+        OmitIfEmptyJsonCase {
+            name: "delta_repeated_same_row_is_suppressed_after_first_emit",
+            source_name: "stream",
+            sql: "SELECT a FROM stream",
+            schema_hint: vec![("a".to_string(), vec![Value::Int64(1)])],
+            input_batches: vec![
+                vec![("a".to_string(), vec![Value::Int64(1)])],
+                vec![("a".to_string(), vec![Value::Int64(1)])],
+                vec![("a".to_string(), vec![Value::Int64(1)])],
+            ],
+            sink_common: CommonSinkProps::default(),
+            encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::delta().with_omit_if_empty(true),
+            expected_outputs: vec![
+                Some(serde_json::json!([
+                    {"a": 1}
+                ])),
+                None,
+                None,
+            ],
+        },
+    ];
+
+    for case in cases {
+        run_omit_if_empty_json_case(case).await;
     }
 }
 

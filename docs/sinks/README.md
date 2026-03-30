@@ -71,6 +71,7 @@ Current transform support:
 See also:
 
 - [Encoder Transform](/Users/yisa/Downloads/Github/veloFlux/docs/sinks/encoder_transform.md)
+- [Omit If Empty](/Users/yisa/Downloads/Github/veloFlux/docs/sinks/omit_if_empty.md)
 - [Row Diff Output](/Users/yisa/Downloads/Github/veloFlux/docs/sinks/row_diff_output.md)
 
 ## Current Common Sink Properties
@@ -227,6 +228,12 @@ These capabilities already exist near the sink boundary:
 5. **Memory collection materialization**
    - Normalizes collection rows into a stable layout before publishing to memory collection topics.
 
+Proposed / documented sink-side capabilities:
+
+6. **Empty-result suppression**
+   - `output.omit_if_empty`
+   - modeled as a sink-side output policy, not as an encoder or connector behavior
+
 ## Design Guideline For New Sink-Side Features
 
 When adding new sink-side features, prefer to classify them explicitly as one of:
@@ -250,6 +257,7 @@ In particular:
 
 - [Memory Sink](/Users/yisa/Downloads/Github/veloFlux/docs/sinks/memory.md)
 - [Kuksa Sink](/Users/yisa/Downloads/Github/veloFlux/docs/sinks/kuksa.md)
+- [Omit If Empty](/Users/yisa/Downloads/Github/veloFlux/docs/sinks/omit_if_empty.md)
 - [Row Diff Output](/Users/yisa/Downloads/Github/veloFlux/docs/sinks/row_diff_output.md)
 - [Encoder Transform](/Users/yisa/Downloads/Github/veloFlux/docs/sinks/encoder_transform.md)
 - [StreamingEncoderRewrite](/Users/yisa/Downloads/Github/veloFlux/docs/planner_optimize/physical/streaming_encoder_rewrite.md)

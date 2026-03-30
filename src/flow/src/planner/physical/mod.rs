@@ -11,6 +11,7 @@ pub mod physical_compute;
 pub mod physical_data_sink;
 pub mod physical_data_source;
 pub mod physical_decoder;
+pub mod physical_empty_suppress;
 pub mod physical_encoder;
 pub mod physical_eventtime_watermark;
 pub mod physical_filter;
@@ -39,6 +40,7 @@ pub use physical_data_sink::{PhysicalDataSink, PhysicalSinkConnector};
 pub use physical_data_source::PhysicalDataSource;
 pub use physical_decoder::PhysicalDecoder;
 pub use physical_decoder::PhysicalDecoderEventtimeSpec;
+pub use physical_empty_suppress::PhysicalEmptySuppress;
 pub use physical_encoder::PhysicalEncoder;
 pub use physical_eventtime_watermark::PhysicalEventtimeWatermark;
 pub use physical_filter::PhysicalFilter;
@@ -72,6 +74,7 @@ pub enum PhysicalPlan {
     Order(PhysicalOrder),
     Project(PhysicalProject),
     RowDiff(PhysicalRowDiff),
+    EmptySuppress(PhysicalEmptySuppress),
     Aggregation(PhysicalAggregation),
     SharedStream(PhysicalSharedStream),
     Batch(PhysicalBatch),
@@ -109,6 +112,7 @@ impl PhysicalPlan {
             PhysicalPlan::Order(plan) => plan.base.children(),
             PhysicalPlan::Project(plan) => plan.base.children(),
             PhysicalPlan::RowDiff(plan) => plan.base.children(),
+            PhysicalPlan::EmptySuppress(plan) => plan.base.children(),
             PhysicalPlan::Aggregation(plan) => plan.base.children(),
             PhysicalPlan::SharedStream(plan) => plan.base.children(),
             PhysicalPlan::Batch(plan) => plan.base.children(),
@@ -142,6 +146,7 @@ impl PhysicalPlan {
             PhysicalPlan::Order(_) => "PhysicalOrder",
             PhysicalPlan::Project(_) => "PhysicalProject",
             PhysicalPlan::RowDiff(_) => "PhysicalRowDiff",
+            PhysicalPlan::EmptySuppress(_) => "PhysicalEmptySuppress",
             PhysicalPlan::Aggregation(_) => "PhysicalAggregation",
             PhysicalPlan::SharedStream(_) => "PhysicalSharedStream",
             PhysicalPlan::Batch(_) => "PhysicalBatch",
@@ -175,6 +180,7 @@ impl PhysicalPlan {
             PhysicalPlan::Order(plan) => plan.base.index(),
             PhysicalPlan::Project(plan) => plan.base.index(),
             PhysicalPlan::RowDiff(plan) => plan.base.index(),
+            PhysicalPlan::EmptySuppress(plan) => plan.base.index(),
             PhysicalPlan::Aggregation(plan) => plan.base.index(),
             PhysicalPlan::SharedStream(plan) => plan.base.index(),
             PhysicalPlan::Batch(plan) => plan.base.index(),
@@ -227,6 +233,7 @@ impl PhysicalPlan {
             PhysicalPlan::Order(plan) => &mut plan.base.children,
             PhysicalPlan::Project(plan) => &mut plan.base.children,
             PhysicalPlan::RowDiff(plan) => &mut plan.base.children,
+            PhysicalPlan::EmptySuppress(plan) => &mut plan.base.children,
             PhysicalPlan::Aggregation(plan) => &mut plan.base.children,
             PhysicalPlan::SharedStream(plan) => &mut plan.base.children,
             PhysicalPlan::Batch(plan) => &mut plan.base.children,

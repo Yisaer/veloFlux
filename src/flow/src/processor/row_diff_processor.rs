@@ -344,9 +344,10 @@ fn apply_row_diff(
             tracked_flags,
             output_column_names,
         )?;
+        state.previous_tracked_row = Some(tracked_current_values);
+
         let output_tuple =
             output_accessor.overlay_tuple(&tuple, &diff_values, tracked_flags, Some(output_mask));
-        state.previous_tracked_row = Some(tracked_current_values);
         output_rows.push(output_tuple);
     }
 
