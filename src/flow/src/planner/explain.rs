@@ -314,6 +314,9 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                     info.push(format!("output.columns=[{}]", columns.join(", ")));
                 }
             }
+            if sink.output.omit_if_empty() {
+                info.push("output.omit_if_empty=true".to_string());
+            }
             if let Some(transform_kind) = sink.connector.encoder.transform_kind() {
                 info.push(format!("transform={}", transform_kind));
             }
@@ -807,6 +810,10 @@ fn build_physical_node_with_prefix(
                     info.push(format!("by_index_projection=[{}]", cols.join("; ")));
                 }
             }
+        }
+        PhysicalPlan::EmptySuppress(empty_suppress) => {
+            info.push(format!("sink_id={}", empty_suppress.sink_id));
+            info.push(format!("omit_if_empty={}", empty_suppress.omit_if_empty));
         }
         PhysicalPlan::Aggregation(aggregation) => {
             info.push(format!(

@@ -51,6 +51,8 @@ pub struct SinkIR {
 pub struct SinkOutputIR {
     pub mode: SinkOutputModeIR,
     pub delta: Option<SinkDeltaOutputIR>,
+    #[serde(default)]
+    pub omit_if_empty: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -693,6 +695,7 @@ fn sink_output_from_ir(output: &SinkOutputIR) -> SinkOutputConfig {
         delta: output.delta.as_ref().map(|delta| SinkDeltaOutputConfig {
             columns: delta.columns.clone(),
         }),
+        omit_if_empty: output.omit_if_empty,
     }
 }
 
@@ -705,6 +708,7 @@ fn sink_output_to_ir(output: &SinkOutputConfig) -> SinkOutputIR {
         delta: output.delta.as_ref().map(|delta| SinkDeltaOutputIR {
             columns: delta.columns.clone(),
         }),
+        omit_if_empty: output.omit_if_empty,
     }
 }
 

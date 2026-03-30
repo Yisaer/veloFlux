@@ -13,12 +13,12 @@ use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
     PartitionGroupKey, PhysicalAggregation, PhysicalBatch, PhysicalCompute, PhysicalDataSink,
-    PhysicalDataSource, PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEncoder,
-    PhysicalEventtimeWatermark, PhysicalFilter, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
-    PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
-    PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
-    PhysicalSinkConnector, PhysicalStatefulFunction, StatefulCall, WatermarkConfig,
-    WatermarkStrategy,
+    PhysicalDataSource, PhysicalDecoder, PhysicalDecoderEventtimeSpec, PhysicalEmptySuppress,
+    PhysicalEncoder, PhysicalEventtimeWatermark, PhysicalFilter,
+    PhysicalMemoryCollectionMaterialize, PhysicalOrder, PhysicalOrderKey, PhysicalPlan,
+    PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect, PhysicalRowDiff,
+    PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector, PhysicalStatefulFunction,
+    StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
@@ -922,9 +922,15 @@ fn build_sink_chain_with_builder(
 ) -> Result<(Arc<PhysicalPlan>, PhysicalSinkConnector), String> {
     let row_diff_input =
         create_row_diff_processor_if_needed_with_builder(sink, input_child, builder)?;
-    let batch_input = row_diff_input
+    let empty_suppress_input = create_empty_suppress_processor_if_needed_with_builder(
+        sink,
+        row_diff_input.as_ref().unwrap_or(input_child),
+        builder,
+    );
+    let batch_input = empty_suppress_input
         .as_ref()
         .map(Arc::clone)
+        .or_else(|| row_diff_input.as_ref().map(Arc::clone))
         .unwrap_or_else(|| Arc::clone(input_child));
     let batch_processor =
         create_batch_processor_if_needed_with_builder(sink, &batch_input, builder);
@@ -973,6 +979,25 @@ fn create_row_diff_processor_if_needed_with_builder(
         tracked_column_indexes,
     );
     Ok(Some(Arc::new(PhysicalPlan::RowDiff(row_diff_plan))))
+}
+
+fn create_empty_suppress_processor_if_needed_with_builder(
+    sink: &PipelineSink,
+    input_child: &Arc<PhysicalPlan>,
+    builder: &mut PhysicalPlanBuilder,
+) -> Option<Arc<PhysicalPlan>> {
+    if !sink.output.omit_if_empty() {
+        return None;
+    }
+
+    let empty_suppress_index = builder.allocate_index();
+    let empty_suppress = PhysicalEmptySuppress::new(
+        vec![Arc::clone(input_child)],
+        empty_suppress_index,
+        sink.sink_id.clone(),
+        sink.output.omit_if_empty(),
+    );
+    Some(Arc::new(PhysicalPlan::EmptySuppress(empty_suppress)))
 }
 
 fn validate_row_diff_sink_path(sink: &PipelineSink) -> Result<(), String> {

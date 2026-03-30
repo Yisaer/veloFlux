@@ -880,26 +880,33 @@ fn build_node_and_consumer_maps(
         let index = plan.get_plan_index();
         let already_visited = !visited.insert(index);
         nodes.entry(index).or_insert_with(|| Arc::clone(plan));
+        let inherited_consumers = consumers.get(&index).cloned().unwrap_or_default();
 
         for child in plan.children() {
             let child_index = child.get_plan_index();
-            let consumer = match plan.as_ref() {
-                PhysicalPlan::RowDiff(row_diff) => ProjectConsumer::RowDiff {
+            let child_consumers = match plan.as_ref() {
+                PhysicalPlan::EmptySuppress(_) => inherited_consumers.clone(),
+                PhysicalPlan::RowDiff(row_diff) => vec![ProjectConsumer::RowDiff {
                     row_diff_index: row_diff.base.index(),
-                },
-                PhysicalPlan::Encoder(encoder) => ProjectConsumer::Encoder {
+                }],
+                PhysicalPlan::Encoder(encoder) => vec![ProjectConsumer::Encoder {
                     encoder_index: encoder.base.index(),
                     kind: encoder.encoder.kind_str().to_string(),
                     transform_enabled: encoder.encoder.transform_kind().is_some(),
-                },
-                PhysicalPlan::StreamingEncoder(encoder) => ProjectConsumer::StreamingEncoder {
-                    encoder_index: encoder.base.index(),
-                    kind: encoder.encoder.kind_str().to_string(),
-                    transform_enabled: encoder.encoder.transform_kind().is_some(),
-                },
-                _ => ProjectConsumer::Other,
+                }],
+                PhysicalPlan::StreamingEncoder(encoder) => {
+                    vec![ProjectConsumer::StreamingEncoder {
+                        encoder_index: encoder.base.index(),
+                        kind: encoder.encoder.kind_str().to_string(),
+                        transform_enabled: encoder.encoder.transform_kind().is_some(),
+                    }]
+                }
+                _ => vec![ProjectConsumer::Other],
             };
-            consumers.entry(child_index).or_default().push(consumer);
+            consumers
+                .entry(child_index)
+                .or_default()
+                .extend(child_consumers);
 
             if !already_visited {
                 helper(child, nodes, consumers, visited);
@@ -1236,6 +1243,11 @@ fn rebuild_with_children(
             let mut new = row_diff.clone();
             new.base.children = children;
             Arc::new(PhysicalPlan::RowDiff(new))
+        }
+        PhysicalPlan::EmptySuppress(empty_suppress) => {
+            let mut new = empty_suppress.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::EmptySuppress(new))
         }
         PhysicalPlan::Aggregation(agg) => {
             let mut new = agg.clone();

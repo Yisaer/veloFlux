@@ -163,6 +163,8 @@ pub struct SinkOutputConfigRequest {
     pub mode: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta: Option<SinkDeltaOutputConfigRequest>,
+    #[serde(default)]
+    pub omit_if_empty: bool,
 }
 
 impl SinkOutputConfigRequest {
@@ -174,13 +176,15 @@ impl SinkOutputConfigRequest {
                         "sink output.delta is only supported when output.mode=delta".to_string()
                     );
                 }
-                Ok(SinkOutputConfig::new(SinkOutputMode::Full))
+                Ok(SinkOutputConfig::new(SinkOutputMode::Full)
+                    .with_omit_if_empty(self.omit_if_empty))
             }
             "delta" => Ok(SinkOutputConfig {
                 mode: SinkOutputMode::Delta,
                 delta: self.delta.as_ref().map(|delta| SinkDeltaOutputConfig {
                     columns: delta.columns.clone(),
                 }),
+                omit_if_empty: self.omit_if_empty,
             }),
             other => Err(format!(
                 "invalid sink output.mode `{other}` (expected full|delta)"
