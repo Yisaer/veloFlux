@@ -1271,7 +1271,7 @@ async fn pipeline_omit_if_empty_json_table_driven() {
             ]))],
         },
         OmitIfEmptyJsonCase {
-            name: "delta_repeated_same_row_is_suppressed_after_first_emit",
+            name: "delta_repeated_same_row_is_forwarded_as_non_empty_collection",
             source_name: "stream",
             sql: "SELECT a FROM stream",
             schema_hint: vec![("a".to_string(), vec![Value::Int64(1)])],
@@ -1287,8 +1287,8 @@ async fn pipeline_omit_if_empty_json_table_driven() {
                 Some(serde_json::json!([
                     {"a": 1}
                 ])),
-                None,
-                None,
+                Some(serde_json::json!([{}])),
+                Some(serde_json::json!([{}])),
             ],
         },
     ];
