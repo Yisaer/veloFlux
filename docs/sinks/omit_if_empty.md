@@ -24,7 +24,7 @@ It should not be modeled as:
 - a SQL clause
 - an encoder option
 - a connector option
-- a special case hidden inside row diff
+- a rule folded into `RowDiff` itself
 
 ## Proposed API Shape
 
@@ -95,19 +95,22 @@ Minimal shape:
 
 ## Semantics
 
-`omit_if_empty` only checks whether the sink branch's final `Collection` has zero rows.
+`omit_if_empty` checks whether the sink branch's final `Collection` is effectively empty.
 
 When `output.omit_if_empty = true`:
 
 - if the branch input collection has zero rows, the branch publishes nothing
-- if the branch input collection has one or more rows, the branch continues normally
+- if the branch input collection has one or more rows but every tuple carries an `output_mask`
+  whose bits are all `false`, the branch also publishes nothing
+- otherwise, the branch continues normally
 
 When `output.omit_if_empty = false`:
 
 - the branch continues normally regardless of whether the collection is empty
 
-This policy is intentionally collection-level. It does not inspect connector payload bytes and does
-not depend on encoder-specific formatting behavior.
+This policy is intentionally collection-level. It may inspect row-diff runtime metadata that is
+already present on the final branch output, but it does not inspect connector payload bytes and
+does not depend on encoder-specific formatting behavior.
 
 ## Placement In The Sink Branch
 
@@ -125,7 +128,8 @@ Project
 Why this order:
 
 1. `RowDiff` should remain the first consumer of final projected values on delta branches.
-2. `omit_if_empty` should observe the branch result after sink-side row shaping has completed.
+2. `omit_if_empty` should observe the branch result after sink-side row shaping has completed,
+   including any `output_mask` metadata produced by `RowDiff`.
 3. `Batch`, `Encoder`, and `DataSink` should not be asked to reason about empty-result suppression.
 
 ## Why It Should Be After Row Diff
@@ -142,7 +146,8 @@ Project -> RowDiff -> EmptySuppress -> ...
 has two benefits:
 
 - it preserves the existing delayed-materialization endpoint on row-diff branches
-- it keeps empty suppression aligned with the actual sink-facing branch output
+- it keeps empty suppression aligned with the actual sink-facing branch output, including row-diff
+  no-op batches where every `output_mask` bit is `false`
 
 Placing `EmptySuppress` before `RowDiff` would make it an intermediate consumer between `Project`
 and `RowDiff`, which is the wrong boundary for delta branches.
@@ -154,7 +159,8 @@ and `RowDiff`, which is the wrong boundary for delta branches.
 Reason:
 
 1. `omit_if_empty` applies to both `output.mode=full` and `output.mode=delta`.
-2. `RowDiff` is a row-content transformation; `omit_if_empty` is a branch delivery policy.
+2. `RowDiff` remains a row-content transformation; `omit_if_empty` remains a branch delivery
+   policy that may consume the resulting row-diff metadata.
 3. Keeping them separate makes explain output and planner responsibilities clearer.
 
 Recommended physical shape:
@@ -223,6 +229,8 @@ semantics.
 For each incoming `Collection`:
 
 - if `omit_if_empty = true` and `collection.row_count() == 0`, drop the collection for this branch
+- if `omit_if_empty = true`, the collection has one or more rows, and every tuple carries an
+  `output_mask` whose bits are all `false`, also drop the collection for this branch
 - otherwise, forward it unchanged
 
 The processor should also forward control signals normally.
@@ -253,7 +261,7 @@ This document does not define:
 - payload-byte-level empty suppression
 - connector-specific empty suppression behavior
 - template-render-result-based suppression
-- row dropping rules inside row diff itself
+- row dropping rules inside `RowDiff` itself
 
 In particular, `RowDiff` should continue to mean row-diff transformation only. Empty-result
 suppression remains a separate sink output policy.

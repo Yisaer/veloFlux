@@ -204,7 +204,18 @@ impl Processor for EmptySuppressProcessor {
 }
 
 fn collection_is_effectively_empty(collection: &dyn Collection) -> bool {
-    collection.num_rows() == 0
+    if collection.num_rows() == 0 {
+        return true;
+    }
+
+    collection.rows().iter().all(tuple_is_effectively_empty)
+}
+
+fn tuple_is_effectively_empty(tuple: &crate::model::Tuple) -> bool {
+    match tuple.output_mask() {
+        Some(mask) => mask.iter().all(|selected| !selected),
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -221,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn output_mask_only_does_not_make_collection_empty() {
+    fn output_mask_only_makes_collection_empty() {
         let message = Arc::new(Message::new(
             Arc::<str>::from("stream"),
             vec![Arc::<str>::from("a")],
@@ -229,6 +240,20 @@ mod tests {
         ));
         let mut tuple = Tuple::new(vec![message]);
         tuple.set_output_mask(vec![false]);
+
+        let batch = RecordBatch::new(vec![tuple]).expect("batch");
+        assert!(collection_is_effectively_empty(&batch));
+    }
+
+    #[test]
+    fn output_mask_with_selected_field_keeps_collection_non_empty() {
+        let message = Arc::new(Message::new(
+            Arc::<str>::from("stream"),
+            vec![Arc::<str>::from("a"), Arc::<str>::from("b")],
+            vec![Arc::new(Value::Int64(1)), Arc::new(Value::Int64(2))],
+        ));
+        let mut tuple = Tuple::new(vec![message]);
+        tuple.set_output_mask(vec![false, true]);
 
         let batch = RecordBatch::new(vec![tuple]).expect("batch");
         assert!(!collection_is_effectively_empty(&batch));
