@@ -4,6 +4,7 @@ use super::math_func::{
     FloorFunc, LnFunc, LogFunc, ModFunc, PiFunc, PowFunc, PowerFunc, RadiansFunc, RandFunc,
     RoundFunc, SignFunc, SinFunc, SinhFunc, SqrtFunc, TanFunc, TanhFunc,
 };
+use super::null_func::IsNullFunc;
 
 use super::string_func::{
     ConcatFunc, EndsWithFunc, FormatFunc, IndexOfFunc, LPadFunc, LTrimFunc, LengthFunc, LowerFunc,
@@ -44,6 +45,7 @@ impl CustomFuncRegistry {
         let mut functions: HashMap<String, Arc<dyn CustomFunc>> = HashMap::new();
 
         register_math_functions(&mut functions);
+        register_null_functions(&mut functions);
         register_string_functions(&mut functions);
 
         Self { functions }
@@ -95,6 +97,10 @@ fn register_math_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>)
     ] {
         register(functions, func);
     }
+}
+
+fn register_null_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>) {
+    register(functions, Arc::new(IsNullFunc));
 }
 
 fn register_string_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>) {
@@ -179,6 +185,14 @@ mod tests {
         assert!(registry.is_registered("split_value"));
         assert!(registry.is_registered("trim"));
         assert!(registry.is_registered("upper"));
+    }
+
+    #[test]
+    fn builtins_include_null_functions() {
+        let registry = CustomFuncRegistry::default();
+        assert!(registry.is_registered("isnull"));
+        assert!(registry.is_registered("ISNULL"));
+        assert!(registry.get("isNull").is_some());
     }
 
     #[test]
