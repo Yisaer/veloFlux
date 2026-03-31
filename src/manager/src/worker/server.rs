@@ -42,6 +42,10 @@ pub fn build_worker_app(state: FlowWorkerState) -> Router {
             "/internal/v1/mqtt/clients/:key",
             delete(delete_shared_mqtt_client),
         )
+        .route(
+            "/internal/v1/mqtt/clients/:key/can-delete",
+            get(can_delete_shared_mqtt_client),
+        )
         .route("/internal/v1/pipelines", get(list_pipelines))
         .route("/internal/v1/pipelines/apply", post(apply_pipeline))
         .route("/internal/v1/pipelines/:id", delete(delete_pipeline))
@@ -249,6 +253,30 @@ async fn delete_shared_mqtt_client(
     }
 }
 
+async fn can_delete_shared_mqtt_client(
+    State(state): State<FlowWorkerState>,
+    Path(key): Path<String>,
+) -> impl IntoResponse {
+    match state.instance.can_drop_shared_mqtt_client(&key) {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(flow::FlowInstanceError::Connector(ConnectorError::NotFound(_))) => (
+            StatusCode::NOT_FOUND,
+            format!("shared mqtt client {key} not found"),
+        )
+            .into_response(),
+        Err(flow::FlowInstanceError::Connector(ConnectorError::ResourceBusy(_))) => (
+            StatusCode::CONFLICT,
+            format!("shared mqtt client {key} is still in use"),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to check shared mqtt client {key}: {err}"),
+        )
+            .into_response(),
+    }
+}
+
 async fn start_pipeline(
     State(state): State<FlowWorkerState>,
     Path(id): Path<String>,
@@ -381,9 +409,14 @@ async fn collect_pipeline_stats(
 
 #[cfg(test)]
 mod tests {
-    use super::{FlowWorkerState, build_worker_app, reconcile_shared_mqtt_clients};
+    use super::{
+        FlowWorkerState, build_worker_app, can_delete_shared_mqtt_client,
+        reconcile_shared_mqtt_clients,
+    };
     use axum::body::{Body, to_bytes};
+    use axum::extract::{Path, State};
     use axum::http::{Request, StatusCode};
+    use axum::response::IntoResponse;
     use flow::connector::SharedMqttClientConfig;
     use tower::util::ServiceExt;
 
@@ -463,5 +496,23 @@ mod tests {
             String::from_utf8(body.to_vec()).expect("utf8 body"),
             "shared mqtt client shared not found"
         );
+    }
+
+    #[tokio::test]
+    async fn can_delete_shared_mqtt_client_endpoint_returns_no_content_for_idle_client() {
+        let instance = crate::new_default_flow_instance();
+        let cfg = shared_mqtt_cfg("shared", "topic/a", "client_a");
+        instance
+            .create_shared_mqtt_client(cfg)
+            .await
+            .expect("create shared mqtt client");
+
+        let response = can_delete_shared_mqtt_client(
+            State(FlowWorkerState::new(instance)),
+            Path("shared".to_string()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 }

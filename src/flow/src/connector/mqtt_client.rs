@@ -294,6 +294,20 @@ impl MqttClientManager {
         Ok(())
     }
 
+    pub(crate) fn can_drop_client(&self, key: &str) -> Result<(), ConnectorError> {
+        let guard = self.entries.lock();
+        let entry = guard
+            .get(key)
+            .cloned()
+            .ok_or_else(|| ConnectorError::NotFound(key.to_string()))?;
+
+        if entry.ref_count.load(Ordering::Acquire) > 0 {
+            return Err(ConnectorError::ResourceBusy(key.to_string()));
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn release(&self, key: &str) {
         if let Some(entry) = self.entries.lock().get(key) {
             entry.ref_count.fetch_sub(1, Ordering::AcqRel);

@@ -24,6 +24,12 @@ impl FlowInstance {
         Ok(())
     }
 
+    /// Check whether a shared MQTT client can be dropped without mutating runtime state.
+    pub fn can_drop_shared_mqtt_client(&self, key: &str) -> Result<(), FlowInstanceError> {
+        self.mqtt_client_manager.can_drop_client(key)?;
+        Ok(())
+    }
+
     /// List metadata for registered shared MQTT clients.
     pub fn list_shared_mqtt_clients(&self) -> Vec<SharedMqttClientConfig> {
         self.shared_mqtt_client_configs

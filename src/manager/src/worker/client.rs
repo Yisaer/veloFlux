@@ -91,6 +91,40 @@ impl FlowWorkerClient {
         }
     }
 
+    pub async fn can_delete_shared_mqtt_client(
+        &self,
+        key: &str,
+    ) -> Result<(), DeleteSharedMqttClientError> {
+        let resp = self
+            .http
+            .get(self.url(&format!("/internal/v1/mqtt/clients/{key}/can-delete")))
+            .send()
+            .await
+            .map_err(|e| {
+                DeleteSharedMqttClientError::Other(format!("worker request failed: {e}"))
+            })?;
+        match resp.status() {
+            StatusCode::NO_CONTENT => Ok(()),
+            StatusCode::NOT_FOUND => Err(DeleteSharedMqttClientError::NotFound),
+            StatusCode::CONFLICT => {
+                let body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<failed to read worker response body>".to_string());
+                Err(DeleteSharedMqttClientError::Conflict(body))
+            }
+            other => {
+                let body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<failed to read worker response body>".to_string());
+                Err(DeleteSharedMqttClientError::Other(format!(
+                    "worker can-delete shared mqtt client failed (HTTP {other}): {body}"
+                )))
+            }
+        }
+    }
+
     pub async fn start_pipeline(&self, id: &str) -> Result<(), String> {
         let resp = self
             .http
