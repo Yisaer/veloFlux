@@ -6,6 +6,7 @@ use axum::{
 };
 use flow::connector::{ConnectorError, SharedMqttClientConfig};
 use storage::StorageError;
+use tokio::sync::TryAcquireError;
 
 use crate::pipeline::AppState;
 use crate::storage_bridge::{mqtt_config_from_stored, stored_mqtt_from_config};
@@ -59,6 +60,14 @@ fn storage_conflict_message(key: &str, existing: &SharedMqttClientConfig) -> Str
     )
 }
 
+fn shared_mqtt_busy_response(key: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        format!("shared mqtt client {key} is busy processing another command"),
+    )
+        .into_response()
+}
+
 pub async fn create_shared_mqtt_client_handler(
     State(state): State<AppState>,
     Json(req): Json<SharedMqttClientConfig>,
@@ -68,6 +77,21 @@ pub async fn create_shared_mqtt_client_handler(
     }
 
     let key = req.key.trim().to_string();
+    let _permit = match state
+        .try_acquire_shared_mqtt_ops(std::iter::once(key.clone()))
+        .await
+    {
+        Ok(permits) => permits,
+        Err(TryAcquireError::NoPermits) => return shared_mqtt_busy_response(&key),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "shared mqtt operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
+
     let mut storage_created = false;
     match state.storage.get_mqtt_config(&key) {
         Ok(Some(stored)) => {
@@ -198,6 +222,21 @@ pub async fn delete_shared_mqtt_client_handler(
     State(state): State<AppState>,
     Path(key): Path<String>,
 ) -> impl IntoResponse {
+    let _permit = match state
+        .try_acquire_shared_mqtt_ops(std::iter::once(key.clone()))
+        .await
+    {
+        Ok(permits) => permits,
+        Err(TryAcquireError::NoPermits) => return shared_mqtt_busy_response(&key),
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "shared mqtt operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
+
     let stored = match state.storage.get_mqtt_config(&key) {
         Ok(Some(stored)) => stored,
         Ok(None) => {
@@ -473,5 +512,55 @@ mod tests {
 
         worker_handle.abort();
         let _ = worker_handle.await;
+    }
+
+    #[tokio::test]
+    async fn delete_shared_mqtt_client_returns_conflict_when_key_operation_is_busy() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let instance = crate::new_default_flow_instance();
+        let state = AppState::new(
+            instance,
+            storage,
+            vec![crate::FlowInstanceSpec {
+                id: "default".to_string(),
+                backend: crate::FlowInstanceBackendKind::InProcess,
+                ..crate::FlowInstanceSpec::default()
+            }],
+            Vec::new(),
+        )
+        .expect("build state");
+
+        let cfg = shared_mqtt_cfg("shared");
+        let create_resp = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg))
+            .await
+            .into_response();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        let local_instance = state
+            .local_instance("default")
+            .expect("default local runtime instance");
+        let _permit = state
+            .try_acquire_shared_mqtt_ops(std::iter::once("shared".to_string()))
+            .await
+            .expect("acquire shared mqtt op");
+
+        let delete_resp =
+            delete_shared_mqtt_client_handler(State(state), Path("shared".to_string()))
+                .await
+                .into_response();
+        assert_eq!(delete_resp.status(), StatusCode::CONFLICT);
+
+        let body = to_bytes(delete_resp.into_body(), 64 * 1024)
+            .await
+            .expect("read delete body");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).expect("utf8 delete body"),
+            "shared mqtt client shared is busy processing another command"
+        );
+        assert!(
+            local_instance.get_shared_mqtt_client("shared").is_some(),
+            "busy key conflict must not drop the local shared mqtt client"
+        );
     }
 }
