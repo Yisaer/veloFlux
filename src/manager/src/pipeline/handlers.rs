@@ -7,12 +7,14 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use flow::pipeline::{PipelineError, PipelineStopMode};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 use storage::{StorageError, StoredPipelineDesiredState, StoredPipelineRunState};
-use tokio::sync::TryAcquireError;
+use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 
-use super::context::build_pipeline_context_payload;
+use super::context::{
+    build_pipeline_context_payload, shared_mqtt_connector_keys_from_pipeline_request,
+};
 use super::remote::apply_pipeline_in_worker;
 use super::spec::{build_pipeline_definition, status_label, validate_create_request};
 use super::state::AppState;
@@ -33,6 +35,28 @@ fn busy_response(id: &str) -> axum::response::Response {
     (
         StatusCode::CONFLICT,
         format!("pipeline {id} is busy processing another command"),
+    )
+        .into_response()
+}
+
+fn shared_mqtt_busy_response(keys: &BTreeSet<String>) -> axum::response::Response {
+    if keys.len() == 1 {
+        return (
+            StatusCode::CONFLICT,
+            format!(
+                "shared mqtt client {} is busy processing another command",
+                keys.iter().next().expect("single key")
+            ),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::CONFLICT,
+        format!(
+            "shared mqtt clients {} are busy processing another command",
+            keys.iter().cloned().collect::<Vec<_>>().join(", ")
+        ),
     )
         .into_response()
 }
@@ -130,6 +154,35 @@ async fn resolve_pipeline_spec(
     Ok((flow_instance_id, req))
 }
 
+async fn try_acquire_shared_mqtt_pipeline_ops(
+    state: &AppState,
+    pipeline_id: &str,
+    pipeline_req: &CreatePipelineRequest,
+) -> Result<Vec<OwnedSemaphorePermit>, axum::response::Response> {
+    let keys = match shared_mqtt_connector_keys_from_pipeline_request(
+        state.instances.default_instance().as_ref(),
+        state.storage.as_ref(),
+        pipeline_id,
+        pipeline_req,
+    ) {
+        Ok(keys) => keys,
+        Err(resp) => return Err(*resp),
+    };
+
+    match state
+        .try_acquire_shared_mqtt_ops(keys.iter().cloned())
+        .await
+    {
+        Ok(permits) => Ok(permits),
+        Err(TryAcquireError::NoPermits) => Err(shared_mqtt_busy_response(&keys)),
+        Err(TryAcquireError::Closed) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "shared mqtt operation guard closed".to_string(),
+        )
+            .into_response()),
+    }
+}
+
 pub async fn create_pipeline_handler(
     State(state): State<AppState>,
     Json(req): Json<CreatePipelineRequest>,
@@ -170,6 +223,12 @@ pub async fn create_pipeline_handler(
         )
             .into_response();
     }
+
+    let _shared_mqtt_permits =
+        match try_acquire_shared_mqtt_pipeline_ops(&state, &req.id, &req).await {
+            Ok(permits) => permits,
+            Err(resp) => return resp,
+        };
 
     let stored = match storage_bridge::stored_pipeline_from_request(&req) {
         Ok(stored) => stored,
@@ -368,6 +427,12 @@ pub async fn upsert_pipeline_handler(
             return (StatusCode::BAD_REQUEST, err).into_response();
         }
     };
+
+    let _shared_mqtt_permits =
+        match try_acquire_shared_mqtt_pipeline_ops(&state, &id, &create_req).await {
+            Ok(permits) => permits,
+            Err(resp) => return resp,
+        };
 
     if matches!(backend, FlowInstanceBackend::WorkerProcess) {
         if old_pipeline.is_some() {
@@ -819,6 +884,12 @@ pub async fn start_pipeline_handler(
     };
     let audit = ResourceMutationLog::new("pipeline", "start", id.as_str(), Some(&flow_instance_id));
 
+    let _shared_mqtt_permits =
+        match try_acquire_shared_mqtt_pipeline_ops(&state, &id, &pipeline_req).await {
+            Ok(permits) => permits,
+            Err(resp) => return resp,
+        };
+
     if let Err(err) = state
         .storage
         .put_pipeline_run_state(StoredPipelineRunState {
@@ -1223,5 +1294,138 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
             format!("failed to list pipelines: {err}"),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::start_pipeline_handler;
+    use crate::pipeline::{AppState, CreatePipelineRequest};
+    use crate::storage_bridge::{
+        stored_mqtt_from_config, stored_pipeline_from_request, stored_stream_from_request,
+    };
+    use crate::stream::{
+        CreateStreamRequest, MqttStreamPropsRequest, SchemaConfigRequest, StreamPropsRequest,
+    };
+    use axum::{
+        body::to_bytes,
+        extract::{Path, State},
+        http::StatusCode,
+        response::IntoResponse,
+    };
+    use flow::connector::SharedMqttClientConfig;
+    use serde_json::{Map as JsonMap, Value as JsonValue};
+
+    fn default_flow_instance_spec() -> crate::FlowInstanceSpec {
+        crate::FlowInstanceSpec {
+            id: "default".to_string(),
+            backend: crate::FlowInstanceBackendKind::InProcess,
+            ..crate::FlowInstanceSpec::default()
+        }
+    }
+
+    fn shared_mqtt_cfg(key: &str) -> SharedMqttClientConfig {
+        SharedMqttClientConfig {
+            key: key.to_string(),
+            broker_url: "tcp://127.0.0.1:1883".to_string(),
+            topic: "fleet/+/telemetry".to_string(),
+            client_id: format!("client_{key}"),
+            qos: 0,
+            max_packet_size: None,
+        }
+    }
+
+    fn mqtt_stream_request(name: &str, connector_key: &str) -> CreateStreamRequest {
+        let props = serde_json::to_value(MqttStreamPropsRequest {
+            connector_key: Some(connector_key.to_string()),
+            ..MqttStreamPropsRequest::default()
+        })
+        .expect("encode mqtt stream props");
+        let JsonValue::Object(fields) = props else {
+            panic!("mqtt stream props should encode as object");
+        };
+
+        CreateStreamRequest {
+            name: name.to_string(),
+            stream_type: "mqtt".to_string(),
+            schema: SchemaConfigRequest {
+                schema_type: "json".to_string(),
+                props: JsonMap::new(),
+            },
+            props: StreamPropsRequest { fields },
+            shared: false,
+            decoder: crate::stream::DecoderConfigRequest::default(),
+            eventtime: None,
+            sampler: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn start_pipeline_returns_conflict_when_shared_mqtt_key_operation_is_busy() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            Vec::new(),
+        )
+        .expect("build app state");
+
+        let connector_key = "shared".to_string();
+        state
+            .storage
+            .create_mqtt_config(stored_mqtt_from_config(&shared_mqtt_cfg(&connector_key)))
+            .expect("persist shared mqtt config");
+
+        let stream_req = mqtt_stream_request("src", &connector_key);
+        state
+            .storage
+            .create_stream(
+                stored_stream_from_request(&stream_req).expect("serialize stored stream request"),
+            )
+            .expect("persist stream");
+
+        let pipeline_req = CreatePipelineRequest {
+            id: "pipe_busy".to_string(),
+            flow_instance_id: Some("default".to_string()),
+            sql: "select * from src".to_string(),
+            sinks: Vec::new(),
+            options: Default::default(),
+        };
+        state
+            .storage
+            .create_pipeline(
+                stored_pipeline_from_request(&pipeline_req)
+                    .expect("serialize stored pipeline request"),
+            )
+            .expect("persist pipeline");
+
+        let _permit = state
+            .try_acquire_shared_mqtt_ops(std::iter::once(connector_key.clone()))
+            .await
+            .expect("acquire shared mqtt op");
+
+        let start_resp =
+            start_pipeline_handler(State(state.clone()), Path("pipe_busy".to_string()))
+                .await
+                .into_response();
+        assert_eq!(start_resp.status(), StatusCode::CONFLICT);
+
+        let body = to_bytes(start_resp.into_body(), 64 * 1024)
+            .await
+            .expect("read start body");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).expect("utf8 start body"),
+            "shared mqtt client shared is busy processing another command"
+        );
+        assert!(
+            state
+                .storage
+                .get_pipeline_run_state("pipe_busy")
+                .expect("read pipeline run state")
+                .is_none(),
+            "busy shared mqtt key must reject start before mutating desired state"
+        );
     }
 }

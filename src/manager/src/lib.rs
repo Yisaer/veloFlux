@@ -6,6 +6,7 @@ mod import;
 mod init_process;
 mod instances;
 mod memory_topic;
+mod mqtt_client;
 mod pipeline;
 mod startup;
 pub mod storage_bridge;
@@ -91,6 +92,16 @@ fn build_app(state: AppState) -> Router {
             "/memory/topics",
             post(memory_topic::create_memory_topic_handler)
                 .get(memory_topic::list_memory_topics_handler),
+        )
+        .route(
+            "/mqtt/clients",
+            post(mqtt_client::create_shared_mqtt_client_handler)
+                .get(mqtt_client::list_shared_mqtt_clients_handler),
+        )
+        .route(
+            "/mqtt/clients/:key",
+            get(mqtt_client::get_shared_mqtt_client_handler)
+                .delete(mqtt_client::delete_shared_mqtt_client_handler),
         )
         .layer(CorsLayer::permissive())
         .with_state(state)

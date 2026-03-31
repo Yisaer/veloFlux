@@ -89,6 +89,7 @@ pub struct MqttSinkProps {
     pub retain: bool,
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
+    pub max_packet_size: Option<usize>,
 }
 
 /// Concrete Nop sink configuration.
@@ -127,6 +128,7 @@ impl MqttSinkProps {
             retain: false,
             client_id: None,
             connector_key: None,
+            max_packet_size: None,
         }
     }
 
@@ -142,6 +144,11 @@ impl MqttSinkProps {
 
     pub fn with_connector_key(mut self, connector_key: impl Into<String>) -> Self {
         self.connector_key = Some(connector_key.into());
+        self
+    }
+
+    pub fn with_max_packet_size(mut self, max_packet_size: usize) -> Self {
+        self.max_packet_size = Some(max_packet_size);
         self
     }
 }

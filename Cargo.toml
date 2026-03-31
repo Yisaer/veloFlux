@@ -51,6 +51,7 @@ deadlock_detection = ["flow/deadlock_detection", "manager/deadlock_detection", "
 [dev-dependencies]
 bytes = "1"
 criterion = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tempfile = "3"
 
 [[bench]]

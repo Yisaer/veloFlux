@@ -68,16 +68,14 @@ pub(super) type PipelineContextPayload = (
 );
 pub(super) type PipelineContextError = Box<axum::response::Response>;
 
-pub(super) fn build_pipeline_context_payload(
-    instances: &FlowInstances,
+pub(super) fn shared_mqtt_connector_keys_from_pipeline_request(
+    instance: &FlowInstance,
     storage: &StorageManager,
     pipeline_id: &str,
     pipeline_req: &CreatePipelineRequest,
-) -> Result<PipelineContextPayload, PipelineContextError> {
-    let default_instance = instances.default_instance();
-    let select_stmt =
-        select_stmt_from_sql(default_instance.as_ref(), pipeline_id, &pipeline_req.sql)
-            .map_err(|err| Box::new((StatusCode::BAD_REQUEST, err).into_response()))?;
+) -> Result<BTreeSet<String>, PipelineContextError> {
+    let select_stmt = select_stmt_from_sql(instance, pipeline_id, &pipeline_req.sql)
+        .map_err(|err| Box::new((StatusCode::BAD_REQUEST, err).into_response()))?;
 
     let mut stream_names = select_stmt
         .source_infos
@@ -98,8 +96,6 @@ pub(super) fn build_pipeline_context_payload(
         )
     })?;
 
-    let mut streams = BTreeMap::new();
-    let mut memory_topics = BTreeSet::new();
     for stream_name in stream_names {
         let stored_stream = match storage.get_stream(&stream_name) {
             Ok(Some(stream)) => stream,
@@ -148,7 +144,75 @@ pub(super) fn build_pipeline_context_payload(
                 ));
             }
         }
+    }
 
+    Ok(connector_keys)
+}
+
+pub(super) fn build_pipeline_context_payload(
+    instances: &FlowInstances,
+    storage: &StorageManager,
+    pipeline_id: &str,
+    pipeline_req: &CreatePipelineRequest,
+) -> Result<PipelineContextPayload, PipelineContextError> {
+    let default_instance = instances.default_instance();
+    let select_stmt =
+        select_stmt_from_sql(default_instance.as_ref(), pipeline_id, &pipeline_req.sql)
+            .map_err(|err| Box::new((StatusCode::BAD_REQUEST, err).into_response()))?;
+
+    let mut stream_names = select_stmt
+        .source_infos
+        .iter()
+        .map(|source| source.name.clone())
+        .collect::<Vec<_>>();
+    stream_names.sort();
+    stream_names.dedup();
+
+    let connector_keys = shared_mqtt_connector_keys_from_pipeline_request(
+        default_instance.as_ref(),
+        storage,
+        pipeline_id,
+        pipeline_req,
+    )?;
+
+    let mut streams = BTreeMap::new();
+    let mut memory_topics = BTreeSet::new();
+    for stream_name in stream_names {
+        let stored_stream = match storage.get_stream(&stream_name) {
+            Ok(Some(stream)) => stream,
+            Ok(None) => {
+                return Err(Box::new(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("stream {stream_name} missing from storage"),
+                    )
+                        .into_response(),
+                ));
+            }
+            Err(err) => {
+                return Err(Box::new(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to read stream {stream_name} from storage: {err}"),
+                    )
+                        .into_response(),
+                ));
+            }
+        };
+
+        let stream_req: crate::stream::CreateStreamRequest =
+            match serde_json::from_str(&stored_stream.raw_json) {
+                Ok(req) => req,
+                Err(err) => {
+                    return Err(Box::new(
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("decode stored stream {stream_name}: {err}"),
+                        )
+                            .into_response(),
+                    ));
+                }
+            };
         if stream_req.stream_type.eq_ignore_ascii_case("memory") {
             let props: crate::stream::MemoryStreamPropsRequest =
                 serde_json::from_value(JsonValue::Object(stream_req.props.fields.clone()))

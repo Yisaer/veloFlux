@@ -222,6 +222,7 @@ pub struct MqttSinkPropsRequest {
     pub retain: Option<bool>,
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
+    pub max_packet_size: Option<usize>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]

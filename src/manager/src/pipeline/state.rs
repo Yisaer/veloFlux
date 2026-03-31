@@ -6,7 +6,7 @@ use crate::instances::{
 use crate::startup::StartupPhase;
 use crate::storage_bridge;
 use crate::worker::{FlowWorkerClient, WorkerApplyPipelineRequest, WorkerDesiredState};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 use storage::{StorageManager, StoredPipelineDesiredState};
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
@@ -22,6 +22,7 @@ pub struct AppState {
     pub declared_instances: Arc<HashMap<String, FlowInstanceBackend>>,
     import_export_op_lock: Arc<Semaphore>,
     pipeline_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    shared_mqtt_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
 impl AppState {
@@ -42,6 +43,7 @@ impl AppState {
             declared_instances: Arc::new(HashMap::new()),
             import_export_op_lock: Arc::new(Semaphore::new(1)),
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
+            shared_mqtt_op_locks: Arc::new(Mutex::new(HashMap::new())),
         };
 
         find_default_flow_instance_spec(&flow_instances)?;
@@ -182,6 +184,42 @@ impl AppState {
 
     pub fn try_acquire_import_export_op(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {
         self.import_export_op_lock.clone().try_acquire_owned()
+    }
+
+    pub async fn try_acquire_shared_mqtt_ops<I, S>(
+        &self,
+        keys: I,
+    ) -> Result<Vec<OwnedSemaphorePermit>, TryAcquireError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let keys = keys
+            .into_iter()
+            .map(Into::into)
+            .filter(|key: &String| !key.trim().is_empty())
+            .collect::<BTreeSet<_>>();
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let semaphores = {
+            let mut guard = self.shared_mqtt_op_locks.lock().await;
+            keys.into_iter()
+                .map(|key| {
+                    guard
+                        .entry(key)
+                        .or_insert_with(|| Arc::new(Semaphore::new(1)))
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut permits = Vec::with_capacity(semaphores.len());
+        for semaphore in semaphores {
+            permits.push(semaphore.try_acquire_owned()?);
+        }
+        Ok(permits)
     }
 
     async fn hydrate_workers_from_storage(&self) -> Result<(), String> {

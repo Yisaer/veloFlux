@@ -353,6 +353,7 @@ mod tests {
                     topic: format!("{mqtt_key}/topic"),
                     client_id: format!("{mqtt_key}_client"),
                     qos: 1,
+                    max_packet_size: None,
                 }],
                 streams: vec![sample_stream_request(stream_name)],
                 pipelines: vec![sample_pipeline_request(pipeline_id, stream_name)],

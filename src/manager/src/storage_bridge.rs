@@ -90,6 +90,7 @@ pub fn mqtt_config_from_stored(stored: &StoredMqttClientConfig) -> SharedMqttCli
         topic: String::new(),
         client_id: String::new(),
         qos: 0,
+        max_packet_size: None,
     })
 }
 

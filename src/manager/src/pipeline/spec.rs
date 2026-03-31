@@ -72,6 +72,9 @@ pub(crate) fn build_pipeline_definition(
                 if let Some(connector_key) = mqtt_props.connector_key {
                     props = props.with_connector_key(connector_key);
                 }
+                if let Some(max_packet_size) = mqtt_props.max_packet_size {
+                    props = props.with_max_packet_size(max_packet_size);
+                }
                 SinkDefinition::new(sink_id.clone(), SinkType::Mqtt, SinkProps::Mqtt(props))
             }
             "nop" => {

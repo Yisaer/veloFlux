@@ -4,6 +4,13 @@ use super::protocol::{
 use flow::processor::ProcessorStatsEntry;
 use reqwest::StatusCode;
 
+#[derive(Debug)]
+pub enum DeleteSharedMqttClientError {
+    NotFound,
+    Conflict(String),
+    Other(String),
+}
+
 #[derive(Clone)]
 pub struct FlowWorkerClient {
     base_url: String,
@@ -48,6 +55,40 @@ impl FlowWorkerClient {
         resp.json::<WorkerApplyPipelineResponse>()
             .await
             .map_err(|e| format!("decode worker apply response: {e}"))
+    }
+
+    pub async fn delete_shared_mqtt_client(
+        &self,
+        key: &str,
+    ) -> Result<(), DeleteSharedMqttClientError> {
+        let resp = self
+            .http
+            .delete(self.url(&format!("/internal/v1/mqtt/clients/{key}")))
+            .send()
+            .await
+            .map_err(|e| {
+                DeleteSharedMqttClientError::Other(format!("worker request failed: {e}"))
+            })?;
+        match resp.status() {
+            StatusCode::NO_CONTENT => Ok(()),
+            StatusCode::NOT_FOUND => Err(DeleteSharedMqttClientError::NotFound),
+            StatusCode::CONFLICT => {
+                let body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<failed to read worker response body>".to_string());
+                Err(DeleteSharedMqttClientError::Conflict(body))
+            }
+            other => {
+                let body = resp
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<failed to read worker response body>".to_string());
+                Err(DeleteSharedMqttClientError::Other(format!(
+                    "worker delete shared mqtt client failed (HTTP {other}): {body}"
+                )))
+            }
+        }
     }
 
     pub async fn start_pipeline(&self, id: &str) -> Result<(), String> {

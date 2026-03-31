@@ -23,6 +23,7 @@ pub struct SharedMqttClientConfig {
     pub topic: String,
     pub client_id: String,
     pub qos: u8,
+    pub max_packet_size: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,20 +32,43 @@ pub enum SharedMqttEvent {
     EndOfStream,
 }
 
+fn mqtt_topic_matches(filter: &str, topic: &str) -> bool {
+    let filter_levels = filter.split('/').collect::<Vec<_>>();
+    let topic_levels = topic.split('/').collect::<Vec<_>>();
+    let mut filter_idx = 0usize;
+    let mut topic_idx = 0usize;
+
+    while filter_idx < filter_levels.len() {
+        match filter_levels[filter_idx] {
+            "#" => return filter_idx == filter_levels.len() - 1,
+            "+" => {
+                if topic_idx >= topic_levels.len() {
+                    return false;
+                }
+                filter_idx += 1;
+                topic_idx += 1;
+            }
+            level => {
+                if topic_idx >= topic_levels.len() || topic_levels[topic_idx] != level {
+                    return false;
+                }
+                filter_idx += 1;
+                topic_idx += 1;
+            }
+        }
+    }
+
+    topic_idx == topic_levels.len()
+}
+
 pub struct SharedMqttClient {
-    key: String,
     entry: Arc<MqttClientEntry>,
     manager: MqttClientManager,
 }
 
 impl SharedMqttClient {
-    fn new(key: String, entry: Arc<MqttClientEntry>, manager: MqttClientManager) -> Self {
-        entry.ref_count.fetch_add(1, Ordering::AcqRel);
-        Self {
-            key,
-            entry,
-            manager,
-        }
+    fn from_acquired(entry: Arc<MqttClientEntry>, manager: MqttClientManager) -> Self {
+        Self { entry, manager }
     }
 
     pub fn client(&self) -> AsyncClient {
@@ -84,7 +108,7 @@ impl SharedMqttClient {
 
 impl Drop for SharedMqttClient {
     fn drop(&mut self) {
-        self.manager.release(&self.key);
+        self.manager.release(&self.entry);
     }
 }
 
@@ -94,6 +118,7 @@ struct MqttClientEntry {
     shutdown_tx: watch::Sender<bool>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
     ref_count: AtomicUsize,
+    closing: AtomicBool,
     topic: String,
     qos: QoS,
     connected: AtomicBool,
@@ -124,6 +149,7 @@ impl MqttClientEntry {
                 shutdown_tx,
                 join_handle: Mutex::new(None),
                 ref_count: AtomicUsize::new(0),
+                closing: AtomicBool::new(false),
                 topic,
                 qos,
                 connected: AtomicBool::new(false),
@@ -156,7 +182,7 @@ impl MqttClientEntry {
                         Ok(Event::Incoming(Packet::Publish(publish))) => {
                             entry_for_task.connected.store(true, Ordering::Release);
                             backoff = Duration::from_millis(100);
-                            if publish.topic == topic {
+                            if mqtt_topic_matches(&topic, &publish.topic) {
                                 let _ = events_tx.send(Ok(SharedMqttEvent::Payload(publish.payload.to_vec())));
                             }
                         }
@@ -242,31 +268,37 @@ impl MqttClientManager {
         &self,
         key: &str,
     ) -> Result<SharedMqttClient, ConnectorError> {
-        if let Some(entry) = self.entries.lock().get(key).cloned() {
-            return Ok(SharedMqttClient::new(key.to_string(), entry, self.clone()));
-        }
-        Err(ConnectorError::NotFound(key.to_string()))
+        let entry = {
+            let guard = self.entries.lock();
+            let entry = guard
+                .get(key)
+                .cloned()
+                .ok_or_else(|| ConnectorError::NotFound(key.to_string()))?;
+            entry.ref_count.fetch_add(1, Ordering::AcqRel);
+            entry
+        };
+        Ok(SharedMqttClient::from_acquired(entry, self.clone()))
     }
 
     pub(crate) fn drop_client(&self, key: &str) -> Result<(), ConnectorError> {
-        let mut guard = self.entries.lock();
-        let entry = guard
-            .get(key)
-            .cloned()
+        let entry = self
+            .entries
+            .lock()
+            .remove(key)
             .ok_or_else(|| ConnectorError::NotFound(key.to_string()))?;
 
-        if entry.ref_count.load(Ordering::Acquire) > 0 {
-            return Err(ConnectorError::ResourceBusy(key.to_string()));
+        entry.closing.store(true, Ordering::Release);
+        if entry.ref_count.load(Ordering::Acquire) == 0 {
+            MqttClientEntry::spawn_shutdown(&self.spawner, entry);
         }
-
-        guard.remove(key);
-        MqttClientEntry::spawn_shutdown(&self.spawner, entry);
         Ok(())
     }
 
-    pub(crate) fn release(&self, key: &str) {
-        if let Some(entry) = self.entries.lock().get(key) {
-            entry.ref_count.fetch_sub(1, Ordering::AcqRel);
+    fn release(&self, entry: &Arc<MqttClientEntry>) {
+        if entry.ref_count.fetch_sub(1, Ordering::AcqRel) == 1
+            && entry.closing.load(Ordering::Acquire)
+        {
+            MqttClientEntry::spawn_shutdown(&self.spawner, Arc::clone(entry));
         }
     }
 }
@@ -298,6 +330,8 @@ fn build_mqtt_options(config: &SharedMqttClientConfig) -> Result<MqttOptions, Co
         })?;
 
     let mut options = MqttOptions::new(config.client_id.clone(), host, port);
+    let max_packet_size = config.max_packet_size.unwrap_or(64 * 1024 * 1024);
+    options.set_max_packet_size(max_packet_size, max_packet_size);
 
     if is_tls_scheme(scheme) {
         options.set_transport(Transport::tls_with_default_config());
@@ -327,4 +361,82 @@ fn default_port_for_scheme(scheme: &str) -> Option<u16> {
 
 fn is_tls_scheme(scheme: &str) -> bool {
     matches!(scheme, "mqtts" | "ssl" | "tcps")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{mqtt_topic_matches, MqttClientManager, SharedMqttClientConfig};
+    use crate::connector::ConnectorError;
+    use crate::runtime::TaskSpawner;
+    use tokio::runtime::Handle;
+
+    #[test]
+    fn mqtt_topic_match_exact() {
+        assert!(mqtt_topic_matches("topic/123", "topic/123"));
+        assert!(!mqtt_topic_matches("topic/123", "topic/456"));
+    }
+
+    #[test]
+    fn mqtt_topic_match_single_level_wildcard() {
+        assert!(mqtt_topic_matches("topic/+", "topic/123"));
+        assert!(!mqtt_topic_matches("topic/+", "topic/123/456"));
+        assert!(!mqtt_topic_matches("topic/+", "topic"));
+    }
+
+    #[test]
+    fn mqtt_topic_match_multi_level_wildcard() {
+        assert!(mqtt_topic_matches("topic/#", "topic"));
+        assert!(mqtt_topic_matches("topic/#", "topic/123"));
+        assert!(mqtt_topic_matches("topic/#", "topic/123/456"));
+        assert!(!mqtt_topic_matches("topic/#", "other/123"));
+    }
+
+    #[test]
+    fn mqtt_topic_match_mixed_wildcards() {
+        assert!(mqtt_topic_matches(
+            "fleet/+/telemetry/#",
+            "fleet/car_a/telemetry"
+        ));
+        assert!(mqtt_topic_matches(
+            "fleet/+/telemetry/#",
+            "fleet/car_a/telemetry/speed"
+        ));
+        assert!(!mqtt_topic_matches(
+            "fleet/+/telemetry/#",
+            "fleet/car_a/state/speed"
+        ));
+    }
+
+    #[tokio::test]
+    async fn drop_client_removes_busy_client_from_registry() {
+        let manager = MqttClientManager::new(TaskSpawner::from_handle(Handle::current()));
+        let cfg = SharedMqttClientConfig {
+            key: "shared".to_string(),
+            broker_url: "tcp://127.0.0.1:1883".to_string(),
+            topic: "fleet/+/telemetry".to_string(),
+            client_id: "client_shared".to_string(),
+            qos: 0,
+            max_packet_size: None,
+        };
+
+        manager
+            .create_client(cfg)
+            .await
+            .expect("create shared mqtt client");
+        let held = manager
+            .acquire_client("shared")
+            .await
+            .expect("acquire shared mqtt client");
+
+        manager
+            .drop_client("shared")
+            .expect("best-effort drop busy shared mqtt client");
+
+        assert!(matches!(
+            manager.acquire_client("shared").await,
+            Err(ConnectorError::NotFound(_))
+        ));
+
+        drop(held);
+    }
 }
