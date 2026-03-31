@@ -28,6 +28,7 @@ pub struct MqttSinkConfig {
     pub retain: bool,
     pub client_id: Option<String>,
     pub connector_key: Option<String>,
+    pub max_packet_size: Option<usize>,
 }
 
 impl MqttSinkConfig {
@@ -45,6 +46,7 @@ impl MqttSinkConfig {
             retain: false,
             client_id: None,
             connector_key: None,
+            max_packet_size: None,
         }
     }
 
@@ -60,6 +62,11 @@ impl MqttSinkConfig {
 
     pub fn with_connector_key(mut self, connector_key: impl Into<String>) -> Self {
         self.connector_key = Some(connector_key.into());
+        self
+    }
+
+    pub fn with_max_packet_size(mut self, max_packet_size: usize) -> Self {
+        self.max_packet_size = Some(max_packet_size);
         self
     }
 
@@ -378,8 +385,9 @@ fn build_mqtt_options(config: &MqttSinkConfig) -> Result<MqttOptions, SinkConnec
             ))
         })?;
 
+    let max_packet_size = config.max_packet_size.unwrap_or(64 * 1024 * 1024);
     let mut options = MqttOptions::new(config.client_id(), host, port);
-    options.set_max_packet_size(64 * 1024 * 1024, 64 * 1024 * 1024);
+    options.set_max_packet_size(max_packet_size, max_packet_size);
     if is_tls_scheme(scheme) {
         options.set_transport(Transport::tls_with_default_config());
     }

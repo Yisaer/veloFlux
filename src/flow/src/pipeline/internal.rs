@@ -5,7 +5,6 @@ use crate::connector::{
     MemorySourceConfig, MemorySourceConnector, MemoryTopicKind, MockSourceConnector,
     MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
-use crate::explain_shared_stream::shared_stream_decode_applied_snapshot;
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan;
 use crate::planner::sink::SinkEncoderKind;
@@ -17,8 +16,8 @@ use crate::processor::{
     create_processor_pipeline, ProcessorPipelineDependencies, ProcessorPipelineOptions,
 };
 use crate::{
-    explain_pipeline_with_options, optimize_physical_plan, PipelineExplain, PipelineExplainConfig,
-    PipelineRegistries, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
+    explain_pipeline_with_options, optimize_physical_plan, PipelineExplain, PipelineRegistries,
+    PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -529,30 +528,30 @@ fn build_pipeline_runtime(
             };
             Ok::<_, String>(eventtime)
         })?;
-        // Pipeline explain is exposed via REST; avoid generating/logging it in release builds.
-        #[cfg(debug_assertions)]
-        {
-            let shared_stream_decode_applied = shared_stream_decode_applied_snapshot(
-                &optimized_plan,
-                shared_stream_registry.as_ref(),
-            );
-            let explain = PipelineExplain::new(
-                Arc::clone(&logical_plan),
-                Arc::clone(&optimized_plan),
-                PipelineExplainConfig {
-                    pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
-                        eventtime_enabled: definition.options().eventtime.enabled,
-                        eventtime_late_tolerance_ms: definition
-                            .options()
-                            .eventtime
-                            .late_tolerance
-                            .as_millis(),
-                    }),
-                    shared_stream_decode_applied,
-                },
-            );
-            tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
-        }
+        // // Pipeline explain is exposed via REST; avoid generating/logging it in release builds.
+        // #[cfg(debug_assertions)]
+        // {
+        //     let shared_stream_decode_applied = shared_stream_decode_applied_snapshot(
+        //         &optimized_plan,
+        //         shared_stream_registry.as_ref(),
+        //     );
+        //     let explain = PipelineExplain::new(
+        //         Arc::clone(&logical_plan),
+        //         Arc::clone(&optimized_plan),
+        //         PipelineExplainConfig {
+        //             pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
+        //                 eventtime_enabled: definition.options().eventtime.enabled,
+        //                 eventtime_late_tolerance_ms: definition
+        //                     .options()
+        //                     .eventtime
+        //                     .late_tolerance
+        //                     .as_millis(),
+        //             }),
+        //             shared_stream_decode_applied,
+        //         },
+        //     );
+        //     tracing::info!(explain = %explain.to_pretty_string(), "pipeline explain");
+        // }
 
         let mut pipeline = build_log.run_phase("create_processor_pipeline", || {
             create_processor_pipeline(
@@ -624,6 +623,9 @@ fn build_sinks_from_definition(
                 config = config.with_client_id(client_id);
                 if let Some(conn_key) = &props.connector_key {
                     config = config.with_connector_key(conn_key.clone());
+                }
+                if let Some(max_packet_size) = props.max_packet_size {
+                    config = config.with_max_packet_size(max_packet_size);
                 }
                 let connector = PipelineSinkConnector::new(
                     sink.sink_id.clone(),

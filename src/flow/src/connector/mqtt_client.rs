@@ -23,12 +23,42 @@ pub struct SharedMqttClientConfig {
     pub topic: String,
     pub client_id: String,
     pub qos: u8,
+    pub max_packet_size: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub enum SharedMqttEvent {
     Payload(Vec<u8>),
     EndOfStream,
+}
+
+fn mqtt_topic_matches(filter: &str, topic: &str) -> bool {
+    let filter_levels = filter.split('/').collect::<Vec<_>>();
+    let topic_levels = topic.split('/').collect::<Vec<_>>();
+    let mut filter_idx = 0usize;
+    let mut topic_idx = 0usize;
+
+    while filter_idx < filter_levels.len() {
+        match filter_levels[filter_idx] {
+            "#" => return filter_idx == filter_levels.len() - 1,
+            "+" => {
+                if topic_idx >= topic_levels.len() {
+                    return false;
+                }
+                filter_idx += 1;
+                topic_idx += 1;
+            }
+            level => {
+                if topic_idx >= topic_levels.len() || topic_levels[topic_idx] != level {
+                    return false;
+                }
+                filter_idx += 1;
+                topic_idx += 1;
+            }
+        }
+    }
+
+    topic_idx == topic_levels.len()
 }
 
 pub struct SharedMqttClient {
@@ -156,7 +186,7 @@ impl MqttClientEntry {
                         Ok(Event::Incoming(Packet::Publish(publish))) => {
                             entry_for_task.connected.store(true, Ordering::Release);
                             backoff = Duration::from_millis(100);
-                            if publish.topic == topic {
+                            if mqtt_topic_matches(&topic, &publish.topic) {
                                 let _ = events_tx.send(Ok(SharedMqttEvent::Payload(publish.payload.to_vec())));
                             }
                         }
@@ -298,6 +328,8 @@ fn build_mqtt_options(config: &SharedMqttClientConfig) -> Result<MqttOptions, Co
         })?;
 
     let mut options = MqttOptions::new(config.client_id.clone(), host, port);
+    let max_packet_size = config.max_packet_size.unwrap_or(64 * 1024 * 1024);
+    options.set_max_packet_size(max_packet_size, max_packet_size);
 
     if is_tls_scheme(scheme) {
         options.set_transport(Transport::tls_with_default_config());
@@ -327,4 +359,46 @@ fn default_port_for_scheme(scheme: &str) -> Option<u16> {
 
 fn is_tls_scheme(scheme: &str) -> bool {
     matches!(scheme, "mqtts" | "ssl" | "tcps")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mqtt_topic_matches;
+
+    #[test]
+    fn mqtt_topic_match_exact() {
+        assert!(mqtt_topic_matches("topic/123", "topic/123"));
+        assert!(!mqtt_topic_matches("topic/123", "topic/456"));
+    }
+
+    #[test]
+    fn mqtt_topic_match_single_level_wildcard() {
+        assert!(mqtt_topic_matches("topic/+", "topic/123"));
+        assert!(!mqtt_topic_matches("topic/+", "topic/123/456"));
+        assert!(!mqtt_topic_matches("topic/+", "topic"));
+    }
+
+    #[test]
+    fn mqtt_topic_match_multi_level_wildcard() {
+        assert!(mqtt_topic_matches("topic/#", "topic"));
+        assert!(mqtt_topic_matches("topic/#", "topic/123"));
+        assert!(mqtt_topic_matches("topic/#", "topic/123/456"));
+        assert!(!mqtt_topic_matches("topic/#", "other/123"));
+    }
+
+    #[test]
+    fn mqtt_topic_match_mixed_wildcards() {
+        assert!(mqtt_topic_matches(
+            "fleet/+/telemetry/#",
+            "fleet/car_a/telemetry"
+        ));
+        assert!(mqtt_topic_matches(
+            "fleet/+/telemetry/#",
+            "fleet/car_a/telemetry/speed"
+        ));
+        assert!(!mqtt_topic_matches(
+            "fleet/+/telemetry/#",
+            "fleet/car_a/state/speed"
+        ));
+    }
 }

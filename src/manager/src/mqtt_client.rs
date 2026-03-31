@@ -41,12 +41,17 @@ fn shared_mqtt_config_eq(left: &SharedMqttClientConfig, right: &SharedMqttClient
         && left.topic == right.topic
         && left.client_id == right.client_id
         && left.qos == right.qos
+        && left.max_packet_size == right.max_packet_size
 }
 
 fn storage_conflict_message(key: &str, existing: &SharedMqttClientConfig) -> String {
     format!(
-        "shared mqtt client {key} already exists with different config: broker_url={}, topic={}, client_id={}, qos={}",
-        existing.broker_url, existing.topic, existing.client_id, existing.qos
+        "shared mqtt client {key} already exists with different config: broker_url={}, topic={}, client_id={}, qos={}, max_packet_size={:?}",
+        existing.broker_url,
+        existing.topic,
+        existing.client_id,
+        existing.qos,
+        existing.max_packet_size
     )
 }
 

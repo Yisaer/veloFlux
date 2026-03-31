@@ -456,6 +456,10 @@ fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, St
         .get("connector_key")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let max_packet_size = obj
+        .get("max_packet_size")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize);
 
     let mut config =
         MqttSinkConfig::new(sink_name.clone(), broker_url, topic, qos).with_retain(retain);
@@ -464,6 +468,9 @@ fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, St
     }
     if let Some(connector_key) = connector_key {
         config = config.with_connector_key(connector_key);
+    }
+    if let Some(max_packet_size) = max_packet_size {
+        config = config.with_max_packet_size(max_packet_size);
     }
     Ok(config)
 }
@@ -752,6 +759,7 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "retain": cfg.retain,
                 "client_id": cfg.client_id,
                 "connector_key": cfg.connector_key,
+                "max_packet_size": cfg.max_packet_size,
             }),
         ),
         SinkConnectorConfig::Kuksa(cfg) => (

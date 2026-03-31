@@ -262,6 +262,7 @@ mod tests {
             topic: "foo/bar".to_string(),
             client_id: "client_a".to_string(),
             qos: 1,
+            max_packet_size: None,
         };
         let memory_topic = StoredMemoryTopic {
             topic: "topic_1".to_string(),
