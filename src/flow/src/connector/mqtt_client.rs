@@ -62,19 +62,13 @@ fn mqtt_topic_matches(filter: &str, topic: &str) -> bool {
 }
 
 pub struct SharedMqttClient {
-    key: String,
     entry: Arc<MqttClientEntry>,
     manager: MqttClientManager,
 }
 
 impl SharedMqttClient {
-    fn new(key: String, entry: Arc<MqttClientEntry>, manager: MqttClientManager) -> Self {
-        entry.ref_count.fetch_add(1, Ordering::AcqRel);
-        Self {
-            key,
-            entry,
-            manager,
-        }
+    fn from_acquired(entry: Arc<MqttClientEntry>, manager: MqttClientManager) -> Self {
+        Self { entry, manager }
     }
 
     pub fn client(&self) -> AsyncClient {
@@ -114,7 +108,7 @@ impl SharedMqttClient {
 
 impl Drop for SharedMqttClient {
     fn drop(&mut self) {
-        self.manager.release(&self.key);
+        self.manager.release(&self.entry);
     }
 }
 
@@ -124,6 +118,7 @@ struct MqttClientEntry {
     shutdown_tx: watch::Sender<bool>,
     join_handle: Mutex<Option<JoinHandle<()>>>,
     ref_count: AtomicUsize,
+    closing: AtomicBool,
     topic: String,
     qos: QoS,
     connected: AtomicBool,
@@ -154,6 +149,7 @@ impl MqttClientEntry {
                 shutdown_tx,
                 join_handle: Mutex::new(None),
                 ref_count: AtomicUsize::new(0),
+                closing: AtomicBool::new(false),
                 topic,
                 qos,
                 connected: AtomicBool::new(false),
@@ -272,45 +268,37 @@ impl MqttClientManager {
         &self,
         key: &str,
     ) -> Result<SharedMqttClient, ConnectorError> {
-        if let Some(entry) = self.entries.lock().get(key).cloned() {
-            return Ok(SharedMqttClient::new(key.to_string(), entry, self.clone()));
-        }
-        Err(ConnectorError::NotFound(key.to_string()))
+        let entry = {
+            let guard = self.entries.lock();
+            let entry = guard
+                .get(key)
+                .cloned()
+                .ok_or_else(|| ConnectorError::NotFound(key.to_string()))?;
+            entry.ref_count.fetch_add(1, Ordering::AcqRel);
+            entry
+        };
+        Ok(SharedMqttClient::from_acquired(entry, self.clone()))
     }
 
     pub(crate) fn drop_client(&self, key: &str) -> Result<(), ConnectorError> {
-        let mut guard = self.entries.lock();
-        let entry = guard
-            .get(key)
-            .cloned()
+        let entry = self
+            .entries
+            .lock()
+            .remove(key)
             .ok_or_else(|| ConnectorError::NotFound(key.to_string()))?;
 
-        if entry.ref_count.load(Ordering::Acquire) > 0 {
-            return Err(ConnectorError::ResourceBusy(key.to_string()));
+        entry.closing.store(true, Ordering::Release);
+        if entry.ref_count.load(Ordering::Acquire) == 0 {
+            MqttClientEntry::spawn_shutdown(&self.spawner, entry);
         }
-
-        guard.remove(key);
-        MqttClientEntry::spawn_shutdown(&self.spawner, entry);
         Ok(())
     }
 
-    pub(crate) fn can_drop_client(&self, key: &str) -> Result<(), ConnectorError> {
-        let guard = self.entries.lock();
-        let entry = guard
-            .get(key)
-            .cloned()
-            .ok_or_else(|| ConnectorError::NotFound(key.to_string()))?;
-
-        if entry.ref_count.load(Ordering::Acquire) > 0 {
-            return Err(ConnectorError::ResourceBusy(key.to_string()));
-        }
-
-        Ok(())
-    }
-
-    pub(crate) fn release(&self, key: &str) {
-        if let Some(entry) = self.entries.lock().get(key) {
-            entry.ref_count.fetch_sub(1, Ordering::AcqRel);
+    fn release(&self, entry: &Arc<MqttClientEntry>) {
+        if entry.ref_count.fetch_sub(1, Ordering::AcqRel) == 1
+            && entry.closing.load(Ordering::Acquire)
+        {
+            MqttClientEntry::spawn_shutdown(&self.spawner, Arc::clone(entry));
         }
     }
 }
@@ -377,7 +365,10 @@ fn is_tls_scheme(scheme: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::mqtt_topic_matches;
+    use super::{mqtt_topic_matches, MqttClientManager, SharedMqttClientConfig};
+    use crate::connector::ConnectorError;
+    use crate::runtime::TaskSpawner;
+    use tokio::runtime::Handle;
 
     #[test]
     fn mqtt_topic_match_exact() {
@@ -414,5 +405,38 @@ mod tests {
             "fleet/+/telemetry/#",
             "fleet/car_a/state/speed"
         ));
+    }
+
+    #[tokio::test]
+    async fn drop_client_removes_busy_client_from_registry() {
+        let manager = MqttClientManager::new(TaskSpawner::from_handle(Handle::current()));
+        let cfg = SharedMqttClientConfig {
+            key: "shared".to_string(),
+            broker_url: "tcp://127.0.0.1:1883".to_string(),
+            topic: "fleet/+/telemetry".to_string(),
+            client_id: "client_shared".to_string(),
+            qos: 0,
+            max_packet_size: None,
+        };
+
+        manager
+            .create_client(cfg)
+            .await
+            .expect("create shared mqtt client");
+        let held = manager
+            .acquire_client("shared")
+            .await
+            .expect("acquire shared mqtt client");
+
+        manager
+            .drop_client("shared")
+            .expect("best-effort drop busy shared mqtt client");
+
+        assert!(matches!(
+            manager.acquire_client("shared").await,
+            Err(ConnectorError::NotFound(_))
+        ));
+
+        drop(held);
     }
 }

@@ -237,9 +237,9 @@ pub async fn delete_shared_mqtt_client_handler(
         }
     };
 
-    let stored = match state.storage.get_mqtt_config(&key) {
-        Ok(Some(stored)) => stored,
-        Ok(None) => {
+    match state.storage.delete_mqtt_config(&key) {
+        Ok(()) => {}
+        Err(StorageError::NotFound(_)) => {
             return (
                 StatusCode::NOT_FOUND,
                 format!("shared mqtt client {key} not found"),
@@ -249,86 +249,24 @@ pub async fn delete_shared_mqtt_client_handler(
         Err(err) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to read shared mqtt client {key}: {err}"),
+                format!("failed to delete shared mqtt client {key}: {err}"),
             )
                 .into_response();
         }
-    };
-
-    for (instance_id, instance) in state.instances.instances_snapshot() {
-        if let Err(err) = instance.can_drop_shared_mqtt_client(&key) {
-            match err {
-                flow::FlowInstanceError::Connector(ConnectorError::NotFound(_)) => {}
-                flow::FlowInstanceError::Connector(ConnectorError::ResourceBusy(_)) => {
-                    return (
-                        StatusCode::CONFLICT,
-                        format!(
-                            "shared mqtt client {key} is still in use in runtime instance {instance_id}"
-                        ),
-                    )
-                        .into_response();
-                }
-                other => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "drop shared mqtt client {key} in runtime instance {instance_id}: {other}"
-                        ),
-                    )
-                        .into_response();
-                }
-            }
-        }
     }
 
-    for (instance_id, worker) in state.workers.iter() {
-        if let Err(err) = worker.can_delete_shared_mqtt_client(&key).await {
-            match err {
-                DeleteSharedMqttClientError::NotFound => {}
-                DeleteSharedMqttClientError::Conflict(_) => {
-                    return (
-                        StatusCode::CONFLICT,
-                        format!(
-                            "shared mqtt client {key} is still in use in worker instance {instance_id}"
-                        ),
-                    )
-                        .into_response();
-                }
-                DeleteSharedMqttClientError::Other(other) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "drop shared mqtt client {key} in worker instance {instance_id}: {other}"
-                        ),
-                    )
-                        .into_response();
-                }
-            }
-        }
-    }
-
-    let _stored = stored;
+    // Storage is authoritative; runtime cleanup is best-effort.
     for (instance_id, instance) in state.instances.instances_snapshot() {
         if let Err(err) = instance.drop_shared_mqtt_client(&key) {
             match err {
                 flow::FlowInstanceError::Connector(ConnectorError::NotFound(_)) => {}
-                flow::FlowInstanceError::Connector(ConnectorError::ResourceBusy(_)) => {
-                    return (
-                        StatusCode::CONFLICT,
-                        format!(
-                            "shared mqtt client {key} is still in use in runtime instance {instance_id}"
-                        ),
-                    )
-                        .into_response();
-                }
                 other => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "drop shared mqtt client {key} in runtime instance {instance_id}: {other}"
-                        ),
-                    )
-                        .into_response();
+                    tracing::warn!(
+                        shared_mqtt_key = %key,
+                        flow_instance_id = %instance_id,
+                        error = %other,
+                        "best-effort delete of shared mqtt client in local runtime failed"
+                    );
                 }
             }
         }
@@ -339,40 +277,25 @@ pub async fn delete_shared_mqtt_client_handler(
             match err {
                 DeleteSharedMqttClientError::NotFound => {}
                 DeleteSharedMqttClientError::Conflict(_) => {
-                    return (
-                        StatusCode::CONFLICT,
-                        format!(
-                            "shared mqtt client {key} is still in use in worker instance {instance_id}"
-                        ),
-                    )
-                        .into_response();
+                    tracing::warn!(
+                        shared_mqtt_key = %key,
+                        flow_instance_id = %instance_id,
+                        "best-effort delete of shared mqtt client in worker runtime reported conflict"
+                    );
                 }
                 DeleteSharedMqttClientError::Other(other) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "drop shared mqtt client {key} in worker instance {instance_id}: {other}"
-                        ),
-                    )
-                        .into_response();
+                    tracing::warn!(
+                        shared_mqtt_key = %key,
+                        flow_instance_id = %instance_id,
+                        error = %other,
+                        "best-effort delete of shared mqtt client in worker runtime failed"
+                    );
                 }
             }
         }
     }
 
-    match state.storage.delete_mqtt_config(&key) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(StorageError::NotFound(_)) => (
-            StatusCode::NOT_FOUND,
-            format!("shared mqtt client {key} not found"),
-        )
-            .into_response(),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("failed to delete shared mqtt client {key}: {err}"),
-        )
-            .into_response(),
-    }
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[cfg(test)]
@@ -385,7 +308,7 @@ mod tests {
         extract::{Path, State},
         http::StatusCode,
         response::IntoResponse,
-        routing::{delete, get},
+        routing::delete,
     };
     use flow::connector::SharedMqttClientConfig;
     use std::sync::{
@@ -419,16 +342,12 @@ mod tests {
     async fn conflict_worker_server(
         delete_called: Arc<AtomicBool>,
     ) -> (String, tokio::task::JoinHandle<()>) {
-        async fn can_delete_handler() -> impl IntoResponse {
+        async fn delete_handler(State(called): State<Arc<AtomicBool>>) -> impl IntoResponse {
+            called.store(true, Ordering::Release);
             (
                 StatusCode::CONFLICT,
                 "shared mqtt client shared is still in use",
             )
-        }
-
-        async fn delete_handler(State(called): State<Arc<AtomicBool>>) -> impl IntoResponse {
-            called.store(true, Ordering::Release);
-            StatusCode::NO_CONTENT
         }
 
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -436,10 +355,6 @@ mod tests {
             .expect("bind fake worker listener");
         let addr = listener.local_addr().expect("fake worker addr");
         let app = axum::Router::new()
-            .route(
-                "/internal/v1/mqtt/clients/:key/can-delete",
-                get(can_delete_handler),
-            )
             .route("/internal/v1/mqtt/clients/:key", delete(delete_handler))
             .with_state(delete_called);
         let handle = tokio::spawn(async move {
@@ -451,8 +366,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_shared_mqtt_client_does_not_drop_local_runtime_when_worker_preflight_conflicts()
-    {
+    async fn delete_shared_mqtt_client_is_best_effort_when_worker_delete_conflicts() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
         let instance = crate::new_default_flow_instance();
@@ -486,28 +400,26 @@ mod tests {
             .expect("default local runtime instance");
 
         let delete_resp =
-            delete_shared_mqtt_client_handler(State(state), Path("shared".to_string()))
+            delete_shared_mqtt_client_handler(State(state.clone()), Path("shared".to_string()))
                 .await
                 .into_response();
-        assert_eq!(delete_resp.status(), StatusCode::CONFLICT);
-
-        let body = to_bytes(delete_resp.into_body(), 64 * 1024)
-            .await
-            .expect("read delete body");
-        assert!(
-            String::from_utf8(body.to_vec())
-                .expect("utf8 delete body")
-                .contains("worker instance worker_a"),
-            "expected conflict body to mention worker instance"
-        );
+        assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
 
         assert!(
-            local_instance.get_shared_mqtt_client("shared").is_some(),
-            "local runtime should keep shared mqtt client when worker preflight conflicts"
+            local_instance.get_shared_mqtt_client("shared").is_none(),
+            "local runtime should drop shared mqtt client even if worker delete conflicts"
         );
         assert!(
-            !delete_called.load(Ordering::Acquire),
-            "manager should stop before issuing worker delete after preflight conflict"
+            delete_called.load(Ordering::Acquire),
+            "manager should still issue worker delete notification"
+        );
+        assert!(
+            state
+                .storage
+                .get_mqtt_config("shared")
+                .expect("read shared mqtt config")
+                .is_none(),
+            "storage should be authoritative after delete succeeds"
         );
 
         worker_handle.abort();
