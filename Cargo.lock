@@ -2286,6 +2286,7 @@ dependencies = [
  "storage",
  "tempfile",
  "tokio",
+ "tower 0.5.3",
  "tower-http",
  "tracing",
 ]
@@ -4456,6 +4457,7 @@ dependencies = [
  "pprof",
  "prometheus_exporter",
  "rand 0.8.5",
+ "reqwest",
  "rusqlite",
  "sdk",
  "serde",

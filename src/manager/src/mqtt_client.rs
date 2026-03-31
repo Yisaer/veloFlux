@@ -9,6 +9,7 @@ use storage::StorageError;
 
 use crate::pipeline::AppState;
 use crate::storage_bridge::{mqtt_config_from_stored, stored_mqtt_from_config};
+use crate::worker::client::DeleteSharedMqttClientError;
 
 fn validate_shared_mqtt_config(cfg: &SharedMqttClientConfig) -> Result<(), String> {
     if cfg.key.trim().is_empty() {
@@ -35,7 +36,10 @@ fn validate_shared_mqtt_config(cfg: &SharedMqttClientConfig) -> Result<(), Strin
     Ok(())
 }
 
-fn shared_mqtt_config_eq(left: &SharedMqttClientConfig, right: &SharedMqttClientConfig) -> bool {
+pub(crate) fn shared_mqtt_config_eq(
+    left: &SharedMqttClientConfig,
+    right: &SharedMqttClientConfig,
+) -> bool {
     left.key == right.key
         && left.broker_url == right.broker_url
         && left.topic == right.topic
@@ -231,6 +235,32 @@ pub async fn delete_shared_mqtt_client_handler(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         format!(
                             "drop shared mqtt client {key} in runtime instance {instance_id}: {other}"
+                        ),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    for (instance_id, worker) in state.workers.iter() {
+        if let Err(err) = worker.delete_shared_mqtt_client(&key).await {
+            match err {
+                DeleteSharedMqttClientError::NotFound => {}
+                DeleteSharedMqttClientError::Conflict(_) => {
+                    return (
+                        StatusCode::CONFLICT,
+                        format!(
+                            "shared mqtt client {key} is still in use in worker instance {instance_id}"
+                        ),
+                    )
+                        .into_response();
+                }
+                DeleteSharedMqttClientError::Other(other) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "drop shared mqtt client {key} in worker instance {instance_id}: {other}"
                         ),
                     )
                         .into_response();

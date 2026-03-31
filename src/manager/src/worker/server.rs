@@ -2,6 +2,7 @@ use super::protocol::{
     WorkerApplyPipelineRequest, WorkerApplyPipelineResponse, WorkerDesiredState,
     WorkerPipelineListItem,
 };
+use crate::mqtt_client::shared_mqtt_config_eq;
 use crate::pipeline::{build_pipeline_definition, status_label, validate_create_request};
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
@@ -14,6 +15,7 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post},
 };
+use flow::connector::{ConnectorError, SharedMqttClientConfig};
 use flow::pipeline::{PipelineError, PipelineStopMode};
 use serde::Deserialize;
 use serde_json::json;
@@ -36,6 +38,10 @@ impl FlowWorkerState {
 pub fn build_worker_app(state: FlowWorkerState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route(
+            "/internal/v1/mqtt/clients/:key",
+            delete(delete_shared_mqtt_client),
+        )
         .route("/internal/v1/pipelines", get(list_pipelines))
         .route("/internal/v1/pipelines/apply", post(apply_pipeline))
         .route("/internal/v1/pipelines/:id", delete(delete_pipeline))
@@ -94,19 +100,6 @@ async fn apply_pipeline(
         }
     }
 
-    for cfg in &req.shared_mqtt_clients {
-        if state.instance.get_shared_mqtt_client(&cfg.key).is_some() {
-            continue;
-        }
-        if let Err(err) = state.instance.create_shared_mqtt_client(cfg.clone()).await {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("create shared mqtt client {}: {err}", cfg.key),
-            )
-                .into_response();
-        }
-    }
-
     for stream in req.streams.values() {
         if let Err(resp) = ensure_stream_installed(state.instance.as_ref(), stream).await {
             return resp;
@@ -114,6 +107,12 @@ async fn apply_pipeline(
     }
 
     let _ = state.instance.delete_pipeline(&req.pipeline.id).await;
+
+    if let Err(err) =
+        reconcile_shared_mqtt_clients(state.instance.as_ref(), &req.shared_mqtt_clients).await
+    {
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
 
     let encoder_registry = state.instance.encoder_registry();
     let definition = match build_pipeline_definition(
@@ -150,6 +149,28 @@ async fn apply_pipeline(
 
     let status = status_label(result.snapshot.status);
     (StatusCode::OK, Json(WorkerApplyPipelineResponse { status })).into_response()
+}
+
+async fn reconcile_shared_mqtt_clients(
+    instance: &flow::FlowInstance,
+    shared_mqtt_clients: &[SharedMqttClientConfig],
+) -> Result<(), String> {
+    for cfg in shared_mqtt_clients {
+        if let Some(existing) = instance.get_shared_mqtt_client(&cfg.key) {
+            if shared_mqtt_config_eq(&existing, cfg) {
+                continue;
+            }
+            instance
+                .drop_shared_mqtt_client(&cfg.key)
+                .map_err(|err| format!("replace shared mqtt client {}: {err}", cfg.key))?;
+        }
+
+        instance
+            .create_shared_mqtt_client(cfg.clone())
+            .await
+            .map_err(|err| format!("create shared mqtt client {}: {err}", cfg.key))?;
+    }
+    Ok(())
 }
 
 async fn ensure_stream_installed(
@@ -201,6 +222,30 @@ async fn ensure_stream_installed(
     match instance.create_stream(definition, req.shared).await {
         Ok(_) => Ok(()),
         Err(err) => Err((StatusCode::BAD_REQUEST, err.to_string()).into_response()),
+    }
+}
+
+async fn delete_shared_mqtt_client(
+    State(state): State<FlowWorkerState>,
+    Path(key): Path<String>,
+) -> impl IntoResponse {
+    match state.instance.drop_shared_mqtt_client(&key) {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(flow::FlowInstanceError::Connector(ConnectorError::NotFound(_))) => (
+            StatusCode::NOT_FOUND,
+            format!("shared mqtt client {key} not found"),
+        )
+            .into_response(),
+        Err(flow::FlowInstanceError::Connector(ConnectorError::ResourceBusy(_))) => (
+            StatusCode::CONFLICT,
+            format!("shared mqtt client {key} is still in use"),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to delete shared mqtt client {key}: {err}"),
+        )
+            .into_response(),
     }
 }
 
@@ -331,5 +376,92 @@ async fn collect_pipeline_stats(
             format!("failed to collect pipeline {id} stats: {err}"),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FlowWorkerState, build_worker_app, reconcile_shared_mqtt_clients};
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use flow::connector::SharedMqttClientConfig;
+    use tower::util::ServiceExt;
+
+    fn shared_mqtt_cfg(key: &str, topic: &str, client_id: &str) -> SharedMqttClientConfig {
+        SharedMqttClientConfig {
+            key: key.to_string(),
+            broker_url: "tcp://127.0.0.1:1883".to_string(),
+            topic: topic.to_string(),
+            client_id: client_id.to_string(),
+            qos: 0,
+            max_packet_size: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_shared_mqtt_clients_replaces_stale_config() {
+        let instance = crate::new_default_flow_instance();
+        let original = shared_mqtt_cfg("shared", "topic/old", "client_old");
+        let updated = shared_mqtt_cfg("shared", "topic/new", "client_new");
+
+        instance
+            .create_shared_mqtt_client(original)
+            .await
+            .expect("create original shared mqtt client");
+
+        reconcile_shared_mqtt_clients(&instance, std::slice::from_ref(&updated))
+            .await
+            .expect("reconcile shared mqtt client");
+
+        let actual = instance
+            .get_shared_mqtt_client("shared")
+            .expect("shared mqtt client present after reconcile");
+        assert_eq!(actual.key, updated.key);
+        assert_eq!(actual.broker_url, updated.broker_url);
+        assert_eq!(actual.topic, updated.topic);
+        assert_eq!(actual.client_id, updated.client_id);
+        assert_eq!(actual.qos, updated.qos);
+        assert_eq!(actual.max_packet_size, updated.max_packet_size);
+    }
+
+    #[tokio::test]
+    async fn delete_shared_mqtt_client_endpoint_returns_not_found_after_drop() {
+        let instance = crate::new_default_flow_instance();
+        let cfg = shared_mqtt_cfg("shared", "topic/a", "client_a");
+        instance
+            .create_shared_mqtt_client(cfg)
+            .await
+            .expect("create shared mqtt client");
+
+        let app = build_worker_app(FlowWorkerState::new(instance));
+
+        let first = app
+            .clone()
+            .oneshot(
+                Request::delete("/internal/v1/mqtt/clients/shared")
+                    .body(Body::empty())
+                    .expect("first request"),
+            )
+            .await
+            .expect("first response");
+        assert_eq!(first.status(), StatusCode::NO_CONTENT);
+
+        let second = app
+            .oneshot(
+                Request::delete("/internal/v1/mqtt/clients/shared")
+                    .body(Body::empty())
+                    .expect("second request"),
+            )
+            .await
+            .expect("second response");
+        assert_eq!(second.status(), StatusCode::NOT_FOUND);
+
+        let body = to_bytes(second.into_body(), 64 * 1024)
+            .await
+            .expect("read second body");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).expect("utf8 body"),
+            "shared mqtt client shared not found"
+        );
     }
 }
