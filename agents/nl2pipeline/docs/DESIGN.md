@@ -8,7 +8,7 @@ requirements into:
 
 ## Constraints and grounding
 
-The agent must follow `docs/agents_readme.md` grounding rules:
+The agent must follow `docs/integrations/agents/runtime_playbook.md` grounding rules:
 
 - Do not invent stream names, column names, column types, or function names.
 - Treat Manager REST introspection as source of truth:

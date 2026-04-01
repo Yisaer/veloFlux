@@ -6,7 +6,7 @@ into veloFlux Manager REST API requests (stream + pipeline).
 - `POST /streams` (MQTT source stream)
 - `POST /pipelines` (MQTT sink pipeline)
 
-It follows the grounding rules in `docs/agents_readme.md`: do not invent stream/column/function
+It follows the grounding rules in `docs/integrations/agents/runtime_playbook.md`: do not invent stream/column/function
 names; always ground on Manager introspection APIs and syntax/function catalogs.
 
 ## What v1 does

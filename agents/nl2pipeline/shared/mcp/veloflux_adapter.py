@@ -43,7 +43,7 @@ def _summarize_streams(streams: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def register_veloflux_mcp(registry: McpRegistry, manager: ManagerClient) -> None:
     """
-    Register the v1 tools/resources defined in `docs/mcp_design.md`.
+    Register the v1 tools/resources defined in `docs/integrations/agents/mcp_design.md`.
 
     This is a thin adapter: it maps MCP-shaped calls to Manager REST calls.
     """
