@@ -74,6 +74,10 @@ fn build_app(state: AppState) -> Router {
             axum::routing::get(stream::describe_stream_handler),
         )
         .route(
+            "/streams/:name/shared/stats",
+            axum::routing::get(stream::shared_stream_stats_handler),
+        )
+        .route(
             "/functions",
             axum::routing::get(function::list_functions_handler),
         )

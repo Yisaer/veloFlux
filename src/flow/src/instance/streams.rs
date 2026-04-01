@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::time::{sleep, Duration, Instant};
 
 use crate::catalog::{CatalogError, StreamDefinition, StreamProps};
 use crate::connector::MockSourceConnector;
-use crate::shared_stream::{SharedStreamConfig, SharedStreamError, SharedStreamInfo};
+use crate::shared_stream::{
+    SharedStreamConfig, SharedStreamError, SharedStreamInfo, SharedStreamProcessorStats,
+};
 
 use super::{FlowInstance, FlowInstanceError, StreamRuntimeInfo};
 
@@ -68,6 +71,28 @@ impl FlowInstance {
         Ok(payload)
     }
 
+    /// Fetch processor stats for one shared stream's internal ingest pipeline.
+    pub async fn get_shared_stream_processor_stats(
+        &self,
+        name: &str,
+    ) -> Result<SharedStreamProcessorStats, FlowInstanceError> {
+        self.catalog
+            .get(name)
+            .ok_or_else(|| CatalogError::NotFound(name.to_string()))?;
+
+        match self
+            .shared_stream_registry
+            .get_stream_processor_stats(name)
+            .await
+        {
+            Ok(stats) => Ok(stats),
+            Err(SharedStreamError::NotFound(_)) => Err(FlowInstanceError::Invalid(format!(
+                "stream {name} is not a shared stream"
+            ))),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     /// Delete a stream definition and its shared runtime (if registered).
     pub async fn delete_stream(&self, name: &str) -> Result<(), FlowInstanceError> {
         let pipelines_using_stream = self
@@ -87,8 +112,58 @@ impl FlowInstance {
         if self.shared_stream_registry.is_registered(name).await {
             self.shared_stream_registry.drop_stream(name).await?;
         }
+        self.shared_mock_source_handles.lock().remove(name);
         self.catalog.remove(name)?;
         Ok(())
+    }
+
+    /// Send one payload into a shared mock stream.
+    ///
+    /// This is intended for tests and local diagnostics that need to drive a shared mock stream
+    /// through the normal shared-stream runtime path.
+    pub async fn send_shared_mock_stream_payload(
+        &self,
+        name: &str,
+        payload: impl Into<Vec<u8>>,
+    ) -> Result<(), FlowInstanceError> {
+        let definition = self
+            .catalog
+            .get(name)
+            .ok_or_else(|| CatalogError::NotFound(name.to_string()))?;
+        if !self.shared_stream_registry.is_registered(name).await {
+            return Err(FlowInstanceError::Invalid(format!(
+                "stream {name} is not a shared stream"
+            )));
+        }
+        if !matches!(definition.props(), StreamProps::Mock(_)) {
+            return Err(FlowInstanceError::Invalid(format!(
+                "stream {name} is not a shared mock stream"
+            )));
+        }
+
+        let payload = payload.into();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let handle = {
+                let guard = self.shared_mock_source_handles.lock();
+                guard.get(name).cloned()
+            };
+            if let Some(handle) = handle {
+                handle.send(payload.clone()).await.map_err(|err| {
+                    FlowInstanceError::Invalid(format!(
+                        "send payload to shared mock stream {name}: {err}"
+                    ))
+                })?;
+                return Ok(());
+            }
+
+            if Instant::now() >= deadline {
+                return Err(FlowInstanceError::Invalid(format!(
+                    "shared mock stream {name} is not ready to receive payloads"
+                )));
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
     }
 
     async fn ensure_shared_stream(
@@ -193,8 +268,9 @@ impl FlowInstance {
                     schema: Arc<datatypes::Schema>,
                     decoder: crate::catalog::StreamDecoderConfig,
                     decoder_registry: Arc<crate::codec::DecoderRegistry>,
-                    // Keep the sender alive so the mock connector stream doesn't immediately EOF.
-                    _handle: parking_lot::Mutex<Option<crate::connector::MockSourceHandle>>,
+                    handle_store: Arc<
+                        parking_lot::Mutex<HashMap<String, crate::connector::MockSourceHandle>>,
+                    >,
                 }
 
                 impl crate::shared_stream::SharedStreamConnectorFactory for MockSharedStreamConnectorFactory {
@@ -212,8 +288,9 @@ impl FlowInstance {
                         crate::shared_stream::SharedStreamError,
                     > {
                         let (connector, handle) = MockSourceConnector::new(self.connector_id());
-                        let mut guard = self._handle.lock();
-                        *guard = Some(handle);
+                        self.handle_store
+                            .lock()
+                            .insert(self.stream_id.clone(), handle);
 
                         let decoder = self.decoder_registry.instantiate(
                             &self.decoder,
@@ -232,7 +309,7 @@ impl FlowInstance {
                     schema: definition.schema(),
                     decoder: definition.decoder().clone(),
                     decoder_registry: Arc::clone(&self.decoder_registry),
-                    _handle: parking_lot::Mutex::new(None),
+                    handle_store: Arc::clone(&self.shared_mock_source_handles),
                 });
 
                 config.set_connector_factory(factory);

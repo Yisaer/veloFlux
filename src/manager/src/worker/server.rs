@@ -6,7 +6,8 @@ use crate::mqtt_client::shared_mqtt_config_eq;
 use crate::pipeline::{build_pipeline_definition, status_label, validate_create_request};
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
-    validate_memory_stream_topic, validate_stream_decoder_config,
+    into_shared_stream_stats_response, validate_memory_stream_topic,
+    validate_stream_decoder_config,
 };
 use axum::{
     Json, Router,
@@ -51,6 +52,10 @@ pub fn build_worker_app(state: FlowWorkerState) -> Router {
         .route(
             "/internal/v1/pipelines/:id/stats",
             get(collect_pipeline_stats),
+        )
+        .route(
+            "/internal/v1/streams/:name/shared/stats",
+            get(shared_stream_stats),
         )
         .with_state(state)
 }
@@ -369,6 +374,34 @@ async fn collect_pipeline_stats(
         Err(err) => (
             StatusCode::BAD_REQUEST,
             format!("failed to collect pipeline {id} stats: {err}"),
+        )
+            .into_response(),
+    }
+}
+
+async fn shared_stream_stats(
+    State(state): State<FlowWorkerState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    match state
+        .instance
+        .get_shared_stream_processor_stats(&name)
+        .await
+    {
+        Ok(stats) => (
+            StatusCode::OK,
+            Json(into_shared_stream_stats_response(
+                state.instance.id(),
+                stats,
+            )),
+        )
+            .into_response(),
+        Err(flow::FlowInstanceError::Catalog(flow::catalog::CatalogError::NotFound(_))) => {
+            (StatusCode::NOT_FOUND, format!("stream {name} not found")).into_response()
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            format!("failed to collect shared stream stats for {name}: {err}"),
         )
             .into_response(),
     }

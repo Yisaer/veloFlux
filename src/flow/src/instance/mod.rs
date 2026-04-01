@@ -3,7 +3,7 @@ use crate::catalog::{Catalog, CatalogError, StreamDefinition};
 use crate::codec::{CodecError, DecoderRegistry, EncoderRegistry, MergerRegistry};
 use crate::connector::{
     ConnectorError, ConnectorRegistry, MemoryData, MemoryPubSubError, MemoryPubSubRegistry,
-    MemoryPublisher, MemoryTopicKind, MqttClientManager, SharedMqttClientConfig,
+    MemoryPublisher, MemoryTopicKind, MockSourceHandle, MqttClientManager, SharedMqttClientConfig,
 };
 use crate::eventtime::EventtimeTypeRegistry;
 use crate::expr::custom_func::CustomFuncRegistry;
@@ -100,6 +100,7 @@ pub struct FlowInstance {
     memory_pubsub_registry: MemoryPubSubRegistry,
     // In-memory registry of shared MQTT client configs for discovery/listing.
     shared_mqtt_client_configs: Arc<Mutex<HashMap<String, SharedMqttClientConfig>>>,
+    shared_mock_source_handles: Arc<Mutex<HashMap<String, MockSourceHandle>>>,
     mqtt_client_manager: MqttClientManager,
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,
@@ -240,6 +241,7 @@ impl FlowInstance {
             pipeline_manager,
             memory_pubsub_registry,
             shared_mqtt_client_configs: Arc::new(Mutex::new(HashMap::new())),
+            shared_mock_source_handles: Arc::new(Mutex::new(HashMap::new())),
             mqtt_client_manager,
             connector_registry,
             encoder_registry: registries.encoder_registry,

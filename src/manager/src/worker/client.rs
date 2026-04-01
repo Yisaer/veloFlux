@@ -225,4 +225,35 @@ impl FlowWorkerClient {
             .await
             .map_err(|e| format!("decode worker stats response: {e}"))
     }
+
+    pub async fn shared_stream_stats(
+        &self,
+        name: &str,
+    ) -> Result<crate::stream::SharedStreamStatsResponse, String> {
+        let resp = self
+            .http
+            .get(self.url(&format!(
+                "/internal/v1/streams/{}/shared/stats",
+                urlencoding::encode(name)
+            )))
+            .send()
+            .await
+            .map_err(|e| format!("worker request failed: {e}"))?;
+        if resp.status() == StatusCode::NOT_FOUND {
+            return Err("not_found".to_string());
+        }
+        if !resp.status().is_success() {
+            let code = resp.status();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "<failed to read worker response body>".to_string());
+            return Err(format!(
+                "worker shared stream stats failed (HTTP {code}): {body}"
+            ));
+        }
+        resp.json::<crate::stream::SharedStreamStatsResponse>()
+            .await
+            .map_err(|e| format!("decode worker shared stream stats response: {e}"))
+    }
 }

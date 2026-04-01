@@ -73,6 +73,30 @@ impl ManagerClient {
             .await
     }
 
+    pub async fn shared_stream_stats(&self, name: &str) -> Result<serde_json::Value, SdkError> {
+        self.shared_stream_stats_in_instance(name, None).await
+    }
+
+    pub async fn shared_stream_stats_in_instance(
+        &self,
+        name: &str,
+        flow_instance_id: Option<&str>,
+    ) -> Result<serde_json::Value, SdkError> {
+        let path = format!("/streams/{}/shared/stats", urlencoding::encode(name));
+        let query = flow_instance_id
+            .map(|id| vec![("flow_instance_id", id.to_string())])
+            .unwrap_or_default();
+        self.t
+            .expect_json_success::<(), serde_json::Value>(
+                Method::GET,
+                &path,
+                &query,
+                Option::<&()>::None,
+                &[StatusCode::OK],
+            )
+            .await
+    }
+
     pub async fn build_pipeline_context(&self, id: &str) -> Result<serde_json::Value, SdkError> {
         let path = format!("/pipelines/{}/buildContext", urlencoding::encode(id));
         self.t

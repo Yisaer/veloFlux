@@ -10,7 +10,7 @@ use crate::processor::processor_builder::{
     create_processor_pipeline_for_shared_stream, PlanProcessor, SharedStreamPipelineOptions,
 };
 use crate::processor::SamplerConfig;
-use crate::processor::{ControlSignal, ProcessorPipeline, StreamData};
+use crate::processor::{ControlSignal, ProcessorPipeline, ProcessorStatsEntry, StreamData};
 use crate::runtime::TaskSpawner;
 use datatypes::Schema;
 use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
@@ -122,6 +122,21 @@ impl SharedStreamRegistry {
                 .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?
         };
         Ok(entry.snapshot().await)
+    }
+
+    /// Fetch processor stats for the internal ingest pipeline of one shared stream.
+    pub async fn get_stream_processor_stats(
+        &self,
+        name: &str,
+    ) -> Result<SharedStreamProcessorStats, SharedStreamError> {
+        let entry = {
+            let guard = self.streams.read().await;
+            guard
+                .get(name)
+                .cloned()
+                .ok_or_else(|| SharedStreamError::NotFound(name.to_string()))?
+        };
+        Ok(entry.processor_stats_snapshot().await)
     }
 
     /// Drop a shared stream if it is not referenced by any pipelines.
@@ -347,6 +362,14 @@ pub struct SharedStreamInfo {
     /// This is used by pipelines to wait until the shared decoder has applied a required
     /// projection before the pipeline starts consuming data.
     pub decoding_columns: Vec<String>,
+}
+
+/// Processor stats snapshot for one shared stream's internal ingest pipeline.
+#[derive(Clone, Debug)]
+pub struct SharedStreamProcessorStats {
+    pub stream: String,
+    pub status: SharedStreamStatus,
+    pub processors: Vec<ProcessorStatsEntry>,
 }
 
 #[derive(Clone, Debug)]
@@ -694,6 +717,34 @@ impl SharedStreamInner {
             connector_id: self.connector_id.clone(),
             subscriber_count: state.subscribers.len(),
             decoding_columns,
+        }
+    }
+
+    async fn processor_stats_snapshot(&self) -> SharedStreamProcessorStats {
+        let status = {
+            let state = self.state.lock().await;
+            state.status.clone()
+        };
+
+        let processors = {
+            let handles = self.handles.lock().await;
+            handles
+                .pipeline
+                .as_ref()
+                .map(|pipeline| {
+                    pipeline
+                        .processor_stats()
+                        .iter()
+                        .map(|handle| handle.snapshot())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        SharedStreamProcessorStats {
+            stream: self.name.clone(),
+            status,
+            processors,
         }
     }
 

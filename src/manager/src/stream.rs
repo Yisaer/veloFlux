@@ -1,11 +1,11 @@
 use crate::MQTT_QOS;
 use crate::audit::ResourceMutationLog;
-use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
+use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend};
 use crate::pipeline::AppState;
 use crate::storage_bridge;
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -14,6 +14,7 @@ use flow::catalog::{
     CatalogError, EventtimeDefinition, HistoryStreamProps, MemoryStreamProps, MockStreamProps,
     MqttStreamProps, StreamDecoderConfig,
 };
+use flow::processor::ProcessorStatsEntry;
 use flow::processor::SamplerConfig;
 use flow::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamStatus};
 use flow::{FlowInstanceError, Schema, StreamDefinition, StreamProps, StreamRuntimeInfo};
@@ -269,6 +270,22 @@ pub struct StreamDefinitionSpec {
     pub sampler: Option<SamplerConfig>,
 }
 
+#[derive(Deserialize, Serialize)]
+pub struct SharedStreamStatsResponse {
+    pub stream: String,
+    pub flow_instance_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_message: Option<String>,
+    pub processors: Vec<ProcessorStatsEntry>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct SharedStreamStatsQuery {
+    pub flow_instance_id: Option<String>,
+}
+
 pub async fn create_stream_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateStreamRequest>,
@@ -507,6 +524,107 @@ pub async fn describe_stream_handler(
         .into_response()
 }
 
+pub async fn shared_stream_stats_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<SharedStreamStatsQuery>,
+) -> impl IntoResponse {
+    let stored = match state.storage.get_stream(&name) {
+        Ok(Some(stream)) => stream,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, format!("stream {name} not found")).into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to load stream {name}: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    let req = match serde_json::from_str::<CreateStreamRequest>(&stored.raw_json) {
+        Ok(req) => req,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("decode stored stream {name}: {err}"),
+            )
+                .into_response();
+        }
+    };
+
+    if !req.shared {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("stream {name} is not a shared stream"),
+        )
+            .into_response();
+    }
+
+    let flow_instance_id = match resolve_shared_stream_stats_flow_instance_id(&state, &query) {
+        Ok(id) => id,
+        Err(resp) => return *resp,
+    };
+
+    let response = match state.backend(&flow_instance_id) {
+        Some(FlowInstanceBackend::InProcess) => {
+            let Some(instance) = state.local_instance(&flow_instance_id) else {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "in_process flow instance {flow_instance_id} is not available in runtime"
+                    ),
+                )
+                    .into_response();
+            };
+            let stats = match instance.get_shared_stream_processor_stats(&name).await {
+                Ok(stats) => stats,
+                Err(FlowInstanceError::Catalog(CatalogError::NotFound(_))) => {
+                    return (StatusCode::NOT_FOUND, format!("stream {name} not found"))
+                        .into_response();
+                }
+                Err(err) => return map_flow_instance_error(err),
+            };
+            into_shared_stream_stats_response(&flow_instance_id, stats)
+        }
+        Some(FlowInstanceBackend::WorkerProcess) => {
+            let Some(worker) = state.worker(&flow_instance_id) else {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("worker_process flow instance {flow_instance_id} is not available"),
+                )
+                    .into_response();
+            };
+            match worker.shared_stream_stats(&name).await {
+                Ok(stats) => stats,
+                Err(err) if err == "not_found" => {
+                    return (StatusCode::NOT_FOUND, format!("stream {name} not found"))
+                        .into_response();
+                }
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!(
+                            "failed to collect shared stream stats for {name} from worker {flow_instance_id}: {err}"
+                        ),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("flow instance {flow_instance_id} is not declared by config"),
+            )
+                .into_response();
+        }
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
 pub async fn delete_stream_handler(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -596,6 +714,59 @@ fn map_flow_instance_error(err: FlowInstanceError) -> axum::response::Response {
     };
 
     (status, message).into_response()
+}
+
+fn resolve_shared_stream_stats_flow_instance_id(
+    state: &AppState,
+    query: &SharedStreamStatsQuery,
+) -> Result<String, Box<axum::response::Response>> {
+    match query.flow_instance_id.as_deref() {
+        Some(id) => {
+            let id = id.trim();
+            if id.is_empty() {
+                return Err(Box::new(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "flow_instance_id must not be empty".to_string(),
+                    )
+                        .into_response(),
+                ));
+            }
+            if !state.is_declared_instance(id) {
+                return Err(Box::new(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("flow instance {id} is not declared by config"),
+                    )
+                        .into_response(),
+                ));
+            }
+            Ok(id.to_string())
+        }
+        None if state.declared_instances.len() > 1 => Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                "flow_instance_id is required when multiple flow instances are declared"
+                    .to_string(),
+            )
+                .into_response(),
+        )),
+        None => Ok(DEFAULT_FLOW_INSTANCE_ID.to_string()),
+    }
+}
+
+pub(crate) fn into_shared_stream_stats_response(
+    flow_instance_id: &str,
+    stats: flow::SharedStreamProcessorStats,
+) -> SharedStreamStatsResponse {
+    let (status, status_message) = shared_stream_status_label(&stats.status);
+    SharedStreamStatsResponse {
+        stream: stats.stream,
+        flow_instance_id: flow_instance_id.to_string(),
+        status,
+        status_message,
+        processors: stats.processors,
+    }
 }
 
 fn stream_type_label(stream_type: flow::catalog::StreamType) -> &'static str {
@@ -899,6 +1070,33 @@ fn datatype_name(datatype: &ConcreteDatatype) -> String {
     .to_string()
 }
 
+fn into_shared_stream_item(info: SharedStreamInfo) -> SharedStreamItem {
+    let (status, status_message) = shared_stream_status_label(&info.status);
+    SharedStreamItem {
+        id: info.name,
+        status,
+        status_message,
+        connector_id: info.connector_id,
+        subscribers: info.subscriber_count,
+        created_at_secs: unix_timestamp_secs(info.created_at),
+    }
+}
+
+fn shared_stream_status_label(status: &SharedStreamStatus) -> (String, Option<String>) {
+    match status {
+        SharedStreamStatus::Starting => ("starting".to_string(), None),
+        SharedStreamStatus::Running => ("running".to_string(), None),
+        SharedStreamStatus::Stopped => ("stopped".to_string(), None),
+        SharedStreamStatus::Failed(msg) => ("failed".to_string(), Some(msg.clone())),
+    }
+}
+
+fn unix_timestamp_secs(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -998,31 +1196,4 @@ mod tests {
         };
         assert!(parse_datatype(&missing_element).is_err());
     }
-}
-
-fn into_shared_stream_item(info: SharedStreamInfo) -> SharedStreamItem {
-    let (status, status_message) = shared_stream_status_label(&info.status);
-    SharedStreamItem {
-        id: info.name,
-        status,
-        status_message,
-        connector_id: info.connector_id,
-        subscribers: info.subscriber_count,
-        created_at_secs: unix_timestamp_secs(info.created_at),
-    }
-}
-
-fn shared_stream_status_label(status: &SharedStreamStatus) -> (String, Option<String>) {
-    match status {
-        SharedStreamStatus::Starting => ("starting".to_string(), None),
-        SharedStreamStatus::Running => ("running".to_string(), None),
-        SharedStreamStatus::Stopped => ("stopped".to_string(), None),
-        SharedStreamStatus::Failed(msg) => ("failed".to_string(), Some(msg.clone())),
-    }
-}
-
-fn unix_timestamp_secs(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
 }

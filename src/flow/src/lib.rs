@@ -65,7 +65,7 @@ pub use planner::sink::{
 pub use processor::{ControlSignal, ProcessorError, StreamData};
 pub use shared_stream::{
     SharedSourceConnectorConfig, SharedStreamConfig, SharedStreamError, SharedStreamInfo,
-    SharedStreamStatus, SharedStreamSubscription,
+    SharedStreamProcessorStats, SharedStreamStatus, SharedStreamSubscription,
 };
 pub use stateful::StatefulFunctionRegistry;
 

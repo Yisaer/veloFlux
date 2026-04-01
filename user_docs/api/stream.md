@@ -117,6 +117,45 @@ Example:
 curl -s -XDELETE http://127.0.0.1:8080/streams/source_stream
 ```
 
+### Shared Stream Stats
+
+`GET /streams/:name/shared/stats`
+
+Returns processor-level stats for the internal ingest pipeline owned by one shared stream.
+
+This endpoint only applies to streams created with `shared=true`.
+
+It reports stats for the shared ingest processors, for example:
+
+- `shared/<stream>/PhysicalDataSource_*`
+- `shared/<stream>/PhysicalDecoder_*`
+- `shared/<stream>/PhysicalResultCollect_*`
+
+It does **not** report stats for downstream user pipelines. For pipeline-local stats, continue to
+use `GET /pipelines/:id/stats`.
+
+Query parameters:
+
+- Optional `flow_instance_id=<id>` selects which flow instance's shared-stream runtime to inspect.
+- In single-instance deployments, omitting `flow_instance_id` defaults to `default`.
+- In multi-instance deployments, `flow_instance_id` is required because shared-stream runtimes are
+  instance-scoped.
+
+Response:
+
+- `200 OK` with `SharedStreamStatsResponse`
+- `404 Not Found` if the stream does not exist
+- `400 Bad Request` if the stream exists but is not a shared stream
+- `400 Bad Request` if multiple flow instances are declared and `flow_instance_id` is omitted
+- `400 Bad Request` if `flow_instance_id` is empty or references an undeclared flow instance
+
+Example:
+
+```bash
+curl -s \
+  "http://127.0.0.1:8080/streams/source_stream/shared/stats?flow_instance_id=default" | jq .
+```
+
 ## Request Shapes
 
 ### `CreateStreamRequest`
@@ -233,6 +272,23 @@ Supported type strings:
 - `stream: string`
 - `spec_version: number` (currently `1`)
 - `spec: StreamDefinitionSpec`
+
+### `SharedStreamStatsResponse`
+
+- `stream: string`
+- `status: string` (`starting`, `running`, `stopped`, `failed`)
+- Optional `status_message: string` (present when `status == "failed"`)
+- `processors: ProcessorStatsEntry[]`
+
+When the shared stream runtime is not currently running, the response returns an empty
+`processors` array and the runtime `status`.
+
+### `ProcessorStatsEntry`
+
+- `processor_id: string`
+- `stats: object`
+  - Common fields: `records_in`, `records_out`, `error_count`, `last_error`
+  - Custom processor metrics are flattened into this object as additional numeric fields
 
 ### `StreamDefinitionSpec`
 
