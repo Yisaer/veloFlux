@@ -63,7 +63,7 @@ jobs:
   test:
     name: Test
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: infra-emqx-io-4c
     services:
       nanomq:
         image: emqx/nanomq
