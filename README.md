@@ -99,4 +99,4 @@ REST API docs:
 - Default build enables `metrics` and `profiling`; use `--no-default-features` to disable.
 - Narrow tests while iterating, e.g. `cargo test -p flow convert::`.
 - Use `test_simple/` for isolated end-to-end experiments without touching main data.
-- Extensibility for connectors/codecs lives in `docs/EXTENSIBILITY.md`; windowing plan in `docs/WATERMARK_WINDOW_PLAN.md`.
+- Extensibility for connectors/codecs lives in `docs/runtime/extensibility/registry_extensibility.md`; windowing plan in `docs/syntax/windows/watermarks.md`.
