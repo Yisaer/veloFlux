@@ -1391,6 +1391,7 @@ mod tests {
             id: "pipe_busy".to_string(),
             flow_instance_id: Some("default".to_string()),
             sql: "select * from src".to_string(),
+            sources: Vec::new(),
             sinks: Vec::new(),
             options: Default::default(),
         };
