@@ -17,8 +17,8 @@ use crate::planner::physical::{
     PhysicalEncoder, PhysicalEventtimeWatermark, PhysicalFilter,
     PhysicalMemoryCollectionMaterialize, PhysicalOrder, PhysicalOrderKey, PhysicalPlan,
     PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect, PhysicalRowDiff,
-    PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector, PhysicalStatefulFunction,
-    StatefulCall, WatermarkConfig, WatermarkStrategy,
+    PhysicalSampler, PhysicalSharedStream, PhysicalSinkConnector, PhysicalSourceChangeGate,
+    PhysicalStatefulFunction, StatefulCall, WatermarkConfig, WatermarkStrategy,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
@@ -104,6 +104,98 @@ impl Default for PhysicalPlanBuilder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn resolve_source_change_gate_columns(
+    logical_ds: &LogicalDataSource,
+    schema: &datatypes::Schema,
+) -> Result<(Vec<Arc<str>>, Vec<usize>), String> {
+    let columns: Vec<String> = logical_ds
+        .source_input()
+        .on_change_columns()
+        .map(|cols| cols.to_vec())
+        .unwrap_or_else(|| {
+            schema
+                .column_schemas()
+                .iter()
+                .map(|col| col.name.clone())
+                .collect()
+        });
+    let mut tracked_columns = Vec::with_capacity(columns.len());
+    let mut tracked_column_indexes = Vec::with_capacity(columns.len());
+    for column in columns {
+        let index = schema.column_index(&column).ok_or_else(|| {
+            format!(
+                "source `{}` input.on_change column `{}` is not present in effective source schema",
+                logical_ds.source_name, column
+            )
+        })?;
+        tracked_columns.push(Arc::<str>::from(column));
+        tracked_column_indexes.push(index);
+    }
+    Ok((tracked_columns, tracked_column_indexes))
+}
+
+fn wrap_source_change_gate(
+    child: Arc<PhysicalPlan>,
+    logical_ds: &LogicalDataSource,
+    schema: &datatypes::Schema,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    if !logical_ds.source_input().is_on_change() {
+        return Ok(child);
+    }
+
+    let (tracked_columns, tracked_column_indexes) =
+        resolve_source_change_gate_columns(logical_ds, schema)?;
+    let gate_index = builder.allocate_index();
+    Ok(Arc::new(PhysicalPlan::SourceChangeGate(
+        PhysicalSourceChangeGate::new(
+            logical_ds.source_name.clone(),
+            logical_ds.source_input().clone(),
+            tracked_columns,
+            tracked_column_indexes,
+            vec![child],
+            gate_index,
+        ),
+    )))
+}
+
+fn shared_stream_required_columns(
+    logical_ds: &LogicalDataSource,
+    schema: &datatypes::Schema,
+) -> Vec<String> {
+    if logical_ds.source_input().is_on_change()
+        && logical_ds.source_input().on_change_columns().is_none()
+    {
+        return schema
+            .column_schemas()
+            .iter()
+            .map(|col| col.name.clone())
+            .collect();
+    }
+
+    let mut required: HashSet<String> = logical_ds
+        .shared_required_schema()
+        .map(|cols| cols.iter().cloned().collect())
+        .unwrap_or_else(|| {
+            schema
+                .column_schemas()
+                .iter()
+                .map(|col| col.name.clone())
+                .collect()
+        });
+
+    if let Some(columns) = logical_ds.source_input().on_change_columns() {
+        required.extend(columns.iter().cloned());
+    }
+
+    schema
+        .column_schemas()
+        .iter()
+        .filter(|col| required.contains(&col.name))
+        .map(|col| col.name.clone())
+        .collect()
 }
 
 /// Create a physical plan from a logical plan using centralized index management
@@ -679,7 +771,12 @@ fn create_physical_data_source_with_builder(
                 decoder_children,
                 decoder_index,
             );
-            Ok(Arc::new(PhysicalPlan::Decoder(decoder)))
+            wrap_source_change_gate(
+                Arc::new(PhysicalPlan::Decoder(decoder)),
+                logical_ds,
+                logical_ds.schema().as_ref(),
+                builder,
+            )
         }
         SourceBindingKind::Shared => {
             if decoder_kind == "none" {
@@ -688,16 +785,7 @@ fn create_physical_data_source_with_builder(
                     logical_ds.source_name
                 ));
             }
-            let required_columns = logical_ds
-                .shared_required_schema()
-                .map(|cols| cols.to_vec())
-                .unwrap_or_else(|| {
-                    schema
-                        .column_schemas()
-                        .iter()
-                        .map(|col| col.name.clone())
-                        .collect()
-                });
+            let required_columns = shared_stream_required_columns(logical_ds, schema.as_ref());
             let explain_ingest_plan = create_physical_plan_for_shared_stream(
                 &logical_ds.source_name,
                 Arc::clone(&schema),
@@ -707,13 +795,18 @@ fn create_physical_data_source_with_builder(
             let physical_shared = PhysicalSharedStream::new(
                 logical_ds.source_name.clone(),
                 logical_ds.alias.clone(),
-                schema,
+                Arc::clone(&schema),
                 required_columns,
                 logical_ds.decoder().clone(),
                 Some(explain_ingest_plan),
                 index,
             );
-            Ok(Arc::new(PhysicalPlan::SharedStream(physical_shared)))
+            wrap_source_change_gate(
+                Arc::new(PhysicalPlan::SharedStream(physical_shared)),
+                logical_ds,
+                schema.as_ref(),
+                builder,
+            )
         }
     }
 }

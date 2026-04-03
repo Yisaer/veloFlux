@@ -1031,6 +1031,12 @@ fn create_processor_from_plan_node(
                 PlanProcessor::SharedSource(processor),
             ))
         }
+        PhysicalPlan::SourceChangeGate(gate) => Err(ProcessorError::InvalidConfiguration(
+            format!(
+                "PhysicalSourceChangeGate for source `{}` is planned but processor implementation is not wired yet",
+                gate.source_name
+            ),
+        )),
         PhysicalPlan::Compute(compute) => {
             let processor = ComputeProcessor::new_with_channel_capacities(
                 processor_id.clone(),

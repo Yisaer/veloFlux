@@ -77,7 +77,8 @@ impl PhysicalPlan {
             | PhysicalPlan::ProcessTimeWatermark(_)
             | PhysicalPlan::EventtimeWatermark(_)
             | PhysicalPlan::Watermark(_)
-            | PhysicalPlan::Sampler(_) => passthrough_single_child(self),
+            | PhysicalPlan::Sampler(_)
+            | PhysicalPlan::SourceChangeGate(_) => passthrough_single_child(self),
 
             PhysicalPlan::Barrier(_) => passthrough_fan_in(self),
             PhysicalPlan::DataSink(_) => passthrough_single_child(self),

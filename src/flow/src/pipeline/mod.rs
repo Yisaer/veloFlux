@@ -19,7 +19,8 @@ pub use api::{
     CreatePipelineRequest, CreatePipelineResult, EventtimeOptions, ExplainPipelineTarget,
     KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
     PipelineError, PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode,
-    SinkDefinition, SinkProps, SinkType,
+    SinkDefinition, SinkProps, SinkType, SourceDefinition, SourceInputConfig, SourceInputMode,
+    SourceOnChangeConfig,
 };
 pub(crate) use context::PipelineContext;
 

@@ -11,6 +11,11 @@ use crate::shared_stream::{
 use super::{FlowInstance, FlowInstanceError, StreamRuntimeInfo};
 
 impl FlowInstance {
+    /// Retrieve a stream definition from the local catalog.
+    pub fn stream_definition(&self, name: &str) -> Option<Arc<StreamDefinition>> {
+        self.catalog.get(name)
+    }
+
     /// Create a stream definition and optionally attach a shared stream runtime.
     pub async fn create_stream(
         &self,

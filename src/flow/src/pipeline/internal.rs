@@ -6,7 +6,7 @@ use crate::connector::{
     MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
-use crate::planner::logical::create_logical_plan;
+use crate::planner::logical::create_logical_plan_with_source_inputs;
 use crate::planner::sink::SinkEncoderKind;
 use crate::processor::processor_builder::{PlanProcessor, ProcessorPipeline};
 use crate::processor::EventtimePipelineContext;
@@ -16,8 +16,8 @@ use crate::processor::{
     create_processor_pipeline, ProcessorPipelineDependencies, ProcessorPipelineOptions,
 };
 use crate::{
-    explain_pipeline_with_options, optimize_physical_plan, PipelineExplain, PipelineRegistries,
-    PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
+    explain_pipeline_definition_with_options, optimize_physical_plan, PipelineExplain,
+    PipelineRegistries, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -258,8 +258,8 @@ impl PipelineManager {
         let sinks = build_sinks_from_definition(definition.as_ref())
             .map_err(PipelineError::BuildFailure)?;
 
-        explain_pipeline_with_options(
-            definition.sql(),
+        explain_pipeline_definition_with_options(
+            definition.as_ref(),
             sinks,
             &self.catalog,
             Some(self.context.shared_stream_registry().as_ref()),
@@ -477,9 +477,19 @@ fn build_pipeline_runtime(
 
         let sinks =
             build_log.run_phase("build_sinks", || build_sinks_from_definition(definition))?;
+        let source_inputs: HashMap<String, crate::pipeline::SourceInputConfig> = definition
+            .sources()
+            .iter()
+            .map(|source| (source.stream.clone(), source.input.clone()))
+            .collect();
         let schema_binding = SchemaBinding::new(binding_entries);
         let (logical_plan, pruned_binding) = build_log.run_phase("build_logical_plan", || {
-            let logical_plan = create_logical_plan(select_stmt, sinks, &stream_definitions)?;
+            let logical_plan = create_logical_plan_with_source_inputs(
+                select_stmt,
+                sinks,
+                &stream_definitions,
+                &source_inputs,
+            )?;
             Ok::<_, String>(crate::planner::optimize_logical_plan_with_options(
                 logical_plan,
                 &schema_binding,

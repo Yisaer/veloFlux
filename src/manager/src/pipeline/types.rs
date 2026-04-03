@@ -1,5 +1,6 @@
 use crate::worker::WorkerMemoryTopicSpec;
 use flow::connector::SharedMqttClientConfig;
+use flow::pipeline::{SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig};
 use flow::planner::sink::{
     CommonSinkProps, SinkDeltaOutputConfig, SinkOutputConfig, SinkOutputMode,
 };
@@ -15,6 +16,8 @@ pub struct CreatePipelineRequest {
     pub flow_instance_id: Option<String>,
     pub sql: String,
     #[serde(default)]
+    pub sources: Vec<CreatePipelineSourceRequest>,
+    #[serde(default)]
     pub sinks: Vec<CreatePipelineSinkRequest>,
     #[serde(default)]
     pub options: PipelineOptionsRequest,
@@ -23,6 +26,8 @@ pub struct CreatePipelineRequest {
 #[derive(Deserialize, Serialize)]
 pub struct UpsertPipelineRequest {
     pub sql: String,
+    #[serde(default)]
+    pub sources: Vec<CreatePipelineSourceRequest>,
     #[serde(default)]
     pub sinks: Vec<CreatePipelineSinkRequest>,
     #[serde(default)]
@@ -107,6 +112,65 @@ impl Default for StopPipelineQuery {
             mode: "quick".to_string(),
             timeout_ms: 5_000,
         }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+pub struct CreatePipelineSourceRequest {
+    pub stream: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<SourceInputConfigRequest>,
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceInputConfigRequest {
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_change: Option<SourceOnChangeConfigRequest>,
+}
+
+impl SourceInputConfigRequest {
+    pub(super) fn to_input_config(&self) -> Result<SourceInputConfig, String> {
+        match self.mode.trim().to_ascii_lowercase().as_str() {
+            "full" => {
+                if self.on_change.is_some() {
+                    return Err(
+                        "source input.on_change is only supported when input.mode=on_change"
+                            .to_string(),
+                    );
+                }
+                Ok(SourceInputConfig::new(SourceInputMode::Full))
+            }
+            "on_change" => Ok(SourceInputConfig {
+                mode: SourceInputMode::OnChange,
+                on_change: self.on_change.as_ref().map(|cfg| SourceOnChangeConfig {
+                    columns: cfg.columns.clone(),
+                }),
+            }),
+            other => Err(format!(
+                "invalid source input.mode `{other}` (expected full|on_change)"
+            )),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceOnChangeConfigRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub columns: Option<Vec<String>>,
+}
+
+impl CreatePipelineSourceRequest {
+    pub(super) fn to_source_definition(&self) -> Result<SourceDefinition, String> {
+        let input = self
+            .input
+            .as_ref()
+            .map(SourceInputConfigRequest::to_input_config)
+            .transpose()?
+            .unwrap_or_default();
+        Ok(SourceDefinition::new(self.stream.clone()).with_input(input))
     }
 }
 

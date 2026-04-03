@@ -1219,6 +1219,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::SharedStream(new))
         }
+        PhysicalPlan::SourceChangeGate(gate) => {
+            let mut new = gate.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::SourceChangeGate(new))
+        }
         PhysicalPlan::Filter(filter) => {
             let mut new = filter.clone();
             new.base.children = children;

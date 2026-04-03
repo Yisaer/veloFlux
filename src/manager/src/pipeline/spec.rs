@@ -2,16 +2,18 @@ use crate::MQTT_QOS;
 use flow::EncoderRegistry;
 use flow::pipeline::{
     KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
-    PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType,
+    PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType, SourceDefinition,
 };
 use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
+use parser::SelectStmt;
 use serde::Deserialize;
 use serde_json::Map as JsonMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use super::types::{
-    CreatePipelineRequest, EncoderTransformRequest, MemorySinkPropsRequest, MqttSinkPropsRequest,
-    NopSinkPropsRequest, SinkOutputConfigRequest,
+    CreatePipelineRequest, CreatePipelineSourceRequest, EncoderTransformRequest,
+    MemorySinkPropsRequest, MqttSinkPropsRequest, NopSinkPropsRequest, SinkOutputConfigRequest,
 };
 
 #[derive(Deserialize)]
@@ -37,11 +39,117 @@ pub(crate) fn validate_create_request(req: &CreatePipelineRequest) -> Result<(),
     Ok(())
 }
 
+fn parse_pipeline_select_stmt(
+    req: &CreatePipelineRequest,
+    instance: &flow::FlowInstance,
+) -> Result<SelectStmt, String> {
+    parser::parse_sql_with_registries(
+        &req.sql,
+        instance.aggregate_registry(),
+        instance.stateful_registry(),
+    )
+    .map_err(|err| format!("parse pipeline {} sql: {err}", req.id))
+}
+
+fn build_source_definitions(
+    req: &CreatePipelineRequest,
+    instance: &flow::FlowInstance,
+    select_stmt: &SelectStmt,
+) -> Result<Vec<SourceDefinition>, String> {
+    let mut source_counts = HashMap::<String, usize>::new();
+    for source in &select_stmt.source_infos {
+        *source_counts.entry(source.name.clone()).or_insert(0) += 1;
+    }
+
+    let mut seen_streams = HashSet::new();
+    let mut sources = Vec::with_capacity(req.sources.len());
+    for source_req in &req.sources {
+        validate_source_request(source_req, &source_counts, instance)?;
+        if !seen_streams.insert(source_req.stream.clone()) {
+            return Err(format!(
+                "pipeline source `{}` is configured more than once",
+                source_req.stream
+            ));
+        }
+        sources.push(source_req.to_source_definition()?);
+    }
+
+    Ok(sources)
+}
+
+fn validate_source_request(
+    source_req: &CreatePipelineSourceRequest,
+    source_counts: &HashMap<String, usize>,
+    instance: &flow::FlowInstance,
+) -> Result<(), String> {
+    let stream = source_req.stream.trim();
+    if stream.is_empty() {
+        return Err("pipeline source stream must not be empty".to_string());
+    }
+
+    let count = source_counts.get(stream).copied().unwrap_or(0);
+    if count == 0 {
+        return Err(format!(
+            "pipeline source `{stream}` is not referenced by the SQL"
+        ));
+    }
+
+    let source = source_req.to_source_definition()?;
+    if !source.input.is_on_change() {
+        return Ok(());
+    }
+
+    if count > 1 {
+        return Err(format!(
+            "pipeline source `{stream}` uses input.mode=on_change but the SQL references that stream multiple times"
+        ));
+    }
+
+    let definition = instance
+        .stream_definition(stream)
+        .ok_or_else(|| format!("stream `{stream}` not found in catalog"))?;
+    if definition.decoder().kind() == "none" {
+        return Err(format!(
+            "pipeline source `{stream}` with input.mode=on_change requires a decoder"
+        ));
+    }
+
+    if let Some(columns) = source.input.on_change_columns() {
+        if columns.is_empty() {
+            return Err(format!(
+                "pipeline source `{stream}` input.on_change.columns must not be empty"
+            ));
+        }
+        let mut seen_columns = HashSet::new();
+        for column in columns {
+            if column.contains('.') {
+                return Err(format!(
+                    "pipeline source `{stream}` input.on_change column `{column}` must be a top-level column"
+                ));
+            }
+            if !seen_columns.insert(column.as_str()) {
+                return Err(format!(
+                    "pipeline source `{stream}` input.on_change has duplicate column `{column}`"
+                ));
+            }
+            if definition.schema().column_index(column).is_none() {
+                return Err(format!(
+                    "pipeline source `{stream}` input.on_change column `{column}` is not present in stream schema"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn build_pipeline_definition(
     req: &CreatePipelineRequest,
     encoder_registry: &EncoderRegistry,
     instance: &flow::FlowInstance,
 ) -> Result<PipelineDefinition, String> {
+    let select_stmt = parse_pipeline_select_stmt(req, instance)?;
+    let sources = build_source_definitions(req, instance, &select_stmt)?;
     let mut sinks = Vec::with_capacity(req.sinks.len());
     for (index, sink_req) in req.sinks.iter().enumerate() {
         let sink_id = sink_req
@@ -178,7 +286,11 @@ pub(crate) fn build_pipeline_definition(
             late_tolerance: Duration::from_millis(req.options.eventtime.late_tolerance_ms),
         },
     };
-    Ok(PipelineDefinition::new(req.id.clone(), req.sql.clone(), sinks).with_options(options))
+    Ok(
+        PipelineDefinition::new(req.id.clone(), req.sql.clone(), sinks)
+            .with_sources(sources)
+            .with_options(options),
+    )
 }
 
 pub(crate) fn status_label(status: PipelineStatus) -> String {

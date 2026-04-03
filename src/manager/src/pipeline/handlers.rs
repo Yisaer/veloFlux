@@ -394,6 +394,7 @@ pub async fn upsert_pipeline_handler(
         id: id.clone(),
         flow_instance_id: Some(flow_instance_id),
         sql: req.sql,
+        sources: req.sources,
         sinks: req.sinks,
         options: req.options,
     };
