@@ -21,9 +21,9 @@ use crate::processor::{
     FilterProcessor, Ingress, InstantControlSignal, MemoryCollectionMaterializeProcessor,
     OrderProcessor, Processor, ProcessorError, ProjectProcessor, ResultCollectProcessor,
     RowDiffProcessor, SamplerProcessor, SharedStreamProcessor, SinkProcessor,
-    SlidingWindowProcessor, StateWindowProcessor, StatefulFunctionProcessor, StreamData,
-    StreamingAggregationProcessor, StreamingEncoderProcessor, TumblingWindowProcessor,
-    WatermarkProcessor,
+    SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
+    StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
+    StreamingEncoderProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{ProcessorStats, ProcessorStatsHandle};
 use crate::runtime::TaskSpawner;
@@ -62,6 +62,8 @@ pub(crate) enum PlanProcessor {
     MemoryCollectionMaterialize(MemoryCollectionMaterializeProcessor),
     /// SharedStreamProcessor created from PhysicalSharedStream
     SharedSource(SharedStreamProcessor),
+    /// SourceChangeGateProcessor created from PhysicalSourceChangeGate
+    SourceChangeGate(SourceChangeGateProcessor),
     /// ComputeProcessor created from PhysicalCompute
     Compute(ComputeProcessor),
     /// OrderProcessor created from PhysicalOrder
@@ -288,6 +290,7 @@ impl PlanProcessor {
             PlanProcessor::CollectionLayoutNormalize(p) => p.id(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.id(),
             PlanProcessor::SharedSource(p) => p.id(),
+            PlanProcessor::SourceChangeGate(p) => p.id(),
             PlanProcessor::Compute(p) => p.id(),
             PlanProcessor::Order(p) => p.id(),
             PlanProcessor::Project(p) => p.id(),
@@ -318,6 +321,7 @@ impl PlanProcessor {
             PlanProcessor::CollectionLayoutNormalize(_) => "collection_layout_normalize",
             PlanProcessor::MemoryCollectionMaterialize(_) => "memory_collection_materialize",
             PlanProcessor::SharedSource(_) => "shared_source",
+            PlanProcessor::SourceChangeGate(_) => "source_change_gate",
             PlanProcessor::Compute(_) => "compute",
             PlanProcessor::Order(_) => "order",
             PlanProcessor::Project(_) => "project",
@@ -354,6 +358,7 @@ impl PlanProcessor {
             PlanProcessor::CollectionLayoutNormalize(p) => p.set_stats(stats),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.set_stats(stats),
             PlanProcessor::SharedSource(p) => p.set_stats(stats),
+            PlanProcessor::SourceChangeGate(p) => p.set_stats(stats),
             PlanProcessor::Compute(p) => p.set_stats(stats),
             PlanProcessor::Order(p) => p.set_stats(stats),
             PlanProcessor::Project(p) => p.set_stats(stats),
@@ -388,6 +393,7 @@ impl PlanProcessor {
             PlanProcessor::CollectionLayoutNormalize(p) => p.start(spawner),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.start(spawner),
             PlanProcessor::SharedSource(p) => p.start(spawner),
+            PlanProcessor::SourceChangeGate(p) => p.start(spawner),
             PlanProcessor::Compute(p) => p.start(spawner),
             PlanProcessor::Order(p) => p.start(spawner),
             PlanProcessor::Project(p) => p.start(spawner),
@@ -419,6 +425,7 @@ impl PlanProcessor {
             PlanProcessor::CollectionLayoutNormalize(p) => p.subscribe_output(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.subscribe_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_output(),
+            PlanProcessor::SourceChangeGate(p) => p.subscribe_output(),
             PlanProcessor::Compute(p) => p.subscribe_output(),
             PlanProcessor::Order(p) => p.subscribe_output(),
             PlanProcessor::Project(p) => p.subscribe_output(),
@@ -450,6 +457,7 @@ impl PlanProcessor {
             PlanProcessor::CollectionLayoutNormalize(p) => p.subscribe_control_output(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.subscribe_control_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_control_output(),
+            PlanProcessor::SourceChangeGate(p) => p.subscribe_control_output(),
             PlanProcessor::Compute(p) => p.subscribe_control_output(),
             PlanProcessor::Order(p) => p.subscribe_control_output(),
             PlanProcessor::Project(p) => p.subscribe_control_output(),
@@ -481,6 +489,7 @@ impl PlanProcessor {
             PlanProcessor::CollectionLayoutNormalize(p) => p.add_input(receiver),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.add_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_input(receiver),
+            PlanProcessor::SourceChangeGate(p) => p.add_input(receiver),
             PlanProcessor::Compute(p) => p.add_input(receiver),
             PlanProcessor::Order(p) => p.add_input(receiver),
             PlanProcessor::Project(p) => p.add_input(receiver),
@@ -512,6 +521,7 @@ impl PlanProcessor {
             PlanProcessor::CollectionLayoutNormalize(p) => p.add_control_input(receiver),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.add_control_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_control_input(receiver),
+            PlanProcessor::SourceChangeGate(p) => p.add_control_input(receiver),
             PlanProcessor::Compute(p) => p.add_control_input(receiver),
             PlanProcessor::Order(p) => p.add_control_input(receiver),
             PlanProcessor::Project(p) => p.add_control_input(receiver),
@@ -1029,6 +1039,16 @@ fn create_processor_from_plan_node(
             processor.set_required_columns(shared.required_columns().to_vec());
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::SharedSource(processor),
+            ))
+        }
+        PhysicalPlan::SourceChangeGate(gate) => {
+            let processor = SourceChangeGateProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Arc::new(gate.clone()),
+                channel_capacities,
+            );
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::SourceChangeGate(processor),
             ))
         }
         PhysicalPlan::Compute(compute) => {

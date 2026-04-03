@@ -244,6 +244,15 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                     sampling_strategy_name(&sampler.strategy)
                 ));
             }
+            if ds.source_input().is_on_change() {
+                info.push(format!("input.mode={}", ds.source_input().mode.as_str()));
+                let columns = ds
+                    .source_input()
+                    .on_change_columns()
+                    .map(|cols| cols.join(", "))
+                    .unwrap_or_else(|| "ALL".to_string());
+                info.push(format!("input.columns=[{}]", columns));
+            }
         }
         LogicalPlan::StatefulFunction(stateful) => {
             let mappings = stateful
@@ -714,6 +723,18 @@ fn build_physical_node_with_prefix(
                 info.push(format!("alias={}", alias));
             }
             info.push(format!("schema=[{}]", ds.required_columns().join(", ")));
+        }
+        PhysicalPlan::SourceChangeGate(gate) => {
+            info.push(format!("source={}", gate.source_name));
+            info.push(format!("mode={}", gate.input.mode.as_str()));
+            info.push(format!(
+                "columns=[{}]",
+                gate.tracked_columns
+                    .iter()
+                    .map(|col| col.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
         PhysicalPlan::CollectionLayoutNormalize(normalize) => {
             info.push(format!("source={}", normalize.output_source_name()));

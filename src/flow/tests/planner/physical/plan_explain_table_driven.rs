@@ -5,7 +5,7 @@ use datatypes::{
 use flow::catalog::MemoryStreamProps;
 use flow::catalog::MockStreamProps;
 use flow::connector::{KuksaSinkConfig, MemorySinkConfig, MemoryTopicKind};
-use flow::planner::logical::create_logical_plan;
+use flow::planner::logical::{create_logical_plan, create_logical_plan_with_source_inputs};
 use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::processor::SamplerConfig;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use flow::pipeline::{EventtimeOptions, PipelineOptions};
+use flow::pipeline::{EventtimeOptions, PipelineOptions, SourceInputConfig};
 use serde_json::Map as JsonMap;
 
 fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
@@ -192,6 +192,30 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamDecoderConfig::new("none", JsonMap::new()),
     );
 
+    let vehicle_stream_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "vehicle_stream".to_string(),
+            "speed".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "vehicle_stream".to_string(),
+            "rpm".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "vehicle_stream".to_string(),
+            "gear".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+    let vehicle_stream_def = StreamDefinition::new(
+        "vehicle_stream",
+        Arc::clone(&vehicle_stream_schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    );
+
     let mut stream_defs = HashMap::new();
     stream_defs.insert("stream".to_string(), Arc::new(stream_def));
     stream_defs.insert("stream_sampler".to_string(), Arc::new(stream_sampler_def));
@@ -201,6 +225,7 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs.insert("stream_3".to_string(), Arc::new(stream_3_def));
     stream_defs.insert("stream_4".to_string(), Arc::new(stream_4_def));
     stream_defs.insert("memory_collect".to_string(), Arc::new(memory_collect_def));
+    stream_defs.insert("vehicle_stream".to_string(), Arc::new(vehicle_stream_def));
 
     stream_defs
 }
@@ -412,6 +437,42 @@ fn explain_json(sql: &str, sinks: Vec<PipelineSink>) -> String {
 
     let bindings = bindings_for_select(&select_stmt, &stream_defs);
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs).expect("logical");
+
+    let (logical_plan, bindings) = flow::optimize_logical_plan(logical_plan, &bindings);
+
+    let physical_plan =
+        flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
+            .expect("physical");
+
+    let physical_plan = flow::optimize_physical_plan(
+        physical_plan,
+        registries.encoder_registry().as_ref(),
+        registries.aggregate_registry(),
+    );
+    let explain = PipelineExplain::new(
+        logical_plan,
+        physical_plan,
+        PipelineExplainConfig::default(),
+    );
+    println!("{sql}");
+    println!("{}", explain.to_pretty_string());
+    explain.to_json().to_string()
+}
+
+fn explain_json_with_source_inputs(
+    sql: &str,
+    sinks: Vec<PipelineSink>,
+    source_inputs: HashMap<String, SourceInputConfig>,
+) -> String {
+    let registries = PipelineRegistries::new_with_builtin();
+    let stream_defs = setup_streams();
+
+    let select_stmt = parse_sql(sql).expect("parse sql");
+
+    let bindings = bindings_for_select(&select_stmt, &stream_defs);
+    let logical_plan =
+        create_logical_plan_with_source_inputs(select_stmt, sinks, &stream_defs, &source_inputs)
+            .expect("logical");
 
     let (logical_plan, bindings) = flow::optimize_logical_plan(logical_plan, &bindings);
 
@@ -1114,6 +1175,51 @@ fn plan_explain_row_diff_table_driven() {
 
     for case in explain_cases {
         let got = explain_json(case.sql, case.sinks);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
+fn plan_explain_source_on_change_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        source_inputs: HashMap<String, SourceInputConfig>,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "source_on_change_with_explicit_columns",
+            sql: "SELECT speed, rpm FROM vehicle_stream",
+            source_inputs: HashMap::from([(
+                "vehicle_stream".to_string(),
+                SourceInputConfig::on_change_with_columns(["speed", "rpm"]),
+            )]),
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=vehicle_stream","decoder=json","schema=[speed, rpm]","input.mode=on_change","input.columns=[speed, rpm]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[speed; rpm]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=vehicle_stream","schema=[speed, rpm]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[speed, rpm]"],"operator":"PhysicalDecoder"}],"id":"PhysicalSourceChangeGate_2","info":["source=vehicle_stream","mode=on_change","columns=[speed, rpm]"],"operator":"PhysicalSourceChangeGate"}],"id":"PhysicalProject_3","info":["fields=[speed; rpm]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "source_on_change_without_columns_tracks_all_top_level_columns",
+            sql: "SELECT speed FROM vehicle_stream",
+            source_inputs: HashMap::from([(
+                "vehicle_stream".to_string(),
+                SourceInputConfig::on_change(),
+            )]),
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=vehicle_stream","decoder=json","schema=[speed, rpm, gear]","input.mode=on_change","input.columns=[ALL]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=vehicle_stream","schema=[speed, rpm, gear]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[speed, rpm, gear]"],"operator":"PhysicalDecoder"}],"id":"PhysicalSourceChangeGate_2","info":["source=vehicle_stream","mode=on_change","columns=[speed, rpm, gear]"],"operator":"PhysicalSourceChangeGate"}],"id":"PhysicalProject_3","info":["fields=[speed]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "source_on_change_keeps_hidden_tracked_columns_alive",
+            sql: "SELECT speed FROM vehicle_stream",
+            source_inputs: HashMap::from([(
+                "vehicle_stream".to_string(),
+                SourceInputConfig::on_change_with_columns(["rpm"]),
+            )]),
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=vehicle_stream","decoder=json","schema=[speed, rpm]","input.mode=on_change","input.columns=[rpm]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=vehicle_stream","schema=[speed, rpm]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[speed, rpm]"],"operator":"PhysicalDecoder"}],"id":"PhysicalSourceChangeGate_2","info":["source=vehicle_stream","mode=on_change","columns=[rpm]"],"operator":"PhysicalSourceChangeGate"}],"id":"PhysicalProject_3","info":["fields=[speed]"],"operator":"PhysicalProject"}}"##,
+        },
+    ];
+
+    for case in cases {
+        let got = explain_json_with_source_inputs(case.sql, vec![], case.source_inputs);
         assert_eq!(got, case.expected, "case={}", case.name);
     }
 }

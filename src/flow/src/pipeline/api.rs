@@ -193,11 +193,101 @@ impl SinkDefinition {
     }
 }
 
+/// Source binding definition for a pipeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceDefinition {
+    pub stream: String,
+    pub input: SourceInputConfig,
+}
+
+impl SourceDefinition {
+    pub fn new(stream: impl Into<String>) -> Self {
+        Self {
+            stream: stream.into(),
+            input: SourceInputConfig::default(),
+        }
+    }
+
+    pub fn with_input(mut self, input: SourceInputConfig) -> Self {
+        self.input = input;
+        self
+    }
+}
+
+/// Source-side input behavior configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SourceInputConfig {
+    pub mode: SourceInputMode,
+    pub on_change: Option<SourceOnChangeConfig>,
+}
+
+impl SourceInputConfig {
+    pub fn new(mode: SourceInputMode) -> Self {
+        Self {
+            mode,
+            on_change: None,
+        }
+    }
+
+    pub fn on_change() -> Self {
+        Self::new(SourceInputMode::OnChange)
+    }
+
+    pub fn on_change_with_columns(columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self::on_change().with_on_change_columns(columns)
+    }
+
+    pub fn is_on_change(&self) -> bool {
+        matches!(self.mode, SourceInputMode::OnChange)
+    }
+
+    pub fn with_on_change_columns(
+        mut self,
+        columns: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.mode = SourceInputMode::OnChange;
+        self.on_change = Some(SourceOnChangeConfig {
+            columns: Some(columns.into_iter().map(Into::into).collect()),
+        });
+        self
+    }
+
+    pub fn on_change_columns(&self) -> Option<&[String]> {
+        self.on_change
+            .as_ref()
+            .and_then(|cfg| cfg.columns.as_deref())
+    }
+}
+
+/// Input delivery mode for a source branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceInputMode {
+    #[default]
+    Full,
+    OnChange,
+}
+
+impl SourceInputMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SourceInputMode::Full => "full",
+            SourceInputMode::OnChange => "on_change",
+        }
+    }
+}
+
+/// On-change-specific source input configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SourceOnChangeConfig {
+    pub columns: Option<Vec<String>>,
+}
+
 /// Pipeline definition referencing SQL + sinks.
 #[derive(Debug, Clone)]
 pub struct PipelineDefinition {
     id: String,
     sql: String,
+    sources: Vec<SourceDefinition>,
     sinks: Vec<SinkDefinition>,
     options: PipelineOptions,
 }
@@ -207,9 +297,15 @@ impl PipelineDefinition {
         Self {
             id: id.into(),
             sql: sql.into(),
+            sources: Vec::new(),
             sinks,
             options: PipelineOptions::default(),
         }
+    }
+
+    pub fn with_sources(mut self, sources: Vec<SourceDefinition>) -> Self {
+        self.sources = sources;
+        self
     }
 
     pub fn with_options(mut self, options: PipelineOptions) -> Self {
@@ -223,6 +319,10 @@ impl PipelineDefinition {
 
     pub fn sql(&self) -> &str {
         &self.sql
+    }
+
+    pub fn sources(&self) -> &[SourceDefinition] {
+        &self.sources
     }
 
     pub fn sinks(&self) -> &[SinkDefinition] {

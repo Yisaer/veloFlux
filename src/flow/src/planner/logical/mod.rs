@@ -1,4 +1,5 @@
 use crate::catalog::StreamDefinition;
+use crate::pipeline::SourceInputConfig;
 use parser::window as parser_window;
 use parser::SelectStmt;
 use std::collections::HashMap;
@@ -154,6 +155,15 @@ pub fn create_logical_plan(
     sinks: Vec<PipelineSink>,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
 ) -> Result<Arc<LogicalPlan>, String> {
+    create_logical_plan_with_source_inputs(select_stmt, sinks, stream_defs, &HashMap::new())
+}
+
+pub fn create_logical_plan_with_source_inputs(
+    select_stmt: SelectStmt,
+    sinks: Vec<PipelineSink>,
+    stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+    source_inputs: &HashMap<String, SourceInputConfig>,
+) -> Result<Arc<LogicalPlan>, String> {
     let mut select_stmt = select_stmt;
 
     validate_group_by_requires_aggregates(&select_stmt)?;
@@ -190,6 +200,11 @@ pub fn create_logical_plan(
             definition.eventtime().cloned(),
             definition.sampler().cloned(),
         );
+        let mut datasource = datasource;
+        datasource.source_input = source_inputs
+            .get(&source_info.name)
+            .cloned()
+            .unwrap_or_default();
         current_plans.push(Arc::new(LogicalPlan::DataSource(datasource)));
         current_index += 1;
     }

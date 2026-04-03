@@ -49,7 +49,7 @@ pub use pipeline::{
     CreatePipelineRequest, CreatePipelineResult, ExplainPipelineTarget, KuksaSinkProps,
     MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
     PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps,
-    SinkType,
+    SinkType, SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
 };
 pub use planner::create_physical_plan;
 pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};
@@ -84,7 +84,7 @@ pub fn collect_flow_instance_cpu_metrics_once() {
 
 use connector::{ConnectorRegistry, MqttClientManager};
 use explain_shared_stream::shared_stream_decode_applied_snapshot;
-use planner::logical::create_logical_plan;
+use planner::logical::{create_logical_plan, create_logical_plan_with_source_inputs};
 use processor::processor_builder::{
     create_processor_pipeline, ProcessorPipeline, ProcessorPipelineDependencies,
     ProcessorPipelineOptions,
@@ -365,6 +365,72 @@ pub fn explain_pipeline_with_options(
     let (schema_binding, stream_defs) =
         build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
     let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs)?;
+    let (logical_plan, pruned_binding) = crate::planner::optimize_logical_plan_with_options(
+        Arc::clone(&logical_plan),
+        &schema_binding,
+        &crate::planner::LogicalOptimizerOptions {
+            eventtime_enabled: options.eventtime.enabled,
+        },
+    );
+    if options.eventtime.enabled {
+        validate_eventtime_enabled(&stream_defs, registries)?;
+    }
+
+    let build_options = crate::planner::PhysicalPlanBuildOptions {
+        eventtime_enabled: options.eventtime.enabled,
+        eventtime_late_tolerance: options.eventtime.late_tolerance,
+    };
+    let physical_plan = crate::planner::create_physical_plan_with_build_options(
+        Arc::clone(&logical_plan),
+        &pruned_binding,
+        registries,
+        &build_options,
+    )?;
+    let optimized_plan = optimize_physical_plan(
+        Arc::clone(&physical_plan),
+        registries.encoder_registry().as_ref(),
+        registries.aggregate_registry(),
+    );
+
+    let shared_stream_decode_applied = shared_stream_registry.map_or_else(HashMap::new, |r| {
+        shared_stream_decode_applied_snapshot(&optimized_plan, r)
+    });
+
+    Ok(PipelineExplain::new(
+        logical_plan,
+        optimized_plan,
+        PipelineExplainConfig {
+            pipeline_options: Some(crate::planner::explain::PipelineExplainOptions {
+                eventtime_enabled: options.eventtime.enabled,
+                eventtime_late_tolerance_ms: options.eventtime.late_tolerance.as_millis(),
+            }),
+            shared_stream_decode_applied,
+        },
+    ))
+}
+
+pub(crate) fn explain_pipeline_definition_with_options(
+    definition: &crate::pipeline::PipelineDefinition,
+    sinks: Vec<PipelineSink>,
+    catalog: &Catalog,
+    shared_stream_registry: Option<&SharedStreamRegistry>,
+    registries: &PipelineRegistries,
+    options: &crate::pipeline::PipelineOptions,
+) -> Result<PipelineExplain, Box<dyn std::error::Error>> {
+    let select_stmt = parser::parse_sql_with_registries(
+        definition.sql(),
+        registries.aggregate_registry(),
+        registries.stateful_registry(),
+    )?;
+    let (schema_binding, stream_defs) =
+        build_schema_binding(&select_stmt, catalog, shared_stream_registry)?;
+    let source_inputs = definition
+        .sources()
+        .iter()
+        .map(|source| (source.stream.clone(), source.input.clone()))
+        .collect::<HashMap<_, _>>();
+    let logical_plan =
+        create_logical_plan_with_source_inputs(select_stmt, sinks, &stream_defs, &source_inputs)?;
     let (logical_plan, pruned_binding) = crate::planner::optimize_logical_plan_with_options(
         Arc::clone(&logical_plan),
         &schema_binding,

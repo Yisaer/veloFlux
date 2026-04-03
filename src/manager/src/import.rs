@@ -204,6 +204,7 @@ fn normalize_pipeline_request(
     req: &CreatePipelineRequest,
 ) -> Result<CreatePipelineRequest, String> {
     let mut normalized = req.clone();
+    normalized.normalize();
     normalized.flow_instance_id =
         Some(canonical_flow_instance_id(req.flow_instance_id.as_deref())?);
     validate_create_request(&normalized)?;

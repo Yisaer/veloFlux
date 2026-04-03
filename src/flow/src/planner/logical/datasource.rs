@@ -1,5 +1,6 @@
 use crate::catalog::EventtimeDefinition;
 use crate::catalog::StreamDecoderConfig;
+use crate::pipeline::SourceInputConfig;
 use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::logical::BaseLogicalPlan;
 use crate::processor::SamplerConfig;
@@ -18,6 +19,7 @@ pub struct DataSource {
     /// projection view (column name list). The full `schema` is preserved to keep
     /// `ColumnRef::ByIndex` semantics stable.
     pub shared_required_schema: Option<Vec<String>>,
+    pub source_input: SourceInputConfig,
     pub eventtime: Option<EventtimeDefinition>,
     pub sampler: Option<SamplerConfig>,
 }
@@ -41,6 +43,7 @@ impl DataSource {
             schema,
             decode_projection: None,
             shared_required_schema: None,
+            source_input: SourceInputConfig::default(),
             eventtime,
             sampler,
         }
@@ -60,6 +63,10 @@ impl DataSource {
 
     pub fn shared_required_schema(&self) -> Option<&[String]> {
         self.shared_required_schema.as_deref()
+    }
+
+    pub fn source_input(&self) -> &SourceInputConfig {
+        &self.source_input
     }
 
     pub fn eventtime(&self) -> Option<&EventtimeDefinition> {

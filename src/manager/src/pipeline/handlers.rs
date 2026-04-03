@@ -188,6 +188,7 @@ pub async fn create_pipeline_handler(
     Json(req): Json<CreatePipelineRequest>,
 ) -> impl IntoResponse {
     let mut req = req;
+    req.normalize();
     let flow_instance_id = match canonical_flow_instance_id(req.flow_instance_id.as_deref()) {
         Ok(id) => id,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -390,13 +391,15 @@ pub async fn upsert_pipeline_handler(
         None => DEFAULT_FLOW_INSTANCE_ID.to_string(),
     };
 
-    let create_req = CreatePipelineRequest {
+    let mut create_req = CreatePipelineRequest {
         id: id.clone(),
         flow_instance_id: Some(flow_instance_id),
         sql: req.sql,
+        sources: req.sources,
         sinks: req.sinks,
         options: req.options,
     };
+    create_req.normalize();
     if let Err(err) = validate_create_request(&create_req) {
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
@@ -1390,6 +1393,7 @@ mod tests {
             id: "pipe_busy".to_string(),
             flow_instance_id: Some("default".to_string()),
             sql: "select * from src".to_string(),
+            sources: Vec::new(),
             sinks: Vec::new(),
             options: Default::default(),
         };

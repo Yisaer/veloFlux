@@ -73,6 +73,7 @@ pub fn pipeline_request_from_stored(
 ) -> Result<CreatePipelineRequest, String> {
     let mut req: CreatePipelineRequest = serde_json::from_str(&stored.raw_json)
         .map_err(|err| format!("decode stored pipeline {}: {err}", stored.id))?;
+    req.normalize();
     let instance_id = req
         .flow_instance_id
         .as_deref()

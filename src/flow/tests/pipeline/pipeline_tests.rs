@@ -1,10 +1,10 @@
 //! Table-driven tests for pipeline creation helpers.
 
-use datatypes::Value;
+use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
+use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::connector::MemoryTopicKind;
 use flow::model::{batch_from_columns_simple, Message, RecordBatch, Tuple};
-use flow::pipeline::MemorySinkProps;
-use flow::pipeline::PipelineDefinition;
+use flow::pipeline::{MemorySinkProps, PipelineDefinition, SourceDefinition, SourceInputConfig};
 use flow::planner::sink::{CommonSinkProps, SinkOutputConfig};
 use flow::Collection;
 use flow::FlowInstance;
@@ -516,6 +516,158 @@ async fn run_omit_if_empty_json_case(case: OmitIfEmptyJsonCase) {
                     "Wrong omit_if_empty JSON for test: {} batch={}",
                     case.name,
                     batch_idx
+                );
+            }
+            None => {
+                assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+            }
+        }
+    }
+
+    let _ = instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await;
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
+}
+
+struct SourceOnChangeJsonCase {
+    name: &'static str,
+    source_name: &'static str,
+    sql: &'static str,
+    schema_hint: Vec<(String, Vec<Value>)>,
+    source_input: SourceInputConfig,
+    input_rows: Vec<JsonValue>,
+    expected_outputs: Vec<Option<JsonValue>>,
+}
+
+async fn install_memory_json_stream_schema_with_name(
+    instance: &FlowInstance,
+    input_topic: &str,
+    source_name: &str,
+    columns: &[(String, Vec<Value>)],
+) {
+    let schema_columns = columns
+        .iter()
+        .map(|(name, values)| {
+            let datatype = values
+                .iter()
+                .find(|v| !matches!(v, Value::Null))
+                .map(Value::datatype)
+                .unwrap_or(ConcreteDatatype::Null);
+            ColumnSchema::new(source_name.to_string(), name.clone(), datatype)
+        })
+        .collect();
+    let schema = Schema::new(schema_columns);
+    let definition = StreamDefinition::new(
+        source_name.to_string(),
+        Arc::new(schema),
+        StreamProps::Memory(MemoryStreamProps::new(input_topic.to_string())),
+        StreamDecoderConfig::json(),
+    );
+    instance
+        .create_stream(definition, false)
+        .await
+        .expect("create json memory stream");
+}
+
+async fn run_source_on_change_json_case(case: SourceOnChangeJsonCase) {
+    println!("Running test: {}", case.name);
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ));
+    let (input_topic, output_topic) = make_memory_topics("pipeline_source_on_change", case.name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+    install_memory_json_stream_schema_with_name(
+        &instance,
+        &input_topic,
+        case.source_name,
+        &case.schema_hint,
+    )
+    .await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    );
+    let pipeline =
+        PipelineDefinition::new(pipeline_id.clone(), case.sql, vec![sink]).with_sources(vec![
+            SourceDefinition::new(case.source_name).with_input(case.source_input),
+        ]);
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
+
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
+
+    let timeout_duration = Duration::from_secs(5);
+    assert_eq!(
+        case.input_rows.len(),
+        case.expected_outputs.len(),
+        "input_rows and expected_outputs length mismatch for test: {}",
+        case.name
+    );
+
+    instance
+        .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
+        .await
+        .expect("wait for memory source subscriber");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open input bytes publisher");
+
+    for (row_idx, (input_row, expected_output)) in case
+        .input_rows
+        .into_iter()
+        .zip(case.expected_outputs.into_iter())
+        .enumerate()
+    {
+        let payload = serde_json::to_vec(&input_row).unwrap_or_else(|_| {
+            panic!(
+                "Failed to encode test input row as JSON for: {} row={}",
+                case.name, row_idx
+            )
+        });
+        publisher.publish_bytes(payload).unwrap_or_else(|_| {
+            panic!(
+                "Failed to publish input bytes for: {} row={}",
+                case.name, row_idx
+            )
+        });
+
+        match expected_output {
+            Some(expected) => {
+                let actual = recv_next_json(&mut output, timeout_duration).await;
+                assert_eq!(
+                    normalize_json(actual),
+                    normalize_json(expected),
+                    "Wrong source on_change JSON for test: {} row={}",
+                    case.name,
+                    row_idx
                 );
             }
             None => {
@@ -1295,6 +1447,131 @@ async fn pipeline_omit_if_empty_json_table_driven() {
 
     for case in cases {
         run_omit_if_empty_json_case(case).await;
+    }
+}
+
+#[tokio::test]
+async fn pipeline_source_on_change_json_table_driven() {
+    let cases = vec![
+        SourceOnChangeJsonCase {
+            name: "explicit_columns_filters_rows_within_single_collection",
+            source_name: "stream",
+            sql: "SELECT speed, rpm FROM stream",
+            schema_hint: vec![
+                (
+                    "speed".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(20)],
+                ),
+                (
+                    "rpm".to_string(),
+                    vec![Value::Int64(1000), Value::Int64(1000), Value::Int64(2000)],
+                ),
+            ],
+            source_input: SourceInputConfig::on_change_with_columns(["speed", "rpm"]),
+            input_rows: vec![
+                serde_json::json!({"speed": 10, "rpm": 1000}),
+                serde_json::json!({"speed": 10, "rpm": 1000}),
+                serde_json::json!({"speed": 20, "rpm": 2000}),
+            ],
+            expected_outputs: vec![
+                Some(serde_json::json!([
+                    {"speed": 10, "rpm": 1000}
+                ])),
+                None,
+                Some(serde_json::json!([
+                    {"speed": 20, "rpm": 2000}
+                ])),
+            ],
+        },
+        SourceOnChangeJsonCase {
+            name: "hidden_tracked_column_controls_emission",
+            source_name: "stream",
+            sql: "SELECT speed FROM stream",
+            schema_hint: vec![
+                (
+                    "speed".to_string(),
+                    vec![Value::Int64(10), Value::Int64(11), Value::Int64(12)],
+                ),
+                (
+                    "rpm".to_string(),
+                    vec![Value::Int64(1000), Value::Int64(1000), Value::Int64(2000)],
+                ),
+            ],
+            source_input: SourceInputConfig::on_change_with_columns(["rpm"]),
+            input_rows: vec![
+                serde_json::json!({"speed": 10, "rpm": 1000}),
+                serde_json::json!({"speed": 11, "rpm": 1000}),
+                serde_json::json!({"speed": 12, "rpm": 2000}),
+            ],
+            expected_outputs: vec![
+                Some(serde_json::json!([
+                    {"speed": 10}
+                ])),
+                None,
+                Some(serde_json::json!([
+                    {"speed": 12}
+                ])),
+            ],
+        },
+        SourceOnChangeJsonCase {
+            name: "on_change_without_columns_tracks_all_top_level_columns",
+            source_name: "stream",
+            sql: "SELECT speed FROM stream",
+            schema_hint: vec![
+                (
+                    "speed".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(10)],
+                ),
+                (
+                    "rpm".to_string(),
+                    vec![Value::Int64(1000), Value::Int64(1000), Value::Int64(1000)],
+                ),
+                (
+                    "gear".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(2)],
+                ),
+            ],
+            source_input: SourceInputConfig::on_change(),
+            input_rows: vec![
+                serde_json::json!({"speed": 10, "rpm": 1000, "gear": 1}),
+                serde_json::json!({"speed": 10, "rpm": 1000, "gear": 2}),
+                serde_json::json!({"speed": 10, "rpm": 1000, "gear": 2}),
+            ],
+            expected_outputs: vec![
+                Some(serde_json::json!([
+                    {"speed": 10}
+                ])),
+                Some(serde_json::json!([
+                    {"speed": 10}
+                ])),
+                None,
+            ],
+        },
+        SourceOnChangeJsonCase {
+            name: "state_is_preserved_across_batches",
+            source_name: "stream",
+            sql: "SELECT speed FROM stream",
+            schema_hint: vec![("speed".to_string(), vec![Value::Int64(1), Value::Int64(2)])],
+            source_input: SourceInputConfig::on_change_with_columns(["speed"]),
+            input_rows: vec![
+                serde_json::json!({"speed": 1}),
+                serde_json::json!({"speed": 1}),
+                serde_json::json!({"speed": 2}),
+            ],
+            expected_outputs: vec![
+                Some(serde_json::json!([
+                    {"speed": 1}
+                ])),
+                None,
+                Some(serde_json::json!([
+                    {"speed": 2}
+                ])),
+            ],
+        },
+    ];
+
+    for case in cases {
+        run_source_on_change_json_case(case).await;
     }
 }
 

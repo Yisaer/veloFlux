@@ -23,6 +23,7 @@ pub mod physical_result_collect;
 pub mod physical_row_diff;
 pub mod physical_sampler;
 pub mod physical_shared_stream;
+pub mod physical_source_change_gate;
 pub mod physical_stateful_function;
 pub mod physical_streaming_aggregation;
 pub mod physical_streaming_encoder;
@@ -52,6 +53,7 @@ pub use physical_result_collect::PhysicalResultCollect;
 pub use physical_row_diff::PhysicalRowDiff;
 pub use physical_sampler::PhysicalSampler;
 pub use physical_shared_stream::PhysicalSharedStream;
+pub use physical_source_change_gate::PhysicalSourceChangeGate;
 pub use physical_stateful_function::{PartitionGroupKey, PhysicalStatefulFunction, StatefulCall};
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
 pub use physical_streaming_encoder::PhysicalStreamingEncoder;
@@ -77,6 +79,7 @@ pub enum PhysicalPlan {
     EmptySuppress(PhysicalEmptySuppress),
     Aggregation(PhysicalAggregation),
     SharedStream(PhysicalSharedStream),
+    SourceChangeGate(PhysicalSourceChangeGate),
     Batch(PhysicalBatch),
     DataSink(PhysicalDataSink),
     Encoder(PhysicalEncoder),
@@ -115,6 +118,7 @@ impl PhysicalPlan {
             PhysicalPlan::EmptySuppress(plan) => plan.base.children(),
             PhysicalPlan::Aggregation(plan) => plan.base.children(),
             PhysicalPlan::SharedStream(plan) => plan.base.children(),
+            PhysicalPlan::SourceChangeGate(plan) => plan.base.children(),
             PhysicalPlan::Batch(plan) => plan.base.children(),
             PhysicalPlan::DataSink(plan) => plan.base.children(),
             PhysicalPlan::Encoder(plan) => plan.base.children(),
@@ -149,6 +153,7 @@ impl PhysicalPlan {
             PhysicalPlan::EmptySuppress(_) => "PhysicalEmptySuppress",
             PhysicalPlan::Aggregation(_) => "PhysicalAggregation",
             PhysicalPlan::SharedStream(_) => "PhysicalSharedStream",
+            PhysicalPlan::SourceChangeGate(_) => "PhysicalSourceChangeGate",
             PhysicalPlan::Batch(_) => "PhysicalBatch",
             PhysicalPlan::DataSink(_) => "PhysicalDataSink",
             PhysicalPlan::Encoder(_) => "PhysicalEncoder",
@@ -183,6 +188,7 @@ impl PhysicalPlan {
             PhysicalPlan::EmptySuppress(plan) => plan.base.index(),
             PhysicalPlan::Aggregation(plan) => plan.base.index(),
             PhysicalPlan::SharedStream(plan) => plan.base.index(),
+            PhysicalPlan::SourceChangeGate(plan) => plan.base.index(),
             PhysicalPlan::Batch(plan) => plan.base.index(),
             PhysicalPlan::DataSink(plan) => plan.base.index(),
             PhysicalPlan::Encoder(plan) => plan.base.index(),
@@ -236,6 +242,7 @@ impl PhysicalPlan {
             PhysicalPlan::EmptySuppress(plan) => &mut plan.base.children,
             PhysicalPlan::Aggregation(plan) => &mut plan.base.children,
             PhysicalPlan::SharedStream(plan) => &mut plan.base.children,
+            PhysicalPlan::SourceChangeGate(plan) => &mut plan.base.children,
             PhysicalPlan::Batch(plan) => &mut plan.base.children,
             PhysicalPlan::DataSink(plan) => &mut plan.base.children,
             PhysicalPlan::Encoder(plan) => &mut plan.base.children,

@@ -1244,6 +1244,15 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                         self.mark_column_used(&ds.source_name, eventtime.column());
                     }
                 }
+                if ds.source_input().is_on_change() {
+                    if let Some(columns) = ds.source_input().on_change_columns() {
+                        for column in columns {
+                            self.mark_column_used(&ds.source_name, column);
+                        }
+                    } else {
+                        self.prune_disabled.insert(ds.source_name.clone());
+                    }
+                }
             }
             LogicalPlan::DataSink(_) => {}
             LogicalPlan::Tail(TailPlan { .. }) => {}
@@ -1652,7 +1661,17 @@ impl<'a> StructFieldUsageCollector<'a> {
                     }
                 }
             }
-            LogicalPlan::DataSource(_) => {}
+            LogicalPlan::DataSource(ds) => {
+                if ds.source_input().is_on_change() {
+                    if let Some(columns) = ds.source_input().on_change_columns() {
+                        for column in columns {
+                            self.mark_field_path_used(&ds.source_name, column, &[]);
+                        }
+                    } else {
+                        self.prune_disabled.insert(ds.source_name.clone());
+                    }
+                }
+            }
             LogicalPlan::DataSink(_) => {}
             LogicalPlan::Tail(TailPlan { .. }) => {}
         }
