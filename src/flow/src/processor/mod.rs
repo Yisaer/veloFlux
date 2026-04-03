@@ -32,6 +32,7 @@ pub mod sampler_processor;
 pub mod shared_stream_processor;
 pub mod sink_processor;
 pub mod sliding_window_processor;
+pub mod source_change_gate_processor;
 pub mod state_window_processor;
 pub mod stateful_function_processor;
 pub mod stats;
@@ -68,6 +69,7 @@ pub use sampler_processor::{SamplerConfig, SamplerProcessor, SamplingStrategy};
 pub use shared_stream_processor::SharedStreamProcessor;
 pub use sink_processor::SinkProcessor;
 pub use sliding_window_processor::SlidingWindowProcessor;
+pub use source_change_gate_processor::SourceChangeGateProcessor;
 pub use state_window_processor::StateWindowProcessor;
 pub use stateful_function_processor::StatefulFunctionProcessor;
 pub use stats::{
