@@ -10,6 +10,7 @@ compile_error!("features `allocator-jemalloc` and `allocator-system` are mutuall
 pub mod bootstrap;
 pub mod cgroup;
 pub mod config;
+pub mod distro;
 pub mod logging;
 pub mod server;
 pub mod startup;

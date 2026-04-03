@@ -1,0 +1,152 @@
+{
+  "version": "v1",
+  "source_file": "mul.dbc",
+  "buses": [
+    {
+      "source_file": "mul.dbc",
+      "version": "v1",
+      "name": "EVCAN",
+      "id": 0,
+      "messages": [
+        {
+          "name": "SENSOR_SONARS",
+          "id": 200,
+          "frameId": "0xC8",
+          "length": 8,
+          "signals": [
+            {
+              "name": "SENSOR_SONARS_mux",
+              "start": 0,
+              "length": 4,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 1,
+              "isMultiplexer": true
+            },
+            {
+              "name": "SENSOR_SONARS_err_count",
+              "start": 4,
+              "length": 12,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 1
+            },
+            {
+              "name": "SENSOR_SONARS_mux0",
+              "start": 0,
+              "length": 4,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 1,
+              "isMultiplexed": true,
+              "multiplexerValue": 0
+            },
+            {
+              "name": "SENSOR_SONARS_left",
+              "start": 16,
+              "length": 12,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 0.1,
+              "isMultiplexed": true,
+              "multiplexerValue": 0
+            },
+            {
+              "name": "SENSOR_SONARS_middle",
+              "start": 28,
+              "length": 12,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 0.1,
+              "isMultiplexed": true,
+              "multiplexerValue": 0
+            },
+            {
+              "name": "SENSOR_SONARS_right",
+              "start": 40,
+              "length": 12,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 0.1,
+              "isMultiplexed": true,
+              "multiplexerValue": 0
+            },
+            {
+              "name": "SENSOR_SONARS_rear",
+              "start": 52,
+              "length": 12,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 0.1,
+              "isMultiplexed": true,
+              "multiplexerValue": 0
+            },
+            {
+              "name": "SENSOR_SONARS_mux1",
+              "start": 0,
+              "length": 4,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 1,
+              "isMultiplexed": true,
+              "multiplexerValue": 1
+            },
+            {
+              "name": "SENSOR_SONARS_no_filt_left",
+              "start": 16,
+              "length": 12,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 0.1,
+              "isMultiplexed": true,
+              "multiplexerValue": 1
+            },
+            {
+              "name": "SENSOR_SONARS_no_filt_middle",
+              "start": 28,
+              "length": 12,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 0.1,
+              "isMultiplexed": true,
+              "multiplexerValue": 1
+            },
+            {
+              "name": "SENSOR_SONARS_no_filt_right",
+              "start": 40,
+              "length": 12,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 0.1,
+              "isMultiplexed": true,
+              "multiplexerValue": 1
+            },
+            {
+              "name": "SENSOR_SONARS_no_filt_rear",
+              "start": 52,
+              "length": 12,
+              "isBigEndian": false,
+              "isSigned": false,
+              "offset": 0,
+              "scale": 0.1,
+              "isMultiplexed": true,
+              "multiplexerValue": 1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+

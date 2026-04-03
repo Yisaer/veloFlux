@@ -1,0 +1,48 @@
+[package]
+name = "veloflux-sdv"
+version = "0.4.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "gbf_gen"
+path = "src/bin/gbf_gen.rs"
+
+[features]
+default = []
+
+[dependencies]
+flow = { path = "../../src/flow" }
+manager = { path = "../../src/manager" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+datatypes = { path = "../../src/datatypes" }
+tracing = "0.1.44"
+itoa = "1"
+
+chrono = "=0.4.38"  # Pin to version before quarter() method was added
+can-dbc = "7"
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+hex = "0.4"
+rumqttc = "0.24"
+base64 = "0.22.1"
+
+[dev-dependencies]
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+serial_test = "3"
+criterion = "0.5"
+
+[[bench]]
+name = "gbf_merger"
+harness = false
+
+[[bench]]
+name = "schema_load"
+harness = false
+
+[[bench]]
+name = "decoder_projection"
+harness = false

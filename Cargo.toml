@@ -6,6 +6,7 @@ members = [
     "src/telemetry", "src/storage",
     "src/build_info",
     "src/sdk",
+    "distros/sdv",
 ]
 resolver = "2"
 
@@ -39,6 +40,7 @@ telemetry = { path = "src/telemetry", optional = true }
 storage = { path = "src/storage" }
 build_info = { path = "src/build_info" }
 sdk = { path = "src/sdk" }
+veloflux_sdv = { package = "veloflux-sdv", path = "distros/sdv" }
 
 [features]
 default = ["metrics", "profiling", "allocator-jemalloc"]

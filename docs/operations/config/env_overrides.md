@@ -43,7 +43,9 @@ Only the following environment variables are recognized:
 | `logging.include_source` | `VELOFLUX_LOGGING__INCLUDE_SOURCE` |
 | `logging.file.dir` | `VELOFLUX_LOGGING__FILE__DIR` |
 | `profiling.enabled` | `VELOFLUX_PROFILING__ENABLED` |
+| `profiling.addr` | `VELOFLUX_PROFILING__ADDR` |
 | `profiling.cpu_profile_freq_hz` | `VELOFLUX_PROFILING__CPU_PROFILE_FREQ_HZ` |
+| `metrics.addr` | `VELOFLUX_METRICS__ADDR` |
 | `metrics.poll_interval_secs` | `VELOFLUX_METRICS__POLL_INTERVAL_SECS` |
 | `server.manager_addr` | `VELOFLUX_SERVER__MANAGER_ADDR` |
 
@@ -97,6 +99,8 @@ Examples:
 export VELOFLUX_LOGGING__LEVEL=debug
 export VELOFLUX_LOGGING__OUTPUT=stdout
 export VELOFLUX_PROFILING__ENABLED=false
+export VELOFLUX_PROFILING__ADDR=0.0.0.0:16060
+export VELOFLUX_METRICS__ADDR=0.0.0.0:19898
 export VELOFLUX_METRICS__POLL_INTERVAL_SECS=30
 export VELOFLUX_SERVER__MANAGER_ADDR=0.0.0.0:18080
 ```

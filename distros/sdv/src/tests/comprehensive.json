@@ -1,0 +1,176 @@
+{
+  "buses": [
+    {
+      "name": "TestBus",
+      "id": 1,
+      "messages": [
+        {
+          "name": "Fundamental",
+          "id": 256,
+          "frameId": "0x100",
+          "length": 8,
+          "signals": [
+            {
+              "name": "StandardUnsigned",
+              "start": 0,
+              "length": 8,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": 1.0,
+              "offset": 0.0
+            },
+            {
+              "name": "BitFlag",
+              "start": 8,
+              "length": 1,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": 1.0,
+              "offset": 0.0
+            },
+            {
+              "name": "CrossByte",
+              "start": 12,
+              "length": 12,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": 1.0,
+              "offset": 0.0
+            }
+          ]
+        },
+        {
+          "name": "Endianness",
+          "id": 512,
+          "frameId": "0x200",
+          "length": 8,
+          "signals": [
+            {
+              "name": "Intel16",
+              "start": 0,
+              "length": 16,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": 1.0,
+              "offset": 0.0
+            },
+            {
+              "name": "Motorola16",
+              "start": 23,
+              "length": 16,
+              "isBigEndian": true,
+              "isSigned": false,
+              "scale": 1.0,
+              "offset": 0.0
+            }
+          ]
+        },
+        {
+          "name": "Signed",
+          "id": 768,
+          "frameId": "0x300",
+          "length": 8,
+          "signals": [
+            {
+              "name": "Signed8",
+              "start": 0,
+              "length": 8,
+              "isBigEndian": false,
+              "isSigned": true,
+              "scale": 1.0,
+              "offset": 0.0
+            },
+            {
+              "name": "Signed16",
+              "start": 8,
+              "length": 16,
+              "isBigEndian": false,
+              "isSigned": true,
+              "scale": 1.0,
+              "offset": 0.0
+            }
+          ]
+        },
+        {
+          "name": "Scaling",
+          "id": 1024,
+          "frameId": "0x400",
+          "length": 8,
+          "signals": [
+            {
+              "name": "SimpleScale",
+              "start": 0,
+              "length": 8,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": 0.5,
+              "offset": 0.0
+            },
+            {
+              "name": "OffsetOnly",
+              "start": 8,
+              "length": 8,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": 1.0,
+              "offset": -40.0
+            },
+            {
+              "name": "NegativeSlope",
+              "start": 16,
+              "length": 8,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": -1.0,
+              "offset": 100.0
+            },
+            {
+              "name": "FractionalOffset",
+              "start": 24,
+              "length": 8,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": 0.1,
+              "offset": 10.5
+            },
+            {
+              "name": "LargeOffset",
+              "start": 32,
+              "length": 16,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": 1.0,
+              "offset": -20000.0
+            }
+          ]
+        },
+        {
+          "name": "CornerCases",
+          "id": 1280,
+          "frameId": "0x500",
+          "length": 8,
+          "signals": [
+            {
+              "name": "GapS1",
+              "start": 0,
+              "length": 4,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": 1.0,
+              "offset": 0.0
+            },
+            {
+              "name": "GapS2",
+              "start": 5,
+              "length": 3,
+              "isBigEndian": false,
+              "isSigned": false,
+              "scale": 1.0,
+              "offset": 0.0
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

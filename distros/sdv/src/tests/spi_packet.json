@@ -1,0 +1,52 @@
+{
+    "types": {
+        "can_frame": {
+            "fields": [
+                {
+                    "name": "magic",
+                    "type": "u8",
+                    "const": 85
+                },
+                {
+                    "name": "can_id",
+                    "type": "u16be"
+                },
+                {
+                    "name": "data_len",
+                    "type": "u8",
+                    "read_mask": 127
+                },
+                {
+                    "name": "payload",
+                    "type": "bytes",
+                    "length_ref": "data_len",
+                    "format": {
+                        "type": "dbc",
+                        "id_ref": "can_id"
+                    }
+                }
+            ]
+        }
+    },
+    "packet": {
+        "fields": [
+            {
+                "name": "ts",
+                "type": "u64be"
+            },
+            {
+                "name": "total_len",
+                "type": "u16be"
+            },
+            {
+                "name": "frames",
+                "type": "sequence",
+                "item": {
+                    "type": "can_frame"
+                },
+                "length_ref": "total_len",
+                "length_unit": "bytes"
+            }
+        ]
+    }
+}

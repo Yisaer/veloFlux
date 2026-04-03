@@ -1,0 +1,22 @@
+[
+    {
+        "description": "Comprehensive Decoder Test",
+        "hex": "00000000000000004C0055110001080F21140000000000551100020801020102000000005511000308FF0080000000000055110004086428010A44D00000551100050801EF00000000",
+        "expected": {
+            "TestBus__0x100__StandardUnsigned": 15,
+            "TestBus__0x100__BitFlag": 1,
+            "TestBus__0x100__CrossByte": 322,
+            "TestBus__0x200__Intel16": 513,
+            "TestBus__0x200__Motorola16": 258,
+            "TestBus__0x300__Signed8": -1,
+            "TestBus__0x300__Signed16": -32768,
+            "TestBus__0x400__SimpleScale": 50.0,
+            "TestBus__0x400__OffsetOnly": 0,
+            "TestBus__0x400__NegativeSlope": 90,
+            "TestBus__0x400__FractionalOffset": 11.5,
+            "TestBus__0x400__LargeOffset": -336,
+            "TestBus__0x500__GapS1": 15,
+            "TestBus__0x500__GapS2": 7
+        }
+    }
+]

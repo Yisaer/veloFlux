@@ -23,8 +23,8 @@ use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
 pub use instances::{
-    FlowInstanceBackend, FlowInstanceBackendKind, FlowInstanceSpec, build_in_process_flow_instance,
-    find_default_flow_instance_spec, new_default_flow_instance,
+    DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend, FlowInstanceBackendKind, FlowInstanceSpec,
+    build_in_process_flow_instance, find_default_flow_instance_spec, new_default_flow_instance,
 };
 pub use stream::{SchemaParser, register_schema, schema_registry};
 pub use worker::FlowWorkerClient;

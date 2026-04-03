@@ -45,9 +45,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return run_worker(worker_args).await;
     }
 
-    let result = veloflux::bootstrap::default_init()?;
-    let _logging_guard = result.logging_guard;
-    let ctx = server::init(result.options, result.instance).await?;
+    let bootstrap = veloflux::bootstrap::default_init_options()?;
+    let instance = server::prepare_registry(&bootstrap.options.flow_instances)?;
+    let _logging_guard = bootstrap.logging_guard;
+    veloflux::distro::register_selected_distro(&instance);
+    let ctx = server::init(bootstrap.options, instance).await?;
     server::start(ctx).await
 }
 
@@ -244,6 +246,7 @@ async fn run_worker(
             return Err(err.into());
         }
     };
+    veloflux::distro::register_selected_distro(&default_instance);
     let shared = default_instance.shared_registries();
     let instance = flow::FlowInstance::new(flow::instance::FlowInstanceOptions::dedicated_runtime(
         instance_id.clone(),
