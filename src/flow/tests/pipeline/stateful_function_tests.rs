@@ -1085,3 +1085,73 @@ async fn stateful_projection_with_batched_streaming_encoder() {
         .await
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
 }
+
+#[tokio::test]
+async fn streaming_state_window_graceful_close_flushes_active_window() {
+    let case_name = "streaming_state_window_graceful_close_flushes_active_window";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ));
+    let (input_topic, output_topic) =
+        make_memory_topics("stateful_function_graceful_stop", case_name);
+    let input_data = vec![(
+        "a".to_string(),
+        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+    )];
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    install_memory_stream_schema(&instance, &input_topic, &input_data).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT sum(a) AS s FROM stream GROUP BY statewindow(a = 1, a = 9)",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let columns = input_data
+        .into_iter()
+        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .collect();
+    let batch = batch_from_columns_simple(columns)
+        .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Graceful, timeout_duration)
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "Failed to gracefully stop pipeline for test {}: {err}",
+                case_name
+            )
+        });
+
+    let actual: JsonValue = recv_next_json(&mut output, timeout_duration).await;
+    let expected = serde_json::json!([{ "s": 6 }]);
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected),
+        "Wrong JSON flushed by graceful stop for test: {}",
+        case_name
+    );
+
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
+}
