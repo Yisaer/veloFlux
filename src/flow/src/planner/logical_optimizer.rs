@@ -2129,7 +2129,13 @@ impl<'a> ListElementUsageCollector<'a> {
             }
 
             if let Some(projection) = self.decode_projections.get(&entry.source_name) {
-                projections.insert(entry.source_name.clone(), projection.clone());
+                let mut projection = projection.clone();
+                for column in entry.schema.column_schemas() {
+                    if projection.column(column.name.as_str()).is_none() {
+                        projection.mark_column_all(column.name.as_str());
+                    }
+                }
+                projections.insert(entry.source_name.clone(), projection);
             }
         }
         projections
