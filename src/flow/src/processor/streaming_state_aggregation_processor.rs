@@ -114,6 +114,42 @@ impl StreamingStateAggregationProcessor {
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         self.stats = stats;
     }
+
+    async fn flush_active_partitions(
+        partitions: &mut HashMap<Option<String>, PartitionAggState>,
+        output: &broadcast::Sender<StreamData>,
+        channel_capacities: ProcessorChannelCapacities,
+        stats: &Arc<ProcessorStats>,
+    ) -> Result<(), ProcessorError> {
+        for state in partitions.values_mut() {
+            if !state.active {
+                continue;
+            }
+
+            match state.worker.finalize_current_window() {
+                Ok(Some(batch)) => {
+                    stats.record_out(batch.num_rows() as u64);
+                    send_with_backpressure(
+                        output,
+                        channel_capacities.data,
+                        StreamData::Collection(batch),
+                        Some(stats.as_ref()),
+                    )
+                    .await?;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    stats.record_error_logged(
+                        "streaming state aggregation processor error",
+                        e.to_string(),
+                    );
+                }
+            }
+            state.active = false;
+        }
+
+        Ok(())
+    }
 }
 
 impl Processor for StreamingStateAggregationProcessor {
@@ -295,6 +331,25 @@ impl Processor for StreamingStateAggregationProcessor {
                             Some(Ok(StreamData::Control(control_signal))) => {
                                 let is_terminal = control_signal.is_terminal();
                                 let is_graceful = control_signal.is_graceful_end();
+                                if is_terminal {
+                                    if is_graceful {
+                                        Self::flush_active_partitions(
+                                            &mut partitions,
+                                            &output,
+                                            channel_capacities,
+                                            &stats,
+                                        )
+                                        .await?;
+                                    }
+                                    send_with_backpressure(
+                                        &output,
+                                        channel_capacities.data,
+                                        StreamData::control(control_signal),
+                                        Some(stats.as_ref()),
+                                    )
+                                    .await?;
+                                    break;
+                                }
                                 send_with_backpressure(
                                     &output,
                                     channel_capacities.data,
@@ -302,31 +357,6 @@ impl Processor for StreamingStateAggregationProcessor {
                                     Some(stats.as_ref()),
                                 )
                                 .await?;
-                                if is_terminal {
-                                    if is_graceful {
-                                        for state in partitions.values_mut() {
-                                            if state.active {
-                                                match state.worker.finalize_current_window() {
-                                                    Ok(Some(batch)) => {
-                                                        send_with_backpressure(
-                                                            &output,
-                                                            channel_capacities.data,
-                                                            StreamData::Collection(batch),
-                                                            Some(stats.as_ref()),
-                                                        )
-                                                        .await?;
-                                                    }
-                                                    Ok(None) => {}
-                                                    Err(e) => {
-                                                        stats.record_error_logged("streaming state aggregation processor error", e.to_string());
-                                                    }
-                                                }
-                                                state.active = false;
-                                            }
-                                        }
-                                    }
-                                    break;
-                                }
                             }
                             Some(Ok(other)) => {
                                 let is_terminal = other.is_terminal();
