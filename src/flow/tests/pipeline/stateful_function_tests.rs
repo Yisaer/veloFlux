@@ -4,6 +4,7 @@ use datatypes::Value;
 use flow::model::batch_from_columns_simple;
 use flow::pipeline::MemorySinkProps;
 use flow::pipeline::PipelineDefinition;
+use flow::planner::sink::{CommonSinkProps, SinkOutputConfig};
 use flow::FlowInstance;
 use flow::{CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
 use serde_json::Value as JsonValue;
@@ -193,6 +194,36 @@ async fn stateful_function_table_driven() {
                     }],
                 },
             ],
+            wait_after_send: Duration::from_millis(200),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "aggregation_sum_statewindow_grouped_ordered",
+            sql: "SELECT b, sum(a) AS s FROM stream GROUP BY statewindow(a = 1, a = 4), b ORDER BY b",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(4)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(1)],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 2,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "b".to_string(),
+                        expected_values: vec![Value::Int64(1), Value::Int64(2)],
+                    },
+                    ColumnCheck {
+                        expected_name: "s".to_string(),
+                        expected_values: vec![Value::Int64(5), Value::Int64(2)],
+                    },
+                ],
+            }],
             wait_after_send: Duration::from_millis(200),
             close_before_read: false,
         },
@@ -450,6 +481,30 @@ async fn stateful_function_table_driven() {
                         Value::Int64(34),
                     ],
                 }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "stateful_projection_with_repeated_visible_expr_keeps_runtime_semantics",
+            sql: "SELECT lag(a) + 1 AS x, x + 1 AS y FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 3,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "x".to_string(),
+                        expected_values: vec![Value::Null, Value::Int64(2), Value::Int64(3)],
+                    },
+                    ColumnCheck {
+                        expected_name: "y".to_string(),
+                        expected_values: vec![Value::Null, Value::Int64(3), Value::Int64(4)],
+                    },
+                ],
             }],
             wait_after_send: Duration::from_millis(0),
             close_before_read: false,
@@ -874,4 +929,159 @@ async fn stateful_function_table_driven() {
     for case in cases {
         run_stateful_case(case).await;
     }
+}
+
+#[tokio::test]
+async fn stateful_projection_followed_by_row_diff_delta_output() {
+    let case_name = "stateful_projection_followed_by_row_diff_delta_output";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ));
+    let (input_topic, output_topic) = make_memory_topics("stateful_function_delta", case_name);
+    let input_data = vec![(
+        "a".to_string(),
+        vec![
+            Value::Int64(1),
+            Value::Int64(1),
+            Value::Int64(2),
+            Value::Int64(3),
+        ],
+    )];
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    install_memory_stream_schema(&instance, &input_topic, &input_data).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT lag(a) AS prev FROM stream",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )
+        .with_output(SinkOutputConfig::delta())],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let columns = input_data
+        .into_iter()
+        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .collect();
+    let batch = batch_from_columns_simple(columns)
+        .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+
+    let actual: JsonValue = recv_next_json(&mut output, timeout_duration).await;
+    let expected = serde_json::json!([
+        {"prev": null},
+        {"prev": 1},
+        {},
+        {"prev": 2}
+    ]);
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected),
+        "Wrong delta JSON for test: {}",
+        case_name
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to stop pipeline for test {}: {err}", case_name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
+}
+
+#[tokio::test]
+async fn stateful_projection_with_batched_streaming_encoder() {
+    let case_name = "stateful_projection_with_batched_streaming_encoder";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ));
+    let (input_topic, output_topic) = make_memory_topics("stateful_function_batching", case_name);
+    let input_data = vec![(
+        "a".to_string(),
+        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+    )];
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    install_memory_stream_schema(&instance, &input_topic, &input_data).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT lag(a) AS prev FROM stream",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )
+        .with_common_props(CommonSinkProps {
+            batch_count: Some(2),
+            batch_duration: Some(Duration::from_millis(50)),
+        })],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let columns = input_data
+        .into_iter()
+        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .collect();
+    let batch = batch_from_columns_simple(columns)
+        .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+
+    let actual_first: JsonValue = recv_next_json(&mut output, timeout_duration).await;
+    let expected_first = serde_json::json!([
+        {"prev": null},
+        {"prev": 1}
+    ]);
+    assert_eq!(
+        normalize_json(actual_first),
+        normalize_json(expected_first),
+        "Wrong first batched JSON for test: {}",
+        case_name
+    );
+
+    let actual_second: JsonValue = recv_next_json(&mut output, timeout_duration).await;
+    let expected_second = serde_json::json!([
+        {"prev": 2}
+    ]);
+    assert_eq!(
+        normalize_json(actual_second),
+        normalize_json(expected_second),
+        "Wrong second batched JSON for test: {}",
+        case_name
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to stop pipeline for test {}: {err}", case_name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
 }

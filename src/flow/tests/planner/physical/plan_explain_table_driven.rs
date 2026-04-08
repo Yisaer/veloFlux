@@ -230,7 +230,10 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs
 }
 
-fn setup_catalog_with_eventtime_stream() -> Catalog {
+fn setup_catalog_with_eventtime_stream_config(
+    column: &'static str,
+    type_key: &'static str,
+) -> Catalog {
     let stream_name = "stream_eventtime";
     let schema = Schema::new(vec![
         ColumnSchema::new(
@@ -254,11 +257,15 @@ fn setup_catalog_with_eventtime_stream() -> Catalog {
             StreamDecoderConfig::json(),
         )
         .with_eventtime(EventtimeDefinition::new(
-            "event_ts".to_string(),
-            "unixtimestamp_ms".to_string(),
+            column.to_string(),
+            type_key.to_string(),
         )),
     );
     catalog
+}
+
+fn setup_catalog_with_eventtime_stream() -> Catalog {
+    setup_catalog_with_eventtime_stream_config("event_ts", "unixtimestamp_ms")
 }
 
 fn bindings_for_select(
@@ -1241,5 +1248,68 @@ fn row_diff_kuksa_sink_is_rejected() {
     assert!(
         err.contains("does not preserve output_mask"),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn explain_pipeline_with_eventtime_enabled_rejects_missing_eventtime_column() {
+    let catalog = setup_catalog_with_eventtime_stream_config("missing_ts", "unixtimestamp_ms");
+    let registries = PipelineRegistries::new_with_builtin();
+    let options = PipelineOptions {
+        eventtime: EventtimeOptions {
+            enabled: true,
+            late_tolerance: Duration::ZERO,
+        },
+        ..PipelineOptions::default()
+    };
+
+    let err = flow::explain_pipeline_with_options(
+        "SELECT a FROM stream_eventtime",
+        vec![],
+        &catalog,
+        None,
+        &registries,
+        &options,
+    )
+    .expect_err("missing eventtime column should be rejected");
+
+    assert!(
+        err.to_string().contains(
+            "eventtime.column `missing_ts` not found in stream `stream_eventtime` schema"
+        ),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn explain_pipeline_with_eventtime_enabled_rejects_unknown_eventtime_type() {
+    let catalog = setup_catalog_with_eventtime_stream_config("event_ts", "unknown_eventtime");
+    let registries = PipelineRegistries::new_with_builtin();
+    let options = PipelineOptions {
+        eventtime: EventtimeOptions {
+            enabled: true,
+            late_tolerance: Duration::ZERO,
+        },
+        ..PipelineOptions::default()
+    };
+
+    let err = flow::explain_pipeline_with_options(
+        "SELECT a FROM stream_eventtime",
+        vec![],
+        &catalog,
+        None,
+        &registries,
+        &options,
+    )
+    .expect_err("unknown eventtime type should be rejected");
+
+    let err_text = err.to_string();
+    assert!(
+        err_text.contains("eventtime.type `unknown_eventtime` not registered"),
+        "unexpected error: {err_text}"
+    );
+    assert!(
+        err_text.contains("unixtimestamp_ms") && err_text.contains("unixtimestamp_s"),
+        "available builtin eventtime types should be included: {err_text}"
     );
 }

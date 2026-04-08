@@ -5,7 +5,7 @@ use flow::connector::MemoryData;
 use flow::model::batch_from_columns_simple;
 use flow::pipeline::MemorySinkProps;
 use flow::pipeline::PipelineDefinition;
-use flow::planner::sink::CommonSinkProps;
+use flow::planner::sink::{CommonSinkProps, SinkOutputConfig};
 use flow::FlowInstance;
 use flow::{
     CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkEncoderConfig, SinkProps, SinkType,
@@ -16,8 +16,8 @@ use tokio::time::timeout;
 use tokio::time::Duration;
 
 use super::common::{
-    declare_memory_input_output_topics, install_memory_stream_schema, make_memory_topics,
-    publish_input_collection, recv_next_json,
+    assert_no_json_output, declare_memory_input_output_topics, install_memory_stream_schema,
+    make_memory_topics, publish_input_collection, recv_next_json,
 };
 
 struct BatchCase {
@@ -94,6 +94,7 @@ struct BatchBytesCase {
     input_data: Vec<(String, Vec<Value>)>,
     sink_common: CommonSinkProps,
     encoder: SinkEncoderConfig,
+    output: Option<SinkOutputConfig>,
     expected_batches: Vec<&'static [u8]>,
 }
 
@@ -139,6 +140,10 @@ async fn run_batch_bytes_case(case: BatchBytesCase) {
     )
     .with_common_props(case.sink_common)
     .with_encoder(case.encoder);
+    let sink = match case.output {
+        Some(output) => sink.with_output(output),
+        None => sink,
+    };
     let pipeline = PipelineDefinition::new(pipeline_id.clone(), case.sql, vec![sink]);
     instance
         .create_pipeline(CreatePipelineRequest::new(pipeline))
@@ -205,34 +210,201 @@ async fn pipeline_batching_table_driven() {
 
 #[tokio::test]
 async fn pipeline_encoder_transform_table_driven() {
-    let cases = vec![BatchBytesCase {
-        name: "streaming_encoder_flushes_transformed_json_bytes",
-        sql: "SELECT a + 1 AS c, b + 10 AS d FROM stream",
-        input_data: vec![
-            (
-                "a".to_string(),
-                vec![Value::Int64(1), Value::Int64(3), Value::Int64(5)],
+    let cases = vec![
+        BatchBytesCase {
+            name: "streaming_encoder_flushes_transformed_json_bytes",
+            sql: "SELECT a + 1 AS c, b + 10 AS d FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(3), Value::Int64(5)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(2), Value::Int64(4), Value::Int64(6)],
+                ),
+            ],
+            sink_common: CommonSinkProps {
+                batch_count: Some(2),
+                // Ensure the final partial batch is flushed without relying on stop/close.
+                batch_duration: Some(Duration::from_millis(50)),
+            },
+            encoder: SinkEncoderConfig::json_with_transform_template(
+                r#"{"x":{{ json(.row.c) }},"y":{{ json(.row.d) }} }"#,
             ),
-            (
-                "b".to_string(),
-                vec![Value::Int64(2), Value::Int64(4), Value::Int64(6)],
-            ),
-        ],
-        sink_common: CommonSinkProps {
-            batch_count: Some(2),
-            // Ensure the final partial batch is flushed without relying on stop/close.
-            batch_duration: Some(Duration::from_millis(50)),
+            output: None,
+            expected_batches: vec![
+                br#"[{"x":2,"y":12 },{"x":4,"y":14 }]"#,
+                br#"[{"x":6,"y":16 }]"#,
+            ],
         },
-        encoder: SinkEncoderConfig::json_with_transform_template(
-            r#"{"x":{{ json(.row.c) }},"y":{{ json(.row.d) }} }"#,
-        ),
-        expected_batches: vec![
-            br#"[{"x":2,"y":12 },{"x":4,"y":14 }]"#,
-            br#"[{"x":6,"y":16 }]"#,
-        ],
-    }];
+        BatchBytesCase {
+            name: "delta_transform_batched_output_keeps_dense_rows_and_flushes_correctly",
+            sql: "SELECT a, b FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(10)],
+                ),
+            ],
+            sink_common: CommonSinkProps {
+                batch_count: Some(16),
+                batch_duration: Some(Duration::from_millis(50)),
+            },
+            encoder: SinkEncoderConfig::json_with_transform_template("{{ json(.row) }}"),
+            output: Some(SinkOutputConfig::delta()),
+            expected_batches: vec![br#"[{"a":1,"b":10},{"a":null,"b":null},{"a":2,"b":null}]"#],
+        },
+    ];
 
     for case in cases {
         run_batch_bytes_case(case).await;
     }
+}
+
+#[tokio::test]
+async fn streaming_encoder_flushes_partial_batch_on_graceful_stop() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ));
+    let (input_topic, output_topic) = make_memory_topics(
+        "pipeline_batching",
+        "streaming_encoder_flushes_partial_batch_on_graceful_stop",
+    );
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    let input_data = vec![(
+        "a".to_string(),
+        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+    )];
+    install_memory_stream_schema(&instance, &input_topic, &input_data).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    )
+    .with_common_props(CommonSinkProps {
+        batch_count: Some(8),
+        batch_duration: None,
+    });
+    let pipeline = PipelineDefinition::new(pipeline_id.clone(), "SELECT a FROM stream", vec![sink]);
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .expect("start pipeline");
+
+    let columns = input_data
+        .into_iter()
+        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .collect();
+    let batch = batch_from_columns_simple(columns).expect("create input batch");
+
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+    assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Graceful, timeout_duration)
+        .await
+        .expect("stop pipeline");
+
+    let actual = recv_next_json(&mut output, timeout_duration).await;
+    assert_eq!(
+        actual,
+        serde_json::json!([{"a": 1}, {"a": 2}, {"a": 3}]),
+        "stop should flush the final partial batch"
+    );
+
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
+}
+
+#[tokio::test]
+async fn delta_batched_output_suppresses_empty_batches_but_keeps_non_empty_ones() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ));
+    let (input_topic, output_topic) = make_memory_topics(
+        "pipeline_batching",
+        "delta_batched_output_suppresses_empty_batches_but_keeps_non_empty_ones",
+    );
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    let schema_hint = vec![("a".to_string(), vec![Value::Int64(1), Value::Int64(2)])];
+    install_memory_stream_schema(&instance, &input_topic, &schema_hint).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    )
+    .with_common_props(CommonSinkProps {
+        batch_count: Some(16),
+        batch_duration: Some(Duration::from_millis(50)),
+    })
+    .with_output(SinkOutputConfig::delta().with_omit_if_empty(true));
+    let pipeline = PipelineDefinition::new(pipeline_id.clone(), "SELECT a FROM stream", vec![sink]);
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .expect("start pipeline");
+
+    let timeout_duration = Duration::from_secs(5);
+
+    let first = batch_from_columns_simple(vec![(
+        "stream".to_string(),
+        "a".to_string(),
+        vec![Value::Int64(1)],
+    )])
+    .expect("create first input batch");
+    publish_input_collection(&instance, &input_topic, Box::new(first), timeout_duration).await;
+    let first_output = recv_next_json(&mut output, timeout_duration).await;
+    assert_eq!(first_output, serde_json::json!([{"a": 1}]));
+
+    let second = batch_from_columns_simple(vec![(
+        "stream".to_string(),
+        "a".to_string(),
+        vec![Value::Int64(1)],
+    )])
+    .expect("create second input batch");
+    publish_input_collection(&instance, &input_topic, Box::new(second), timeout_duration).await;
+    assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+
+    let third = batch_from_columns_simple(vec![(
+        "stream".to_string(),
+        "a".to_string(),
+        vec![Value::Int64(2)],
+    )])
+    .expect("create third input batch");
+    publish_input_collection(&instance, &input_topic, Box::new(third), timeout_duration).await;
+    let third_output = recv_next_json(&mut output, timeout_duration).await;
+    assert_eq!(third_output, serde_json::json!([{"a": 2}]));
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .expect("stop pipeline");
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
 }

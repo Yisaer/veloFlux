@@ -380,3 +380,171 @@ fn to_secs(ts: SystemTime, label: &str) -> Result<u64, ProcessorError> {
         .map_err(|e| ProcessorError::ProcessingError(format!("invalid {label}: {e}")))
         .map(|d| d.as_secs())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aggregation::AggregateFunctionRegistry;
+    use crate::expr::scalar::ColumnRef;
+    use crate::expr::ScalarExpr;
+    use crate::planner::logical::TimeUnit;
+    use crate::planner::physical::AggregateCall;
+    use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
+    use crate::runtime::TaskSpawner;
+    use datatypes::Value;
+    use sqlparser::ast::{Expr, Ident};
+    use std::collections::HashMap;
+    use tokio::time::{timeout, Duration};
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
+
+    fn col(name: &str) -> ScalarExpr {
+        ScalarExpr::Column(ColumnRef::ByName {
+            column_name: name.to_string(),
+        })
+    }
+
+    fn tuple_at(sec: u64, cols: &[(&str, Value)]) -> crate::model::Tuple {
+        let mut tuple = crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_secs(sec),
+        );
+        for (k, v) in cols {
+            tuple.add_affiliate_column(Arc::new((*k).to_string()), v.clone());
+        }
+        tuple
+    }
+
+    fn make_physical() -> Arc<PhysicalStreamingAggregation> {
+        let call = AggregateCall {
+            output_column: "sum_a".to_string(),
+            func_name: "sum".to_string(),
+            args: vec![col("a")],
+            distinct: false,
+        };
+
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "sum_a".to_string(),
+            Expr::Function(sqlparser::ast::Function {
+                name: sqlparser::ast::ObjectName(vec![Ident::new("sum")]),
+                args: vec![sqlparser::ast::FunctionArg::Unnamed(
+                    sqlparser::ast::FunctionArgExpr::Expr(Expr::Identifier(Ident::new("a"))),
+                )],
+                over: None,
+                distinct: false,
+                order_by: vec![],
+                filter: None,
+                null_treatment: None,
+                special: false,
+            }),
+        );
+
+        Arc::new(PhysicalStreamingAggregation::new(
+            StreamingWindowSpec::Tumbling {
+                time_unit: TimeUnit::Seconds,
+                length: 10,
+            },
+            mappings,
+            vec![Expr::Nested(Box::new(Expr::Identifier(Ident::new("b"))))],
+            vec![call],
+            vec![col("b")],
+            Vec::new(),
+            0,
+        ))
+    }
+
+    fn extract_grouped_rows(collection: &dyn crate::model::Collection) -> Vec<(i64, i64)> {
+        let mut rows = collection
+            .rows()
+            .iter()
+            .map(|tuple| {
+                let group = tuple
+                    .value_by_name("", "(b)")
+                    .cloned()
+                    .expect("group-by value");
+                let sum = tuple
+                    .value_by_name("", "sum_a")
+                    .cloned()
+                    .expect("aggregate value");
+                let Value::Int64(group) = group else {
+                    panic!("expected Int64 group value, got {group:?}");
+                };
+                let Value::Int64(sum) = sum else {
+                    panic!("expected Int64 aggregate value, got {sum:?}");
+                };
+                (group, sum)
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(group, _)| *group);
+        rows
+    }
+
+    #[tokio::test]
+    async fn tumbling_aggregation_flushes_grouped_rows_on_watermark() {
+        let spawner = test_spawner();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let physical = make_physical();
+
+        let mut processor = StreamingTumblingAggregationProcessor::new(
+            "tumbling",
+            Arc::clone(&physical),
+            Arc::clone(&aggregate_registry),
+        )
+        .expect("tumbling processor");
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let first_window = crate::model::RecordBatch::new(vec![
+            tuple_at(1, &[("a", Value::Int64(2)), ("b", Value::Int64(1))]),
+            tuple_at(2, &[("a", Value::Int64(4)), ("b", Value::Int64(2))]),
+            tuple_at(3, &[("a", Value::Int64(3)), ("b", Value::Int64(1))]),
+        ])
+        .expect("first batch");
+        assert!(input
+            .send(StreamData::collection(Box::new(first_window)))
+            .is_ok());
+        assert!(input
+            .send(StreamData::Watermark(UNIX_EPOCH + Duration::from_secs(10)))
+            .is_ok());
+
+        let first = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let StreamData::Collection(first) = first else {
+            panic!("expected first window collection");
+        };
+        assert_eq!(extract_grouped_rows(first.as_ref()), vec![(1, 5), (2, 4)]);
+
+        let second_window = crate::model::RecordBatch::new(vec![tuple_at(
+            11,
+            &[("a", Value::Int64(7)), ("b", Value::Int64(2))],
+        )])
+        .expect("second batch");
+        assert!(input
+            .send(StreamData::collection(Box::new(second_window)))
+            .is_ok());
+        assert!(input
+            .send(StreamData::Watermark(UNIX_EPOCH + Duration::from_secs(20)))
+            .is_ok());
+
+        let second = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let StreamData::Collection(second) = second else {
+            panic!("expected second window collection");
+        };
+        assert_eq!(extract_grouped_rows(second.as_ref()), vec![(2, 7)]);
+    }
+}
