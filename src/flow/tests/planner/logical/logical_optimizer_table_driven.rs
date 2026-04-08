@@ -3,7 +3,7 @@ use datatypes::{
     StructType,
 };
 use flow::catalog::MemoryStreamProps;
-use flow::planner::logical::create_logical_plan;
+use flow::planner::logical::{create_logical_plan, LogicalPlan};
 use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use flow::{
@@ -232,9 +232,10 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs
 }
 
-fn bindings_for_select(
+fn bindings_for_select_with_shared_sources(
     select_stmt: &parser::SelectStmt,
     stream_defs: &HashMap<String, Arc<StreamDefinition>>,
+    shared_sources: &[&str],
 ) -> SchemaBinding {
     SchemaBinding::new(
         select_stmt
@@ -244,7 +245,9 @@ fn bindings_for_select(
                 let def = stream_defs
                     .get(&source.name)
                     .unwrap_or_else(|| panic!("missing stream definition: {}", source.name));
-                let kind = if def.stream_type() == flow::StreamType::Memory
+                let kind = if shared_sources.iter().any(|name| *name == source.name) {
+                    SourceBindingKind::Shared
+                } else if def.stream_type() == flow::StreamType::Memory
                     && def.decoder().kind() == "none"
                 {
                     SourceBindingKind::MemoryCollection
@@ -263,8 +266,13 @@ fn bindings_for_select(
 }
 
 fn optimized_logical_json(sql: &str) -> String {
-    optimized_logical_json_with_registries(
+    optimized_logical_json_with_shared_sources(sql, &[])
+}
+
+fn optimized_logical_json_with_shared_sources(sql: &str, shared_sources: &[&str]) -> String {
+    optimized_logical_json_with_shared_sources_and_registries(
         sql,
+        shared_sources,
         Arc::new(StaticAggregateRegistry::new([
             "sum", "count", "last_row", "ndv",
         ])),
@@ -273,33 +281,68 @@ fn optimized_logical_json(sql: &str) -> String {
     )
 }
 
-fn optimized_logical_json_with_sinks(sql: &str, sinks: Vec<PipelineSink>) -> String {
-    optimized_logical_json_with_registries(
+fn optimized_logical_json_with_shared_sources_and_registries(
+    sql: &str,
+    shared_sources: &[&str],
+    aggregate_registry: Arc<StaticAggregateRegistry>,
+    stateful_registry: Arc<StaticStatefulRegistry>,
+    sinks: Vec<PipelineSink>,
+) -> String {
+    let optimized = optimized_logical_plan_with_shared_sources_and_registries(
         sql,
+        shared_sources,
+        aggregate_registry,
+        stateful_registry,
+        sinks,
+    );
+    let explain = ExplainReport::from_logical(optimized);
+    println!("{}", sql);
+    println!("{}", explain.table_string());
+    explain.to_json().to_string()
+}
+
+fn optimized_logical_plan_with_shared_sources(
+    sql: &str,
+    shared_sources: &[&str],
+) -> Arc<LogicalPlan> {
+    optimized_logical_plan_with_shared_sources_and_registries(
+        sql,
+        shared_sources,
+        Arc::new(StaticAggregateRegistry::new([
+            "sum", "count", "last_row", "ndv",
+        ])),
+        Arc::new(StaticStatefulRegistry::new(["lag"])),
+        vec![],
+    )
+}
+
+fn optimized_logical_plan_with_shared_sources_and_registries(
+    sql: &str,
+    shared_sources: &[&str],
+    aggregate_registry: Arc<StaticAggregateRegistry>,
+    stateful_registry: Arc<StaticStatefulRegistry>,
+    sinks: Vec<PipelineSink>,
+) -> Arc<LogicalPlan> {
+    let stream_defs = setup_streams();
+    let select_stmt =
+        parse_sql_with_registries(sql, aggregate_registry, stateful_registry).expect("parse sql");
+    let bindings =
+        bindings_for_select_with_shared_sources(&select_stmt, &stream_defs, shared_sources);
+    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs).expect("logical");
+    let (optimized, _pruned) = flow::optimize_logical_plan(logical_plan, &bindings);
+    optimized
+}
+
+fn optimized_logical_json_with_sinks(sql: &str, sinks: Vec<PipelineSink>) -> String {
+    optimized_logical_json_with_shared_sources_and_registries(
+        sql,
+        &[],
         Arc::new(StaticAggregateRegistry::new([
             "sum", "count", "last_row", "ndv",
         ])),
         Arc::new(StaticStatefulRegistry::new(["lag"])),
         sinks,
     )
-}
-
-fn optimized_logical_json_with_registries(
-    sql: &str,
-    aggregate_registry: Arc<StaticAggregateRegistry>,
-    stateful_registry: Arc<StaticStatefulRegistry>,
-    sinks: Vec<PipelineSink>,
-) -> String {
-    let stream_defs = setup_streams();
-    let select_stmt =
-        parse_sql_with_registries(sql, aggregate_registry, stateful_registry).expect("parse sql");
-    let bindings = bindings_for_select(&select_stmt, &stream_defs);
-    let logical_plan = create_logical_plan(select_stmt, sinks, &stream_defs).expect("logical");
-    let (optimized, _pruned) = flow::optimize_logical_plan(logical_plan, &bindings);
-    let explain = ExplainReport::from_logical(optimized);
-    println!("{}", sql);
-    println!("{}", explain.table_string());
-    explain.to_json().to_string()
 }
 
 fn build_nop_json_sink(sink_id: &'static str, connector_id: &'static str) -> PipelineSink {
@@ -350,12 +393,130 @@ fn logical_optimizer_table_driven() {
             sql: "SELECT stream_3.items[a] FROM stream_3",
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[*][struct{c, d}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[\"a\"]]"],"operator":"Project"}"##,
         },
+        Case {
+            name: "logical_optimizer_inserts_compute_for_repeated_subexpr_in_project_and_filter",
+            sql: "SELECT a + 1 AS x, x + 1 AS y FROM stream WHERE x > 1 AND y > 1",
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Compute_3","info":["temps=[__vf_cse_1 = a + 1; __vf_cse_2 = __vf_cse_1 + 1]"],"operator":"Compute"}],"id":"Filter_1","info":["predicate=__vf_cse_1 > 1 AND __vf_cse_2 > 1"],"operator":"Filter"}],"id":"Project_2","info":["fields=[__vf_cse_1 as x; __vf_cse_2 as y]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "logical_optimizer_does_not_cse_function_calls",
+            sql: "SELECT concat(a) AS x, concat(a) AS y FROM stream",
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[concat(a) as x; concat(a) as y]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "logical_optimizer_does_not_cse_plain_identifier_or_literal",
+            sql: "SELECT a AS x, a AS y, 1 AS one, 1 AS another_one FROM stream",
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as x; a as y; 1 as one; 1 as another_one]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "logical_optimizer_select_star_disables_top_level_pruning",
+            sql: "SELECT * FROM stream_prune",
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_prune","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "logical_optimizer_selecting_whole_list_element_keeps_full_element_struct",
+            sql: "SELECT stream_3.items[0] FROM stream_3",
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[0][struct{c, d}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[0]]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "logical_optimizer_cse_keeps_stateful_dependency_boundary",
+            sql: "SELECT lag(a) + 1 AS x, x + 1 AS y FROM stream",
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Compute_3","info":["temps=[__vf_cse_1 = col_1 + 1]"],"operator":"Compute"}],"id":"Project_2","info":["fields=[__vf_cse_1 as x; __vf_cse_1 + 1 as y]"],"operator":"Project"}"##,
+        },
     ];
 
     for case in cases {
         let got = optimized_logical_json(case.sql);
         assert_eq!(got, case.expected, "case={}", case.name);
     }
+}
+
+fn find_single_datasource(
+    plan: &Arc<LogicalPlan>,
+) -> &flow::planner::logical::datasource::DataSource {
+    fn walk(plan: &Arc<LogicalPlan>) -> Option<&flow::planner::logical::datasource::DataSource> {
+        match plan.as_ref() {
+            LogicalPlan::DataSource(ds) => Some(ds),
+            _ => plan.children().iter().find_map(walk),
+        }
+    }
+
+    walk(plan).expect("expected a datasource in logical plan")
+}
+
+#[test]
+fn logical_optimizer_shared_source_keeps_full_nested_schema_and_records_required_schema() {
+    let sql = "SELECT stream_3.items[0]->c FROM stream_3";
+    let optimized = optimized_logical_plan_with_shared_sources(sql, &["stream_3"]);
+    let explain = ExplainReport::from_logical(optimized.clone());
+    println!("{}", sql);
+    println!("{}", explain.table_string());
+
+    let datasource = find_single_datasource(&optimized);
+    assert_eq!(
+        datasource.shared_required_schema(),
+        Some(&["items".to_string()][..])
+    );
+    assert!(
+        datasource.decode_projection().is_none(),
+        "shared source should not enable decode projection"
+    );
+
+    let schema = datasource.schema();
+    let columns = schema.column_schemas();
+    assert_eq!(
+        columns.len(),
+        2,
+        "shared source should keep full top-level schema"
+    );
+    assert_eq!(columns[0].name, "a");
+    assert_eq!(columns[1].name, "items");
+
+    let ConcreteDatatype::List(list_type) = &columns[1].data_type else {
+        panic!("expected items to stay list-typed");
+    };
+    let ConcreteDatatype::Struct(struct_type) = list_type.item_type() else {
+        panic!("expected list element to stay struct-typed");
+    };
+    let struct_fields = struct_type.fields();
+    let field_names: Vec<_> = struct_fields
+        .iter()
+        .map(|field| field.name().to_string())
+        .collect();
+    assert_eq!(
+        field_names,
+        vec!["c".to_string(), "d".to_string()],
+        "shared source should keep full nested struct fields"
+    );
+}
+
+#[test]
+fn logical_optimizer_shared_source_keeps_full_schema_under_alias_projection() {
+    let sql = "SELECT a AS x FROM stream_prune";
+    let optimized = optimized_logical_plan_with_shared_sources(sql, &["stream_prune"]);
+    let explain = ExplainReport::from_logical(optimized.clone());
+    println!("{}", sql);
+    println!("{}", explain.table_string());
+
+    let datasource = find_single_datasource(&optimized);
+    assert_eq!(
+        datasource.shared_required_schema(),
+        Some(&["a".to_string()][..])
+    );
+    assert!(
+        datasource.decode_projection().is_none(),
+        "shared source alias projection should not enable decode projection"
+    );
+
+    let schema = datasource.schema();
+    let columns = schema.column_schemas();
+    assert_eq!(
+        columns.len(),
+        2,
+        "shared source should keep full top-level schema under alias projection"
+    );
+    assert_eq!(columns[0].name, "a");
+    assert_eq!(columns[1].name, "b");
 }
 
 #[test]

@@ -468,3 +468,140 @@ impl Processor for StreamingSlidingAggregationProcessor {
         self.control_inputs.push(receiver);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aggregation::AggregateFunctionRegistry;
+    use crate::expr::scalar::ColumnRef;
+    use crate::expr::ScalarExpr;
+    use crate::planner::logical::TimeUnit;
+    use crate::planner::physical::AggregateCall;
+    use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
+    use crate::runtime::TaskSpawner;
+    use datatypes::Value;
+    use sqlparser::ast::{Expr, Ident};
+    use std::collections::HashMap;
+    use tokio::time::{timeout, Duration};
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
+
+    fn col(name: &str) -> ScalarExpr {
+        ScalarExpr::Column(ColumnRef::ByName {
+            column_name: name.to_string(),
+        })
+    }
+
+    fn tuple_at(sec: u64, a: i64) -> crate::model::Tuple {
+        let mut tuple = crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_secs(sec),
+        );
+        tuple.add_affiliate_column(Arc::new("a".to_string()), Value::Int64(a));
+        tuple
+    }
+
+    fn make_physical() -> Arc<PhysicalStreamingAggregation> {
+        let call = AggregateCall {
+            output_column: "sum_a".to_string(),
+            func_name: "sum".to_string(),
+            args: vec![col("a")],
+            distinct: false,
+        };
+
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "sum_a".to_string(),
+            Expr::Function(sqlparser::ast::Function {
+                name: sqlparser::ast::ObjectName(vec![Ident::new("sum")]),
+                args: vec![sqlparser::ast::FunctionArg::Unnamed(
+                    sqlparser::ast::FunctionArgExpr::Expr(Expr::Identifier(Ident::new("a"))),
+                )],
+                over: None,
+                distinct: false,
+                order_by: vec![],
+                filter: None,
+                null_treatment: None,
+                special: false,
+            }),
+        );
+
+        Arc::new(PhysicalStreamingAggregation::new(
+            StreamingWindowSpec::Sliding {
+                time_unit: TimeUnit::Seconds,
+                lookback: 2,
+                lookahead: None,
+            },
+            mappings,
+            Vec::new(),
+            vec![call],
+            Vec::new(),
+            Vec::new(),
+            0,
+        ))
+    }
+
+    fn extract_sum(collection: &dyn crate::model::Collection) -> i64 {
+        assert_eq!(
+            collection.rows().len(),
+            1,
+            "expected one row per sliding emit"
+        );
+        let value = collection.rows()[0]
+            .value_by_name("", "sum_a")
+            .cloned()
+            .expect("aggregate value");
+        let Value::Int64(sum) = value else {
+            panic!("expected Int64 aggregate value, got {value:?}");
+        };
+        sum
+    }
+
+    #[tokio::test]
+    async fn sliding_aggregation_emits_oldest_window_per_tuple_when_delay_is_zero() {
+        let spawner = test_spawner();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let physical = make_physical();
+
+        let mut processor = StreamingSlidingAggregationProcessor::new(
+            "sliding",
+            Arc::clone(&physical),
+            Arc::clone(&aggregate_registry),
+        )
+        .expect("sliding processor");
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch = crate::model::RecordBatch::new(vec![
+            tuple_at(1, 1),
+            tuple_at(2, 2),
+            tuple_at(4, 4),
+            tuple_at(5, 8),
+        ])
+        .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+
+        let mut sums = Vec::new();
+        for _ in 0..4 {
+            let item = timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("recv");
+            let StreamData::Collection(collection) = item else {
+                panic!("expected sliding aggregation collection");
+            };
+            sums.push(extract_sum(collection.as_ref()));
+        }
+
+        assert_eq!(sums, vec![1, 3, 2, 12]);
+    }
+}
