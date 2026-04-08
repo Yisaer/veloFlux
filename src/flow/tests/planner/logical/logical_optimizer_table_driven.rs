@@ -3,6 +3,7 @@ use datatypes::{
     StructType,
 };
 use flow::catalog::MemoryStreamProps;
+use flow::planner::decode_projection::{ListIndexSelection, ProjectionNode};
 use flow::planner::logical::{create_logical_plan, LogicalPlan};
 use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
@@ -15,6 +16,7 @@ use parser::{
 };
 use serde_json::json;
 use serde_json::Map as JsonMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -517,6 +519,70 @@ fn logical_optimizer_shared_source_keeps_full_schema_under_alias_projection() {
     );
     assert_eq!(columns[0].name, "a");
     assert_eq!(columns[1].name, "b");
+}
+
+#[test]
+fn logical_optimizer_regular_source_decode_projection_keeps_top_level_columns() {
+    let sql = "SELECT stream_3.a, stream_3.items[0]->c, stream_3.items[3]->c FROM stream_3";
+    let optimized = optimized_logical_plan_with_shared_sources(sql, &[]);
+    let explain = ExplainReport::from_logical(optimized.clone());
+    println!("{}", sql);
+    println!("{}", explain.table_string());
+
+    let datasource = find_single_datasource(&optimized);
+    let projection = datasource
+        .decode_projection()
+        .expect("regular source should produce decode projection");
+    println!("decode_projection: {projection:?}");
+
+    assert_eq!(
+        datasource.shared_required_schema(),
+        None,
+        "regular source should not record shared required schema"
+    );
+
+    let schema = datasource.schema();
+    let columns = schema.column_schemas();
+    assert_eq!(
+        columns
+            .iter()
+            .map(|col| col.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "items"]
+    );
+
+    assert_eq!(
+        projection.column("a"),
+        Some(&ProjectionNode::All),
+        "top-level primitive column should stay fully decoded",
+    );
+
+    let Some(ProjectionNode::List { indexes, element }) = projection.column("items") else {
+        panic!("expected list decode projection for items");
+    };
+
+    let mut expected_indexes = BTreeSet::new();
+    expected_indexes.insert(0usize);
+    expected_indexes.insert(3usize);
+    assert_eq!(
+        indexes,
+        &ListIndexSelection::Indexes(expected_indexes),
+        "list decode projection should keep only referenced sparse indexes",
+    );
+
+    let ProjectionNode::Struct(fields) = element.as_ref() else {
+        panic!("expected list element projection to stay struct-shaped");
+    };
+    assert_eq!(
+        fields.get("c"),
+        Some(&ProjectionNode::All),
+        "projected struct field should stay fully decoded",
+    );
+    assert_eq!(
+        fields.len(),
+        1,
+        "only referenced struct field should remain in the list element projection",
+    );
 }
 
 #[test]

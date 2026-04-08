@@ -1,6 +1,9 @@
 //! Table-driven tests for pipeline creation helpers.
 
-use datatypes::{ColumnSchema, ConcreteDatatype, Schema, Value};
+use datatypes::{
+    ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
+    StructType, Value,
+};
 use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::connector::MemoryTopicKind;
 use flow::model::{batch_from_columns_simple, Message, RecordBatch, Tuple};
@@ -572,6 +575,39 @@ async fn install_memory_json_stream_schema_with_name(
         .create_stream(definition, false)
         .await
         .expect("create json memory stream");
+}
+
+async fn install_memory_json_stream_4_schema(instance: &FlowInstance, input_topic: &str) {
+    let element_xy_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+        StructField::new("x".to_string(), ConcreteDatatype::Int64(Int64Type), false),
+        StructField::new("y".to_string(), ConcreteDatatype::String(StringType), true),
+    ])));
+    let b_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
+        StructField::new("c".to_string(), ConcreteDatatype::Int64(Int64Type), true),
+        StructField::new(
+            "items".to_string(),
+            ConcreteDatatype::List(ListType::new(Arc::new(element_xy_struct))),
+            false,
+        ),
+    ])));
+    let schema = Schema::new(vec![
+        ColumnSchema::new(
+            "stream_4".to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new("stream_4".to_string(), "b".to_string(), b_struct),
+    ]);
+    let definition = StreamDefinition::new(
+        "stream_4".to_string(),
+        Arc::new(schema),
+        StreamProps::Memory(MemoryStreamProps::new(input_topic.to_string())),
+        StreamDecoderConfig::json(),
+    );
+    instance
+        .create_stream(definition, false)
+        .await
+        .expect("create stream_4 json memory stream");
 }
 
 async fn run_source_on_change_json_case(case: SourceOnChangeJsonCase) {
@@ -1711,6 +1747,113 @@ async fn pipeline_source_on_change_json_table_driven() {
     for case in cases {
         run_source_on_change_json_case(case).await;
     }
+}
+
+#[tokio::test]
+async fn pipeline_list_element_pruning_sparse_index_json_runtime() {
+    let case_name = "pipeline_list_element_pruning_sparse_index_json_runtime";
+    let sql =
+        "SELECT a, stream_4.b->items[0]->x AS x0, stream_4.b->items[3]->x AS x3 FROM stream_4";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ));
+    let (input_topic, output_topic) = make_memory_topics("pipeline_json_runtime", case_name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+    install_memory_json_stream_4_schema(&instance, &input_topic).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        sql,
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case_name));
+
+    let input_rows = serde_json::json!([
+        {
+            "a": 7,
+            "b": {
+                "items": [
+                    {"x": 10},
+                    {"x": 20},
+                    {"x": 30},
+                    {"x": 40}
+                ]
+            }
+        },
+        {
+            "a": 8,
+            "b": {
+                "items": [
+                    {"x": 11},
+                    {"x": 21},
+                    {"x": 31},
+                    {"x": 41}
+                ]
+            }
+        }
+    ]);
+
+    let timeout_duration = Duration::from_secs(5);
+    instance
+        .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
+        .await
+        .expect("wait for memory source subscriber");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open input bytes publisher");
+    publisher
+        .publish_bytes(
+            serde_json::to_vec(&input_rows).expect("encode sparse list pruning input rows"),
+        )
+        .expect("publish sparse list pruning input rows");
+
+    let actual = recv_next_json(&mut output, timeout_duration).await;
+    let expected = serde_json::json!([
+        {"a": 7, "x0": 10, "x3": 40},
+        {"a": 8, "x0": 11, "x3": 41}
+    ]);
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected),
+        "Wrong JSON output for test: {}",
+        case_name
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to stop pipeline for test: {}", case_name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case_name));
 }
 
 struct MixedConsumersJsonCase {
