@@ -554,4 +554,54 @@ mod tests {
         };
         assert_eq!(extract_grouped_rows(second.as_ref()), vec![(2, 7)]);
     }
+
+    #[tokio::test]
+    async fn tumbling_aggregation_graceful_end_flushes_open_window_before_terminal_control() {
+        let spawner = test_spawner();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let physical = make_physical();
+
+        let mut processor = StreamingTumblingAggregationProcessor::new(
+            "tumbling",
+            Arc::clone(&physical),
+            Arc::clone(&aggregate_registry),
+        )
+        .expect("tumbling processor");
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch = crate::model::RecordBatch::new(vec![
+            tuple_at(1, &[("a", Value::Int64(2)), ("b", Value::Int64(1))]),
+            tuple_at(2, &[("a", Value::Int64(3)), ("b", Value::Int64(1))]),
+        ])
+        .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+        assert!(input
+            .send(StreamData::control(ControlSignal::Barrier(
+                crate::processor::BarrierControlSignal::StreamGracefulEnd { barrier_id: 1 },
+            )))
+            .is_ok());
+
+        let first = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let second = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+
+        let StreamData::Collection(collection) = first else {
+            panic!("expected tumbling aggregation output before terminal control");
+        };
+        assert_eq!(extract_grouped_rows(collection.as_ref()), vec![(1, 5)]);
+        assert!(matches!(
+            second,
+            StreamData::Control(ControlSignal::Barrier(
+                crate::processor::BarrierControlSignal::StreamGracefulEnd { .. }
+            ))
+        ));
+    }
 }

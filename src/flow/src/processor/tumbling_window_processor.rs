@@ -346,3 +346,68 @@ fn window_start_secs(ts: SystemTime, len_secs: u64) -> Result<u64, ProcessorErro
     let len = len_secs.max(1);
     Ok(secs / len * len)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::logical::TimeUnit;
+    use crate::planner::physical::PhysicalTumblingWindow;
+    use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
+    use crate::processor::BarrierControlSignal;
+    use tokio::time::timeout;
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
+
+    fn tuple_at(sec: u64) -> crate::model::Tuple {
+        crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_secs(sec),
+        )
+    }
+
+    #[tokio::test]
+    async fn tumbling_window_graceful_end_flushes_buffer_before_terminal_control() {
+        let spawner = test_spawner();
+        let physical = PhysicalTumblingWindow::new(TimeUnit::Seconds, 10, Vec::new(), 0);
+        let mut processor = TumblingWindowProcessor::new("tw", Arc::new(physical));
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch = crate::model::RecordBatch::new(vec![tuple_at(1), tuple_at(2)]).expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+        assert!(input
+            .send(StreamData::control(ControlSignal::Barrier(
+                BarrierControlSignal::StreamGracefulEnd { barrier_id: 1 },
+            )))
+            .is_ok());
+
+        let first = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let second = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+
+        let StreamData::Collection(collection) = first else {
+            panic!("expected buffered collection before terminal control");
+        };
+        assert_eq!(collection.rows().len(), 2);
+        assert!(matches!(
+            second,
+            StreamData::Control(ControlSignal::Barrier(
+                BarrierControlSignal::StreamGracefulEnd { .. }
+            ))
+        ));
+    }
+}

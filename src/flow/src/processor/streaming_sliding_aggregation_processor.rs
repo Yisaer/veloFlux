@@ -584,6 +584,10 @@ mod tests {
     }
 
     fn make_physical() -> Arc<PhysicalStreamingAggregation> {
+        make_physical_with_lookahead(None)
+    }
+
+    fn make_physical_with_lookahead(lookahead: Option<u64>) -> Arc<PhysicalStreamingAggregation> {
         let call = AggregateCall {
             output_column: "sum_a".to_string(),
             func_name: "sum".to_string(),
@@ -612,7 +616,7 @@ mod tests {
             StreamingWindowSpec::Sliding {
                 time_unit: TimeUnit::Seconds,
                 lookback: 2,
-                lookahead: None,
+                lookahead,
             },
             mappings,
             Vec::new(),
@@ -678,5 +682,50 @@ mod tests {
         }
 
         assert_eq!(sums, vec![1, 3, 2, 12]);
+    }
+
+    #[tokio::test]
+    async fn sliding_aggregation_graceful_end_flushes_all_pending_windows_before_terminal_control()
+    {
+        let spawner = test_spawner();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let physical = make_physical_with_lookahead(Some(2));
+
+        let mut processor = StreamingSlidingAggregationProcessor::new(
+            "sliding",
+            Arc::clone(&physical),
+            Arc::clone(&aggregate_registry),
+        )
+        .expect("sliding processor");
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch =
+            crate::model::RecordBatch::new(vec![tuple_at(1, 1), tuple_at(2, 2)]).expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+        assert!(input
+            .send(StreamData::control(ControlSignal::Barrier(
+                crate::processor::BarrierControlSignal::StreamGracefulEnd { barrier_id: 1 },
+            )))
+            .is_ok());
+
+        let mut sums = Vec::new();
+        loop {
+            let item = timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("recv");
+            match item {
+                StreamData::Collection(collection) => sums.push(extract_sum(collection.as_ref())),
+                StreamData::Control(ControlSignal::Barrier(
+                    crate::processor::BarrierControlSignal::StreamGracefulEnd { .. },
+                )) => break,
+                other => panic!("unexpected output: {}", other.description()),
+            }
+        }
+
+        assert_eq!(sums, vec![3, 2]);
     }
 }

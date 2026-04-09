@@ -487,6 +487,7 @@ mod tests {
     use crate::runtime::TaskSpawner;
     use std::sync::Arc;
     use std::time::UNIX_EPOCH;
+    use tokio::time::timeout;
 
     fn test_spawner() -> TaskSpawner {
         TaskSpawner::new(
@@ -566,5 +567,44 @@ mod tests {
             }
             _ => panic!("unexpected output"),
         }
+    }
+
+    #[tokio::test]
+    async fn sliding_window_with_lookahead_graceful_end_flushes_pending_windows_before_terminal_control(
+    ) {
+        let spawner = test_spawner();
+        let physical = PhysicalSlidingWindow::new(TimeUnit::Seconds, 10, Some(15), Vec::new(), 0);
+        let mut processor = SlidingWindowProcessor::new("sw", Arc::new(physical));
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch =
+            crate::model::RecordBatch::new(vec![tuple_at(100), tuple_at(110), tuple_at(115)])
+                .expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+        assert!(input
+            .send(StreamData::control(ControlSignal::Barrier(
+                crate::processor::BarrierControlSignal::StreamGracefulEnd { barrier_id: 1 },
+            )))
+            .is_ok());
+
+        let mut window_sizes = Vec::new();
+        loop {
+            match timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("recv")
+            {
+                StreamData::Collection(collection) => window_sizes.push(collection.rows().len()),
+                StreamData::Control(ControlSignal::Barrier(
+                    crate::processor::BarrierControlSignal::StreamGracefulEnd { .. },
+                )) => break,
+                other => panic!("unexpected output: {}", other.description()),
+            }
+        }
+
+        assert_eq!(window_sizes, vec![3, 3, 2]);
     }
 }
