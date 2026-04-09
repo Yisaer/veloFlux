@@ -15,3 +15,9 @@ mod sampler_tests;
 
 #[path = "pipeline/stats_tests.rs"]
 mod stats_tests;
+
+#[path = "pipeline/eventtime_tests.rs"]
+mod eventtime_tests;
+
+#[path = "pipeline/shared_stream_tests.rs"]
+mod shared_stream_tests;

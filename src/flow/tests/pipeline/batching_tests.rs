@@ -1,8 +1,8 @@
 //! Table-driven tests for batching behavior (encoder flush) in pipelines.
 
 use datatypes::Value;
-use flow::connector::MemoryData;
-use flow::model::batch_from_columns_simple;
+use flow::connector::{MemoryData, MemoryTopicKind};
+use flow::model::{batch_from_columns_simple, Collection};
 use flow::pipeline::MemorySinkProps;
 use flow::pipeline::PipelineDefinition;
 use flow::planner::sink::{CommonSinkProps, SinkOutputConfig};
@@ -10,6 +10,7 @@ use flow::FlowInstance;
 use flow::{
     CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkEncoderConfig, SinkProps, SinkType,
 };
+use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::time::timeout;
@@ -17,7 +18,7 @@ use tokio::time::Duration;
 
 use super::common::{
     assert_no_json_output, declare_memory_input_output_topics, install_memory_stream_schema,
-    make_memory_topics, publish_input_collection, recv_next_json,
+    make_memory_topics, publish_input_collection, recv_next_collection, recv_next_json,
 };
 
 struct BatchCase {
@@ -324,6 +325,149 @@ async fn streaming_encoder_flushes_partial_batch_on_graceful_stop() {
         actual,
         serde_json::json!([{"a": 1}, {"a": 2}, {"a": 3}]),
         "stop should flush the final partial batch"
+    );
+
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
+}
+
+#[tokio::test]
+async fn multi_sink_graceful_stop_flushes_partial_batch_and_keeps_collection_sink_consistent() {
+    let case_name =
+        "multi_sink_graceful_stop_flushes_partial_batch_and_keeps_collection_sink_consistent";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ));
+    let (input_topic, bytes_output_topic) = make_memory_topics("pipeline_batching", case_name);
+    let (_, collection_output_topic) =
+        make_memory_topics("pipeline_batching_collection", case_name);
+
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Collection,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input memory topic");
+    instance
+        .declare_memory_topic(
+            &bytes_output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare bytes output memory topic");
+    instance
+        .declare_memory_topic(
+            &collection_output_topic,
+            MemoryTopicKind::Collection,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare collection output memory topic");
+
+    let input_data = vec![
+        (
+            "a".to_string(),
+            vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+        ),
+        (
+            "b".to_string(),
+            vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+        ),
+    ];
+    install_memory_stream_schema(&instance, &input_topic, &input_data).await;
+
+    let mut bytes_output = instance
+        .open_memory_subscribe_bytes(&bytes_output_topic)
+        .expect("subscribe bytes output");
+    let mut collection_output = instance
+        .open_memory_subscribe_collection(&collection_output_topic)
+        .expect("subscribe collection output");
+
+    let pipeline_id = format!("pipe_{}", bytes_output_topic);
+    let bytes_sink = SinkDefinition::new(
+        "mem_sink_bytes",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(bytes_output_topic.clone())),
+    )
+    .with_common_props(CommonSinkProps {
+        batch_count: Some(8),
+        batch_duration: None,
+    });
+    let collection_sink = SinkDefinition::new(
+        "mem_sink_collection",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(collection_output_topic.clone())),
+    )
+    .with_encoder(SinkEncoderConfig::new("none", JsonMap::new()));
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT a, b FROM stream",
+        vec![bytes_sink, collection_sink],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .expect("start pipeline");
+
+    let columns = input_data
+        .into_iter()
+        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .collect();
+    let batch = batch_from_columns_simple(columns).expect("create input batch");
+
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+
+    assert_no_json_output(&mut bytes_output, Duration::from_millis(300)).await;
+
+    let collection = recv_next_collection(&mut collection_output, timeout_duration).await;
+    assert_eq!(
+        collection.num_rows(),
+        3,
+        "collection row count should match input"
+    );
+    for (row_idx, tuple) in collection.rows().iter().enumerate() {
+        assert!(tuple.affiliate().is_none(), "affiliate should be empty");
+        assert_eq!(
+            tuple.messages().len(),
+            1,
+            "collection sink should materialize one message per tuple"
+        );
+        let message = &tuple.messages()[0];
+        let entries: Vec<(&str, datatypes::Value)> =
+            message.entries().map(|(k, v)| (k, v.clone())).collect();
+        assert_eq!(
+            entries,
+            vec![
+                ("a", Value::Int64((row_idx + 1) as i64)),
+                ("b", Value::Int64(((row_idx + 1) as i64) * 10)),
+            ],
+            "collection sink should preserve full-row values before graceful stop"
+        );
+        assert!(
+            tuple.output_mask().is_none(),
+            "full collection branch should not add output mask"
+        );
+    }
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Graceful, timeout_duration)
+        .await
+        .expect("stop pipeline");
+
+    let actual = recv_next_json(&mut bytes_output, timeout_duration).await;
+    assert_eq!(
+        actual,
+        serde_json::json!([
+            {"a": 1, "b": 10},
+            {"a": 2, "b": 20},
+            {"a": 3, "b": 30}
+        ]),
+        "graceful stop should flush the buffered batch without regressing sibling branch output"
     );
 
     instance

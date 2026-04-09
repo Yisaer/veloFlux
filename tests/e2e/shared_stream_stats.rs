@@ -1,5 +1,6 @@
-use super::{bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix};
-use sdk::{PipelineCreateRequest, StopOptions, StreamCreateRequest};
+use super::{bind_manager_listener_or_skip, default_flow_instances, random_suffix};
+use reqwest::StatusCode;
+use sdk::{PipelineCreateRequest, StreamCreateRequest};
 use serde_json::Value as JsonValue;
 use std::time::Duration;
 
@@ -44,27 +45,61 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
         .expect("start manager server");
     });
 
-    let client = make_client(addr);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build test http client");
+    let manager_base = format!("http://{addr}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     let stream_name = format!("e2e_shared_stream_stats_{}", random_suffix());
-    let stream_req = StreamCreateRequest::mock_shared_i64_value(stream_name.clone());
-    client
-        .create_stream(&stream_req)
+    let create_stream_resp = http
+        .post(format!("{manager_base}/streams"))
+        .json(&StreamCreateRequest::mock_shared_i64_value(
+            stream_name.clone(),
+        ))
+        .send()
         .await
-        .expect("create shared mock stream");
+        .expect("create shared stream request");
+    let create_stream_status = create_stream_resp.status();
+    let create_stream_body = create_stream_resp.text().await.unwrap_or_default();
+    assert!(
+        create_stream_status.is_success(),
+        "create shared mock stream failed: status={} body={}",
+        create_stream_status,
+        create_stream_body
+    );
 
     let pipeline_id = format!("e2e_shared_stream_pipeline_{}", random_suffix());
     let sql = format!("SELECT value FROM {stream_name}");
-    let pipeline_req = PipelineCreateRequest::nop(pipeline_id.clone(), sql);
-    client
-        .create_pipeline(&pipeline_req)
+    let create_pipeline_resp = http
+        .post(format!("{manager_base}/pipelines"))
+        .json(&PipelineCreateRequest::nop(pipeline_id.clone(), sql))
+        .send()
         .await
-        .expect("create pipeline");
-    client
-        .start_pipeline(&pipeline_id)
+        .expect("create pipeline request");
+    let create_pipeline_status = create_pipeline_resp.status();
+    let create_pipeline_body = create_pipeline_resp.text().await.unwrap_or_default();
+    assert!(
+        create_pipeline_status.is_success(),
+        "create pipeline failed: status={} body={}",
+        create_pipeline_status,
+        create_pipeline_body
+    );
+
+    let start_pipeline_resp = http
+        .post(format!("{manager_base}/pipelines/{pipeline_id}/start"))
+        .send()
         .await
-        .expect("start pipeline");
+        .expect("start pipeline request");
+    let start_pipeline_status = start_pipeline_resp.status();
+    let start_pipeline_body = start_pipeline_resp.text().await.unwrap_or_default();
+    assert!(
+        start_pipeline_status.is_success(),
+        "start pipeline failed: status={} body={}",
+        start_pipeline_status,
+        start_pipeline_body
+    );
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -75,10 +110,18 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let stats = loop {
-        let stats = client
-            .shared_stream_stats_in_instance(&stream_name, Some("default"))
+        let stats_resp = http
+            .get(format!(
+                "{manager_base}/streams/{stream_name}/shared/stats?flow_instance_id=default"
+            ))
+            .send()
             .await
-            .expect("get shared stream stats");
+            .expect("get shared stream stats request");
+        assert_eq!(stats_resp.status(), StatusCode::OK);
+        let stats = stats_resp
+            .json::<JsonValue>()
+            .await
+            .expect("decode shared stream stats");
         let processors = stats["processors"]
             .as_array()
             .expect("processors should be an array");
@@ -121,18 +164,299 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
         "result collect stats should reflect consumed records: {result_collect}"
     );
 
-    client
-        .stop_pipeline(&pipeline_id, StopOptions::graceful(5000))
+    let stop_pipeline_resp = http
+        .post(format!(
+            "{manager_base}/pipelines/{pipeline_id}/stop?mode=graceful&timeout_ms=5000"
+        ))
+        .send()
         .await
-        .expect("stop pipeline");
-    client
-        .delete_pipeline(&pipeline_id)
+        .expect("stop pipeline request");
+    assert_eq!(stop_pipeline_resp.status(), StatusCode::OK);
+
+    let delete_pipeline_resp = http
+        .delete(format!("{manager_base}/pipelines/{pipeline_id}"))
+        .send()
         .await
-        .expect("delete pipeline");
-    client
-        .delete_stream(&stream_name)
+        .expect("delete pipeline request");
+    assert_eq!(delete_pipeline_resp.status(), StatusCode::OK);
+
+    let delete_stream_resp = http
+        .delete(format!("{manager_base}/streams/{stream_name}"))
+        .send()
         .await
-        .expect("delete stream");
+        .expect("delete stream request");
+    assert_eq!(delete_stream_resp.status(), StatusCode::OK);
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_stream_stats_rejects_non_shared_stream_via_rest() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
+    let instance = manager::new_default_flow_instance();
+
+    let Some(listener) = bind_manager_listener_or_skip().await else {
+        return;
+    };
+    let addr = listener.local_addr().expect("read listener addr");
+
+    let server = tokio::spawn(async move {
+        manager::start_server_with_listener(
+            listener,
+            instance,
+            storage,
+            default_flow_instances(),
+            Vec::new(),
+        )
+        .await
+        .expect("start manager server");
+    });
+
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build test http client");
+    let manager_base = format!("http://{addr}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let stream_name = format!("e2e_non_shared_stream_stats_{}", random_suffix());
+    let create_stream_resp = http
+        .post(format!("{manager_base}/streams"))
+        .json(&StreamCreateRequest {
+            name: stream_name.clone(),
+            stream_type: "mock".to_string(),
+            schema: serde_json::json!({
+                "type": "json",
+                "props": {
+                    "columns": [
+                        { "name": "value", "data_type": "int64" }
+                    ]
+                }
+            }),
+            props: serde_json::json!({}),
+            shared: false,
+            decoder: serde_json::json!({ "type": "json", "props": {} }),
+        })
+        .send()
+        .await
+        .expect("create non-shared stream request");
+    assert_eq!(create_stream_resp.status(), StatusCode::CREATED);
+
+    let stats_resp = http
+        .get(format!("{manager_base}/streams/{stream_name}/shared/stats"))
+        .send()
+        .await
+        .expect("request shared stream stats for non-shared stream");
+    let stats_status = stats_resp.status();
+    let stats_body = stats_resp.text().await.unwrap_or_default();
+    assert_eq!(stats_status, StatusCode::BAD_REQUEST);
+    assert!(
+        stats_body.contains("is not a shared stream"),
+        "unexpected body: {stats_body}"
+    );
+
+    let delete_stream_resp = http
+        .delete(format!("{manager_base}/streams/{stream_name}"))
+        .send()
+        .await
+        .expect("delete non-shared stream request");
+    assert_eq!(delete_stream_resp.status(), StatusCode::OK);
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_stream_stats_returns_404_for_unknown_stream() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
+    let instance = manager::new_default_flow_instance();
+
+    let Some(listener) = bind_manager_listener_or_skip().await else {
+        return;
+    };
+    let addr = listener.local_addr().expect("read listener addr");
+
+    let server = tokio::spawn(async move {
+        manager::start_server_with_listener(
+            listener,
+            instance,
+            storage,
+            default_flow_instances(),
+            Vec::new(),
+        )
+        .await
+        .expect("start manager server");
+    });
+
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build test http client");
+    let manager_base = format!("http://{addr}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let stream_name = format!("missing_shared_stream_stats_{}", random_suffix());
+    let stats_resp = http
+        .get(format!("{manager_base}/streams/{stream_name}/shared/stats"))
+        .send()
+        .await
+        .expect("request shared stream stats for unknown stream");
+    assert_eq!(stats_resp.status(), StatusCode::NOT_FOUND);
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shared_stream_stats_reports_stopped_status_after_last_consumer_stops() {
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
+    let instance = manager::new_default_flow_instance();
+
+    let Some(listener) = bind_manager_listener_or_skip().await else {
+        return;
+    };
+    let addr = listener.local_addr().expect("read listener addr");
+
+    let server = tokio::spawn(async move {
+        manager::start_server_with_listener(
+            listener,
+            instance,
+            storage,
+            default_flow_instances(),
+            Vec::new(),
+        )
+        .await
+        .expect("start manager server");
+    });
+
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("build test http client");
+    let manager_base = format!("http://{addr}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let stream_name = format!("e2e_shared_stream_stopped_stats_{}", random_suffix());
+    let create_stream_resp = http
+        .post(format!("{manager_base}/streams"))
+        .json(&StreamCreateRequest::mock_shared_i64_value(
+            stream_name.clone(),
+        ))
+        .send()
+        .await
+        .expect("create shared stream request");
+    let create_stream_status = create_stream_resp.status();
+    let create_stream_body = create_stream_resp.text().await.unwrap_or_default();
+    assert!(
+        create_stream_status.is_success(),
+        "create shared mock stream failed: status={} body={}",
+        create_stream_status,
+        create_stream_body
+    );
+
+    let pipeline_id = format!("e2e_shared_stream_stopped_pipeline_{}", random_suffix());
+    let sql = format!("SELECT value FROM {stream_name}");
+    let create_pipeline_resp = http
+        .post(format!("{manager_base}/pipelines"))
+        .json(&PipelineCreateRequest::nop(pipeline_id.clone(), sql))
+        .send()
+        .await
+        .expect("create pipeline request");
+    let create_pipeline_status = create_pipeline_resp.status();
+    let create_pipeline_body = create_pipeline_resp.text().await.unwrap_or_default();
+    assert!(
+        create_pipeline_status.is_success(),
+        "create pipeline failed: status={} body={}",
+        create_pipeline_status,
+        create_pipeline_body
+    );
+
+    let start_pipeline_resp = http
+        .post(format!("{manager_base}/pipelines/{pipeline_id}/start"))
+        .send()
+        .await
+        .expect("start pipeline request");
+    let start_pipeline_status = start_pipeline_resp.status();
+    let start_pipeline_body = start_pipeline_resp.text().await.unwrap_or_default();
+    assert!(
+        start_pipeline_status.is_success(),
+        "start pipeline failed: status={} body={}",
+        start_pipeline_status,
+        start_pipeline_body
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let stop_pipeline_resp = http
+        .post(format!(
+            "{manager_base}/pipelines/{pipeline_id}/stop?mode=graceful&timeout_ms=5000"
+        ))
+        .send()
+        .await
+        .expect("stop pipeline request");
+    let stop_pipeline_status = stop_pipeline_resp.status();
+    let stop_pipeline_body = stop_pipeline_resp.text().await.unwrap_or_default();
+    assert!(
+        stop_pipeline_status.is_success(),
+        "stop pipeline failed: status={} body={}",
+        stop_pipeline_status,
+        stop_pipeline_body
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let stopped_stats = loop {
+        let stats_resp = http
+            .get(format!(
+                "{manager_base}/streams/{stream_name}/shared/stats?flow_instance_id=default"
+            ))
+            .send()
+            .await
+            .expect("get shared stream stats request");
+        assert_eq!(stats_resp.status(), StatusCode::OK);
+        let stats = stats_resp
+            .json::<JsonValue>()
+            .await
+            .expect("decode shared stream stats");
+        if stats["status"] == "stopped"
+            && stats["processors"]
+                .as_array()
+                .is_some_and(|processors| processors.is_empty())
+        {
+            break stats;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "shared stream stats did not reach stopped state before timeout: {stats}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    assert_eq!(stopped_stats["stream"], stream_name);
+    assert_eq!(stopped_stats["flow_instance_id"], "default");
+    assert_eq!(stopped_stats["status"], "stopped");
+    assert_eq!(
+        stopped_stats["processors"],
+        serde_json::json!([]),
+        "stopped shared stream runtime should not expose ingest processors",
+    );
+
+    let delete_pipeline_resp = http
+        .delete(format!("{manager_base}/pipelines/{pipeline_id}"))
+        .send()
+        .await
+        .expect("delete pipeline request");
+    assert_eq!(delete_pipeline_resp.status(), StatusCode::OK);
+
+    let delete_stream_resp = http
+        .delete(format!("{manager_base}/streams/{stream_name}"))
+        .send()
+        .await
+        .expect("delete stream request");
+    assert_eq!(delete_stream_resp.status(), StatusCode::OK);
 
     server.abort();
     let _ = server.await;

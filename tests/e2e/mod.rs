@@ -1,14 +1,7 @@
+mod pipeline_stats;
 mod shared_stream_stats;
 
-use std::net::SocketAddr;
 use tokio::net::TcpListener;
-
-use sdk::{ClientConfig, ManagerClient};
-
-pub fn make_client(addr: SocketAddr) -> ManagerClient {
-    let base_url = format!("http://{}", addr).parse().expect("base_url");
-    ManagerClient::new(ClientConfig::new(base_url)).expect("create client")
-}
 
 pub fn random_suffix() -> String {
     use rand::{distributions::Alphanumeric, Rng};
