@@ -252,13 +252,6 @@ impl Processor for StateWindowProcessor {
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
                                 let is_graceful = signal.is_graceful_end();
-                                send_with_backpressure(
-                                    &output,
-                                    channel_capacities.data,
-                                    StreamData::control(signal),
-                                    Some(stats.as_ref()),
-                                )
-                                .await?;
                                 if is_terminal {
                                     if is_graceful {
                                         for state in partitions.values_mut() {
@@ -278,9 +271,23 @@ impl Processor for StateWindowProcessor {
                                             }
                                         }
                                     }
+                                    send_with_backpressure(
+                                        &output,
+                                        channel_capacities.data,
+                                        StreamData::control(signal),
+                                        Some(stats.as_ref()),
+                                    )
+                                    .await?;
                                     tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    StreamData::control(signal),
+                                    Some(stats.as_ref()),
+                                )
+                                .await?;
                             }
                             Some(Ok(other)) => {
                                 let is_terminal = other.is_terminal();

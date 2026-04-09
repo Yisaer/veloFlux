@@ -137,6 +137,22 @@ impl Processor for TumblingWindowProcessor {
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
                                 let is_graceful = signal.is_graceful_end();
+                                if is_terminal {
+                                    if is_graceful {
+                                        state.flush_all().await?;
+                                    } else {
+                                        state.rows_buffered.set(0);
+                                    }
+                                    send_with_backpressure(
+                                        &output,
+                                        channel_capacities.data,
+                                        StreamData::control(signal),
+                                        Some(stats.as_ref()),
+                                    )
+                                    .await?;
+                                    tracing::info!(processor_id = %id, "stopped");
+                                    return Ok(());
+                                }
                                 send_with_backpressure(
                                     &output,
                                     channel_capacities.data,
@@ -144,15 +160,6 @@ impl Processor for TumblingWindowProcessor {
                                     Some(stats.as_ref()),
                                 )
                                 .await?;
-                                if is_terminal {
-                                    if is_graceful {
-                                        state.flush_all().await?;
-                                    } else {
-                                        state.rows_buffered.set(0);
-                                    }
-                                    tracing::info!(processor_id = %id, "stopped");
-                                    return Ok(());
-                                }
                             }
                             Some(Ok(other)) => {
                                 let is_terminal = other.is_terminal();

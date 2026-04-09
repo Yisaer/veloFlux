@@ -171,13 +171,6 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                     StreamData::Control(control_signal) => {
                                         let is_terminal = control_signal.is_terminal();
                                         let is_graceful = control_signal.is_graceful_end();
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            StreamData::control(control_signal),
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
                                         if is_terminal {
                                             if is_graceful {
                                                 window_state
@@ -188,8 +181,22 @@ impl Processor for StreamingTumblingAggregationProcessor {
                                                     )
                                                     .await?;
                                             }
+                                            send_with_backpressure(
+                                                &output,
+                                                channel_capacities.data,
+                                                StreamData::control(control_signal),
+                                                Some(stats.as_ref()),
+                                            )
+                                            .await?;
                                             break;
                                         }
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            StreamData::control(control_signal),
+                                            Some(stats.as_ref()),
+                                        )
+                                        .await?;
                                     }
                                     other => {
                                         send_with_backpressure(
