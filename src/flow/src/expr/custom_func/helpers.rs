@@ -270,14 +270,16 @@ pub fn b(v: bool) -> Value {
     Value::Bool(v)
 }
 
-pub fn a(v: Vec<Value>) -> Value {
-    array_to_value(v).unwrap()
-}
-
 pub fn n() -> Value {
     Value::Null
 }
 
+#[cfg(test)]
+pub fn a(v: Vec<Value>) -> Value {
+    array_to_value(v).unwrap()
+}
+
+#[cfg(test)]
 pub fn m(entries: Vec<(&str, Value)>) -> Value {
     let mut map = std::collections::BTreeMap::new();
     for (k, v) in entries {

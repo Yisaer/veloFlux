@@ -164,7 +164,11 @@ impl SourceConnector for HistorySourceConnector {
         });
 
         self.receiver = Some(receiver);
-        Ok(Box::pin(ReceiverStream::new(self.receiver.take().unwrap())))
+        Ok(Box::pin(ReceiverStream::new(
+            self.receiver
+                .take()
+                .expect("receiver assigned unconditionally above"),
+        )))
     }
 
     fn close(&mut self) -> Result<(), ConnectorError> {

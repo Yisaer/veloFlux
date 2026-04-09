@@ -690,7 +690,7 @@ fn convert_in_list_expression(
         };
     }
 
-    let final_expr = result_expr.unwrap();
+    let final_expr = result_expr.expect("list is non-empty; early return guarantees Some");
 
     if negated {
         Ok(ScalarExpr::CallUnary {

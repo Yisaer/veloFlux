@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 pub fn git_sha() -> &'static str {
     option_env!("BUILD_GIT_SHA").unwrap_or("unknown")
 }

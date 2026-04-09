@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 pub mod datatypes;
 pub mod schema;
 pub mod types;

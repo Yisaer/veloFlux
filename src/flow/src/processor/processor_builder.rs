@@ -1206,6 +1206,10 @@ fn create_processor_from_plan_node(
             } else {
                 encoder_impl
             };
+            StreamingEncoderProcessor::validate_batch_config(
+                streaming.common.batch_count,
+                streaming.common.batch_duration,
+            )?;
             let processor = StreamingEncoderProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 encoder_impl,
@@ -1762,7 +1766,9 @@ mod tests {
     use crate::expr::ScalarExpr;
     use crate::planner::physical::{
         PhysicalDataSource, PhysicalDecoder, PhysicalProject, PhysicalProjectField,
+        PhysicalStreamingEncoder,
     };
+    use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
     use datatypes::{ConcreteDatatype, Schema, Value};
     use sqlparser::ast::{Expr, Value as SqlValue};
     use std::sync::Arc;
@@ -1846,6 +1852,67 @@ mod tests {
         tracing::info!(
             processor_id = %processor.id(),
             "PhysicalProject processor created successfully"
+        );
+    }
+
+    #[test]
+    fn test_streaming_encoder_rejects_missing_batch_config_during_build() {
+        let schema = Arc::new(Schema::new(vec![]));
+        let upstream = Arc::new(PhysicalPlan::DataSource(PhysicalDataSource::new(
+            "test_source".to_string(),
+            None,
+            Arc::clone(&schema),
+            None,
+            0,
+        )));
+        let physical_plan = Arc::new(PhysicalPlan::StreamingEncoder(
+            PhysicalStreamingEncoder::new(
+                vec![upstream],
+                1,
+                "test_sink".to_string(),
+                SinkEncoderConfig::json(),
+                CommonSinkProps::default(),
+            ),
+        ));
+
+        let spawner = crate::runtime::TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("runtime"),
+        );
+        let connector_registry =
+            ConnectorRegistry::with_builtin_sinks(crate::connector::MemoryPubSubRegistry::new());
+        let encoder_registry = EncoderRegistry::with_builtin_encoders();
+        let decoder_registry = DecoderRegistry::with_builtin_decoders();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let stateful_registry = StatefulFunctionRegistry::with_builtins();
+        let context = ProcessorBuilderContext {
+            flow_instance_id: Arc::<str>::from("default"),
+            mqtt_clients: Some(MqttClientManager::new(spawner.clone())),
+            connector_registry: Some(connector_registry),
+            encoder_registry: Some(encoder_registry),
+            decoder_registry: Some(decoder_registry),
+            aggregate_registry: Some(aggregate_registry),
+            stateful_registry: Some(stateful_registry),
+            shared_stream_registry: None,
+            eventtime: None,
+            merger_registry: None,
+            shared_stream: None,
+            channel_capacities: ProcessorChannelCapacities::new(
+                DEFAULT_DATA_CHANNEL_CAPACITY,
+                DEFAULT_CONTROL_CHANNEL_CAPACITY,
+            ),
+            spawner,
+        };
+
+        let err = match create_processor_from_plan_node(&physical_plan, &context) {
+            Ok(_) => panic!("streaming encoder without batching should fail during build"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Invalid configuration: streaming encoder requires batch_count or batch_duration"
         );
     }
 }

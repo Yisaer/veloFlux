@@ -31,7 +31,7 @@ impl CollectionEncoder for ColumnarJsonEncoder {
     fn encode(&self, collection: &dyn Collection) -> Result<Vec<u8>, EncodeError> {
         let mut aggregator = ColumnarAggregator::default();
         for tuple in collection.rows() {
-            aggregator.append_tuple(tuple);
+            aggregator.append_tuple(tuple)?;
         }
         aggregator.finish_bytes()
     }
@@ -59,8 +59,7 @@ struct ColumnarJsonStream {
 
 impl CollectionEncoderStream for ColumnarJsonStream {
     fn append(&mut self, tuple: &flow::model::Tuple) -> Result<(), EncodeError> {
-        self.agg.append_tuple(tuple);
-        Ok(())
+        self.agg.append_tuple(tuple)
     }
 
     fn finish(self: Box<Self>) -> Result<Vec<u8>, EncodeError> {
@@ -80,7 +79,7 @@ struct ColumnBuf {
 }
 
 impl ColumnarAggregator {
-    fn append_tuple(&mut self, tuple: &flow::model::Tuple) {
+    fn append_tuple(&mut self, tuple: &flow::model::Tuple) -> Result<(), EncodeError> {
         // Only aggregate source messages; affiliate columns (if any) are skipped here.
         for msg in tuple.messages.iter() {
             for (name, value) in msg.entries() {
@@ -97,10 +96,10 @@ impl ColumnarAggregator {
                 }
                 entry.first = false;
                 serde_json::to_writer(&mut entry.buf, &to_json_value(value))
-                    .map_err(EncodeError::Serialization)
-                    .unwrap();
+                    .map_err(EncodeError::Serialization)?;
             }
         }
+        Ok(())
     }
 
     fn finish_bytes(mut self) -> Result<Vec<u8>, EncodeError> {

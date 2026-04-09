@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 pub mod aggregation;
 pub mod catalog;
 pub mod codec;

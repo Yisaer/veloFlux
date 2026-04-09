@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 pub mod aggregate_registry;
 pub mod aggregate_transformer;
 pub mod capabilities;

@@ -286,10 +286,10 @@ fn write_value_to_buffer(value: &Value, buffer: &mut String) {
             buffer.push_str(s);
         }
         Value::Float32(v) => {
-            write!(buffer, "{}", v).unwrap();
+            write!(buffer, "{}", v).expect("write! to String is infallible");
         }
         Value::Float64(v) => {
-            write!(buffer, "{}", v).unwrap();
+            write!(buffer, "{}", v).expect("write! to String is infallible");
         }
         Value::Int8(v) => {
             let mut b = itoa::Buffer::new();

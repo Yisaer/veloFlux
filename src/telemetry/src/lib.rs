@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 pub mod flow_instance;
 pub mod metrics;
 pub mod runtime;

@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 use serde_json::{Map, Value};
 use std::sync::Arc;
 

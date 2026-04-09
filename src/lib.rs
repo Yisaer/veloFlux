@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 // Main library entry point
 // The actual functionality is provided by individual crates:
 // - parser: SQL parsing functionality

@@ -361,8 +361,11 @@ impl GbfParser {
                     if cursor + 4 > packet.len() {
                         break;
                     }
-                    let value =
-                        u32::from_be_bytes(packet[cursor..cursor + 4].try_into().unwrap()) as u64;
+                    let value = u32::from_be_bytes(
+                        packet[cursor..cursor + 4]
+                            .try_into()
+                            .expect("4-byte slice; bounds checked above"),
+                    ) as u64;
                     if let Some(idx) = field.store_index {
                         context[idx] = value;
                     }
@@ -375,8 +378,11 @@ impl GbfParser {
                     if cursor + 4 > packet.len() {
                         break;
                     }
-                    let value =
-                        u32::from_le_bytes(packet[cursor..cursor + 4].try_into().unwrap()) as u64;
+                    let value = u32::from_le_bytes(
+                        packet[cursor..cursor + 4]
+                            .try_into()
+                            .expect("4-byte slice; bounds checked above"),
+                    ) as u64;
                     if let Some(idx) = field.store_index {
                         context[idx] = value;
                     }
@@ -389,7 +395,11 @@ impl GbfParser {
                     if cursor + 8 > packet.len() {
                         break;
                     }
-                    let value = u64::from_be_bytes(packet[cursor..cursor + 8].try_into().unwrap());
+                    let value = u64::from_be_bytes(
+                        packet[cursor..cursor + 8]
+                            .try_into()
+                            .expect("8-byte slice; bounds checked above"),
+                    );
                     if let Some(idx) = field.store_index {
                         context[idx] = value;
                     }
@@ -402,7 +412,11 @@ impl GbfParser {
                     if cursor + 8 > packet.len() {
                         break;
                     }
-                    let value = u64::from_le_bytes(packet[cursor..cursor + 8].try_into().unwrap());
+                    let value = u64::from_le_bytes(
+                        packet[cursor..cursor + 8]
+                            .try_into()
+                            .expect("8-byte slice; bounds checked above"),
+                    );
                     if let Some(idx) = field.store_index {
                         context[idx] = value;
                     }
@@ -486,7 +500,9 @@ impl GbfParser {
                             magic_ok = false;
                             break;
                         }
-                        context[field.store_index.unwrap()] = value;
+                        if let Some(idx) = field.store_index {
+                            context[idx] = value;
+                        }
                         frame_cursor += 1;
                     }
                     OptFieldType::U16Be { id_ref } => {
@@ -496,7 +512,9 @@ impl GbfParser {
                         let value =
                             u16::from_be_bytes([buffer[frame_cursor], buffer[frame_cursor + 1]])
                                 as u64;
-                        context[field.store_index.unwrap()] = value;
+                        if let Some(idx) = field.store_index {
+                            context[idx] = value;
+                        }
                         if *id_ref {
                             can_id = Some(value as u32);
                         }
@@ -507,9 +525,13 @@ impl GbfParser {
                             break;
                         }
                         let value = u32::from_be_bytes(
-                            buffer[frame_cursor..frame_cursor + 4].try_into().unwrap(),
+                            buffer[frame_cursor..frame_cursor + 4]
+                                .try_into()
+                                .expect("4-byte slice; bounds checked above"),
                         ) as u64;
-                        context[field.store_index.unwrap()] = value;
+                        if let Some(idx) = field.store_index {
+                            context[idx] = value;
+                        }
                         // For u32be fields containing "id" in name, treat as can_id
                         if field._name.contains("id") {
                             can_id = Some(value as u32);
@@ -612,8 +634,16 @@ impl GbfParser {
         match size {
             1 => bytes[0] as u64,
             2 => u16::from_be_bytes([bytes[0], bytes[1]]) as u64,
-            4 => u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as u64,
-            8 => u64::from_be_bytes(bytes[0..8].try_into().unwrap()),
+            4 => u32::from_be_bytes(
+                bytes[0..4]
+                    .try_into()
+                    .expect("4-byte match arm guarantees exact length"),
+            ) as u64,
+            8 => u64::from_be_bytes(
+                bytes[0..8]
+                    .try_into()
+                    .expect("8-byte match arm guarantees exact length"),
+            ),
             _ => 0,
         }
     }

@@ -415,7 +415,10 @@ impl ProcessingWithLookaheadState {
             if front.end > watermark {
                 break;
             }
-            let request = self.pending.pop_front().unwrap();
+            let request = self
+                .pending
+                .pop_front()
+                .expect("front() returned Some; pop_front must succeed");
             self.emit_window(request.start, request.end).await?;
         }
         self.trim(watermark);

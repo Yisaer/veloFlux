@@ -64,6 +64,19 @@ impl StreamingBatchMode {
 }
 
 impl StreamingEncoderProcessor {
+    pub(crate) fn validate_batch_config(
+        batch_count: Option<usize>,
+        batch_duration: Option<Duration>,
+    ) -> Result<(), ProcessorError> {
+        StreamingBatchMode::new(batch_count, batch_duration)
+            .map(|_| ())
+            .ok_or_else(|| {
+                ProcessorError::InvalidConfiguration(
+                    "streaming encoder requires batch_count or batch_duration".to_string(),
+                )
+            })
+    }
+
     pub fn new(
         id: impl Into<String>,
         encoder: Arc<dyn CollectionEncoder>,
@@ -226,7 +239,18 @@ impl Processor for StreamingEncoderProcessor {
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
         let encoder = Arc::clone(&self.encoder);
-        let mode = StreamingBatchMode::new(self.batch_count, self.batch_duration).unwrap();
+        let batch_count = self.batch_count;
+        let batch_duration = self.batch_duration;
+        let mode = match StreamingBatchMode::new(batch_count, batch_duration) {
+            Some(mode) => mode,
+            None => {
+                return spawner.spawn(async move {
+                    Err(ProcessorError::InvalidConfiguration(
+                        "streaming encoder requires batch_count or batch_duration".to_string(),
+                    ))
+                });
+            }
+        };
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %processor_id, "streaming encoder processor starting");
