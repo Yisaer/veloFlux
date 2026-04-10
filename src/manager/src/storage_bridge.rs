@@ -338,7 +338,8 @@ mod tests {
         let storage = StorageManager::new(dir.path()).unwrap();
         let instance = FlowInstance::new(
             flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
-        );
+        )
+        .expect("create flow instance");
 
         // 1. Create a GOOD stream
         let good_req = sample_stream_request("good_stream");

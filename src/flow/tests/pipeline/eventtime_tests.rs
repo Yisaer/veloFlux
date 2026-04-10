@@ -71,7 +71,8 @@ async fn publish_json_row(instance: &FlowInstance, input_topic: &str, row: serde
 async fn eventtime_tumbling_window_orders_out_of_order_input_before_flush() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_eventtime",
         "eventtime_tumbling_window_orders_out_of_order_input_before_flush",
@@ -168,7 +169,8 @@ async fn eventtime_tumbling_window_orders_out_of_order_input_before_flush() {
 async fn eventtime_tumbling_window_drops_tuple_older_than_current_watermark() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_eventtime",
         "eventtime_tumbling_window_drops_tuple_older_than_current_watermark",

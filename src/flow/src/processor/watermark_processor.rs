@@ -33,26 +33,30 @@ pub enum ProcessTimeWatermarkProcessor {
 }
 
 impl WatermarkProcessor {
-    pub fn from_physical_plan(id: impl Into<String>, plan: Arc<PhysicalPlan>) -> Option<Self> {
+    pub fn from_physical_plan(
+        id: impl Into<String>,
+        plan: Arc<PhysicalPlan>,
+    ) -> Result<Option<Self>, ProcessorError> {
         match plan.as_ref() {
             PhysicalPlan::ProcessTimeWatermark(watermark) => match &watermark.config {
-                WatermarkConfig::Tumbling { .. } => Some(WatermarkProcessor::ProcessTime(
+                WatermarkConfig::Tumbling { .. } => Ok(Some(WatermarkProcessor::ProcessTime(
                     ProcessTimeWatermarkProcessor::Tumbling(TumblingWatermarkProcessor::new(
                         id,
                         Arc::new(watermark.clone()),
                     )),
-                )),
-                WatermarkConfig::Sliding { .. } => Some(WatermarkProcessor::ProcessTime(
-                    ProcessTimeWatermarkProcessor::Sliding(SlidingWatermarkProcessor::new(
-                        id,
-                        Arc::new(watermark.clone()),
-                    )),
-                )),
+                ))),
+                WatermarkConfig::Sliding { .. } => {
+                    let processor =
+                        SlidingWatermarkProcessor::new(id, Arc::new(watermark.clone()))?;
+                    Ok(Some(WatermarkProcessor::ProcessTime(
+                        ProcessTimeWatermarkProcessor::Sliding(processor),
+                    )))
+                }
             },
-            PhysicalPlan::EventtimeWatermark(watermark) => Some(WatermarkProcessor::Eventtime(
+            PhysicalPlan::EventtimeWatermark(watermark) => Ok(Some(WatermarkProcessor::Eventtime(
                 EventtimeWatermarkProcessor::new(id, Arc::new(watermark.clone())),
-            )),
-            _ => None,
+            ))),
+            _ => Ok(None),
         }
     }
 
@@ -60,10 +64,10 @@ impl WatermarkProcessor {
         id: impl Into<String>,
         plan: Arc<PhysicalPlan>,
         channel_capacities: ProcessorChannelCapacities,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, ProcessorError> {
         match plan.as_ref() {
             PhysicalPlan::ProcessTimeWatermark(watermark) => match &watermark.config {
-                WatermarkConfig::Tumbling { .. } => Some(WatermarkProcessor::ProcessTime(
+                WatermarkConfig::Tumbling { .. } => Ok(Some(WatermarkProcessor::ProcessTime(
                     ProcessTimeWatermarkProcessor::Tumbling(
                         TumblingWatermarkProcessor::new_with_channel_capacities(
                             id,
@@ -71,25 +75,26 @@ impl WatermarkProcessor {
                             channel_capacities,
                         ),
                     ),
-                )),
-                WatermarkConfig::Sliding { .. } => Some(WatermarkProcessor::ProcessTime(
-                    ProcessTimeWatermarkProcessor::Sliding(
-                        SlidingWatermarkProcessor::new_with_channel_capacities(
-                            id,
-                            Arc::new(watermark.clone()),
-                            channel_capacities,
-                        ),
-                    ),
-                )),
+                ))),
+                WatermarkConfig::Sliding { .. } => {
+                    let processor = SlidingWatermarkProcessor::new_with_channel_capacities(
+                        id,
+                        Arc::new(watermark.clone()),
+                        channel_capacities,
+                    )?;
+                    Ok(Some(WatermarkProcessor::ProcessTime(
+                        ProcessTimeWatermarkProcessor::Sliding(processor),
+                    )))
+                }
             },
-            PhysicalPlan::EventtimeWatermark(watermark) => Some(WatermarkProcessor::Eventtime(
+            PhysicalPlan::EventtimeWatermark(watermark) => Ok(Some(WatermarkProcessor::Eventtime(
                 EventtimeWatermarkProcessor::new_with_channel_capacities(
                     id,
                     Arc::new(watermark.clone()),
                     channel_capacities,
                 ),
-            )),
-            _ => None,
+            ))),
+            _ => Ok(None),
         }
     }
 
@@ -420,7 +425,10 @@ pub struct SlidingWatermarkProcessor {
 }
 
 impl SlidingWatermarkProcessor {
-    pub fn new(id: impl Into<String>, physical: Arc<PhysicalProcessTimeWatermark>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        physical: Arc<PhysicalProcessTimeWatermark>,
+    ) -> Result<Self, ProcessorError> {
         Self::new_with_channel_capacities(id, physical, default_channel_capacities())
     }
 
@@ -428,16 +436,21 @@ impl SlidingWatermarkProcessor {
         id: impl Into<String>,
         physical: Arc<PhysicalProcessTimeWatermark>,
         channel_capacities: ProcessorChannelCapacities,
-    ) -> Self {
+    ) -> Result<Self, ProcessorError> {
         let (output, _) = broadcast::channel(channel_capacities.data);
         let (control_output, _) = broadcast::channel(channel_capacities.control);
+        let id = id.into();
         let (lookahead, strategy) = match &physical.config {
             WatermarkConfig::Sliding {
                 lookahead,
                 strategy,
                 ..
             } => (*lookahead, strategy),
-            _ => panic!("SlidingWatermarkProcessor requires WatermarkConfig::Sliding"),
+            _ => {
+                return Err(ProcessorError::InvalidConfiguration(
+                    "SlidingWatermarkProcessor requires WatermarkConfig::Sliding".to_string(),
+                ))
+            }
         };
         let lookahead = lookahead.map(Duration::from_secs);
         let ticker = strategy.interval_duration().map(|duration| {
@@ -445,8 +458,8 @@ impl SlidingWatermarkProcessor {
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
             ticker
         });
-        Self {
-            id: id.into(),
+        Ok(Self {
+            id,
             lookahead,
             ticker,
             inputs: Vec::new(),
@@ -455,7 +468,7 @@ impl SlidingWatermarkProcessor {
             control_output,
             channel_capacities,
             stats: Arc::new(ProcessorStats::default()),
-        }
+        })
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
@@ -1139,7 +1152,8 @@ mod tests {
             Vec::new(),
             0,
         );
-        let mut processor = SlidingWatermarkProcessor::new("wm", Arc::new(physical));
+        let mut processor =
+            SlidingWatermarkProcessor::new("wm", Arc::new(physical)).expect("valid sliding config");
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
@@ -1195,7 +1209,8 @@ mod tests {
             Vec::new(),
             0,
         );
-        let mut processor = SlidingWatermarkProcessor::new("wm", Arc::new(physical));
+        let mut processor =
+            SlidingWatermarkProcessor::new("wm", Arc::new(physical)).expect("valid sliding config");
         let (_input, _) = broadcast::channel::<StreamData>(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(_input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
@@ -1381,5 +1396,29 @@ mod tests {
             .on_rows(vec![tuple_at(2), tuple_at(1)])
             .expect("on_rows");
         assert!(step.outputs.is_empty());
+    }
+
+    #[test]
+    fn sliding_watermark_processor_rejects_non_sliding_config() {
+        use crate::planner::physical::PhysicalProcessTimeWatermark;
+
+        let physical = PhysicalProcessTimeWatermark::new(
+            WatermarkConfig::Tumbling {
+                time_unit: TimeUnit::Seconds,
+                length: 10,
+                strategy: WatermarkStrategy::ProcessingTime {
+                    time_unit: TimeUnit::Seconds,
+                    interval: 1,
+                },
+            },
+            Vec::new(),
+            0,
+        );
+
+        let result = SlidingWatermarkProcessor::new("wm", Arc::new(physical));
+        assert!(
+            matches!(result, Err(ProcessorError::InvalidConfiguration(_))),
+            "expected Err(InvalidConfiguration)"
+        );
     }
 }

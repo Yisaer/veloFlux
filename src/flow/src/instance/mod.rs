@@ -118,7 +118,7 @@ impl FlowInstance {
         instance_id: &str,
         options: &FlowInstanceDedicatedRuntimeOptions,
         thread_registry: RuntimeThreadRegistry,
-    ) -> crate::runtime::TaskSpawner {
+    ) -> Result<crate::runtime::TaskSpawner, FlowInstanceError> {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         if let Some(worker_threads) = options.worker_threads {
             builder.worker_threads(worker_threads);
@@ -129,6 +129,11 @@ impl FlowInstance {
             .unwrap_or_else(|| format!("flow-instance-{instance_id}"));
         let thread_cgroup_path = options.thread_cgroup_path.clone();
         let runtime_id = instance_id.to_string();
+        // Captures the first cgroup-bind error from any worker thread.
+        // Worker threads call on_thread_start synchronously during build(), so this cell
+        // is populated before build() returns.
+        let cgroup_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let cgroup_error_capture = Arc::clone(&cgroup_error);
         builder.on_thread_start(move || {
             #[cfg(not(target_os = "linux"))]
             {
@@ -139,53 +144,55 @@ impl FlowInstance {
 
             #[cfg(target_os = "linux")]
             {
-            if let Some(thread_cgroup_path) = &thread_cgroup_path {
-                match crate::runtime::bind_current_thread_to_cgroup(thread_cgroup_path) {
+                if let Some(thread_cgroup_path) = &thread_cgroup_path {
+                    match crate::runtime::bind_current_thread_to_cgroup(thread_cgroup_path) {
+                        Ok(tid) => {
+                            thread_registry.insert(tid);
+                            tracing::info!(
+                                flow_instance_id = %runtime_id,
+                                tid,
+                                thread_cgroup_path = %thread_cgroup_path,
+                                "flow instance runtime thread joined thread cgroup"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                flow_instance_id = %runtime_id,
+                                thread_cgroup_path = %thread_cgroup_path,
+                                error = %err,
+                                "failed to bind flow instance runtime thread to cgroup"
+                            );
+                            *cgroup_error_capture.lock() = Some(err.to_string());
+                        }
+                    }
+                    return;
+                }
+
+                match crate::runtime::current_thread_tid() {
                     Ok(tid) => {
                         thread_registry.insert(tid);
-                        tracing::info!(
-                            flow_instance_id = %runtime_id,
-                            tid,
-                            thread_cgroup_path = %thread_cgroup_path,
-                            "flow instance runtime thread joined thread cgroup"
-                        );
                     }
                     Err(err) => {
-                        tracing::error!(
+                        tracing::warn!(
                             flow_instance_id = %runtime_id,
-                            thread_cgroup_path = %thread_cgroup_path,
                             error = %err,
-                            "failed to bind flow instance runtime thread to cgroup"
-                        );
-                        panic!(
-                            "failed to bind flow instance runtime thread to cgroup: instance={runtime_id} path={thread_cgroup_path} error={err}"
+                            "failed to register flow instance runtime thread tid"
                         );
                     }
                 }
-                return;
-            }
-
-            match crate::runtime::current_thread_tid() {
-                Ok(tid) => {
-                    thread_registry.insert(tid);
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        flow_instance_id = %runtime_id,
-                        error = %err,
-                        "failed to register flow instance runtime thread tid"
-                    );
-                }
-            }
             }
         });
-        crate::runtime::TaskSpawner::new(
-            builder
-                .thread_name(thread_name)
-                .enable_all()
-                .build()
-                .expect("build flow instance tokio runtime"),
-        )
+        let runtime = builder
+            .thread_name(thread_name)
+            .enable_all()
+            .build()
+            .map_err(|e| {
+                FlowInstanceError::Invalid(format!("failed to build tokio runtime: {e}"))
+            })?;
+        if let Some(err) = cgroup_error.lock().take() {
+            return Err(FlowInstanceError::CgroupBind(err));
+        }
+        Ok(crate::runtime::TaskSpawner::new(runtime))
     }
 
     fn build(
@@ -272,7 +279,7 @@ impl FlowInstance {
     }
 
     /// Create a Flow instance from explicit options.
-    pub fn new(options: FlowInstanceOptions) -> Self {
+    pub fn new(options: FlowInstanceOptions) -> Result<Self, FlowInstanceError> {
         let id = options.id.trim();
         assert!(!id.is_empty(), "flow instance id must not be empty");
         let mut cpu_metrics_state = None;
@@ -284,7 +291,7 @@ impl FlowInstance {
             FlowInstanceRuntimeOptions::Dedicated(runtime_options) => {
                 let thread_registry = RuntimeThreadRegistry::default();
                 cpu_metrics_state = build_flow_instance_cpu_metrics_state(thread_registry.clone());
-                Self::dedicated_spawner(id, runtime_options, thread_registry)
+                Self::dedicated_spawner(id, runtime_options, thread_registry)?
             }
         };
         let mut instance = Self::build(
@@ -295,7 +302,7 @@ impl FlowInstance {
         );
         instance.cpu_metrics_state = cpu_metrics_state;
         register_flow_instance_cpu_metrics_state(&instance.id, instance.cpu_metrics_state.clone());
-        instance
+        Ok(instance)
     }
 
     pub fn merger_registry(&self) -> Arc<MergerRegistry> {
@@ -395,6 +402,8 @@ pub enum FlowInstanceError {
     StreamInUse { stream: String, pipelines: String },
     #[error("{0}")]
     Invalid(String),
+    #[error("failed to bind runtime thread to cgroup: {0}")]
+    CgroupBind(String),
 }
 
 /// Errors surfaced by FlowInstance CPU metric sampling.

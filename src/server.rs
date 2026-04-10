@@ -65,6 +65,7 @@ const PR_SET_PDEATHSIG: i32 = 1;
 const SIGTERM_RAW: i32 = 15;
 
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)] // approved: prctl FFI for PDEATHSIG child-process signal
 unsafe extern "C" {
     fn prctl(option: i32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> i32;
 }
@@ -315,6 +316,7 @@ type FlowWorkerEndpoints = Vec<(String, String)>;
 type FlowWorkerChildren = Vec<std::process::Child>;
 
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)] // approved: pre_exec closure calls prctl (safe FFI guarded by linux cfg)
 fn configure_worker_pre_exec(cmd: &mut std::process::Command) {
     unsafe {
         cmd.pre_exec(|| {
@@ -733,6 +735,7 @@ fn generate_profile(duration: u64, frequency_hz: i32) -> Result<Vec<u8>, String>
     feature = "allocator-jemalloc",
     not(target_env = "msvc")
 ))]
+#[allow(unsafe_code)] // approved: jemalloc mallctl raw API (prof.active / prof.dump)
 fn capture_heap_profile() -> Result<Vec<u8>, String> {
     let _lock = PPROF_ENDPOINT_MUTEX.lock();
 
@@ -848,6 +851,7 @@ fn parse_i32_param(query: Option<&str>, key: &str) -> Option<i32> {
     feature = "allocator-jemalloc",
     not(target_env = "msvc")
 ))]
+#[allow(unsafe_code)] // approved: jemalloc mallctl raw API (prof.active)
 fn ensure_jemalloc_profiling() {
     // Best-effort: try to activate runtime profiling. If jemalloc was built
     // without profiling, mallctl will return an error and heap endpoint will
@@ -867,6 +871,7 @@ fn ensure_jemalloc_profiling() {}
     feature = "allocator-jemalloc",
     not(target_env = "msvc")
 ))]
+#[allow(unsafe_code)] // approved: jemalloc mallctl raw API (prof.thread_active)
 fn disable_heap_profiling_for_current_thread() {
     let _ = unsafe { raw::write(b"prof.thread_active\0", false) };
 }
@@ -882,6 +887,7 @@ fn disable_heap_profiling_for_current_thread() {}
     feature = "allocator-jemalloc",
     not(target_env = "msvc")
 ))]
+#[allow(unsafe_code)] // approved: jemalloc mallctl raw API (prof.active read/write)
 fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let _lock = PPROF_ENDPOINT_MUTEX.lock();
 

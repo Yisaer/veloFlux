@@ -138,17 +138,16 @@ pub fn build_in_process_flow_instance(
         ));
     }
 
-    Ok(FlowInstance::new(
-        flow::instance::FlowInstanceOptions::dedicated_runtime(
-            id,
-            shared_registries,
-            FlowInstanceDedicatedRuntimeOptions {
-                worker_threads: spec.runtime.worker_threads,
-                thread_name_prefix: spec.runtime.thread_name_prefix.clone(),
-                thread_cgroup_path: spec.thread_cgroup_path().map(|path| path.to_string()),
-            },
-        ),
+    FlowInstance::new(flow::instance::FlowInstanceOptions::dedicated_runtime(
+        id,
+        shared_registries,
+        FlowInstanceDedicatedRuntimeOptions {
+            worker_threads: spec.runtime.worker_threads,
+            thread_name_prefix: spec.runtime.thread_name_prefix.clone(),
+            thread_cgroup_path: spec.thread_cgroup_path().map(|path| path.to_string()),
+        },
     ))
+    .map_err(|e| e.to_string())
 }
 
 pub fn new_default_flow_instance() -> FlowInstance {

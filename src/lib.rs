@@ -1,4 +1,8 @@
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::unreachable, clippy::panic)
+)]
+#![deny(unsafe_code)]
 
 // Main library entry point
 // The actual functionality is provided by individual crates:

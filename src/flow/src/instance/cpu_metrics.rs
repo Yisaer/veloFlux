@@ -147,6 +147,7 @@ pub(crate) fn collect_registered_flow_instance_cpu_metrics() {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)] // approved: libc::sysconf(_SC_CLK_TCK) to read CPU clock ticks per second
 fn ticks_per_second() -> Result<u64, super::FlowInstanceCpuMetricsError> {
     let value = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
     if value <= 0 {

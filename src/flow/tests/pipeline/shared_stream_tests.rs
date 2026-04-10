@@ -147,7 +147,8 @@ async fn stop_and_delete_pipeline(instance: &FlowInstance, pipeline_id: &str) {
 async fn shared_stream_new_consumer_waits_for_required_columns_before_first_tuple() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let stream_name = "shared_stream_readiness";
     install_shared_mock_json_stream(&instance, stream_name).await;
 
@@ -237,7 +238,8 @@ async fn shared_stream_new_consumer_waits_for_required_columns_before_first_tupl
 async fn shared_stream_required_columns_shrink_after_consumer_stop() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let stream_name = "shared_stream_shrink";
     install_shared_mock_json_stream(&instance, stream_name).await;
 
@@ -339,7 +341,8 @@ async fn shared_stream_required_columns_shrink_after_consumer_stop() {
 async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let stream_name = "shared_stream_wildcard";
     install_shared_mock_json_stream(&instance, stream_name).await;
 

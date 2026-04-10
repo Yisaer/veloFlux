@@ -36,7 +36,8 @@ async fn run_stateful_case(case: StatefulCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) =
         make_memory_topics("stateful_function_table_driven", case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
@@ -936,7 +937,8 @@ async fn stateful_projection_followed_by_row_diff_delta_output() {
     let case_name = "stateful_projection_followed_by_row_diff_delta_output";
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics("stateful_function_delta", case_name);
     let input_data = vec![(
         "a".to_string(),
@@ -1010,7 +1012,8 @@ async fn stateful_projection_with_batched_streaming_encoder() {
     let case_name = "stateful_projection_with_batched_streaming_encoder";
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics("stateful_function_batching", case_name);
     let input_data = vec![(
         "a".to_string(),
@@ -1091,7 +1094,8 @@ async fn streaming_state_window_graceful_close_flushes_active_window() {
     let case_name = "streaming_state_window_graceful_close_flushes_active_window";
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) =
         make_memory_topics("stateful_function_graceful_stop", case_name);
     let input_data = vec![(

@@ -1226,7 +1226,7 @@ fn create_processor_from_plan_node(
                 processor_id.clone(),
                 Arc::clone(plan),
                 channel_capacities,
-            )
+            )?
             .ok_or_else(|| {
                 ProcessorError::InvalidConfiguration(
                     "Unsupported watermark configuration".to_string(),

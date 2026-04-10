@@ -41,7 +41,8 @@ async fn create_stream_with_sampler(
 async fn test_sampler_execution_latest_strategy() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let interval = Duration::from_millis(200);
     // Create stream with 200ms sampler interval
     create_stream_with_sampler(&instance, "latest_stream", interval).await;

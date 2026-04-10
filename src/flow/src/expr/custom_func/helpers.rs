@@ -288,6 +288,7 @@ pub fn m(entries: Vec<(&str, Value)>) -> Value {
     map_to_value(map).unwrap()
 }
 
+#[cfg(test)]
 pub fn assert_int(actual: Value, expected: i64) {
     match actual {
         Value::Int64(v) => {
@@ -297,6 +298,7 @@ pub fn assert_int(actual: Value, expected: i64) {
     }
 }
 
+#[cfg(test)]
 pub fn assert_float(v: Value, expected: f64) {
     match v {
         Value::Float64(actual) => {
@@ -321,6 +323,7 @@ pub fn assert_float(v: Value, expected: f64) {
     }
 }
 
+#[cfg(test)]
 pub fn assert_bool(actual: Value, expected: bool) {
     match actual {
         Value::Bool(v) => {
@@ -330,6 +333,7 @@ pub fn assert_bool(actual: Value, expected: bool) {
     }
 }
 
+#[cfg(test)]
 pub fn assert_string(actual: Value, expected: &str) {
     match actual {
         Value::String(v) => {
@@ -342,6 +346,7 @@ pub fn assert_string(actual: Value, expected: &str) {
     }
 }
 
+#[cfg(test)]
 pub fn assert_array(v: Value, expected: Vec<Value>) {
     match v {
         Value::List(v) => assert_eq!(v.items().to_vec(), expected),
@@ -349,6 +354,7 @@ pub fn assert_array(v: Value, expected: Vec<Value>) {
     }
 }
 
+#[cfg(test)]
 pub fn assert_null(actual: Value) {
     assert!(
         matches!(actual, Value::Null),
@@ -357,6 +363,7 @@ pub fn assert_null(actual: Value) {
     );
 }
 
+#[cfg(test)]
 pub fn assert_map(v: Value, expected_entries: Vec<(&str, Value)>) {
     let expected_map: BTreeMap<String, Value> = expected_entries
         .into_iter()
@@ -457,7 +464,10 @@ pub fn value_to_f64(value: &Value) -> Result<f64, EvalError> {
             Value::Uint64(v) => Ok(v as f64),
             Value::Float32(v) => Ok(v as f64),
             Value::Float64(v) => Ok(v),
-            _ => unreachable!(),
+            other => Err(EvalError::TypeMismatch {
+                expected: "numeric".to_string(),
+                actual: format!("{:?}", other),
+            }),
         },
     }
 }

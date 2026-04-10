@@ -1,4 +1,8 @@
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::unreachable, clippy::panic)
+)]
+#![forbid(unsafe_code)]
 
 pub fn git_sha() -> &'static str {
     option_env!("BUILD_GIT_SHA").unwrap_or("unknown")

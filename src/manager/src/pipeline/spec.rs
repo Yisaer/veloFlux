@@ -329,6 +329,7 @@ mod tests {
         FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
             "default", None,
         ))
+        .expect("create flow instance")
     }
 
     async fn install_json_stream(instance: &FlowInstance, stream_name: &str) {

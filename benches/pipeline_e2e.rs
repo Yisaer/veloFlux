@@ -68,7 +68,8 @@ impl PipelineBenchEnv {
                 let instance = FlowInstance::new(FlowInstanceOptions::shared_current_runtime(
                     format!("bench_instance_{output_topic}"),
                     None,
-                ));
+                ))
+                .expect("create bench flow instance");
 
                 instance
                     .declare_memory_topic(&input_topic, MemoryTopicKind::Bytes, capacity)

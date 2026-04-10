@@ -125,12 +125,19 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
         let processors = stats["processors"]
             .as_array()
             .expect("processors should be an array");
-        if processors.iter().any(|entry| {
+        let decoder_ready = processors.iter().any(|entry| {
             entry["processor_id"]
                 .as_str()
                 .is_some_and(|id| id.ends_with("PhysicalDecoder_1"))
                 && records_value(entry, "records_in") > 0
-        }) {
+        });
+        let collect_ready = processors.iter().any(|entry| {
+            entry["processor_id"]
+                .as_str()
+                .is_some_and(|id| id.ends_with("PhysicalResultCollect_2"))
+                && records_value(entry, "records_in") > 0
+        });
+        if decoder_ready && collect_ready {
             break stats;
         }
         assert!(

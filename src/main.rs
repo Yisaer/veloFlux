@@ -1,4 +1,8 @@
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::unreachable, clippy::panic)
+)]
+#![forbid(unsafe_code)]
 
 #[cfg(all(feature = "allocator-jemalloc", not(target_env = "msvc")))]
 #[global_allocator]
@@ -258,7 +262,8 @@ async fn run_worker(
             thread_name_prefix: spec.runtime.thread_name_prefix.clone(),
             thread_cgroup_path: spec.thread_cgroup_path().map(|path| path.to_string()),
         },
-    ));
+    ))
+    .map_err(std::io::Error::other)?;
     tracing::info!(
         mode = runtime_prepare_phase.mode(),
         flow_instance_id = %runtime_prepare_phase.flow_instance_id(),

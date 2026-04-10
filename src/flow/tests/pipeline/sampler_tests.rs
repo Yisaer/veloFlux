@@ -141,7 +141,8 @@ async fn assert_no_output(output: &mut mpsc::Receiver<StreamData>, timeout_durat
 async fn sampler_latest_emits_only_last_value_per_interval() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let interval = Duration::from_millis(200);
     create_stream_with_sampler(
         &instance,
@@ -201,7 +202,8 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
 async fn sampler_latest_flushes_buffer_on_close() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     create_stream_with_sampler(
         &instance,
         "flush_stream",
@@ -261,7 +263,8 @@ async fn sampler_latest_flushes_buffer_on_close() {
 async fn sampler_latest_before_filter_and_projection() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let interval = Duration::from_millis(200);
     create_stream_with_sampler(
         &instance,
@@ -334,7 +337,8 @@ async fn sampler_latest_before_filter_and_projection() {
 async fn sampler_latest_with_omit_if_empty_suppresses_empty_windows() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let interval = Duration::from_millis(200);
     create_stream_with_sampler(
         &instance,
@@ -408,7 +412,8 @@ async fn sampler_latest_with_omit_if_empty_suppresses_empty_windows() {
 async fn sampler_latest_before_row_diff_delta_output() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let interval = Duration::from_millis(200);
     create_stream_with_sampler(
         &instance,
@@ -499,7 +504,8 @@ async fn sampler_latest_before_row_diff_delta_output() {
 async fn sampler_latest_before_streaming_aggregation_then_delta_output() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let interval = Duration::from_millis(200);
     create_stream_with_sampler(
         &instance,
@@ -616,7 +622,8 @@ async fn sampler_latest_before_streaming_aggregation_then_delta_output() {
 async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let interval = Duration::from_millis(200);
     create_stream_with_sampler(
         &instance,
@@ -743,7 +750,8 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
 async fn sampler_packer_emits_merged_payload_once_per_interval() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     instance
         .merger_registry()
         .register("json_object_merge", |_props| {
@@ -811,7 +819,8 @@ async fn sampler_packer_emits_merged_payload_once_per_interval() {
 async fn sampler_packer_flushes_buffer_on_close() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     instance
         .merger_registry()
         .register("json_object_merge", |_props| {

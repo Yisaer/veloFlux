@@ -40,7 +40,8 @@ async fn run_test_case(test_case: TestCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) =
         make_memory_topics("pipeline_table_driven_queries", test_case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
@@ -131,7 +132,8 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_table_driven_memory_collection_sources_layout_normalize",
         test_case.name,
@@ -239,7 +241,8 @@ async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) =
         make_memory_topics("pipeline_table_driven_collection_sinks", test_case.name);
     declare_memory_input_output_topics_with_output_kind(
@@ -372,7 +375,8 @@ async fn run_row_diff_json_case(case: RowDiffJsonCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics("pipeline_row_diff_json", case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     install_memory_stream_schema_with_name(
@@ -450,7 +454,8 @@ async fn run_omit_if_empty_json_case(case: OmitIfEmptyJsonCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics("pipeline_omit_if_empty_json", case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     install_memory_stream_schema_with_name(
@@ -626,7 +631,8 @@ async fn run_source_on_change_json_case(case: SourceOnChangeJsonCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics("pipeline_source_on_change", name);
     instance
         .declare_memory_topic(
@@ -1386,7 +1392,8 @@ async fn pipeline_row_diff_json_table_driven() {
 async fn transform_template_with_alias_projection_keeps_output_correct() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_transform_template",
         "transform_template_with_alias_projection_keeps_output_correct",
@@ -1757,7 +1764,8 @@ async fn pipeline_list_element_pruning_sparse_index_json_runtime() {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics("pipeline_json_runtime", case_name);
     instance
         .declare_memory_topic(
@@ -1871,7 +1879,8 @@ async fn run_mixed_consumers_json_case(case: MixedConsumersJsonCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, regular_output_topic) =
         make_memory_topics("pipeline_mixed_consumers_json_regular", case.name);
     let (_, delta_output_topic) =
@@ -2043,7 +2052,8 @@ async fn run_mixed_output_kinds_case(case: MixedOutputKindsCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, json_output_topic) =
         make_memory_topics("pipeline_mixed_output_kinds_json", case.name);
     let (_, collection_output_topic) =
@@ -2305,7 +2315,8 @@ async fn memory_collection_sink_delta_output_preserves_output_mask() {
     let case_name = "memory_collection_sink_delta_output_preserves_output_mask";
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) =
         make_memory_topics("pipeline_collection_delta_output_mask", case_name);
     let input_data = vec![

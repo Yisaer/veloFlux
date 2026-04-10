@@ -34,7 +34,8 @@ async fn run_batch_case(case: BatchCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics("pipeline_batching", case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     install_memory_stream_schema(&instance, &input_topic, &case.input_data).await;
@@ -124,7 +125,8 @@ async fn run_batch_bytes_case(case: BatchBytesCase) {
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics("pipeline_batching_transform", case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     install_memory_stream_schema(&instance, &input_topic, &case.input_data).await;
@@ -271,7 +273,8 @@ async fn pipeline_encoder_transform_table_driven() {
 async fn streaming_encoder_flushes_partial_batch_on_graceful_stop() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_batching",
         "streaming_encoder_flushes_partial_batch_on_graceful_stop",
@@ -339,7 +342,8 @@ async fn multi_sink_graceful_stop_flushes_partial_batch_and_keeps_collection_sin
         "multi_sink_graceful_stop_flushes_partial_batch_and_keeps_collection_sink_consistent";
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, bytes_output_topic) = make_memory_topics("pipeline_batching", case_name);
     let (_, collection_output_topic) =
         make_memory_topics("pipeline_batching_collection", case_name);
@@ -480,7 +484,8 @@ async fn multi_sink_graceful_stop_flushes_partial_batch_and_keeps_collection_sin
 async fn delta_batched_output_suppresses_empty_batches_but_keeps_non_empty_ones() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_batching",
         "delta_batched_output_suppresses_empty_batches_but_keeps_non_empty_ones",

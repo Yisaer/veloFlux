@@ -112,10 +112,12 @@ impl JsonDecoder {
         let rows: Vec<JsonMap<String, JsonValue>> = items
             .into_iter()
             .map(|v| match v {
-                JsonValue::Object(map) => map,
-                _ => unreachable!("validated object rows"),
+                JsonValue::Object(map) => Ok(map),
+                _ => Err(CodecError::Other(
+                    "internal: expected JSON object after validation".to_string(),
+                )),
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         self.build_from_object_rows_with_decode_projection(rows, decode_projection)
     }
 

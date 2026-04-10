@@ -84,7 +84,8 @@ fn find_processor_stats<'a>(
 async fn collect_pipeline_stats_returns_base_fields_for_running_pipeline() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     create_mock_json_stream(&instance, "stats_stream").await;
 
     let pipeline_id = "stats_running_pipeline";
@@ -133,7 +134,8 @@ async fn collect_pipeline_stats_returns_base_fields_for_running_pipeline() {
 async fn collect_pipeline_stats_returns_error_for_stopped_pipeline() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     create_mock_json_stream(&instance, "stats_stopped_stream").await;
 
     let pipeline_id = "stats_stopped_pipeline";
@@ -173,7 +175,8 @@ async fn collect_pipeline_stats_returns_error_for_stopped_pipeline() {
 async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_stats",
         "collect_pipeline_stats_reset_after_runtime_rebuild",
@@ -277,7 +280,8 @@ async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
 async fn collect_pipeline_stats_exposes_empty_suppress_custom_metrics() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_stats",
         "collect_pipeline_stats_exposes_empty_suppress_custom_metrics",
@@ -376,7 +380,8 @@ async fn collect_pipeline_stats_exposes_empty_suppress_custom_metrics() {
 async fn collect_pipeline_stats_reports_decoder_errors_without_failing_collection() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
-    ));
+    ))
+    .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_stats",
         "collect_pipeline_stats_reports_decoder_errors_without_failing_collection",

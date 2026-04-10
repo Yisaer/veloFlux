@@ -413,7 +413,12 @@ impl BinaryFunc {
                         (Value::Uint64(a), Value::Uint64(b)) => {
                             return Ok(Value::Uint64(a.saturating_add(b)))
                         }
-                        _ => unreachable!(),
+                        (l, r) => {
+                            return Err(EvalError::TypeMismatch {
+                                expected: "numeric pair".to_string(),
+                                actual: format!("{:?} and {:?}", l, r),
+                            })
+                        }
                     }
                 }
                 // If both fail, return error
@@ -470,7 +475,10 @@ impl BinaryFunc {
                     (Value::Uint16(a), Value::Uint16(b)) => Ok(Value::Int64(a as i64 - b as i64)),
                     (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Int64(a as i64 - b as i64)),
                     (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Int64(a as i64 - b as i64)),
-                    _ => unreachable!(),
+                    (l, r) => Err(EvalError::TypeMismatch {
+                        expected: "numeric pair".to_string(),
+                        actual: format!("{:?} and {:?}", l, r),
+                    }),
                 }
             }
             Self::Mul => {
@@ -519,7 +527,10 @@ impl BinaryFunc {
                     (Value::Uint16(a), Value::Uint16(b)) => Ok(Value::Uint16(a.saturating_mul(b))),
                     (Value::Uint32(a), Value::Uint32(b)) => Ok(Value::Uint32(a.saturating_mul(b))),
                     (Value::Uint64(a), Value::Uint64(b)) => Ok(Value::Uint64(a.saturating_mul(b))),
-                    _ => unreachable!(),
+                    (l, r) => Err(EvalError::TypeMismatch {
+                        expected: "numeric pair".to_string(),
+                        actual: format!("{:?} and {:?}", l, r),
+                    }),
                 }
             }
             Self::Div => {
@@ -751,7 +762,10 @@ impl BinaryFunc {
                             Ok(Value::Uint64(a % b))
                         }
                     }
-                    _ => unreachable!(),
+                    (l, r) => Err(EvalError::TypeMismatch {
+                        expected: "numeric pair".to_string(),
+                        actual: format!("{:?} and {:?}", l, r),
+                    }),
                 }
             }
             Self::And => {

@@ -108,7 +108,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let window_mode = detect_window_mode(engine_sql);
         let instance = FlowInstance::new(
             flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
-        );
+        )
+        .expect("create flow instance");
 
         let input_topic = format!("tests.daily.sql_assert.input.{index}");
         let output_topic = format!("tests.daily.sql_assert.output.{index}");

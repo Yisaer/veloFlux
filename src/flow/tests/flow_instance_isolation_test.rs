@@ -8,13 +8,15 @@ async fn memory_pubsub_isolated_across_instances() {
         "instance_a",
         None,
         FlowInstanceDedicatedRuntimeOptions::default(),
-    ));
+    ))
+    .expect("create flow instance");
     let shared_registries = instance_a.shared_registries();
     let instance_b = FlowInstance::new(flow::instance::FlowInstanceOptions::dedicated_runtime(
         "instance_b",
         Some(shared_registries),
         FlowInstanceDedicatedRuntimeOptions::default(),
-    ));
+    ))
+    .expect("create flow instance");
 
     let topic = "tests.memory_pubsub.isolation.bytes";
     instance_a

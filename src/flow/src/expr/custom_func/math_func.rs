@@ -662,7 +662,10 @@ impl CustomFunc for LogFunc {
                 };
                 Ok(f64_to_value_nan_null(x.ln() / base.ln()))
             }
-            _ => unreachable!(),
+            _ => Err(EvalError::TypeMismatch {
+                expected: "1 or 2 arguments for log".to_string(),
+                actual: format!("{} arguments", args.len()),
+            }),
         }
     }
 
@@ -896,10 +899,10 @@ fn to_base_string(mut value: u64, base: u32) -> String {
     let mut buf = Vec::new();
     while value > 0 {
         let digit = (value % base as u64) as u8;
-        let ch = match digit {
-            0..=9 => (b'0' + digit) as char,
-            10..=35 => (b'A' + (digit - 10)) as char,
-            _ => unreachable!(),
+        let ch = if digit <= 9 {
+            (b'0' + digit) as char
+        } else {
+            (b'A' + (digit - 10)) as char
         };
         buf.push(ch);
         value /= base as u64;

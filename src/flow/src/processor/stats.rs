@@ -228,25 +228,33 @@ impl ProcessorStats {
         }
     }
 
+    // Called only from processor constructors (new / new_with_channel_capacities), never during
+    // data processing. All asserts below are init-time programming-error checks; a failure here
+    // means the processor was wired up incorrectly and the pipeline will fail to start.
     fn register_metric(&self, spec: MetricSpec, expected_kind: MetricKind) -> Arc<MetricEntry> {
-        if spec.kind != expected_kind {
-            panic!("metric kind mismatch: id={}", spec.id);
-        }
+        assert_eq!(
+            spec.kind, expected_kind,
+            "metric kind mismatch: id={}",
+            spec.id
+        );
 
         let reserved = ["records_in", "records_out", "error_count", "last_error"];
-        if reserved.contains(&spec.flat_name) {
-            panic!("metric flat_name is reserved: {}", spec.flat_name);
-        }
+        assert!(
+            !reserved.contains(&spec.flat_name),
+            "metric flat_name is reserved: {}",
+            spec.flat_name
+        );
 
         let mut guard = self.metrics.write();
 
         for entry in guard.values() {
-            if entry.flat_name == spec.flat_name && entry.id != spec.id {
-                panic!(
-                    "metric flat_name collision: flat_name={} ({} vs {})",
-                    spec.flat_name, entry.id, spec.id
-                );
-            }
+            assert!(
+                !(entry.flat_name == spec.flat_name && entry.id != spec.id),
+                "metric flat_name collision: flat_name={} ({} vs {})",
+                spec.flat_name,
+                entry.id,
+                spec.id
+            );
         }
 
         let entry = guard.entry(spec.id).or_insert_with(|| {
@@ -258,9 +266,11 @@ impl ProcessorStats {
             })
         });
 
-        if entry.id != spec.id || entry.flat_name != spec.flat_name || entry.kind != spec.kind {
-            panic!("metric registration mismatch: id={}", spec.id);
-        }
+        assert!(
+            entry.id == spec.id && entry.flat_name == spec.flat_name && entry.kind == spec.kind,
+            "metric registration mismatch: id={}",
+            spec.id
+        );
 
         Arc::clone(entry)
     }

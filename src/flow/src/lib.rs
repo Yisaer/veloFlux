@@ -1,4 +1,8 @@
-#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::unreachable, clippy::panic)
+)]
+#![deny(unsafe_code)]
 
 pub mod aggregation;
 pub mod catalog;
@@ -274,7 +278,7 @@ fn build_schema_binding(
 /// };
 ///
 /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
-/// let instance = FlowInstance::new(FlowInstanceOptions::shared_current_runtime("default", None));
+/// let instance = FlowInstance::new(FlowInstanceOptions::shared_current_runtime("default", None))?;
 /// let connector = PipelineSinkConnector::new(
 ///     "custom_connector",
 ///     SinkConnectorConfig::Nop(NopSinkConfig { log: false }),
