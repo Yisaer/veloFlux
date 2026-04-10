@@ -120,3 +120,111 @@ impl SourceConnector for MemorySourceConnector {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connector::{ConnectorEvent, SourceConnector};
+    use tokio::time::{timeout, Duration};
+
+    async fn recv_next_event(
+        stream: &mut crate::connector::ConnectorStream,
+    ) -> Result<ConnectorEvent, ConnectorError> {
+        timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("timed out waiting for connector event")
+            .expect("connector stream ended unexpectedly")
+    }
+
+    #[tokio::test]
+    async fn memory_source_bytes_connector_subscribes_only_to_bytes_topics() {
+        let registry = MemoryPubSubRegistry::new();
+
+        registry
+            .declare_topic("memory_source_bytes_topic", MemoryTopicKind::Bytes, 4)
+            .expect("declare bytes topic");
+        let publisher = registry
+            .open_publisher_bytes("memory_source_bytes_topic")
+            .expect("open bytes publisher");
+
+        let mut connector = MemorySourceConnector::new(
+            "memory_source_bytes_connector",
+            MemorySourceConfig::new("memory_source_bytes_topic", MemoryTopicKind::Bytes),
+            registry.clone(),
+        );
+        let mut stream = connector.subscribe().expect("subscribe bytes connector");
+
+        publisher
+            .publish_bytes("hello")
+            .expect("publish bytes payload");
+
+        match recv_next_event(&mut stream)
+            .await
+            .expect("receive bytes connector event")
+        {
+            ConnectorEvent::Payload(payload) => assert_eq!(payload, b"hello"),
+            other => panic!("expected bytes payload, got {other:?}"),
+        }
+
+        registry
+            .declare_topic(
+                "memory_source_collection_topic",
+                MemoryTopicKind::Collection,
+                4,
+            )
+            .expect("declare collection topic");
+        let mut mismatched_connector = MemorySourceConnector::new(
+            "memory_source_mismatched_bytes_connector",
+            MemorySourceConfig::new("memory_source_collection_topic", MemoryTopicKind::Bytes),
+            registry,
+        );
+        let err = match mismatched_connector.subscribe() {
+            Ok(_) => panic!("bytes connector should reject collection topic"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("kind mismatch"),
+            "unexpected subscribe error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_source_bytes_connector_continues_after_broadcast_lag() {
+        let registry = MemoryPubSubRegistry::new();
+        registry
+            .declare_topic("memory_source_lag_topic", MemoryTopicKind::Bytes, 1)
+            .expect("declare lag topic");
+        let publisher = registry
+            .open_publisher_bytes("memory_source_lag_topic")
+            .expect("open lag publisher");
+
+        let mut connector = MemorySourceConnector::new(
+            "memory_source_lag_connector",
+            MemorySourceConfig::new("memory_source_lag_topic", MemoryTopicKind::Bytes),
+            registry,
+        );
+        let mut stream = connector.subscribe().expect("subscribe lag connector");
+
+        publisher.publish_bytes("first").expect("publish first");
+        publisher.publish_bytes("second").expect("publish second");
+        publisher.publish_bytes("third").expect("publish third");
+
+        match recv_next_event(&mut stream)
+            .await
+            .expect("receive post-lag event")
+        {
+            ConnectorEvent::Payload(payload) => assert_eq!(payload, b"third"),
+            other => panic!("expected latest payload after lag, got {other:?}"),
+        }
+
+        publisher.publish_bytes("fourth").expect("publish fourth");
+
+        match recv_next_event(&mut stream)
+            .await
+            .expect("receive event after lag recovery")
+        {
+            ConnectorEvent::Payload(payload) => assert_eq!(payload, b"fourth"),
+            other => panic!("expected payload after lag recovery, got {other:?}"),
+        }
+    }
+}

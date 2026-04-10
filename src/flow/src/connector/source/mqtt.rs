@@ -359,3 +359,46 @@ fn normalize_broker_url(url: &str) -> String {
         format!("tcp://{url}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{build_mqtt_options, MqttSourceConfig};
+    use rumqttc::Transport;
+
+    #[test]
+    fn mqtt_source_build_mqtt_options_uses_stream_local_broker_and_client_id() {
+        let config =
+            MqttSourceConfig::new("source_stream", "broker.example.com", "fleet/telemetry", 1)
+                .with_client_id("source_client");
+
+        let options = build_mqtt_options(&config).expect("build mqtt source options");
+
+        assert_eq!(
+            options.broker_address(),
+            ("broker.example.com".to_string(), 1883)
+        );
+        assert_eq!(options.client_id(), "source_client");
+        assert_eq!(options.max_packet_size(), 64 * 1024 * 1024);
+        assert!(matches!(options.transport(), Transport::Tcp));
+    }
+
+    #[test]
+    fn mqtt_source_build_mqtt_options_enables_tls_and_secure_default_port() {
+        let config = MqttSourceConfig::new(
+            "source_stream",
+            "mqtts://secure.example.com",
+            "fleet/telemetry",
+            1,
+        )
+        .with_client_id("source_tls_client");
+
+        let options = build_mqtt_options(&config).expect("build secure mqtt source options");
+
+        assert_eq!(
+            options.broker_address(),
+            ("secure.example.com".to_string(), 8883)
+        );
+        assert_eq!(options.client_id(), "source_tls_client");
+        assert!(matches!(options.transport(), Transport::Tls(_)));
+    }
+}

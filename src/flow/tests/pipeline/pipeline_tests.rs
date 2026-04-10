@@ -16,7 +16,7 @@ use flow::{CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkProps, S
 use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
-use tokio::time::Duration;
+use tokio::time::{timeout, Duration};
 
 use super::common::ColumnCheck;
 use super::common::{
@@ -1757,6 +1757,170 @@ async fn pipeline_source_on_change_json_table_driven() {
 }
 
 #[tokio::test]
+async fn memory_source_bytes_topic_with_json_decoder_emits_expected_rows() {
+    let case_name = "memory_source_bytes_topic_with_json_decoder_emits_expected_rows";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_memory_source_bytes", case_name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+    install_memory_json_stream_schema_with_name(
+        &instance,
+        &input_topic,
+        "stream",
+        &[
+            ("a".to_string(), vec![Value::Int64(1), Value::Int64(2)]),
+            ("b".to_string(), vec![Value::Int64(10), Value::Int64(20)]),
+        ],
+    )
+    .await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT a, b FROM stream",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    instance
+        .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
+        .await
+        .expect("wait for bytes source subscriber");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open input bytes publisher");
+    publisher
+        .publish_bytes(
+            serde_json::to_vec(&serde_json::json!([
+                {"a": 1, "b": 10},
+                {"a": 2, "b": 20}
+            ]))
+            .expect("encode bytes source input rows"),
+        )
+        .expect("publish bytes source input rows");
+
+    let actual = recv_next_json(&mut output, timeout_duration).await;
+    let expected = serde_json::json!([
+        {"a": 1, "b": 10},
+        {"a": 2, "b": 20}
+    ]);
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected),
+        "Wrong JSON output for test: {}",
+        case_name
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to stop pipeline for {}: {err}", case_name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for {}: {err}", case_name));
+}
+
+#[tokio::test]
+async fn memory_source_collection_topic_with_non_none_decoder_is_rejected() {
+    let case_name = "memory_source_collection_topic_with_non_none_decoder_is_rejected";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) =
+        make_memory_topics("pipeline_memory_source_collection_decoder", case_name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Collection,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input collection topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+
+    let schema = Schema::new(vec![ColumnSchema::new(
+        "stream".to_string(),
+        "a".to_string(),
+        ConcreteDatatype::Int64(Int64Type),
+    )]);
+    let definition = StreamDefinition::new(
+        "stream".to_string(),
+        Arc::new(schema),
+        StreamProps::Memory(MemoryStreamProps::new(input_topic.clone())),
+        StreamDecoderConfig::json(),
+    );
+    instance
+        .create_stream(definition, false)
+        .await
+        .expect("create memory stream");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id,
+        "SELECT a FROM stream",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic)),
+        )],
+    );
+    let err = instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect_err("collection topic with non-none decoder should fail build");
+    let err_message = err.to_string();
+    assert!(
+        err_message.contains("kind mismatch"),
+        "unexpected error for test {}: {}",
+        case_name,
+        err_message
+    );
+    assert!(
+        err_message.contains("expected bytes, got collection"),
+        "unexpected error details for test {}: {}",
+        case_name,
+        err_message
+    );
+}
+
+#[tokio::test]
 async fn pipeline_list_element_pruning_sparse_index_json_runtime() {
     let case_name = "pipeline_list_element_pruning_sparse_index_json_runtime";
     let sql =
@@ -2273,41 +2437,117 @@ async fn pipeline_table_driven_memory_collection_sources_layout_normalize() {
 
 #[tokio::test]
 async fn pipeline_table_driven_collection_sinks() {
-    let test_cases = vec![CollectionSinkTestCase {
-        name: "select_star_with_alias_materializes_single_message",
-        sql: "SELECT *, a AS x FROM stream",
-        input_data: vec![
-            (
-                "a".to_string(),
-                vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
-            ),
-            (
-                "b".to_string(),
-                vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
-            ),
-        ],
-        expected_rows: 3,
-        expected_message_count: 1,
-        expected_affiliate_none: true,
-        expected_columns: vec![
-            ColumnCheck {
-                expected_name: "a".to_string(),
-                expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
-            },
-            ColumnCheck {
-                expected_name: "b".to_string(),
-                expected_values: vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
-            },
-            ColumnCheck {
-                expected_name: "x".to_string(),
-                expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
-            },
-        ],
-    }];
+    let test_cases = vec![
+        CollectionSinkTestCase {
+            name: "select_star_with_alias_materializes_single_message",
+            sql: "SELECT *, a AS x FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
+                ),
+            ],
+            expected_rows: 3,
+            expected_message_count: 1,
+            expected_affiliate_none: true,
+            expected_columns: vec![
+                ColumnCheck {
+                    expected_name: "a".to_string(),
+                    expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                },
+                ColumnCheck {
+                    expected_name: "b".to_string(),
+                    expected_values: vec![Value::Int64(100), Value::Int64(200), Value::Int64(300)],
+                },
+                ColumnCheck {
+                    expected_name: "x".to_string(),
+                    expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                },
+            ],
+        },
+        CollectionSinkTestCase {
+            name: "alias_order_and_derived_columns_materialize_from_output_schema",
+            sql: "SELECT b AS second, a + 1 AS plus_one, a AS first FROM stream",
+            input_data: vec![
+                ("a".to_string(), vec![Value::Int64(10), Value::Int64(20)]),
+                ("b".to_string(), vec![Value::Int64(100), Value::Int64(200)]),
+            ],
+            expected_rows: 2,
+            expected_message_count: 1,
+            expected_affiliate_none: true,
+            expected_columns: vec![
+                ColumnCheck {
+                    expected_name: "second".to_string(),
+                    expected_values: vec![Value::Int64(100), Value::Int64(200)],
+                },
+                ColumnCheck {
+                    expected_name: "plus_one".to_string(),
+                    expected_values: vec![Value::Int64(11), Value::Int64(21)],
+                },
+                ColumnCheck {
+                    expected_name: "first".to_string(),
+                    expected_values: vec![Value::Int64(10), Value::Int64(20)],
+                },
+            ],
+        },
+    ];
 
     for test_case in test_cases {
         run_collection_sink_test_case(test_case).await;
     }
+}
+
+#[tokio::test]
+async fn memory_collection_sink_rejects_duplicate_output_column_names() {
+    let case_name = "memory_collection_sink_rejects_duplicate_output_column_names";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) =
+        make_memory_topics("pipeline_collection_duplicate_columns", case_name);
+    declare_memory_input_output_topics_with_output_kind(
+        &instance,
+        &input_topic,
+        &output_topic,
+        MemoryTopicKind::Collection,
+    );
+    install_memory_stream_schema(
+        &instance,
+        &input_topic,
+        &[
+            ("a".to_string(), vec![Value::Int64(1)]),
+            ("b".to_string(), vec![Value::Int64(2)]),
+        ],
+    )
+    .await;
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id,
+        "SELECT a, a FROM stream",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic)),
+        )
+        .with_encoder(SinkEncoderConfig::new("none", JsonMap::new()))],
+    );
+    let err = instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect_err("duplicate output column names should fail for collection sink");
+    let err_message = err.to_string();
+    assert!(
+        err_message.contains("duplicate project field name `a`"),
+        "unexpected error for test {}: {}",
+        case_name,
+        err_message
+    );
 }
 
 #[tokio::test]
@@ -2427,6 +2667,163 @@ async fn memory_collection_sink_delta_output_preserves_output_mask() {
             case_name
         );
     }
+
+    let _ = instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await;
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
+}
+
+#[tokio::test]
+async fn memory_collection_sink_delta_omit_if_empty_suppresses_unchanged_collection() {
+    let case_name = "memory_collection_sink_delta_omit_if_empty_suppresses_unchanged_collection";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) =
+        make_memory_topics("pipeline_collection_delta_omit_if_empty", case_name);
+    declare_memory_input_output_topics_with_output_kind(
+        &instance,
+        &input_topic,
+        &output_topic,
+        MemoryTopicKind::Collection,
+    );
+    install_memory_stream_schema(
+        &instance,
+        &input_topic,
+        &[
+            ("a".to_string(), vec![Value::Int64(1)]),
+            ("b".to_string(), vec![Value::Int64(10)]),
+        ],
+    )
+    .await;
+
+    let mut output = instance
+        .open_memory_subscribe_collection(&output_topic)
+        .expect("subscribe output collection");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT a, b FROM stream",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )
+        .with_encoder(SinkEncoderConfig::new("none", JsonMap::new()))
+        .with_output(SinkOutputConfig::delta().with_omit_if_empty(true))],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+
+    let first_batch = batch_from_columns_simple(vec![
+        ("stream".to_string(), "a".to_string(), vec![Value::Int64(1)]),
+        (
+            "stream".to_string(),
+            "b".to_string(),
+            vec![Value::Int64(10)],
+        ),
+    ])
+    .unwrap_or_else(|_| panic!("Failed to create first batch for: {}", case_name));
+    publish_input_collection(
+        &instance,
+        &input_topic,
+        Box::new(first_batch),
+        timeout_duration,
+    )
+    .await;
+
+    let first_collection = recv_next_collection(&mut output, timeout_duration).await;
+    assert_eq!(
+        first_collection.num_rows(),
+        1,
+        "first collection row count mismatch (test: {})",
+        case_name
+    );
+    assert_eq!(
+        first_collection.rows()[0].output_mask(),
+        Some([true, true].as_slice()),
+        "first collection output mask mismatch (test: {})",
+        case_name
+    );
+
+    let second_batch = batch_from_columns_simple(vec![
+        ("stream".to_string(), "a".to_string(), vec![Value::Int64(1)]),
+        (
+            "stream".to_string(),
+            "b".to_string(),
+            vec![Value::Int64(10)],
+        ),
+    ])
+    .unwrap_or_else(|_| panic!("Failed to create second batch for: {}", case_name));
+    publish_input_collection(
+        &instance,
+        &input_topic,
+        Box::new(second_batch),
+        timeout_duration,
+    )
+    .await;
+
+    assert!(
+        timeout(Duration::from_millis(300), output.recv())
+            .await
+            .is_err(),
+        "unchanged diff collection should be suppressed for test: {}",
+        case_name
+    );
+
+    let third_batch = batch_from_columns_simple(vec![
+        ("stream".to_string(), "a".to_string(), vec![Value::Int64(2)]),
+        (
+            "stream".to_string(),
+            "b".to_string(),
+            vec![Value::Int64(11)],
+        ),
+    ])
+    .unwrap_or_else(|_| panic!("Failed to create third batch for: {}", case_name));
+    publish_input_collection(
+        &instance,
+        &input_topic,
+        Box::new(third_batch),
+        timeout_duration,
+    )
+    .await;
+
+    let third_collection = recv_next_collection(&mut output, timeout_duration).await;
+    assert_eq!(
+        third_collection.num_rows(),
+        1,
+        "third collection row count mismatch (test: {})",
+        case_name
+    );
+    let third_tuple = &third_collection.rows()[0];
+    assert_eq!(
+        third_tuple.output_mask(),
+        Some([true, true].as_slice()),
+        "third collection output mask mismatch (test: {})",
+        case_name
+    );
+    let third_entries: Vec<(&str, datatypes::Value)> = third_tuple.messages()[0]
+        .entries()
+        .map(|(k, v)| (k, v.clone()))
+        .collect();
+    assert_eq!(
+        third_entries,
+        vec![("a", Value::Int64(2)), ("b", Value::Int64(11)),],
+        "third collection values mismatch (test: {})",
+        case_name
+    );
 
     let _ = instance
         .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)

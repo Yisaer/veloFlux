@@ -7,6 +7,10 @@ use flow::catalog::MockStreamProps;
 use flow::connector::{KuksaSinkConfig, MemorySinkConfig, MemoryTopicKind};
 use flow::planner::logical::{create_logical_plan, create_logical_plan_with_source_inputs};
 use flow::planner::sink::CustomSinkConnectorConfig;
+use flow::planner::{
+    create_physical_plan_with_build_options, optimize_logical_plan_with_options,
+    PhysicalPlanBuildOptions,
+};
 use flow::processor::SamplerConfig;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use flow::Catalog;
@@ -192,6 +196,25 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamDecoderConfig::new("none", JsonMap::new()),
     );
 
+    let memory_bytes_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "memory_bytes".to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "memory_bytes".to_string(),
+            "b".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+    let memory_bytes_def = StreamDefinition::new(
+        "memory_bytes",
+        Arc::clone(&memory_bytes_schema),
+        StreamProps::Memory(MemoryStreamProps::new("demo_memory_bytes")),
+        StreamDecoderConfig::json(),
+    );
+
     let vehicle_stream_schema = Arc::new(Schema::new(vec![
         ColumnSchema::new(
             "vehicle_stream".to_string(),
@@ -225,6 +248,7 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs.insert("stream_3".to_string(), Arc::new(stream_3_def));
     stream_defs.insert("stream_4".to_string(), Arc::new(stream_4_def));
     stream_defs.insert("memory_collect".to_string(), Arc::new(memory_collect_def));
+    stream_defs.insert("memory_bytes".to_string(), Arc::new(memory_bytes_def));
     stream_defs.insert("vehicle_stream".to_string(), Arc::new(vehicle_stream_def));
 
     stream_defs
@@ -266,6 +290,24 @@ fn setup_catalog_with_eventtime_stream_config(
 
 fn setup_catalog_with_eventtime_stream() -> Catalog {
     setup_catalog_with_eventtime_stream_config("event_ts", "unixtimestamp_ms")
+}
+
+fn setup_catalog_without_eventtime_stream() -> Catalog {
+    let stream_name = "stream_without_eventtime";
+    let schema = Schema::new(vec![ColumnSchema::new(
+        stream_name.to_string(),
+        "a".to_string(),
+        ConcreteDatatype::Int64(Int64Type),
+    )]);
+
+    let catalog = Catalog::new();
+    catalog.upsert(StreamDefinition::new(
+        stream_name.to_string(),
+        Arc::new(schema),
+        StreamProps::Mock(MockStreamProps::default()),
+        StreamDecoderConfig::json(),
+    ));
+    catalog
 }
 
 fn bindings_for_select(
@@ -738,6 +780,12 @@ fn plan_explain_table_driven() {
             sql: "SELECT a FROM memory_collect",
             options: PipelineOptions::default(),
             expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=memory_collect","decoder=none","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=memory_collect","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalCollectionLayoutNormalize_1","info":["source=memory_collect","schema=[a, b]"],"operator":"PhysicalCollectionLayoutNormalize"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "memory_bytes_source_keeps_decoder_path",
+            sql: "SELECT a FROM memory_bytes",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=memory_bytes","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=memory_bytes","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "stateful_where_before_project",
@@ -1323,5 +1371,137 @@ fn explain_pipeline_with_eventtime_enabled_rejects_unknown_eventtime_type() {
     assert!(
         err_text.contains("unixtimestamp_ms") && err_text.contains("unixtimestamp_s"),
         "available builtin eventtime types should be included: {err_text}"
+    );
+}
+
+#[test]
+fn explain_pipeline_with_eventtime_enabled_rejects_when_no_stream_declares_eventtime() {
+    let catalog = setup_catalog_without_eventtime_stream();
+    let registries = PipelineRegistries::new_with_builtin();
+    let options = PipelineOptions {
+        eventtime: EventtimeOptions {
+            enabled: true,
+            late_tolerance: Duration::ZERO,
+        },
+        ..PipelineOptions::default()
+    };
+
+    let err = flow::explain_pipeline_with_options(
+        "SELECT a FROM stream_without_eventtime",
+        vec![],
+        &catalog,
+        None,
+        &registries,
+        &options,
+    )
+    .expect_err("eventtime without any declared eventtime stream should be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("eventtime.enabled=true but no stream declares eventtime"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn explain_pipeline_with_eventtime_enabled_keeps_hidden_eventtime_column_alive() {
+    let stream_name = "stream_eventtime";
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "event_ts".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+    let stream_def = Arc::new(
+        StreamDefinition::new(
+            stream_name,
+            Arc::clone(&schema),
+            StreamProps::Mock(MockStreamProps::default()),
+            StreamDecoderConfig::json(),
+        )
+        .with_eventtime(EventtimeDefinition::new("event_ts", "unixtimestamp_ms")),
+    );
+    let stream_defs = HashMap::from([(stream_name.to_string(), Arc::clone(&stream_def))]);
+
+    let registries = PipelineRegistries::new_with_builtin();
+    let options = PhysicalPlanBuildOptions {
+        eventtime_enabled: true,
+        eventtime_late_tolerance: Duration::ZERO,
+    };
+    let optimizer_options = flow::planner::LogicalOptimizerOptions {
+        eventtime_enabled: true,
+    };
+
+    let select_stmt = parse_sql("SELECT a FROM stream_eventtime").expect("parse sql");
+    let bindings = SchemaBinding::new(vec![SchemaBindingEntry {
+        source_name: stream_name.to_string(),
+        alias: select_stmt.source_infos[0].alias.clone(),
+        schema,
+        kind: SourceBindingKind::Regular,
+    }]);
+    let logical_plan = create_logical_plan_with_source_inputs(
+        select_stmt,
+        vec![],
+        &stream_defs,
+        &HashMap::from([(
+            stream_name.to_string(),
+            SourceInputConfig::on_change_with_columns(["a"]),
+        )]),
+    )
+    .expect("logical plan with source inputs");
+    let (logical_plan, bindings) = optimize_logical_plan_with_options(
+        Arc::clone(&logical_plan),
+        &bindings,
+        &optimizer_options,
+    );
+
+    let pruned_columns = bindings.entries()[0]
+        .schema
+        .column_schemas()
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pruned_columns,
+        vec!["a".to_string(), "event_ts".to_string()],
+        "eventtime-enabled pruning must keep the hidden eventtime column alive"
+    );
+
+    let physical_plan = create_physical_plan_with_build_options(
+        Arc::clone(&logical_plan),
+        &bindings,
+        &registries,
+        &options,
+    )
+    .expect("hidden eventtime column should keep physical build valid");
+    let optimized_plan = flow::optimize_physical_plan(
+        physical_plan,
+        registries.encoder_registry().as_ref(),
+        registries.aggregate_registry(),
+    );
+    let explain = PipelineExplain::new(
+        logical_plan,
+        optimized_plan,
+        PipelineExplainConfig::default(),
+    );
+    let explain_json = explain.to_json().to_string();
+
+    assert!(
+        explain_json.contains("\"schema=[a, event_ts]\""),
+        "eventtime column should remain in the pruned datasource schema: {explain_json}"
+    );
+    assert!(
+        explain_json.contains("\"eventtime.column=event_ts\""),
+        "decoder explain should still expose eventtime metadata: {explain_json}"
+    );
+    assert!(
+        explain_json.contains("\"input.columns=[a]\""),
+        "source-input tracking should remain limited to the requested on-change columns: {explain_json}"
     );
 }

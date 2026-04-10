@@ -269,3 +269,112 @@ impl Processor for MemoryCollectionMaterializeProcessor {
         self.control_inputs.push(receiver);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::physical::output_schema::{OutputColumn, OutputSchema, OutputValueGetter};
+    use datatypes::{ConcreteDatatype, Int64Type, Value};
+    use std::time::{Duration, SystemTime};
+
+    fn build_message(source: &str, keys: &[&str], values: Vec<Value>) -> Arc<Message> {
+        let shared_keys: Arc<[Arc<str>]> = Arc::from(
+            keys.iter()
+                .map(|key| Arc::<str>::from(*key))
+                .collect::<Vec<_>>(),
+        );
+        let shared_values = values.into_iter().map(Arc::new).collect();
+        Arc::new(Message::new_shared_keys(source, shared_keys, shared_values))
+    }
+
+    #[test]
+    fn materialize_collection_fills_missing_columns_with_null_and_preserves_mask() {
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(456);
+        let mut tuple = Tuple::with_timestamp(
+            Arc::from(vec![build_message("stream", &["a"], vec![Value::Int64(7)])]),
+            timestamp,
+        );
+        tuple.add_affiliate_column(Arc::new("tmp".to_string()), Value::Int64(999));
+        tuple.set_output_mask(vec![true, false, true]);
+
+        let input = RecordBatch::new(vec![tuple]).expect("build input collection");
+        let output_schema = OutputSchema::new(vec![
+            OutputColumn {
+                name: Arc::from("a"),
+                data_type: ConcreteDatatype::Int64(Int64Type),
+                getter: OutputValueGetter::MessageByName {
+                    source_name: Arc::from("stream"),
+                    column_name: Arc::from("a"),
+                },
+            },
+            OutputColumn {
+                name: Arc::from("missing_msg"),
+                data_type: ConcreteDatatype::Int64(Int64Type),
+                getter: OutputValueGetter::MessageByName {
+                    source_name: Arc::from("stream"),
+                    column_name: Arc::from("missing_msg"),
+                },
+            },
+            OutputColumn {
+                name: Arc::from("missing_aff"),
+                data_type: ConcreteDatatype::Int64(Int64Type),
+                getter: OutputValueGetter::Affiliate {
+                    column_name: Arc::from("missing_aff"),
+                },
+            },
+        ]);
+        let mut row_accessor = OutputRowAccessor::from_output_schema(&output_schema);
+        let shared_keys = row_accessor.column_names();
+
+        let materialized = materialize_collection(
+            &Arc::<str>::from(""),
+            &shared_keys,
+            &mut row_accessor,
+            &input,
+            "materialize_test",
+        )
+        .expect("materialize collection");
+
+        assert_eq!(
+            materialized.num_rows(),
+            1,
+            "materialized row count mismatch"
+        );
+
+        let output_tuple = &materialized.rows()[0];
+        assert!(
+            output_tuple.affiliate().is_none(),
+            "materialize should clear affiliate",
+        );
+        assert_eq!(
+            output_tuple.output_mask(),
+            Some([true, false, true].as_slice()),
+            "output mask should be preserved",
+        );
+        assert_eq!(
+            output_tuple.timestamp, timestamp,
+            "timestamp should be preserved",
+        );
+        assert_eq!(
+            output_tuple.messages().len(),
+            1,
+            "materialize should emit one message",
+        );
+
+        let msg = &output_tuple.messages()[0];
+        assert_eq!(msg.source(), "", "message source should be empty");
+        let entries: Vec<(&str, Value)> = msg
+            .entries()
+            .map(|(key, value)| (key, value.clone()))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                ("a", Value::Int64(7)),
+                ("missing_msg", Value::Null),
+                ("missing_aff", Value::Null),
+            ],
+            "materialized values mismatch",
+        );
+    }
+}
