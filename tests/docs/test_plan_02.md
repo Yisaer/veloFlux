@@ -32,6 +32,11 @@
   - a tuple older than the current watermark is dropped
   - the dropped late tuple does not alter the next flushed window result
 
+- Eventtime parse-error expectations remain aligned with the processor runtime contract documented
+  under `docs/runtime/processors`: non-fatal processor-local errors are expected to surface via
+  stats/logs while allowing continued execution, not as a downstream `StreamData::Error`
+  assertion in these runtime coverage notes.
+
 ### Shared stream dynamic decode lifecycle
 
 - Startup readiness for a new consumer is covered by `shared_stream_new_consumer_waits_for_required_columns_before_first_tuple`.

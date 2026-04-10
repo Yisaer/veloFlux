@@ -43,7 +43,9 @@ Validation requirements (planner-time preferred):
 
 - `eventtime.column` must exist in the stream schema.
 - `eventtime.type` must be registered in the runtime registry.
-- The column value must be convertible to a timestamp using the selected parser; parsing failures are reported as `StreamData::Error` and do not terminate the pipeline.
+- The column value must be convertible to a timestamp using the selected parser; parsing failures
+  are handled as non-fatal decoder/runtime errors, the affected rows are dropped, diagnostics are
+  recorded in processor stats/logs, and the pipeline does not terminate.
 
 ### Pipeline options
 
@@ -99,7 +101,8 @@ Downstream processors (e.g. `StreamingTumblingAggregationProcessor`) advance eve
 - Output: a stream of `StreamData` items:
   - `StreamData::Collection(...)` (implemented as a `RecordBatch`) forwarding tuples downstream (in non-decreasing `Tuple.timestamp` order)
   - `StreamData::Watermark(SystemTime)` emitted to advance downstream event time
-  - `StreamData::Error(...)` for non-fatal parsing/processing errors (pipeline continues)
+  - processor-local stats/log updates for non-fatal parsing/processing errors; ordinary eventtime
+    runtime failures are not expected to be forwarded downstream as `StreamData::Error`
 
 Key contract:
 

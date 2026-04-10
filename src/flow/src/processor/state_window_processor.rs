@@ -252,19 +252,13 @@ impl Processor for StateWindowProcessor {
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
                                 let is_graceful = signal.is_graceful_end();
-                                send_with_backpressure(
-                                    &output,
-                                    channel_capacities.data,
-                                    StreamData::control(signal),
-                                    Some(stats.as_ref()),
-                                )
-                                .await?;
                                 if is_terminal {
                                     if is_graceful {
                                         for state in partitions.values_mut() {
                                             if state.active && !state.rows.is_empty() {
                                                 let batch_rows: Vec<_> =
                                                     state.rows.drain(..).collect();
+                                                stats.record_out(batch_rows.len() as u64);
                                                 let batch = crate::model::RecordBatch::new(batch_rows)
                                                     .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
                                                 send_with_backpressure(
@@ -278,9 +272,23 @@ impl Processor for StateWindowProcessor {
                                             }
                                         }
                                     }
+                                    send_with_backpressure(
+                                        &output,
+                                        channel_capacities.data,
+                                        StreamData::control(signal),
+                                        Some(stats.as_ref()),
+                                    )
+                                    .await?;
                                     tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
+                                send_with_backpressure(
+                                    &output,
+                                    channel_capacities.data,
+                                    StreamData::control(signal),
+                                    Some(stats.as_ref()),
+                                )
+                                .await?;
                             }
                             Some(Ok(other)) => {
                                 let is_terminal = other.is_terminal();
@@ -333,7 +341,8 @@ mod tests {
     use super::*;
     use crate::expr::scalar::ColumnRef;
     use crate::expr::ScalarExpr;
-    use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
+    use crate::processor::base::{Processor, DEFAULT_DATA_CHANNEL_CAPACITY};
+    use crate::processor::ProcessorStats;
     use crate::runtime::TaskSpawner;
     use datatypes::{BooleanType, ConcreteDatatype, Value};
     use sqlparser::ast::{Expr, Ident};
@@ -513,6 +522,8 @@ mod tests {
         );
 
         let mut processor = StateWindowProcessor::new("sw", Arc::new(physical));
+        let stats = Arc::new(ProcessorStats::default());
+        processor.set_stats(Arc::clone(&stats));
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
@@ -547,5 +558,6 @@ mod tests {
             .collect::<Vec<_>>();
         seen.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
         assert_eq!(seen, vec![Value::Int64(1), Value::Int64(2)]);
+        assert_eq!(stats.snapshot().records_out, 2);
     }
 }

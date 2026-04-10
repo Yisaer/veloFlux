@@ -321,6 +321,67 @@ impl Processor for StreamingSlidingAggregationProcessor {
                 Ok(())
             }
 
+            async fn emit_all_windows(
+                output: &broadcast::Sender<StreamData>,
+                data_channel_capacity: usize,
+                physical: &PhysicalStreamingAggregation,
+                group_by_meta: &[GroupByMeta],
+                windows: &VecDeque<IncAggWindow>,
+                stats: &Arc<ProcessorStats>,
+            ) -> Result<(), ProcessorError> {
+                for window in windows {
+                    if window.groups.is_empty() {
+                        continue;
+                    }
+
+                    let mut out_rows = Vec::with_capacity(window.groups.len());
+                    for state in window.groups.values() {
+                        let mut affiliate_entries = Vec::new();
+                        for (call, accumulator) in physical
+                            .aggregate_calls
+                            .iter()
+                            .zip(state.accumulators.iter())
+                        {
+                            affiliate_entries.push((
+                                Arc::new(call.output_column.clone()),
+                                accumulator.finalize(),
+                            ));
+                        }
+                        for (idx, value) in state.key_values.iter().enumerate() {
+                            if let Some(meta) = group_by_meta.get(idx) {
+                                if !meta.is_simple {
+                                    affiliate_entries
+                                        .push((Arc::new(meta.output_name.clone()), value.clone()));
+                                }
+                            }
+                        }
+
+                        let mut tuple = crate::model::Tuple::with_timestamp(
+                            state.last_tuple.messages.clone(),
+                            state.last_tuple.timestamp,
+                        );
+                        tuple.add_affiliate_columns(affiliate_entries);
+                        out_rows.push(tuple);
+                    }
+
+                    if out_rows.is_empty() {
+                        continue;
+                    }
+
+                    stats.record_out(out_rows.len() as u64);
+                    let batch = RecordBatch::new(out_rows)
+                        .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+                    send_with_backpressure(
+                        output,
+                        data_channel_capacity,
+                        StreamData::collection(Box::new(batch)),
+                        Some(stats.as_ref()),
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+
             loop {
                 tokio::select! {
                     biased;
@@ -412,6 +473,27 @@ impl Processor for StreamingSlidingAggregationProcessor {
                             Some(Ok(StreamData::Control(control_signal))) => {
                                 let is_terminal = control_signal.is_terminal();
                                 let is_graceful = control_signal.is_graceful_end();
+                                if is_terminal {
+                                    if is_graceful {
+                                        emit_all_windows(
+                                            &output,
+                                            channel_capacities.data,
+                                            &physical,
+                                            &group_by_meta,
+                                            &windows,
+                                            &stats,
+                                        )
+                                            .await?;
+                                    }
+                                    send_with_backpressure(
+                                        &output,
+                                        channel_capacities.data,
+                                        StreamData::control(control_signal),
+                                        Some(stats.as_ref()),
+                                    )
+                                    .await?;
+                                    break;
+                                }
                                 send_with_backpressure(
                                     &output,
                                     channel_capacities.data,
@@ -419,13 +501,6 @@ impl Processor for StreamingSlidingAggregationProcessor {
                                     Some(stats.as_ref()),
                                 )
                                 .await?;
-                                if is_terminal {
-                                    if is_graceful {
-                                        emit_oldest_window(&output, channel_capacities.data, &physical, &group_by_meta, &windows, &stats)
-                                            .await?;
-                                    }
-                                    break;
-                                }
                             }
                             Some(Ok(other)) => {
                                 send_with_backpressure(
@@ -509,6 +584,10 @@ mod tests {
     }
 
     fn make_physical() -> Arc<PhysicalStreamingAggregation> {
+        make_physical_with_lookahead(None)
+    }
+
+    fn make_physical_with_lookahead(lookahead: Option<u64>) -> Arc<PhysicalStreamingAggregation> {
         let call = AggregateCall {
             output_column: "sum_a".to_string(),
             func_name: "sum".to_string(),
@@ -537,7 +616,7 @@ mod tests {
             StreamingWindowSpec::Sliding {
                 time_unit: TimeUnit::Seconds,
                 lookback: 2,
-                lookahead: None,
+                lookahead,
             },
             mappings,
             Vec::new(),
@@ -603,5 +682,50 @@ mod tests {
         }
 
         assert_eq!(sums, vec![1, 3, 2, 12]);
+    }
+
+    #[tokio::test]
+    async fn sliding_aggregation_graceful_end_flushes_all_pending_windows_before_terminal_control()
+    {
+        let spawner = test_spawner();
+        let aggregate_registry = AggregateFunctionRegistry::with_builtins();
+        let physical = make_physical_with_lookahead(Some(2));
+
+        let mut processor = StreamingSlidingAggregationProcessor::new(
+            "sliding",
+            Arc::clone(&physical),
+            Arc::clone(&aggregate_registry),
+        )
+        .expect("sliding processor");
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch =
+            crate::model::RecordBatch::new(vec![tuple_at(1, 1), tuple_at(2, 2)]).expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+        assert!(input
+            .send(StreamData::control(ControlSignal::Barrier(
+                crate::processor::BarrierControlSignal::StreamGracefulEnd { barrier_id: 1 },
+            )))
+            .is_ok());
+
+        let mut sums = Vec::new();
+        loop {
+            let item = timeout(Duration::from_secs(2), output_rx.recv())
+                .await
+                .expect("timeout")
+                .expect("recv");
+            match item {
+                StreamData::Collection(collection) => sums.push(extract_sum(collection.as_ref())),
+                StreamData::Control(ControlSignal::Barrier(
+                    crate::processor::BarrierControlSignal::StreamGracefulEnd { .. },
+                )) => break,
+                other => panic!("unexpected output: {}", other.description()),
+            }
+        }
+
+        assert_eq!(sums, vec![3, 2]);
     }
 }

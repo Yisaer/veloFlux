@@ -137,6 +137,22 @@ impl Processor for TumblingWindowProcessor {
                             Some(Ok(StreamData::Control(signal))) => {
                                 let is_terminal = signal.is_terminal();
                                 let is_graceful = signal.is_graceful_end();
+                                if is_terminal {
+                                    if is_graceful {
+                                        state.flush_all().await?;
+                                    } else {
+                                        state.rows_buffered.set(0);
+                                    }
+                                    send_with_backpressure(
+                                        &output,
+                                        channel_capacities.data,
+                                        StreamData::control(signal),
+                                        Some(stats.as_ref()),
+                                    )
+                                    .await?;
+                                    tracing::info!(processor_id = %id, "stopped");
+                                    return Ok(());
+                                }
                                 send_with_backpressure(
                                     &output,
                                     channel_capacities.data,
@@ -144,15 +160,6 @@ impl Processor for TumblingWindowProcessor {
                                     Some(stats.as_ref()),
                                 )
                                 .await?;
-                                if is_terminal {
-                                    if is_graceful {
-                                        state.flush_all().await?;
-                                    } else {
-                                        state.rows_buffered.set(0);
-                                    }
-                                    tracing::info!(processor_id = %id, "stopped");
-                                    return Ok(());
-                                }
                             }
                             Some(Ok(other)) => {
                                 let is_terminal = other.is_terminal();
@@ -316,6 +323,7 @@ impl ProcessingState {
             if current_rows.is_empty() {
                 continue;
             }
+            self.stats.record_out(current_rows.len() as u64);
             let batch = crate::model::RecordBatch::new(current_rows)
                 .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
             send_with_backpressure(
@@ -338,4 +346,72 @@ fn window_start_secs(ts: SystemTime, len_secs: u64) -> Result<u64, ProcessorErro
     let secs = epoch.as_secs();
     let len = len_secs.max(1);
     Ok(secs / len * len)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::logical::TimeUnit;
+    use crate::planner::physical::PhysicalTumblingWindow;
+    use crate::processor::base::{Processor, DEFAULT_DATA_CHANNEL_CAPACITY};
+    use crate::processor::{BarrierControlSignal, ProcessorStats};
+    use tokio::time::timeout;
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
+
+    fn tuple_at(sec: u64) -> crate::model::Tuple {
+        crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            UNIX_EPOCH + Duration::from_secs(sec),
+        )
+    }
+
+    #[tokio::test]
+    async fn tumbling_window_graceful_end_flushes_buffer_before_terminal_control() {
+        let spawner = test_spawner();
+        let physical = PhysicalTumblingWindow::new(TimeUnit::Seconds, 10, Vec::new(), 0);
+        let mut processor = TumblingWindowProcessor::new("tw", Arc::new(physical));
+        let stats = Arc::new(ProcessorStats::default());
+        processor.set_stats(Arc::clone(&stats));
+        let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
+        processor.add_input(input.subscribe());
+        let mut output_rx = processor.subscribe_output().unwrap();
+        let _handle = processor.start(&spawner);
+
+        let batch = crate::model::RecordBatch::new(vec![tuple_at(1), tuple_at(2)]).expect("batch");
+        assert!(input.send(StreamData::collection(Box::new(batch))).is_ok());
+        assert!(input
+            .send(StreamData::control(ControlSignal::Barrier(
+                BarrierControlSignal::StreamGracefulEnd { barrier_id: 1 },
+            )))
+            .is_ok());
+
+        let first = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+        let second = timeout(Duration::from_secs(2), output_rx.recv())
+            .await
+            .expect("timeout")
+            .expect("recv");
+
+        let StreamData::Collection(collection) = first else {
+            panic!("expected buffered collection before terminal control");
+        };
+        assert_eq!(collection.rows().len(), 2);
+        assert!(matches!(
+            second,
+            StreamData::Control(ControlSignal::Barrier(
+                BarrierControlSignal::StreamGracefulEnd { .. }
+            ))
+        ));
+        assert_eq!(stats.snapshot().records_out, 2);
+    }
 }

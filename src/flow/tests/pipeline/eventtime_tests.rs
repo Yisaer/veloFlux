@@ -284,3 +284,95 @@ async fn eventtime_tumbling_window_drops_tuple_older_than_current_watermark() {
         .await
         .expect("delete eventtime pipeline");
 }
+
+#[tokio::test]
+async fn eventtime_tumbling_window_graceful_stop_flushes_final_window() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics(
+        "pipeline_eventtime",
+        "eventtime_tumbling_window_graceful_stop_flushes_final_window",
+    );
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+    install_memory_json_eventtime_stream(&instance, &input_topic, "stream_eventtime").await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    );
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT sum(a) AS s FROM stream_eventtime GROUP BY tumblingwindow('ss', 10)",
+        vec![sink],
+    )
+    .with_options(eventtime_pipeline_options(7_000));
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create eventtime pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .expect("start eventtime pipeline");
+
+    publish_json_row(
+        &instance,
+        &input_topic,
+        serde_json::json!({"a": 7, "event_ts": 7000}),
+    )
+    .await;
+    publish_json_row(
+        &instance,
+        &input_topic,
+        serde_json::json!({"a": 1, "event_ts": 1000}),
+    )
+    .await;
+    publish_json_row(
+        &instance,
+        &input_topic,
+        serde_json::json!({"a": 4, "event_ts": 4000}),
+    )
+    .await;
+
+    assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+
+    instance
+        .stop_pipeline(
+            &pipeline_id,
+            PipelineStopMode::Graceful,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("gracefully stop eventtime pipeline");
+
+    let final_window = recv_next_json(&mut output, Duration::from_secs(5)).await;
+    assert_eq!(
+        final_window,
+        serde_json::json!([{"s": 12}]),
+        "graceful stop should flush the final buffered eventtime tumbling window",
+    );
+
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete eventtime pipeline");
+}

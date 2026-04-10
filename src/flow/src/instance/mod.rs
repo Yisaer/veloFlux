@@ -133,6 +133,7 @@ impl FlowInstance {
         // Worker threads call on_thread_start synchronously during build(), so this cell
         // is populated before build() returns.
         let cgroup_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        #[cfg(target_os = "linux")]
         let cgroup_error_capture = Arc::clone(&cgroup_error);
         builder.on_thread_start(move || {
             #[cfg(not(target_os = "linux"))]
