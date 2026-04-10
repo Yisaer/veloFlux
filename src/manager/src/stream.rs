@@ -1100,6 +1100,169 @@ fn unix_timestamp_secs(time: SystemTime) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::{AppState, CreatePipelineRequest};
+    use axum::{
+        Json,
+        body::to_bytes,
+        extract::{Path, State},
+        http::StatusCode,
+        response::IntoResponse,
+    };
+    use serde_json::{Map as JsonMap, Value as JsonValue, json};
+    use storage::StorageManager;
+    use tempfile::TempDir;
+
+    fn base_stream_request(stream_type: &str) -> CreateStreamRequest {
+        CreateStreamRequest {
+            name: "stream_test".to_string(),
+            stream_type: stream_type.to_string(),
+            schema: SchemaConfigRequest::default(),
+            props: StreamPropsRequest::default(),
+            shared: false,
+            decoder: DecoderConfigRequest::default(),
+            eventtime: None,
+            sampler: None,
+        }
+    }
+
+    fn mqtt_stream_request(name: &str) -> CreateStreamRequest {
+        let schema_props: JsonMap<String, JsonValue> = json!({
+            "columns": [
+                { "name": "value", "data_type": "int64" }
+            ]
+        })
+        .as_object()
+        .expect("schema props object")
+        .clone();
+
+        let props_fields: JsonMap<String, JsonValue> = json!({
+            "broker_url": "mqtt://localhost:1883",
+            "topic": format!("{name}/topic"),
+            "qos": 0
+        })
+        .as_object()
+        .expect("stream props object")
+        .clone();
+
+        CreateStreamRequest {
+            name: name.to_string(),
+            stream_type: "mqtt".to_string(),
+            schema: SchemaConfigRequest {
+                schema_type: "json".to_string(),
+                props: schema_props,
+            },
+            props: StreamPropsRequest {
+                fields: props_fields,
+            },
+            shared: false,
+            decoder: DecoderConfigRequest::default(),
+            eventtime: None,
+            sampler: None,
+        }
+    }
+
+    fn mock_stream_request(name: &str) -> CreateStreamRequest {
+        let schema_props: JsonMap<String, JsonValue> = json!({
+            "columns": [
+                { "name": "value", "data_type": "int64" }
+            ]
+        })
+        .as_object()
+        .expect("schema props object")
+        .clone();
+
+        CreateStreamRequest {
+            name: name.to_string(),
+            stream_type: "mock".to_string(),
+            schema: SchemaConfigRequest {
+                schema_type: "json".to_string(),
+                props: schema_props,
+            },
+            props: StreamPropsRequest::default(),
+            shared: false,
+            decoder: DecoderConfigRequest::default(),
+            eventtime: None,
+            sampler: None,
+        }
+    }
+
+    fn sample_default_instance_spec() -> crate::FlowInstanceSpec {
+        crate::FlowInstanceSpec {
+            id: "default".to_string(),
+            backend: crate::FlowInstanceBackendKind::InProcess,
+            ..crate::FlowInstanceSpec::default()
+        }
+    }
+
+    fn local_flow_instance_spec(id: &str) -> crate::FlowInstanceSpec {
+        crate::FlowInstanceSpec {
+            id: id.to_string(),
+            backend: crate::FlowInstanceBackendKind::InProcess,
+            ..crate::FlowInstanceSpec::default()
+        }
+    }
+
+    fn build_state(temp_dir: &TempDir, flow_instances: Vec<crate::FlowInstanceSpec>) -> AppState {
+        let storage = StorageManager::new(temp_dir.path()).expect("create storage");
+        AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            flow_instances,
+            Vec::new(),
+        )
+        .expect("build app state")
+    }
+
+    fn stream_definition_from_request(
+        req: &CreateStreamRequest,
+        decoder_registry: &flow::DecoderRegistry,
+    ) -> StreamDefinition {
+        let schema = build_schema_from_request(req).expect("build schema from request");
+        let props =
+            build_stream_props(&req.stream_type, &req.props).expect("build stream props from req");
+        let decoder =
+            build_stream_decoder(req, decoder_registry).expect("build stream decoder from req");
+        validate_stream_decoder_config(req, &decoder)
+            .expect("validate stream decoder configuration");
+
+        let mut definition =
+            StreamDefinition::new(req.name.clone(), Arc::new(schema), props, decoder);
+        if let Some(cfg) = &req.eventtime {
+            definition = definition.with_eventtime(EventtimeDefinition::new(
+                cfg.column.clone(),
+                cfg.eventtime_type.clone(),
+            ));
+        }
+        if let Some(sampler) = &req.sampler {
+            definition = definition.with_sampler(sampler.clone());
+        }
+        definition
+    }
+
+    fn pipeline_request(id: &str, stream_name: &str) -> CreatePipelineRequest {
+        serde_json::from_value(json!({
+            "id": id,
+            "flow_instance_id": "default",
+            "sql": format!("SELECT * FROM {stream_name}"),
+            "sinks": [
+                {
+                    "id": format!("{id}_sink_0"),
+                    "type": "nop",
+                    "props": { "log": false },
+                    "common_sink_props": {},
+                    "encoder": { "type": "json", "props": {} }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request")
+    }
 
     fn struct_request() -> StreamColumnRequest {
         StreamColumnRequest {
@@ -1195,5 +1358,280 @@ mod tests {
             element: None,
         };
         assert!(parse_datatype(&missing_element).is_err());
+    }
+
+    #[test]
+    fn build_schema_from_request_rejects_unknown_schema_type() {
+        let mut req = base_stream_request("mqtt");
+        req.schema.schema_type = "avro".to_string();
+
+        let err = build_schema_from_request(&req).unwrap_err();
+        assert_eq!(err, "schema type `avro` not registered");
+    }
+
+    #[test]
+    fn build_stream_decoder_rejects_unknown_non_none_decoder_type() {
+        let mut req = base_stream_request("mqtt");
+        req.decoder.decode_type = "unknown_decoder".to_string();
+        let instance = crate::new_default_flow_instance();
+
+        let err = build_stream_decoder(&req, instance.decoder_registry().as_ref()).unwrap_err();
+        assert_eq!(err, "decoder kind `unknown_decoder` not registered");
+    }
+
+    #[test]
+    fn validate_stream_decoder_config_rejects_shared_memory_stream() {
+        let mut req = base_stream_request("memory");
+        req.shared = true;
+        let decoder = StreamDecoderConfig::new("json", JsonMap::new());
+
+        let err = validate_stream_decoder_config(&req, &decoder).unwrap_err();
+        assert_eq!(
+            err,
+            "shared stream `stream_test` does not support stream type `memory`"
+        );
+    }
+
+    #[test]
+    fn validate_stream_decoder_config_rejects_shared_stream_with_decoder_none() {
+        let mut req = base_stream_request("mqtt");
+        req.shared = true;
+        let decoder = StreamDecoderConfig::new("none", JsonMap::new());
+
+        let err = validate_stream_decoder_config(&req, &decoder).unwrap_err();
+        assert_eq!(
+            err,
+            "shared stream `stream_test` does not support decoder type `none`"
+        );
+    }
+
+    #[test]
+    fn validate_stream_decoder_config_rejects_decoder_none_for_non_memory_stream() {
+        let req = base_stream_request("mqtt");
+        let decoder = StreamDecoderConfig::new("none", JsonMap::new());
+
+        let err = validate_stream_decoder_config(&req, &decoder).unwrap_err();
+        assert_eq!(
+            err,
+            "stream `stream_test` decoder type `none` only supported for memory streams"
+        );
+    }
+
+    #[test]
+    fn validate_stream_decoder_config_rejects_eventtime_with_decoder_none() {
+        let mut req = base_stream_request("memory");
+        req.eventtime = Some(EventtimeConfigRequest {
+            column: "event_ts".to_string(),
+            eventtime_type: "unixtimestamp_ms".to_string(),
+        });
+        let decoder = StreamDecoderConfig::new("none", JsonMap::new());
+
+        let err = validate_stream_decoder_config(&req, &decoder).unwrap_err();
+        assert_eq!(
+            err,
+            "stream `stream_test` eventtime requires a decoder (decoder type `none` unsupported)"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_stream_rolls_back_storage_when_late_instance_install_fails() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(
+            &temp_dir,
+            vec![
+                sample_default_instance_spec(),
+                local_flow_instance_spec("local_b"),
+            ],
+        );
+        let req = mqtt_stream_request("stream_conflict");
+        let later_instance = state
+            .local_instance("local_b")
+            .expect("local_b runtime instance");
+        let existing_definition =
+            stream_definition_from_request(&req, later_instance.decoder_registry().as_ref());
+        later_instance
+            .create_stream(existing_definition, req.shared)
+            .await
+            .expect("seed conflicting stream in local_b");
+
+        let response = create_stream_handler(State(state.clone()), Json(req.clone()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).expect("utf8 body"),
+            "stream stream_conflict already exists"
+        );
+        assert!(
+            state
+                .storage
+                .get_stream(&req.name)
+                .expect("read stored stream")
+                .is_none(),
+            "late instance failure must roll back persisted stream metadata",
+        );
+
+        let default_instance = state
+            .local_instance("default")
+            .expect("default runtime instance");
+        let default_streams = default_instance
+            .list_streams()
+            .await
+            .expect("list default streams");
+        assert!(
+            !default_streams
+                .iter()
+                .any(|stream| stream.definition.id() == req.name),
+            "late instance failure must roll back earlier runtime installs",
+        );
+
+        let local_b_streams = later_instance
+            .list_streams()
+            .await
+            .expect("list local_b streams");
+        assert!(
+            local_b_streams
+                .iter()
+                .any(|stream| stream.definition.id() == req.name),
+            "pre-existing conflicting stream must remain in the failing instance",
+        );
+    }
+
+    #[tokio::test]
+    async fn describe_stream_returns_eventtime_and_shared_flags_from_stored_spec() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
+        let mut req = mqtt_stream_request("shared_stream_describe");
+        req.shared = true;
+        req.eventtime = Some(EventtimeConfigRequest {
+            column: "event_ts".to_string(),
+            eventtime_type: "unixtimestamp_ms".to_string(),
+        });
+
+        state
+            .storage
+            .create_stream(
+                crate::storage_bridge::stored_stream_from_request(&req)
+                    .expect("serialize stored stream"),
+            )
+            .expect("store stream");
+
+        let response = describe_stream_handler(State(state), Path(req.name.clone()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let json: JsonValue = serde_json::from_slice(&body).expect("decode describe response");
+        assert_eq!(json["stream"], req.name);
+        assert_eq!(json["spec_version"], 1);
+        assert_eq!(json["spec"]["type"], "mqtt");
+        assert_eq!(json["spec"]["shared"], true);
+        assert_eq!(json["spec"]["decoder"]["type"], "json");
+        assert_eq!(json["spec"]["eventtime"]["column"], "event_ts");
+        assert_eq!(json["spec"]["eventtime"]["type"], "unixtimestamp_ms");
+    }
+
+    #[tokio::test]
+    async fn list_streams_round_trips_shared_flag_without_runtime_shared_stream_item() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
+        let non_shared = mqtt_stream_request("stream_plain");
+        let mut shared = mqtt_stream_request("stream_shared");
+        shared.shared = true;
+
+        for req in [&non_shared, &shared] {
+            state
+                .storage
+                .create_stream(
+                    crate::storage_bridge::stored_stream_from_request(req)
+                        .expect("serialize stored stream"),
+                )
+                .expect("store stream");
+        }
+
+        let response = list_streams(State(state)).await.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let json: JsonValue = serde_json::from_slice(&body).expect("decode list response");
+        let streams = json.as_array().expect("stream list array");
+        let plain = streams
+            .iter()
+            .find(|item| item["name"] == "stream_plain")
+            .expect("plain stream in list response");
+        let shared_item = streams
+            .iter()
+            .find(|item| item["name"] == "stream_shared")
+            .expect("shared stream in list response");
+
+        assert_eq!(plain["shared"], false);
+        assert!(plain["shared_stream"].is_null());
+        assert_eq!(shared_item["shared"], true);
+        assert!(
+            shared_item["shared_stream"].is_null(),
+            "list endpoint currently exposes stored shared flag but not runtime shared-stream details",
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_stream_returns_conflict_while_stream_is_still_referenced() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
+        let mut stream_req = mock_stream_request("shared_stream_in_use");
+        stream_req.shared = true;
+
+        let create_resp = create_stream_handler(State(state.clone()), Json(stream_req.clone()))
+            .await
+            .into_response();
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        let instance = state
+            .local_instance("default")
+            .expect("default runtime instance");
+        let pipeline_req = pipeline_request("pipe_using_shared_stream", &stream_req.name);
+        let definition = crate::pipeline::build_pipeline_definition(
+            &pipeline_req,
+            instance.encoder_registry().as_ref(),
+            instance.as_ref(),
+        )
+        .expect("build pipeline definition");
+        instance
+            .create_pipeline(flow::CreatePipelineRequest::new(definition))
+            .expect("create pipeline");
+
+        let delete_resp =
+            delete_stream_handler(State(state.clone()), Path(stream_req.name.clone()))
+                .await
+                .into_response();
+        assert_eq!(delete_resp.status(), StatusCode::CONFLICT);
+
+        let body = to_bytes(delete_resp.into_body(), 64 * 1024)
+            .await
+            .expect("read delete response body");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).expect("utf8 response"),
+            "stream shared_stream_in_use still referenced by pipelines: pipe_using_shared_stream"
+        );
+        assert!(
+            state
+                .storage
+                .get_stream(&stream_req.name)
+                .expect("read stored stream")
+                .is_some(),
+            "referenced stream must remain persisted after delete conflict",
+        );
+        assert!(
+            instance.get_stream(&stream_req.name).await.is_ok(),
+            "referenced stream must remain installed in runtime after delete conflict",
+        );
     }
 }

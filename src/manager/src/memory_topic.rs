@@ -166,3 +166,237 @@ pub async fn list_memory_topics_handler(State(state): State<AppState>) -> impl I
             .into_response(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+    use axum::http::StatusCode;
+    use serde_json::Value as JsonValue;
+    use tempfile::TempDir;
+
+    fn sample_default_instance_spec() -> crate::FlowInstanceSpec {
+        crate::FlowInstanceSpec {
+            id: "default".to_string(),
+            backend: crate::FlowInstanceBackendKind::InProcess,
+            ..crate::FlowInstanceSpec::default()
+        }
+    }
+
+    fn build_state(temp_dir: &TempDir) -> AppState {
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![sample_default_instance_spec()],
+            Vec::new(),
+        )
+        .expect("build app state")
+    }
+
+    #[tokio::test]
+    async fn create_memory_topic_defaults_capacity_when_omitted() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+
+        let response = create_memory_topic_handler(
+            State(state.clone()),
+            Json(CreateMemoryTopicRequest {
+                topic: "topic_a".to_string(),
+                kind: MemoryTopicKindRequest::Bytes,
+                capacity: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let json: JsonValue = serde_json::from_slice(&body).expect("decode response json");
+        assert_eq!(
+            json["capacity"].as_u64().expect("capacity as u64"),
+            DEFAULT_MEMORY_PUBSUB_CAPACITY as u64
+        );
+
+        let stored = state
+            .storage
+            .get_memory_topic("topic_a")
+            .expect("read memory topic")
+            .expect("memory topic exists");
+        assert_eq!(stored.capacity, DEFAULT_MEMORY_PUBSUB_CAPACITY);
+    }
+
+    #[tokio::test]
+    async fn create_memory_topic_rejects_blank_topic_name() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+
+        let response = create_memory_topic_handler(
+            State(state),
+            Json(CreateMemoryTopicRequest {
+                topic: "   ".to_string(),
+                kind: MemoryTopicKindRequest::Bytes,
+                capacity: Some(8),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).expect("utf8 response"),
+            "topic must not be empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_memory_topic_normalizes_zero_capacity_to_one() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+
+        let response = create_memory_topic_handler(
+            State(state.clone()),
+            Json(CreateMemoryTopicRequest {
+                topic: "topic_zero".to_string(),
+                kind: MemoryTopicKindRequest::Collection,
+                capacity: Some(0),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let stored = state
+            .storage
+            .get_memory_topic("topic_zero")
+            .expect("read memory topic")
+            .expect("memory topic exists");
+        assert_eq!(stored.capacity, 1);
+    }
+
+    #[tokio::test]
+    async fn create_memory_topic_conflicts_on_kind_mismatch_with_existing_runtime_topic() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+        let instance = state
+            .local_instance("default")
+            .expect("default runtime instance");
+        instance
+            .declare_memory_topic("topic_existing", MemoryTopicKind::Bytes, 16)
+            .expect("declare runtime memory topic");
+
+        let response = create_memory_topic_handler(
+            State(state.clone()),
+            Json(CreateMemoryTopicRequest {
+                topic: "topic_existing".to_string(),
+                kind: MemoryTopicKindRequest::Collection,
+                capacity: Some(16),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).expect("utf8 response"),
+            "memory topic topic_existing kind mismatch: expected bytes, got collection"
+        );
+        assert!(
+            state
+                .storage
+                .get_memory_topic("topic_existing")
+                .expect("read memory topic")
+                .is_none(),
+            "runtime kind mismatch must reject before storage mutation",
+        );
+    }
+
+    #[tokio::test]
+    async fn create_memory_topic_conflicts_on_capacity_mismatch_with_existing_runtime_topic() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+        let instance = state
+            .local_instance("default")
+            .expect("default runtime instance");
+        instance
+            .declare_memory_topic("topic_existing", MemoryTopicKind::Bytes, 16)
+            .expect("declare runtime memory topic");
+
+        let response = create_memory_topic_handler(
+            State(state.clone()),
+            Json(CreateMemoryTopicRequest {
+                topic: "topic_existing".to_string(),
+                kind: MemoryTopicKindRequest::Bytes,
+                capacity: Some(32),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).expect("utf8 response"),
+            "memory topic topic_existing capacity mismatch: expected 16, got 32"
+        );
+        assert!(
+            state
+                .storage
+                .get_memory_topic("topic_existing")
+                .expect("read memory topic")
+                .is_none(),
+            "runtime capacity mismatch must reject before storage mutation",
+        );
+    }
+
+    #[tokio::test]
+    async fn list_memory_topics_returns_stably_sorted_topics() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir);
+
+        for topic in [
+            StoredMemoryTopic {
+                topic: "topic_b".to_string(),
+                kind: StoredMemoryTopicKind::Bytes,
+                capacity: 16,
+            },
+            StoredMemoryTopic {
+                topic: "topic_a".to_string(),
+                kind: StoredMemoryTopicKind::Collection,
+                capacity: 32,
+            },
+        ] {
+            state
+                .storage
+                .create_memory_topic(topic)
+                .expect("seed memory topic");
+        }
+
+        let response = list_memory_topics_handler(State(state))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let json: JsonValue = serde_json::from_slice(&body).expect("decode list response");
+        let names = json
+            .as_array()
+            .expect("topics array")
+            .iter()
+            .map(|item| item["topic"].as_str().expect("topic name"))
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["topic_a", "topic_b"]);
+    }
+}
