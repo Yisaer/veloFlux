@@ -289,6 +289,8 @@ pub(crate) async fn hydrate_runtime_from_storage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::instances::FlowInstances;
+    use crate::pipeline::CreatePipelineRequest;
     use crate::stream::CreateStreamRequest;
     use flow::FlowInstance;
     use serde_json::{Map as JsonMap, Value as JsonValue, json};
@@ -330,6 +332,31 @@ mod tests {
         }
     }
 
+    fn sample_pipeline_request(id: &str, stream_name: &str) -> CreatePipelineRequest {
+        serde_json::from_value(json!({
+            "id": id,
+            "flow_instance_id": "default",
+            "sql": format!("SELECT * FROM {stream_name}"),
+            "sinks": [
+                {
+                    "id": format!("{id}_sink_0"),
+                    "type": "nop",
+                    "props": { "log": false },
+                    "common_sink_props": {},
+                    "encoder": { "type": "json", "props": {} }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request")
+    }
+
     // Plan-cache behavior is intentionally tested in the flow crate. The manager's storage bridge
     // only restores pipelines from their persisted SQL specification.
     #[tokio::test]
@@ -362,5 +389,52 @@ mod tests {
         let streams = instance.list_streams().await.unwrap();
         assert!(streams.iter().any(|s| s.definition.id() == "good_stream"));
         assert!(!streams.iter().any(|s| s.definition.id() == "bad_stream"));
+    }
+
+    #[tokio::test]
+    async fn load_storage_skips_invalid_pipelines_and_restores_valid_neighbors() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let instance = FlowInstance::new(
+            flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
+        )
+        .expect("create flow instance");
+        let instances = FlowInstances::new(instance);
+
+        let stream_req = sample_stream_request("good_stream");
+        storage
+            .create_stream(stored_stream_from_request(&stream_req).expect("serialize stream"))
+            .expect("store good stream");
+
+        let good_pipeline = sample_pipeline_request("good_pipe", "good_stream");
+        storage
+            .create_pipeline(
+                stored_pipeline_from_request(&good_pipeline).expect("serialize good pipeline"),
+            )
+            .expect("store good pipeline");
+        storage
+            .create_pipeline(StoredPipeline {
+                id: "bad_pipe".to_string(),
+                raw_json: "{ invalid json".to_string(),
+            })
+            .expect("store bad pipeline");
+
+        hydrate_runtime_from_storage(&storage, &instances)
+            .await
+            .expect("hydrate runtime from storage");
+
+        let snapshots = instances.default_instance().list_pipelines();
+        assert!(
+            snapshots
+                .iter()
+                .any(|snapshot| snapshot.definition.id() == "good_pipe"),
+            "valid pipeline should still be restored",
+        );
+        assert!(
+            !snapshots
+                .iter()
+                .any(|snapshot| snapshot.definition.id() == "bad_pipe"),
+            "invalid pipeline should be skipped during restore",
+        );
     }
 }

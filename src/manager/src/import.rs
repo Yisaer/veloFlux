@@ -370,6 +370,113 @@ mod tests {
         id == DEFAULT_FLOW_INSTANCE_ID
     }
 
+    #[test]
+    fn validate_snapshot_rejects_duplicate_memory_topics() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle
+            .resources
+            .memory_topics
+            .push(bundle.resources.memory_topics[0].clone());
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert_eq!(err, "duplicate memory topic in bundle: topic_a");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_zero_capacity_memory_topic() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.memory_topics[0].capacity = 0;
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert_eq!(err, "memory topic topic_a capacity must be greater than 0");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_duplicate_shared_mqtt_keys() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle
+            .resources
+            .shared_mqtt_clients
+            .push(bundle.resources.shared_mqtt_clients[0].clone());
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert_eq!(err, "duplicate shared mqtt client key in bundle: mqtt_a");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_duplicate_stream_names() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle
+            .resources
+            .streams
+            .push(sample_stream_request("stream_a"));
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert_eq!(err, "duplicate stream name in bundle: stream_a");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_duplicate_pipeline_ids() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle
+            .resources
+            .pipelines
+            .push(sample_pipeline_request("pipe_a", "stream_a"));
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert_eq!(err, "duplicate pipeline id in bundle: pipe_a");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_duplicate_pipeline_run_state_entries() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle
+            .resources
+            .pipeline_run_states
+            .push(bundle.resources.pipeline_run_states[0].clone());
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert_eq!(err, "duplicate pipeline_run_state entry in bundle: pipe_a");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_pipeline_run_state_for_missing_pipeline() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.pipeline_run_states[0].pipeline_id = "pipe_missing".to_string();
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert_eq!(
+            err,
+            "pipeline_run_state references missing pipeline: pipe_missing"
+        );
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_undeclared_flow_instance() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.pipelines[0].flow_instance_id = Some("worker_a".to_string());
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+        assert_eq!(err, "flow instance worker_a is not declared by config");
+    }
+
+    #[test]
+    fn validate_snapshot_normalizes_missing_flow_instance_id_to_default() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+        bundle.resources.pipelines[0].flow_instance_id = None;
+
+        let snapshot =
+            validate_and_build_snapshot(&bundle, &is_default_instance).expect("build snapshot");
+        let normalized =
+            crate::storage_bridge::pipeline_request_from_stored(&snapshot.pipelines[0])
+                .expect("decode normalized pipeline");
+
+        assert_eq!(
+            normalized.flow_instance_id.as_deref(),
+            Some(DEFAULT_FLOW_INSTANCE_ID)
+        );
+    }
+
     #[tokio::test]
     async fn import_storage_handler_replaces_snapshot_and_returns_previous_bundle() {
         let dir = tempdir().expect("create tempdir");
@@ -455,6 +562,82 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&final_bundle.resources).expect("serialize final resources"),
             serde_json::to_value(&new_bundle.resources).expect("serialize new resources")
+        );
+
+        let runtime_streams = state
+            .instances
+            .default_instance()
+            .list_streams()
+            .await
+            .expect("list runtime streams after import");
+        assert!(runtime_streams.is_empty());
+        assert!(
+            state
+                .instances
+                .default_instance()
+                .list_pipelines()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn import_storage_handler_rejects_invalid_bundle_without_mutating_storage_or_runtime() {
+        let dir = tempdir().expect("create tempdir");
+        let storage = StorageManager::new(dir.path()).expect("create storage");
+        let old_bundle = sample_bundle("stream_old", "pipe_old", "mqtt_old", "topic_old");
+        let mut invalid_bundle = sample_bundle("stream_new", "pipe_new", "mqtt_new", "topic_new");
+        invalid_bundle
+            .resources
+            .memory_topics
+            .push(invalid_bundle.resources.memory_topics[0].clone());
+
+        storage
+            .replace_metadata_snapshot(
+                validate_and_build_snapshot(&old_bundle, &is_default_instance)
+                    .expect("build old snapshot"),
+            )
+            .expect("seed old snapshot");
+
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![sample_default_instance_spec()],
+            Vec::new(),
+        )
+        .expect("create app state");
+
+        let response = import_storage_handler(State(state.clone()), Json(invalid_bundle))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read response body");
+        assert_eq!(
+            String::from_utf8(body.to_vec()).expect("decode error body"),
+            "duplicate memory topic in bundle: topic_new"
+        );
+
+        let bundle_after = build_export_bundle(state.storage.as_ref()).expect("export old bundle");
+        assert_eq!(
+            serde_json::to_value(&bundle_after.resources).expect("serialize resources after error"),
+            serde_json::to_value(&old_bundle.resources).expect("serialize original resources")
+        );
+
+        let runtime_streams = state
+            .instances
+            .default_instance()
+            .list_streams()
+            .await
+            .expect("list runtime streams after failed import");
+        assert!(runtime_streams.is_empty());
+        assert!(
+            state
+                .instances
+                .default_instance()
+                .list_pipelines()
+                .is_empty()
         );
     }
 }

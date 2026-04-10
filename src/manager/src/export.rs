@@ -190,9 +190,9 @@ mod tests {
     };
     use tempfile::tempdir;
 
-    fn sample_stream_request() -> CreateStreamRequest {
+    fn sample_stream_request_named(name: &str) -> CreateStreamRequest {
         serde_json::from_value(json!({
-            "name": "stream_1",
+            "name": name,
             "type": "mqtt",
             "schema": {
                 "type": "json",
@@ -204,7 +204,7 @@ mod tests {
             },
             "props": {
                 "broker_url": "mqtt://localhost:1883",
-                "topic": "input/topic",
+                "topic": format!("{name}/topic"),
                 "qos": 0
             },
             "shared": false,
@@ -216,14 +216,18 @@ mod tests {
         .expect("deserialize stream request")
     }
 
-    fn sample_pipeline_request() -> CreatePipelineRequest {
+    fn sample_stream_request() -> CreateStreamRequest {
+        sample_stream_request_named("stream_1")
+    }
+
+    fn sample_pipeline_request_named(id: &str, stream_name: &str) -> CreatePipelineRequest {
         serde_json::from_value(json!({
-            "id": "pipe_1",
+            "id": id,
             "flow_instance_id": DEFAULT_FLOW_INSTANCE_ID,
-            "sql": "SELECT * FROM stream_1",
+            "sql": format!("SELECT * FROM {stream_name}"),
             "sinks": [
                 {
-                    "id": "pipe_1_sink_0",
+                    "id": format!("{id}_sink_0"),
                     "type": "nop",
                     "props": { "log": false },
                     "common_sink_props": {},
@@ -239,6 +243,10 @@ mod tests {
             }
         }))
         .expect("deserialize pipeline request")
+    }
+
+    fn sample_pipeline_request() -> CreatePipelineRequest {
+        sample_pipeline_request_named("pipe_1", "stream_1")
     }
 
     fn sample_default_instance_spec() -> FlowInstanceSpec {
@@ -337,6 +345,138 @@ mod tests {
         assert_eq!(
             json["resources"]["pipeline_run_states"][0]["desired_state"],
             "Running"
+        );
+    }
+
+    #[test]
+    fn build_export_bundle_sorts_resource_collections_stably() {
+        let dir = tempdir().expect("create tempdir");
+        let storage = StorageManager::new(dir.path()).expect("create storage");
+
+        for topic in [
+            StoredMemoryTopic {
+                topic: "topic_b".to_string(),
+                kind: StoredMemoryTopicKind::Bytes,
+                capacity: 16,
+            },
+            StoredMemoryTopic {
+                topic: "topic_a".to_string(),
+                kind: StoredMemoryTopicKind::Collection,
+                capacity: 32,
+            },
+        ] {
+            storage
+                .create_memory_topic(topic)
+                .expect("create memory topic");
+        }
+
+        for mqtt in [
+            SharedMqttClientConfig {
+                key: "shared_b".to_string(),
+                broker_url: "tcp://localhost:1883".to_string(),
+                topic: "b/topic".to_string(),
+                client_id: "client_b".to_string(),
+                qos: 1,
+                max_packet_size: None,
+            },
+            SharedMqttClientConfig {
+                key: "shared_a".to_string(),
+                broker_url: "tcp://localhost:1883".to_string(),
+                topic: "a/topic".to_string(),
+                client_id: "client_a".to_string(),
+                qos: 0,
+                max_packet_size: Some(1024),
+            },
+        ] {
+            storage
+                .create_mqtt_config(stored_mqtt_from_config(&mqtt))
+                .expect("create mqtt config");
+        }
+
+        for stream in [
+            sample_stream_request_named("stream_b"),
+            sample_stream_request_named("stream_a"),
+        ] {
+            storage
+                .create_stream(stored_stream_from_request(&stream).expect("store stream"))
+                .expect("create stream");
+        }
+
+        for pipeline in [
+            sample_pipeline_request_named("pipe_b", "stream_b"),
+            sample_pipeline_request_named("pipe_a", "stream_a"),
+        ] {
+            storage
+                .create_pipeline(stored_pipeline_from_request(&pipeline).expect("store pipeline"))
+                .expect("create pipeline");
+        }
+
+        for run_state in [
+            StoredPipelineRunState {
+                pipeline_id: "pipe_b".to_string(),
+                desired_state: StoredPipelineDesiredState::Running,
+            },
+            StoredPipelineRunState {
+                pipeline_id: "pipe_a".to_string(),
+                desired_state: StoredPipelineDesiredState::Stopped,
+            },
+        ] {
+            storage
+                .put_pipeline_run_state(run_state)
+                .expect("create pipeline run state");
+        }
+
+        let first_bundle = build_export_bundle(&storage).expect("build first export bundle");
+        let second_bundle = build_export_bundle(&storage).expect("build second export bundle");
+
+        assert_eq!(
+            first_bundle
+                .resources
+                .memory_topics
+                .iter()
+                .map(|topic| topic.topic.as_str())
+                .collect::<Vec<_>>(),
+            vec!["topic_a", "topic_b"]
+        );
+        assert_eq!(
+            first_bundle
+                .resources
+                .shared_mqtt_clients
+                .iter()
+                .map(|cfg| cfg.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["shared_a", "shared_b"]
+        );
+        assert_eq!(
+            first_bundle
+                .resources
+                .streams
+                .iter()
+                .map(|stream| stream.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["stream_a", "stream_b"]
+        );
+        assert_eq!(
+            first_bundle
+                .resources
+                .pipelines
+                .iter()
+                .map(|pipeline| pipeline.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pipe_a", "pipe_b"]
+        );
+        assert_eq!(
+            first_bundle
+                .resources
+                .pipeline_run_states
+                .iter()
+                .map(|state| state.pipeline_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pipe_a", "pipe_b"]
+        );
+        assert_eq!(
+            serde_json::to_value(&first_bundle.resources).expect("serialize first resources"),
+            serde_json::to_value(&second_bundle.resources).expect("serialize second resources")
         );
     }
 }

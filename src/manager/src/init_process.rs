@@ -157,9 +157,11 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    use crate::pipeline::CreatePipelineRequest;
     use crate::stream::{
         CreateStreamRequest, DecoderConfigRequest, SchemaConfigRequest, StreamPropsRequest,
     };
+    use serde_json::json;
 
     fn sample_stream_request(name: &str) -> CreateStreamRequest {
         CreateStreamRequest {
@@ -185,6 +187,35 @@ mod tests {
                 pipeline_run_states: Vec::new(),
             },
         }
+    }
+
+    fn sample_pipeline_request(
+        id: &str,
+        stream_name: &str,
+        flow_instance_id: &str,
+    ) -> CreatePipelineRequest {
+        serde_json::from_value(json!({
+            "id": id,
+            "flow_instance_id": flow_instance_id,
+            "sql": format!("SELECT * FROM {stream_name}"),
+            "sinks": [
+                {
+                    "id": format!("{id}_sink_0"),
+                    "type": "nop",
+                    "props": { "log": false },
+                    "common_sink_props": {},
+                    "encoder": { "type": "json", "props": {} }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request")
     }
 
     fn write_init_json(dir: &Path, bundle: &ExportBundleV1) {
@@ -249,5 +280,25 @@ mod tests {
         assert!(err.contains("already exists: stream_1"));
         assert_eq!(storage.list_streams().unwrap().len(), 1);
         assert_eq!(storage.get_init_apply_meta().unwrap(), Some(stale_meta));
+    }
+
+    #[test]
+    fn apply_init_json_rejects_undeclared_flow_instance_without_partial_writes() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+        let mut bundle = sample_bundle("stream_1");
+        bundle
+            .resources
+            .pipelines
+            .push(sample_pipeline_request("pipe_1", "stream_1", "worker_a"));
+        write_init_json(dir.path(), &bundle);
+
+        let err =
+            apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap_err();
+
+        assert_eq!(err, "flow instance worker_a is not declared by config");
+        assert!(storage.list_streams().unwrap().is_empty());
+        assert!(storage.list_pipelines().unwrap().is_empty());
+        assert_eq!(storage.get_init_apply_meta().unwrap(), None);
     }
 }
