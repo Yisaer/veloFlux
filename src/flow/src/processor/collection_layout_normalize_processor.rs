@@ -354,3 +354,112 @@ impl Processor for CollectionLayoutNormalizeProcessor {
         self.control_inputs.push(receiver);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn build_message(source: &str, keys: &[&str], values: Vec<Value>) -> Arc<Message> {
+        let shared_keys: Arc<[Arc<str>]> = Arc::from(
+            keys.iter()
+                .map(|key| Arc::<str>::from(*key))
+                .collect::<Vec<_>>(),
+        );
+        let shared_values = values.into_iter().map(Arc::new).collect();
+        Arc::new(Message::new_shared_keys(source, shared_keys, shared_values))
+    }
+
+    #[test]
+    fn normalize_collection_rewrites_source_and_stabilizes_schema_order() {
+        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(123);
+        let input = RecordBatch::new(vec![
+            Tuple::with_timestamp(
+                Arc::from(vec![build_message(
+                    "topic_binding",
+                    &["b", "a"],
+                    vec![Value::Int64(2), Value::Int64(1)],
+                )]),
+                timestamp,
+            ),
+            Tuple::with_timestamp(
+                Arc::from(vec![build_message(
+                    "topic_binding",
+                    &["a"],
+                    vec![Value::Int64(100)],
+                )]),
+                timestamp,
+            ),
+        ])
+        .expect("build input collection");
+
+        let schema_keys = vec![Arc::<str>::from("a"), Arc::<str>::from("b")];
+        let shared_keys: Arc<[Arc<str>]> = Arc::from(schema_keys.clone());
+        let output_source_name = Arc::<str>::from("stream");
+
+        let normalized = normalize_collection(
+            &schema_keys,
+            &output_source_name,
+            &shared_keys,
+            &input,
+            "normalize_test",
+        )
+        .expect("normalize collection");
+
+        assert_eq!(normalized.num_rows(), 2, "normalized row count mismatch");
+
+        let first = &normalized.rows()[0];
+        assert!(
+            first.affiliate().is_none(),
+            "normalize should clear affiliate"
+        );
+        assert_eq!(first.timestamp, timestamp, "timestamp should be preserved");
+        assert_eq!(
+            first.messages().len(),
+            1,
+            "normalize should keep one message"
+        );
+        let first_msg = &first.messages()[0];
+        assert_eq!(
+            first_msg.source(),
+            "stream",
+            "message source should be rewritten to stream binding",
+        );
+        let first_entries: Vec<(&str, Value)> = first_msg
+            .entries()
+            .map(|(key, value)| (key, value.clone()))
+            .collect();
+        assert_eq!(
+            first_entries,
+            vec![("a", Value::Int64(1)), ("b", Value::Int64(2))],
+            "first row should be reordered to schema order",
+        );
+
+        let second = &normalized.rows()[1];
+        assert!(
+            second.affiliate().is_none(),
+            "normalize should clear affiliate"
+        );
+        assert_eq!(second.timestamp, timestamp, "timestamp should be preserved");
+        assert_eq!(
+            second.messages().len(),
+            1,
+            "normalize should keep one message"
+        );
+        let second_msg = &second.messages()[0];
+        assert_eq!(
+            second_msg.source(),
+            "stream",
+            "message source should be rewritten to stream binding",
+        );
+        let second_entries: Vec<(&str, Value)> = second_msg
+            .entries()
+            .map(|(key, value)| (key, value.clone()))
+            .collect();
+        assert_eq!(
+            second_entries,
+            vec![("a", Value::Int64(100)), ("b", Value::Null)],
+            "missing columns should be filled with null in schema order",
+        );
+    }
+}

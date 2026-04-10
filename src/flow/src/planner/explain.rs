@@ -1356,4 +1356,52 @@ mod tests {
             "shared stream ingest decoder should omit schema info"
         );
     }
+
+    #[test]
+    fn test_shared_stream_ingest_decoder_wraps_sampler() {
+        use crate::catalog::StreamDecoderConfig;
+        use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
+        use crate::processor::SamplerConfig;
+        use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
+        use std::time::Duration;
+
+        let stream_name = "shared_sampler_stream";
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            stream_name.to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        )]));
+
+        let plan = create_physical_plan_for_shared_stream(
+            stream_name,
+            Arc::clone(&schema),
+            StreamDecoderConfig::json(),
+            Some(SamplerConfig::new(Duration::from_millis(100))),
+        );
+
+        let report = ExplainReport::from_physical(plan);
+        let rows = report.rows();
+        let sampler_pos = rows
+            .iter()
+            .position(|row| row.id.contains("PhysicalSampler"))
+            .expect("shared stream ingest sampler should exist");
+        let sampler_row = &rows[sampler_pos];
+        let decoder_pos = rows
+            .iter()
+            .position(|row| row.id.contains("PhysicalDecoder"))
+            .expect("shared stream ingest decoder should exist");
+        let decoder_row = &rows[decoder_pos];
+
+        assert!(
+            decoder_pos < sampler_pos,
+            "decoder should wrap the sampler in the ingest explain tree: {}",
+            report.table_string()
+        );
+        assert!(
+            sampler_row.info.contains("interval=100ms")
+                && sampler_row.info.contains("strategy=latest"),
+            "shared ingest sampler info mismatch: {}",
+            sampler_row.info
+        );
+    }
 }

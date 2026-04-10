@@ -413,3 +413,93 @@ fn normalize_broker_url(url: &str) -> String {
         format!("tcp://{url}")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::connector::SinkConnector;
+    use crate::model::batch_from_columns_simple;
+    use crate::runtime::TaskSpawner;
+    use datatypes::Value;
+
+    fn test_spawner() -> TaskSpawner {
+        TaskSpawner::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("build test tokio runtime"),
+        )
+    }
+
+    #[tokio::test]
+    async fn mqtt_sink_connector_rejects_collection_payloads() {
+        let spawner = test_spawner();
+        let mut connector = MqttSinkConnector::new(
+            "mqtt_sink_collection_contract",
+            MqttSinkConfig::new(
+                "mqtt_sink_collection_contract",
+                "mqtt://localhost:1883",
+                "tests/mqtt/out",
+                0,
+            ),
+            Arc::<str>::from("default"),
+            MqttClientManager::new(spawner.clone()),
+            spawner,
+        );
+
+        let batch = batch_from_columns_simple(vec![(
+            "stream".to_string(),
+            "value".to_string(),
+            vec![Value::Int64(1)],
+        )])
+        .expect("build collection payload");
+
+        let err = connector
+            .send_collection(&batch)
+            .await
+            .expect_err("mqtt sink should reject collection payloads");
+        assert!(
+            err.to_string()
+                .contains("does not support collection payloads"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn mqtt_sink_build_mqtt_options_uses_sink_local_client_and_packet_limit() {
+        let config = MqttSinkConfig::new("mqtt_sink", "sink.example.com", "tests/mqtt/out", 1)
+            .with_client_id("sink_client")
+            .with_max_packet_size(4096);
+
+        let options = build_mqtt_options(&config).expect("build mqtt sink options");
+
+        assert_eq!(
+            options.broker_address(),
+            ("sink.example.com".to_string(), 1883)
+        );
+        assert_eq!(options.client_id(), "sink_client");
+        assert_eq!(options.max_packet_size(), 4096);
+        assert!(matches!(options.transport(), Transport::Tcp));
+    }
+
+    #[test]
+    fn mqtt_sink_build_mqtt_options_enables_tls_and_secure_default_port() {
+        let config = MqttSinkConfig::new(
+            "mqtt_sink",
+            "mqtts://secure-sink.example.com",
+            "tests/mqtt/out",
+            1,
+        )
+        .with_max_packet_size(8192);
+
+        let options = build_mqtt_options(&config).expect("build secure mqtt sink options");
+
+        assert_eq!(
+            options.broker_address(),
+            ("secure-sink.example.com".to_string(), 8883)
+        );
+        assert_eq!(options.client_id(), "mqtt_sink");
+        assert_eq!(options.max_packet_size(), 8192);
+        assert!(matches!(options.transport(), Transport::Tls(_)));
+    }
+}

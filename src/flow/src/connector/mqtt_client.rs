@@ -365,9 +365,12 @@ fn is_tls_scheme(scheme: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{mqtt_topic_matches, MqttClientManager, SharedMqttClientConfig};
+    use super::{
+        build_mqtt_options, mqtt_topic_matches, MqttClientManager, SharedMqttClientConfig,
+    };
     use crate::connector::ConnectorError;
     use crate::runtime::TaskSpawner;
+    use rumqttc::Transport;
     use tokio::runtime::Handle;
 
     #[test]
@@ -438,5 +441,49 @@ mod tests {
         ));
 
         drop(held);
+    }
+
+    #[test]
+    fn shared_mqtt_build_mqtt_options_uses_shared_client_packet_limit() {
+        let config = SharedMqttClientConfig {
+            key: "shared".to_string(),
+            broker_url: "shared.example.com".to_string(),
+            topic: "fleet/+/telemetry".to_string(),
+            client_id: "shared_client".to_string(),
+            qos: 1,
+            max_packet_size: Some(16384),
+        };
+
+        let options = build_mqtt_options(&config).expect("build shared mqtt options");
+
+        assert_eq!(
+            options.broker_address(),
+            ("shared.example.com".to_string(), 1883)
+        );
+        assert_eq!(options.client_id(), "shared_client");
+        assert_eq!(options.max_packet_size(), 16384);
+        assert!(matches!(options.transport(), Transport::Tcp));
+    }
+
+    #[test]
+    fn shared_mqtt_build_mqtt_options_enables_tls_and_secure_default_port() {
+        let config = SharedMqttClientConfig {
+            key: "shared_tls".to_string(),
+            broker_url: "mqtts://secure-shared.example.com".to_string(),
+            topic: "fleet/+/telemetry".to_string(),
+            client_id: "shared_tls_client".to_string(),
+            qos: 1,
+            max_packet_size: None,
+        };
+
+        let options = build_mqtt_options(&config).expect("build secure shared mqtt options");
+
+        assert_eq!(
+            options.broker_address(),
+            ("secure-shared.example.com".to_string(), 8883)
+        );
+        assert_eq!(options.client_id(), "shared_tls_client");
+        assert_eq!(options.max_packet_size(), 64 * 1024 * 1024);
+        assert!(matches!(options.transport(), Transport::Tls(_)));
     }
 }
