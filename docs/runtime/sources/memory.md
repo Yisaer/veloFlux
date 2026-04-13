@@ -44,6 +44,8 @@ Additional constraints:
 - Shared streams do **not** support `type=memory`.
 - `decoder.type == "none"` is only supported for `type=memory`.
 - `decoder.type == "none"` cannot be used together with `eventtime` (eventtime needs decoded rows).
+- The referenced memory topic must already be declared before stream creation.
+- Stream creation rejects memory topic kind / decoder mismatches before the stream is installed.
 
 ## Data Semantics
 
@@ -54,7 +56,8 @@ The memory topic kind and stream decoder determine what the source expects:
   - The physical plan inserts the configured decoder (for example `json`) before the datasource.
 - **Topic kind = `collection`**:
   - The source ingests `Collection` from the topic.
-  - The stream must be created with `decoder.type = "none"`.
+  - The stream must be created with `decoder.type = "none"`; create-time validation rejects a
+    non-`none` decoder against a `collection` topic.
   - The physical plan does **not** insert a decoder node.
   - The logical optimizer preserves the stream **full schema** (no schema pruning) to keep
     `ColumnRef::ByIndex(source_name, idx)` semantics stable.

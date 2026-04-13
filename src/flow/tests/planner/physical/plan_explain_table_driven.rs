@@ -77,6 +77,19 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     )
     .with_sampler(SamplerConfig::new(Duration::from_millis(100)));
 
+    let shared_stream_sampler_schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "shared_stream_sampler".to_string(),
+        "a".to_string(),
+        ConcreteDatatype::Int64(Int64Type),
+    )]));
+    let shared_stream_sampler_def = StreamDefinition::new(
+        "shared_stream_sampler",
+        Arc::clone(&shared_stream_sampler_schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    )
+    .with_sampler(SamplerConfig::new(Duration::from_millis(100)));
+
     let user_struct = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![
         StructField::new("c".to_string(), ConcreteDatatype::Int64(Int64Type), false),
         StructField::new("d".to_string(), ConcreteDatatype::String(StringType), false),
@@ -242,6 +255,10 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     let mut stream_defs = HashMap::new();
     stream_defs.insert("stream".to_string(), Arc::new(stream_def));
     stream_defs.insert("stream_sampler".to_string(), Arc::new(stream_sampler_def));
+    stream_defs.insert(
+        "shared_stream_sampler".to_string(),
+        Arc::new(shared_stream_sampler_def),
+    );
     stream_defs.insert("stream_2".to_string(), Arc::new(stream_2_def));
     stream_defs.insert("stream_enc".to_string(), Arc::new(stream_enc_def));
     stream_defs.insert("stream_ab".to_string(), Arc::new(stream_ab_def));
@@ -326,6 +343,8 @@ fn bindings_for_select(
                     && def.decoder().kind() == "none"
                 {
                     SourceBindingKind::MemoryCollection
+                } else if source.name == "shared_stream_sampler" {
+                    SourceBindingKind::Shared
                 } else {
                     SourceBindingKind::Regular
                 };
@@ -774,6 +793,12 @@ fn plan_explain_table_driven() {
             sql: "SELECT a FROM stream_sampler",
             options: PipelineOptions::default(),
             expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_sampler","decoder=json","schema=[a]","sampler.strategy=latest"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_sampler","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalSampler_1","info":["interval=100ms","strategy=latest"],"operator":"PhysicalSampler"}],"id":"PhysicalDecoder_2","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_3","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "planner_explain_sampler_appears_before_decoder_for_shared_ingest_path",
+            sql: "SELECT a FROM shared_stream_sampler",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=shared_stream_sampler","decoder=json","schema=[a]","sampler.strategy=latest"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"shared/shared_stream_sampler/PhysicalDataSource_0","info":["scope=shared_stream","source=shared_stream_sampler","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"shared/shared_stream_sampler/PhysicalSampler_1","info":["scope=shared_stream","interval=100ms","strategy=latest"],"operator":"PhysicalSampler"}],"id":"shared/shared_stream_sampler/PhysicalDecoder_2","info":["scope=shared_stream","decoder=json"],"operator":"PhysicalDecoder"}],"id":"shared/shared_stream_sampler/PhysicalResultCollect_3","info":["scope=shared_stream"],"operator":"PhysicalResultCollect"}],"id":"PhysicalSharedStream_0","info":["source=shared_stream_sampler","schema=[a]"],"operator":"PhysicalSharedStream"}],"id":"PhysicalProject_1","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "memory_collection_source_inserts_layout_normalize",

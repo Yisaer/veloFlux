@@ -3,7 +3,7 @@ use crate::pipeline::{CreatePipelineRequest, build_pipeline_definition};
 use crate::startup::StartupPhase;
 use crate::stream::{
     CreateStreamRequest, build_schema_from_request, build_stream_decoder, build_stream_props,
-    validate_memory_stream_topic, validate_stream_decoder_config,
+    validate_memory_stream_binding, validate_memory_stream_topic, validate_stream_decoder_config,
 };
 use flow::catalog::EventtimeDefinition;
 use flow::catalog::StreamDefinition;
@@ -141,7 +141,7 @@ async fn hydrate_instance_globals_from_storage(
     }
 
     for stream in storage.list_streams().map_err(|e| e.to_string())? {
-        if let Err(err) = restore_stream(stream.clone(), instance).await {
+        if let Err(err) = restore_stream(stream.clone(), storage, instance).await {
             summary.stream_failures += 1;
             tracing::error!(stream_id = %stream.id, error = %err, "failed to restore stream");
         }
@@ -163,7 +163,11 @@ async fn hydrate_pipelines_into_instances_from_storage(
     Ok(failures)
 }
 
-async fn restore_stream(stream: StoredStream, instance: &flow::FlowInstance) -> Result<(), String> {
+async fn restore_stream(
+    stream: StoredStream,
+    storage: &StorageManager,
+    instance: &flow::FlowInstance,
+) -> Result<(), String> {
     let decoder_registry = instance.decoder_registry();
     let def = stream_definition_from_stored(&stream, decoder_registry.as_ref())?;
     let req = serde_json::from_str::<CreateStreamRequest>(&stream.raw_json)
@@ -172,6 +176,7 @@ async fn restore_stream(stream: StoredStream, instance: &flow::FlowInstance) -> 
     validate_stream_decoder_config(&req, def.decoder())?;
     if let flow::catalog::StreamProps::Memory(memory_props) = def.props() {
         validate_memory_stream_topic(&req, memory_props)?;
+        validate_memory_stream_binding(&req, memory_props, def.decoder(), storage)?;
     }
     instance
         .create_stream(def, shared)

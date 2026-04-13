@@ -790,7 +790,7 @@ fn create_physical_data_source_with_builder(
                 &logical_ds.source_name,
                 Arc::clone(&schema),
                 logical_ds.decoder().clone(),
-                None,
+                logical_ds.sampler().cloned(),
             );
             let physical_shared = PhysicalSharedStream::new(
                 logical_ds.source_name.clone(),
