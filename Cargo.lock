@@ -4824,6 +4824,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "veloflux-ffi"
+version = "0.0.1"
+dependencies = [
+ "veloflux",
+]
+
+[[package]]
 name = "veloflux-sdv"
 version = "0.4.0"
 dependencies = [

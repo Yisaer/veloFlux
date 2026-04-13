@@ -23,7 +23,9 @@ use axum::Router;
 use axum::routing::{delete, get, post};
 use pipeline::AppState;
 use startup::StartupPhase;
+use std::future::{Future, pending};
 use std::net::SocketAddr;
+use std::sync::mpsc::SyncSender;
 use storage::StorageManager;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
@@ -117,13 +119,18 @@ fn build_app(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn start_server_with_listener(
+async fn serve_manager_with_listener<F>(
     listener: TcpListener,
     instance: flow::FlowInstance,
     storage: StorageManager,
     flow_instances: Vec<FlowInstanceSpec>,
     extra_flow_worker_endpoints: Vec<(String, String)>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    shutdown: F,
+    startup_tx: Option<SyncSender<Result<(), String>>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let state = AppState::new(
         instance,
         storage,
@@ -137,11 +144,63 @@ pub async fn start_server_with_listener(
         )
     })?;
     if let Err(err) = state.bootstrap_from_storage().await {
-        return Err(format!("failed to bootstrap from storage: {err}").into());
+        let err = format!("failed to bootstrap from storage: {err}");
+        if let Some(tx) = startup_tx {
+            let _ = tx.send(Err(err.clone()));
+        }
+        return Err(err.into());
+    }
+    if let Some(tx) = startup_tx {
+        let _ = tx.send(Ok(()));
     }
     let app = build_app(state);
-    axum::serve(listener, app.into_make_service()).await?;
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
+}
+
+pub async fn start_server_with_listener(
+    listener: TcpListener,
+    instance: flow::FlowInstance,
+    storage: StorageManager,
+    flow_instances: Vec<FlowInstanceSpec>,
+    extra_flow_worker_endpoints: Vec<(String, String)>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    start_server_with_listener_and_shutdown(
+        instance,
+        storage,
+        flow_instances,
+        extra_flow_worker_endpoints,
+        pending(),
+        None,
+        listener,
+    )
+    .await
+}
+
+pub async fn start_server_with_listener_and_shutdown<F>(
+    instance: flow::FlowInstance,
+    storage: StorageManager,
+    flow_instances: Vec<FlowInstanceSpec>,
+    extra_flow_worker_endpoints: Vec<(String, String)>,
+    shutdown: F,
+    startup_tx: Option<SyncSender<Result<(), String>>>,
+    listener: TcpListener,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    serve_manager_with_listener(
+        listener,
+        instance,
+        storage,
+        flow_instances,
+        extra_flow_worker_endpoints,
+        shutdown,
+        startup_tx,
+    )
+    .await
 }
 
 pub async fn start_server(
@@ -175,6 +234,51 @@ pub async fn start_server(
         storage,
         flow_instances,
         extra_flow_worker_endpoints,
+    )
+    .await
+}
+
+pub async fn start_server_with_shutdown<F>(
+    addr: String,
+    instance: flow::FlowInstance,
+    storage: StorageManager,
+    flow_instances: Vec<FlowInstanceSpec>,
+    extra_flow_worker_endpoints: Vec<(String, String)>,
+    shutdown: F,
+    startup_tx: Option<SyncSender<Result<(), String>>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let addr: SocketAddr = addr.parse()?;
+    let bind_phase = StartupPhase::new("manager", "default", "server_bind");
+    let listener = match TcpListener::bind(addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            if let Some(tx) = startup_tx {
+                let _ = tx.send(Err(err.to_string()));
+            }
+            bind_phase.log_failure(&err);
+            return Err(err.into());
+        }
+    };
+    tracing::info!(
+        mode = "manager",
+        flow_instance_id = "default",
+        phase = "server_bind",
+        result = "succeeded",
+        elapsed_ms = bind_phase.elapsed_ms(),
+        manager_addr = %addr,
+        "manager listening"
+    );
+    start_server_with_listener_and_shutdown(
+        instance,
+        storage,
+        flow_instances,
+        extra_flow_worker_endpoints,
+        shutdown,
+        startup_tx,
+        listener,
     )
     .await
 }

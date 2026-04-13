@@ -17,6 +17,7 @@ pub mod bootstrap;
 pub mod cgroup;
 pub mod config;
 pub mod distro;
+pub mod embedded;
 pub mod logging;
 pub mod server;
 pub mod startup;

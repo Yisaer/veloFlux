@@ -62,17 +62,22 @@ impl CliFlags {
     }
 }
 
-/// Parse CLI/config and initialize logging/options without preparing FlowInstance.
-pub fn default_init_options(
-) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
-    let cli_flags = CliFlags::parse();
-    let (config, loaded_config_path) = if let Some(path) = cli_flags.config_path.as_deref() {
+fn load_config_with_path(
+    config_path: Option<&str>,
+) -> Result<(AppConfig, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(path) = config_path {
         let cfg = AppConfig::load_required(path)?;
-        (cfg, Some(path.to_string()))
+        Ok((cfg, Some(path.to_string())))
     } else {
-        (AppConfig::load_default_with_env()?, None)
-    };
+        Ok((AppConfig::load_default_with_env()?, None))
+    }
+}
 
+fn init_options_from_loaded_config(
+    config: AppConfig,
+    loaded_config_path: Option<String>,
+    data_dir: Option<&str>,
+) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
     let logging_guard = crate::logging::init_logging(&config.logging)?;
     let bootstrap_phase = StartupPhase::new(
         "manager",
@@ -90,7 +95,7 @@ pub fn default_init_options(
     );
 
     let mut options = config.to_server_options();
-    if let Some(dir) = cli_flags.data_dir.as_deref() {
+    if let Some(dir) = data_dir {
         options.data_dir = Some(dir.to_string());
     }
     options.config_path = loaded_config_path;
@@ -112,6 +117,21 @@ pub fn default_init_options(
         options,
         logging_guard,
     })
+}
+
+pub fn init_options_from_config_path(
+    config_path: &str,
+) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
+    let (config, loaded_config_path) = load_config_with_path(Some(config_path))?;
+    init_options_from_loaded_config(config, loaded_config_path, None)
+}
+
+/// Parse CLI/config and initialize logging/options without preparing FlowInstance.
+pub fn default_init_options(
+) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
+    let cli_flags = CliFlags::parse();
+    let (config, loaded_config_path) = load_config_with_path(cli_flags.config_path.as_deref())?;
+    init_options_from_loaded_config(config, loaded_config_path, cli_flags.data_dir.as_deref())
 }
 
 /// Perform default initialization: parse CLI, load config, init logging, prepare instance.
