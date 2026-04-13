@@ -4,7 +4,7 @@ use crate::catalog::{
 use crate::expr::func::EvalError;
 use datatypes::{ConcreteDatatype, ListValue, StructField, StructType, StructValue, Value};
 use regex::Regex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 // helpers for definition
@@ -254,29 +254,38 @@ pub fn binary_string_fn_def(
 }
 
 // helpers for testing
+#[cfg(test)]
 pub fn i(v: i64) -> Value {
     Value::Int64(v)
 }
 
+#[cfg(test)]
 pub fn f(v: f64) -> Value {
     Value::Float64(v)
 }
 
+#[cfg(test)]
 pub fn s(v: &str) -> Value {
     Value::String(v.to_string())
 }
 
+#[cfg(test)]
 pub fn b(v: bool) -> Value {
     Value::Bool(v)
 }
 
+pub fn ah(v: Vec<Value>) -> Value {
+    Value::List(ListValue::new(v, Arc::new(ConcreteDatatype::Null)))
+}
+
+#[cfg(test)]
 pub fn n() -> Value {
     Value::Null
 }
 
 #[cfg(test)]
 pub fn a(v: Vec<Value>) -> Value {
-    array_to_value(v).unwrap()
+    array_to_value(v).expect("test helper a(): failed to build array value")
 }
 
 #[cfg(test)]
@@ -381,6 +390,37 @@ pub fn assert_map(v: Value, expected_entries: Vec<(&str, Value)>) {
             assert_eq!(actual, expected_map);
         }
         other => panic!("expected map, got {:?}", other),
+    }
+}
+
+#[cfg(test)]
+pub fn assert_array_of_maps(actual: Value, expected: Vec<Vec<(&str, Value)>>) {
+    match actual {
+        Value::List(list) => {
+            let items = list.items();
+
+            assert_eq!(
+                items.len(),
+                expected.len(),
+                "array length mismatch: got {}, expected {}",
+                items.len(),
+                expected.len()
+            );
+
+            for (i, (item, expected_map)) in items.iter().zip(expected.into_iter()).enumerate() {
+                match item {
+                    Value::Struct(_) => {
+                        assert_map(item.clone(), expected_map);
+                    }
+                    other => {
+                        panic!("expected element {} to be object, got {:?}", i, other);
+                    }
+                }
+            }
+        }
+        other => {
+            panic!("expected array, got {:?}", other);
+        }
     }
 }
 
@@ -1020,4 +1060,277 @@ pub fn array_distinct_values(values: Vec<Value>) -> Vec<Value> {
         }
     }
     out
+}
+
+// object
+pub fn nth_object_or_null(
+    args: &[Value],
+    idx: usize,
+) -> Result<Option<BTreeMap<String, Value>>, EvalError> {
+    match args.get(idx) {
+        Some(Value::Null) => Ok(None),
+        Some(v) => Ok(Some(value_to_map(v)?)),
+        None => Err(EvalError::TypeMismatch {
+            expected: format!("argument {}", idx),
+            actual: format!("missing argument {}", idx),
+        }),
+    }
+}
+
+pub fn validate_one_object_or_null(args: &[Value]) -> Result<(), EvalError> {
+    validate_arity(args, &[1])?;
+    nth_object_or_null(args, 0)?;
+    Ok(())
+}
+
+pub fn validate_two_objects_or_null(args: &[Value]) -> Result<(), EvalError> {
+    validate_arity(args, &[2])?;
+    nth_object_or_null(args, 0)?;
+    nth_object_or_null(args, 1)?;
+    Ok(())
+}
+
+pub fn nth_string_array_or_null(
+    args: &[Value],
+    idx: usize,
+) -> Result<Option<Vec<String>>, EvalError> {
+    let Some(values) = nth_array_or_null(args, idx)? else {
+        return Ok(None);
+    };
+
+    let mut out = Vec::with_capacity(values.len());
+    for v in values {
+        out.push(value_to_string(&v)?);
+    }
+    Ok(Some(out))
+}
+
+pub fn value_to_string_vec(value: &Value) -> Result<Vec<String>, EvalError> {
+    match value {
+        Value::List(list) => {
+            let mut out = Vec::with_capacity(list.items().len());
+            for item in list.items() {
+                out.push(value_to_string(item)?);
+            }
+            Ok(out)
+        }
+        other => Err(EvalError::TypeMismatch {
+            expected: "array of strings".to_string(),
+            actual: format!("{:?}", other),
+        }),
+    }
+}
+
+pub fn string_set(values: &[String]) -> BTreeSet<String> {
+    values.iter().cloned().collect()
+}
+
+// json conversion
+pub fn value_to_json_value(v: &Value) -> Result<serde_json::Value, EvalError> {
+    match v {
+        Value::Null => Ok(serde_json::Value::Null),
+        Value::Bool(b) => Ok(serde_json::Value::Bool(*b)),
+
+        Value::Int8(x) => Ok(serde_json::Value::from(*x)),
+        Value::Int16(x) => Ok(serde_json::Value::from(*x)),
+        Value::Int32(x) => Ok(serde_json::Value::from(*x)),
+        Value::Int64(x) => Ok(serde_json::Value::from(*x)),
+
+        Value::Uint8(x) => Ok(serde_json::Value::from(*x)),
+        Value::Uint16(x) => Ok(serde_json::Value::from(*x)),
+        Value::Uint32(x) => Ok(serde_json::Value::from(*x)),
+        Value::Uint64(x) => Ok(serde_json::Value::from(*x)),
+
+        Value::Float32(x) => serde_json::Number::from_f64(*x as f64)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| EvalError::TypeMismatch {
+                expected: "finite float".to_string(),
+                actual: format!("{:?}", x),
+            }),
+
+        Value::Float64(x) => serde_json::Number::from_f64(*x)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| EvalError::TypeMismatch {
+                expected: "finite float".to_string(),
+                actual: format!("{:?}", x),
+            }),
+
+        Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+
+        Value::List(list) => {
+            let mut out = Vec::with_capacity(list.items().len());
+            for item in list.items() {
+                out.push(value_to_json_value(item)?);
+            }
+            Ok(serde_json::Value::Array(out))
+        }
+
+        Value::Struct(_) => {
+            let map = value_to_map(v)?;
+            let mut out = serde_json::Map::new();
+            for (k, val) in map {
+                out.insert(k, value_to_json_value(&val)?);
+            }
+            Ok(serde_json::Value::Object(out))
+        }
+    }
+}
+
+pub fn json_value_to_value(v: &serde_json::Value) -> Result<Value, EvalError> {
+    match v {
+        serde_json::Value::Null => Ok(Value::Null),
+        serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
+
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(Value::Int64(i))
+            } else if let Some(u) = n.as_u64() {
+                Ok(Value::Uint64(u))
+            } else if let Some(f) = n.as_f64() {
+                Ok(Value::Float64(f))
+            } else {
+                Err(EvalError::TypeMismatch {
+                    expected: "valid JSON number".to_string(),
+                    actual: n.to_string(),
+                })
+            }
+        }
+
+        serde_json::Value::String(s) => Ok(Value::String(s.clone())),
+
+        serde_json::Value::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for item in arr {
+                out.push(json_value_to_value(item)?);
+            }
+            Ok(ah(out))
+        }
+
+        serde_json::Value::Object(obj) => {
+            let mut out = std::collections::BTreeMap::new();
+            for (k, val) in obj {
+                out.insert(k.clone(), json_value_to_value(val)?);
+            }
+            map_to_value(out)
+        }
+    }
+}
+
+pub fn cast_to_bigint(v: &Value) -> Result<Value, EvalError> {
+    match v {
+        Value::Null => Ok(Value::Null),
+        Value::Int8(x) => Ok(Value::Int64(*x as i64)),
+        Value::Int16(x) => Ok(Value::Int64(*x as i64)),
+        Value::Int32(x) => Ok(Value::Int64(*x as i64)),
+        Value::Int64(x) => Ok(Value::Int64(*x)),
+        Value::Uint8(x) => Ok(Value::Int64(*x as i64)),
+        Value::Uint16(x) => Ok(Value::Int64(*x as i64)),
+        Value::Uint32(x) => Ok(Value::Int64(*x as i64)),
+        Value::Uint64(x) => {
+            i64::try_from(*x)
+                .map(Value::Int64)
+                .map_err(|_| EvalError::TypeMismatch {
+                    expected: "int64-compatible value".to_string(),
+                    actual: format!("{:?}", v),
+                })
+        }
+        Value::Float32(x) => Ok(Value::Int64(*x as i64)),
+        Value::Float64(x) => Ok(Value::Int64(*x as i64)),
+        Value::Bool(x) => Ok(Value::Int64(if *x { 1 } else { 0 })),
+        Value::String(s) => {
+            s.parse::<i64>()
+                .map(Value::Int64)
+                .map_err(|_| EvalError::TypeMismatch {
+                    expected: "string parseable as bigint".to_string(),
+                    actual: s.clone(),
+                })
+        }
+        other => Err(EvalError::TypeMismatch {
+            expected: "castable to bigint".to_string(),
+            actual: format!("{:?}", other),
+        }),
+    }
+}
+
+pub fn cast_to_float(v: &Value) -> Result<Value, EvalError> {
+    match v {
+        Value::Null => Ok(Value::Null),
+        Value::Int8(x) => Ok(Value::Float64(*x as f64)),
+        Value::Int16(x) => Ok(Value::Float64(*x as f64)),
+        Value::Int32(x) => Ok(Value::Float64(*x as f64)),
+        Value::Int64(x) => Ok(Value::Float64(*x as f64)),
+        Value::Uint8(x) => Ok(Value::Float64(*x as f64)),
+        Value::Uint16(x) => Ok(Value::Float64(*x as f64)),
+        Value::Uint32(x) => Ok(Value::Float64(*x as f64)),
+        Value::Uint64(x) => Ok(Value::Float64(*x as f64)),
+        Value::Float32(x) => Ok(Value::Float64(*x as f64)),
+        Value::Float64(x) => Ok(Value::Float64(*x)),
+        Value::Bool(x) => Ok(Value::Float64(if *x { 1.0 } else { 0.0 })),
+        Value::String(s) => {
+            s.parse::<f64>()
+                .map(Value::Float64)
+                .map_err(|_| EvalError::TypeMismatch {
+                    expected: "string parseable as float".to_string(),
+                    actual: s.clone(),
+                })
+        }
+        other => Err(EvalError::TypeMismatch {
+            expected: "castable to float".to_string(),
+            actual: format!("{:?}", other),
+        }),
+    }
+}
+
+pub fn cast_to_string(v: &Value) -> Result<Value, EvalError> {
+    match v {
+        Value::Null => Ok(Value::Null),
+        Value::String(s) => Ok(Value::String(s.clone())),
+        Value::Bool(x) => Ok(Value::String(x.to_string())),
+        Value::Int8(x) => Ok(Value::String(x.to_string())),
+        Value::Int16(x) => Ok(Value::String(x.to_string())),
+        Value::Int32(x) => Ok(Value::String(x.to_string())),
+        Value::Int64(x) => Ok(Value::String(x.to_string())),
+        Value::Uint8(x) => Ok(Value::String(x.to_string())),
+        Value::Uint16(x) => Ok(Value::String(x.to_string())),
+        Value::Uint32(x) => Ok(Value::String(x.to_string())),
+        Value::Uint64(x) => Ok(Value::String(x.to_string())),
+        Value::Float32(x) => Ok(Value::String(x.to_string())),
+        Value::Float64(x) => Ok(Value::String(x.to_string())),
+        other => Err(EvalError::TypeMismatch {
+            expected: "castable to string".to_string(),
+            actual: format!("{:?}", other),
+        }),
+    }
+}
+
+pub fn cast_to_boolean(v: &Value) -> Result<Value, EvalError> {
+    match v {
+        Value::Null => Ok(Value::Null),
+        Value::Bool(x) => Ok(Value::Bool(*x)),
+        Value::Int8(x) => Ok(Value::Bool(*x != 0)),
+        Value::Int16(x) => Ok(Value::Bool(*x != 0)),
+        Value::Int32(x) => Ok(Value::Bool(*x != 0)),
+        Value::Int64(x) => Ok(Value::Bool(*x != 0)),
+        Value::Uint8(x) => Ok(Value::Bool(*x != 0)),
+        Value::Uint16(x) => Ok(Value::Bool(*x != 0)),
+        Value::Uint32(x) => Ok(Value::Bool(*x != 0)),
+        Value::Uint64(x) => Ok(Value::Bool(*x != 0)),
+        Value::Float32(x) => Ok(Value::Bool(*x != 0.0)),
+        Value::Float64(x) => Ok(Value::Bool(*x != 0.0)),
+        Value::String(s) => {
+            let lower = s.trim().to_ascii_lowercase();
+            match lower.as_str() {
+                "true" | "1" => Ok(Value::Bool(true)),
+                "false" | "0" => Ok(Value::Bool(false)),
+                _ => Err(EvalError::TypeMismatch {
+                    expected: "string parseable as boolean".to_string(),
+                    actual: s.clone(),
+                }),
+            }
+        }
+        other => Err(EvalError::TypeMismatch {
+            expected: "castable to boolean".to_string(),
+            actual: format!("{:?}", other),
+        }),
+    }
 }

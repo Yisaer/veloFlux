@@ -1,8 +1,7 @@
-use std::hash::{Hash, Hasher};
-use std::sync::Arc;
-
 use crate::datatypes::ConcreteDatatype;
 use crate::types::StructType;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 /// List value containing items and their datatype
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -229,11 +228,11 @@ impl Hash for Value {
                 v.hash(state);
             }
             Value::Struct(v) => {
-                13_u8.hash(state);
+                14_u8.hash(state);
                 v.hash(state);
             }
             Value::List(v) => {
-                14_u8.hash(state);
+                15_u8.hash(state);
                 v.hash(state);
             }
         }

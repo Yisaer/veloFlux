@@ -12,6 +12,17 @@ use super::string_func::{
     ReverseFunc, SplitValueFunc, StartsWithFunc, SubstringFunc, TrimFunc, UpperFunc,
 };
 
+use super::obj_func::{
+    EraseFunc, ItemsFunc, KeysFunc, ObjToKvPairArrayFunc, ObjectConcatFunc, ObjectConstructFunc,
+    ObjectFunc, ObjectPickFunc, ObjectSizeFunc, ValuesFunc, ZipFunc,
+};
+
+use super::misc_func::{
+    BypassFunc, CardinalityFunc, CastFunc, ChrFunc, CoalesceFunc, Crc32Func, Dec2HexFunc,
+    DecodeFunc, DelayFunc, EncodeFunc, Hex2DecFunc, Md5Func, NewUuidFunc, ParseJsonFunc, Sha1Func,
+    Sha256Func, Sha384Func, Sha512Func, ToJsonFunc, TruncFunc, TstampFunc,
+};
+
 use super::CustomFunc;
 
 use std::collections::HashMap;
@@ -47,6 +58,8 @@ impl CustomFuncRegistry {
         register_math_functions(&mut functions);
         register_null_functions(&mut functions);
         register_string_functions(&mut functions);
+        register_object_functions(&mut functions);
+        register_misc_functions(&mut functions);
 
         Self { functions }
     }
@@ -130,6 +143,52 @@ fn register_string_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>
     }
 }
 
+fn register_object_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>) {
+    for func in [
+        Arc::new(KeysFunc) as Arc<dyn CustomFunc>,
+        Arc::new(ValuesFunc),
+        Arc::new(ObjectFunc),
+        Arc::new(ZipFunc),
+        Arc::new(ItemsFunc),
+        Arc::new(ObjectConcatFunc),
+        Arc::new(ObjectConstructFunc),
+        Arc::new(EraseFunc),
+        Arc::new(ObjectSizeFunc),
+        Arc::new(ObjectPickFunc),
+        Arc::new(ObjToKvPairArrayFunc),
+    ] {
+        register(functions, func);
+    }
+}
+
+fn register_misc_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>) {
+    for func in [
+        Arc::new(BypassFunc) as Arc<dyn CustomFunc>,
+        Arc::new(ChrFunc),
+        Arc::new(EncodeFunc),
+        Arc::new(DecodeFunc),
+        Arc::new(TruncFunc),
+        Arc::new(Md5Func),
+        Arc::new(Sha1Func),
+        Arc::new(Sha256Func),
+        Arc::new(Sha384Func),
+        Arc::new(Sha512Func),
+        Arc::new(Crc32Func),
+        Arc::new(CoalesceFunc),
+        Arc::new(Hex2DecFunc),
+        Arc::new(Dec2HexFunc),
+        Arc::new(ToJsonFunc),
+        Arc::new(ParseJsonFunc),
+        Arc::new(CardinalityFunc),
+        Arc::new(NewUuidFunc),
+        Arc::new(CastFunc),
+        Arc::new(TstampFunc),
+        Arc::new(DelayFunc),
+    ] {
+        register(functions, func);
+    }
+}
+
 impl Default for CustomFuncRegistry {
     fn default() -> Self {
         Self::builtins()
@@ -185,6 +244,57 @@ mod tests {
         assert!(registry.is_registered("split_value"));
         assert!(registry.is_registered("trim"));
         assert!(registry.is_registered("upper"));
+    }
+
+    #[test]
+    fn builtins_include_object_functions() {
+        let registry = CustomFuncRegistry::default();
+
+        assert!(registry.is_registered("keys"));
+        assert!(registry.is_registered("values"));
+        assert!(registry.is_registered("object"));
+        assert!(registry.is_registered("zip"));
+        assert!(registry.is_registered("items"));
+        assert!(registry.is_registered("object_concat"));
+        assert!(registry.is_registered("object_construct"));
+        assert!(registry.is_registered("erase"));
+        assert!(registry.is_registered("object_size"));
+    }
+
+    #[test]
+    fn builtins_include_misc_functions() {
+        let registry = CustomFuncRegistry::default();
+
+        assert!(registry.is_registered("bypass"));
+        assert!(registry.is_registered("chr"));
+        assert!(registry.is_registered("encode"));
+        assert!(registry.is_registered("decode"));
+        assert!(registry.is_registered("trunc"));
+
+        assert!(registry.is_registered("md5"));
+        assert!(registry.is_registered("sha1"));
+        assert!(registry.is_registered("sha256"));
+        assert!(registry.is_registered("sha384"));
+        assert!(registry.is_registered("sha512"));
+        assert!(registry.is_registered("crc32"));
+
+        assert!(registry.is_registered("coalesce"));
+
+        assert!(registry.is_registered("hex2dec"));
+        assert!(registry.is_registered("dec2hex"));
+
+        assert!(registry.is_registered("to_json"));
+        assert!(registry.is_registered("parse_json"));
+
+        assert!(registry.is_registered("cardinality"));
+        assert!(registry.is_registered("newuuid"));
+        assert!(registry.is_registered("cast"));
+        assert!(registry.is_registered("tstamp"));
+        assert!(registry.is_registered("delay"));
+
+        assert!(registry.is_registered("NEWUUID"));
+        assert!(registry.get("TsTaMp").is_some());
+        assert!(registry.get("CAST").is_some());
     }
 
     #[test]
