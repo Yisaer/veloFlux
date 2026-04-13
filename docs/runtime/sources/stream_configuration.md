@@ -171,8 +171,10 @@ Built-in strategies are:
 Planner/runtime behavior:
 
 - the sampler sits between the physical data source and the decoder
-- all pipelines that read the same stream observe the same sampled output
-- shared-stream ingest plans may also include the sampler before decode
+- for non-shared streams, the sampler is instantiated inside each consuming pipeline runtime
+- for shared streams, the sampler is instantiated inside the shared ingest runtime before decode
+- consumers of the same shared stream on the same instance therefore observe the same sampled
+  output from that shared ingest path
 
 This makes sampler semantics part of the source contract rather than a query-local optimization.
 
