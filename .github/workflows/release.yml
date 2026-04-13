@@ -43,3 +43,27 @@ jobs:
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: veloflux-${{ matrix.asset_suffix }}.tar.gz
+
+  build-and-upload-ffi:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Linux FFI shared library
+        run: cargo build -p veloflux-ffi --release
+      - name: Prepare FFI asset
+        run: |
+          ASSET_NAME="veloflux-ffi-linux-x86_64"
+          mkdir -p "$ASSET_NAME"
+          cp target/release/libveloflux_ffi.so "$ASSET_NAME/"
+          cp src/ffi/include/veloflux_ffi.h "$ASSET_NAME/"
+          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
+          rm -rf "$ASSET_NAME"
+      - name: Upload FFI release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: veloflux-ffi-linux-x86_64.tar.gz

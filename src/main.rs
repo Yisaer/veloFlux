@@ -220,9 +220,11 @@ async fn run_worker(
         services_phase.log_failure(err.as_ref());
         return Err(err);
     }
-    if opts.profiling_enabled.unwrap_or(false) {
-        veloflux::server::start_profile_server(&opts);
-    }
+    let _profile_server = if opts.profiling_enabled.unwrap_or(false) {
+        Some(veloflux::server::start_profile_server(&opts))
+    } else {
+        None
+    };
     tracing::info!(
         mode = services_phase.mode(),
         flow_instance_id = %services_phase.flow_instance_id(),

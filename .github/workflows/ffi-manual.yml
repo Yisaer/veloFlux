@@ -1,0 +1,26 @@
+name: FFI Manual Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-ffi-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Linux FFI shared library
+        run: cargo build -p veloflux-ffi --release
+      - name: Prepare FFI artifact
+        run: |
+          ASSET_DIR="veloflux-ffi-linux-x86_64"
+          mkdir -p "$ASSET_DIR"
+          cp target/release/libveloflux_ffi.so "$ASSET_DIR/"
+          cp src/ffi/include/veloflux_ffi.h "$ASSET_DIR/"
+          tar -czf "${ASSET_DIR}.tar.gz" "$ASSET_DIR"
+      - name: Upload FFI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloflux-ffi-linux-x86_64-${{ github.run_id }}
+          path: veloflux-ffi-linux-x86_64.tar.gz

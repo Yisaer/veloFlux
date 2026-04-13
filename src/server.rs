@@ -5,6 +5,7 @@ use flow::FlowInstance;
     not(target_env = "msvc")
 ))]
 use parking_lot::Mutex;
+use std::future::Future;
 use std::io::{BufRead, BufReader};
 #[cfg(feature = "profiling")]
 use std::io::{Read, Write};
@@ -77,6 +78,49 @@ unsafe extern "C" {
 ))]
 static PPROF_ENDPOINT_MUTEX: Mutex<()> = Mutex::new(());
 
+#[cfg(feature = "metrics")]
+struct MetricsExporterRuntime {
+    _exporter: prometheus_exporter::Exporter,
+}
+
+#[cfg(not(feature = "metrics"))]
+struct MetricsExporterRuntime;
+
+#[cfg(feature = "profiling")]
+struct ProfileServerHandle {
+    shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(feature = "profiling")]
+impl ProfileServerHandle {
+    fn shutdown(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(join_handle) = self.join_handle.take() {
+            let _ = join_handle.join();
+        }
+    }
+}
+
+#[cfg(feature = "profiling")]
+impl Drop for ProfileServerHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+#[cfg(not(feature = "profiling"))]
+struct ProfileServerHandle;
+
+struct ServerRuntimeGuards {
+    #[cfg(feature = "metrics")]
+    _metrics_exporter: Option<MetricsExporterRuntime>,
+    #[cfg(feature = "profiling")]
+    _profile_server: Option<ProfileServerHandle>,
+}
+
 /// Options for initializing the server runtime.
 #[derive(Debug, Clone, Default)]
 pub struct ServerOptions {
@@ -105,9 +149,9 @@ pub struct ServerContext {
     instance: FlowInstance,
     storage: StorageManager,
     manager_addr: String,
-    profiling_enabled: bool,
     flow_instances: Vec<manager::FlowInstanceSpec>,
     config_path: Option<String>,
+    runtime_guards: ServerRuntimeGuards,
 }
 
 impl ServerContext {
@@ -126,12 +170,12 @@ impl ServerContext {
         &self.manager_addr
     }
 
-    fn into_parts(self) -> (FlowInstance, StorageManager, String, bool) {
+    fn into_parts(self) -> (FlowInstance, StorageManager, String, ServerRuntimeGuards) {
         (
             self.instance,
             self.storage,
             self.manager_addr,
-            self.profiling_enabled,
+            self.runtime_guards,
         )
     }
 
@@ -166,13 +210,20 @@ pub async fn init(
         ensure_jemalloc_profiling();
     }
 
-    if let Err(err) = init_metrics_exporter(&opts).await {
-        init_phase.log_failure(err.as_ref());
-        return Err(err);
-    }
-    if profiling_enabled {
-        start_profile_server(&opts);
-    }
+    #[cfg(feature = "metrics")]
+    let metrics_exporter = match init_metrics_exporter_runtime(&opts).await {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            init_phase.log_failure(err.as_ref());
+            return Err(err);
+        }
+    };
+    #[cfg(feature = "profiling")]
+    let profile_server = if profiling_enabled {
+        start_profile_server_runtime(&opts)
+    } else {
+        None
+    };
 
     let manager_addr = opts
         .manager_addr
@@ -206,17 +257,43 @@ pub async fn init(
         instance,
         storage,
         manager_addr,
-        profiling_enabled,
         flow_instances: opts.flow_instances,
         config_path: opts.config_path,
+        runtime_guards: ServerRuntimeGuards {
+            #[cfg(feature = "metrics")]
+            _metrics_exporter: metrics_exporter,
+            #[cfg(feature = "profiling")]
+            _profile_server: profile_server,
+        },
     })
 }
 
 /// Start the manager server and await termination (Ctrl+C or server error).
 pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    start_with_shutdown(ctx, shutdown_signal()).await
+}
+
+pub async fn start_with_shutdown<F>(
+    ctx: ServerContext,
+    shutdown: F,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    start_with_shutdown_and_signal(ctx, shutdown, None).await
+}
+
+pub async fn start_with_shutdown_and_signal<F>(
+    ctx: ServerContext,
+    shutdown: F,
+    startup_tx: Option<std::sync::mpsc::SyncSender<Result<(), String>>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     let flow_instances = ctx.flow_instances().to_vec();
     let config_path = ctx.config_path().map(|s| s.to_string());
-    let (instance, storage, manager_addr, _profiling_enabled) = ctx.into_parts();
+    let (instance, storage, manager_addr, _runtime_guards) = ctx.into_parts();
     let worker_spawn_phase =
         StartupPhase::new("manager", "default", "worker_spawn", config_path.as_deref());
     let worker_process_count = flow_instances
@@ -248,25 +325,39 @@ pub async fn start(ctx: ServerContext) -> Result<(), Box<dyn std::error::Error +
         "startup phase"
     );
     tracing::info!(manager_addr = %manager_addr, "starting manager");
-    let manager_future = manager::start_server(
+    let (manager_shutdown_tx, manager_shutdown_rx) = tokio::sync::oneshot::channel();
+    let manager_future = manager::start_server_with_shutdown(
         manager_addr.clone(),
         instance,
         storage,
         flow_instances,
         worker_endpoints,
+        async move {
+            let _ = manager_shutdown_rx.await;
+        },
+        startup_tx,
     );
+    tokio::pin!(manager_future);
+    tokio::pin!(shutdown);
 
     let result = tokio::select! {
-        result = manager_future => {
+        result = &mut manager_future => {
             if let Err(err) = result {
                 tracing::error!(error = %err, "manager server exited with error");
                 return Err(err);
             }
             Ok(())
         }
-        _ = shutdown_signal() => {
+        _ = &mut shutdown => {
             tracing::info!("shutdown signal received, shutting down");
-            Ok(())
+            let _ = manager_shutdown_tx.send(());
+            match manager_future.await {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    tracing::error!(error = %err, "manager server exited with error during shutdown");
+                    Err(err)
+                }
+            }
         }
     };
 
@@ -606,7 +697,7 @@ fn log_allocator() {
 }
 
 #[cfg(feature = "profiling")]
-pub fn start_profile_server(opts: &ServerOptions) {
+fn start_profile_server_runtime(opts: &ServerOptions) -> Option<ProfileServerHandle> {
     let addr_str = opts
         .profile_addr
         .clone()
@@ -619,37 +710,66 @@ pub fn start_profile_server(opts: &ServerOptions) {
         Ok(a) => a,
         Err(err) => {
             tracing::error!(error = %err, profile_addr = %addr_str, "invalid profile addr");
-            return;
+            return None;
         }
     };
 
+    let listener = match TcpListener::bind(addr) {
+        Ok(listener) => listener,
+        Err(err) => {
+            tracing::error!(error = %err, profile_addr = %addr, "profile server bind error");
+            return None;
+        }
+    };
+    if let Err(err) = listener.set_nonblocking(true) {
+        tracing::error!(error = %err, profile_addr = %addr, "failed to configure profile listener");
+        return None;
+    }
+
     tracing::info!(profile_addr = %addr, "enabling profiling endpoints");
-    thread::spawn(move || {
-        if let Err(err) = run_profile_server(addr, default_freq_hz) {
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel();
+    let join_handle = thread::spawn(move || {
+        if let Err(err) = run_profile_server(listener, addr, default_freq_hz, shutdown_rx) {
             tracing::error!(error = %err, "profile server error");
         }
     });
+    Some(ProfileServerHandle {
+        shutdown_tx: Some(shutdown_tx),
+        join_handle: Some(join_handle),
+    })
 }
 
 #[cfg(not(feature = "profiling"))]
-pub fn start_profile_server(_opts: &ServerOptions) {}
+fn start_profile_server_runtime(_opts: &ServerOptions) -> Option<ProfileServerHandle> {
+    None
+}
 
 #[cfg(feature = "profiling")]
-fn run_profile_server(addr: SocketAddr, default_freq_hz: i32) -> std::io::Result<()> {
-    let listener = TcpListener::bind(addr)?;
+fn run_profile_server(
+    listener: TcpListener,
+    addr: SocketAddr,
+    default_freq_hz: i32,
+    shutdown_rx: std::sync::mpsc::Receiver<()>,
+) -> std::io::Result<()> {
     tracing::info!(
         profile_addr = %addr,
         "CPU/heap endpoints at http://{addr}/debug/pprof/{{profile,heap}}"
     );
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
+    loop {
+        if shutdown_rx.try_recv().is_ok() {
+            break;
+        }
+        match listener.accept() {
+            Ok((stream, _peer_addr)) => {
                 thread::spawn(move || {
                     disable_heap_profiling_for_current_thread();
                     if let Err(err) = handle_profile_connection(stream, default_freq_hz) {
                         tracing::error!(error = %err, "profile connection failed");
                     }
                 });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(err) => tracing::error!(error = %err, "profile accept error"),
         }
@@ -923,9 +1043,9 @@ fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> 
 }
 
 #[cfg(feature = "metrics")]
-pub async fn init_metrics_exporter(
+async fn init_metrics_exporter_runtime(
     opts: &ServerOptions,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<MetricsExporterRuntime>, Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = opts
         .metrics_addr
         .clone()
@@ -933,8 +1053,6 @@ pub async fn init_metrics_exporter(
         .parse()?;
     tracing::info!(metrics_addr = %addr, "enabling metrics exporter");
     let exporter = prometheus_exporter::start(addr)?;
-    // Leak exporter handle so the HTTP endpoint stays alive for the duration of the process.
-    Box::leak(Box::new(exporter));
 
     let poll_interval = opts
         .metrics_poll_interval_secs
@@ -961,6 +1079,25 @@ pub async fn init_metrics_exporter(
             sleep(Duration::from_secs(poll_interval)).await;
         }
     });
+    Ok(Some(MetricsExporterRuntime {
+        _exporter: exporter,
+    }))
+}
+
+#[cfg(not(feature = "metrics"))]
+async fn init_metrics_exporter_runtime(
+    _opts: &ServerOptions,
+) -> Result<Option<MetricsExporterRuntime>, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(None)
+}
+
+#[cfg(feature = "metrics")]
+pub async fn init_metrics_exporter(
+    opts: &ServerOptions,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(runtime) = init_metrics_exporter_runtime(opts).await? {
+        Box::leak(Box::new(runtime));
+    }
     Ok(())
 }
 
@@ -969,6 +1106,26 @@ pub async fn init_metrics_exporter(
     _opts: &ServerOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     Ok(())
+}
+
+#[cfg(feature = "profiling")]
+pub struct ProfileServerGuard {
+    _handle: Option<ProfileServerHandle>,
+}
+
+#[cfg(feature = "profiling")]
+pub fn start_profile_server(opts: &ServerOptions) -> ProfileServerGuard {
+    ProfileServerGuard {
+        _handle: start_profile_server_runtime(opts),
+    }
+}
+
+#[cfg(not(feature = "profiling"))]
+pub struct ProfileServerGuard;
+
+#[cfg(not(feature = "profiling"))]
+pub fn start_profile_server(_opts: &ServerOptions) -> ProfileServerGuard {
+    ProfileServerGuard
 }
 
 #[cfg(all(

@@ -4,6 +4,7 @@ mod rolling_file;
 
 use crate::config::LoggingConfig;
 use std::io;
+use std::sync::{Mutex, OnceLock};
 use tracing_subscriber::filter::LevelFilter;
 
 pub use cleanup::prune_rotated_logs;
@@ -25,14 +26,34 @@ pub fn open_output(cfg: &LoggingConfig) -> io::Result<LogOutput> {
     }
 }
 
-#[derive(Debug)]
-pub struct LoggingGuard {
-    _worker: Option<tracing_appender::non_blocking::WorkerGuard>,
+static LOGGING_CONFIG: OnceLock<LoggingConfig> = OnceLock::new();
+static LOGGING_WORKER_GUARDS: OnceLock<Mutex<Vec<tracing_appender::non_blocking::WorkerGuard>>> =
+    OnceLock::new();
+
+#[derive(Debug, Default)]
+pub struct LoggingGuard;
+
+fn retain_worker_guard(guard: tracing_appender::non_blocking::WorkerGuard) {
+    let guards = LOGGING_WORKER_GUARDS.get_or_init(|| Mutex::new(Vec::new()));
+    guards
+        .lock()
+        .expect("logging worker guard mutex poisoned")
+        .push(guard);
 }
 
 pub fn init_logging(
     cfg: &LoggingConfig,
 ) -> Result<LoggingGuard, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(existing) = LOGGING_CONFIG.get() {
+        if existing != cfg {
+            return Err(format!(
+                "logging already initialized with a different config: existing={existing:?}, requested={cfg:?}"
+            )
+            .into());
+        }
+        return Ok(LoggingGuard);
+    }
+
     let level = match cfg.level {
         crate::config::LogLevel::Trace => LevelFilter::TRACE,
         crate::config::LogLevel::Debug => LevelFilter::DEBUG,
@@ -52,7 +73,6 @@ pub fn init_logging(
                 .with_ansi(true)
                 .finish();
             tracing::subscriber::set_global_default(subscriber)?;
-            Ok(LoggingGuard { _worker: None })
         }
         LogOutput::File(writer) => {
             let (non_blocking, guard) = tracing_appender::non_blocking(writer);
@@ -66,9 +86,10 @@ pub fn init_logging(
                 .with_writer(non_blocking)
                 .finish();
             tracing::subscriber::set_global_default(subscriber)?;
-            Ok(LoggingGuard {
-                _worker: Some(guard),
-            })
+            retain_worker_guard(guard);
         }
-    }
+    };
+
+    let _ = LOGGING_CONFIG.set(cfg.clone());
+    Ok(LoggingGuard)
 }
