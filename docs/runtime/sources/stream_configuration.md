@@ -182,6 +182,8 @@ Cross-cutting constraints worth preserving in future work:
 
 - `memory` is the only built-in source type that may bypass decode with `decoder.type = none`
 - `memory` cannot be promoted into a shared stream
+- memory streams require a predeclared memory topic, and the topic kind must match decoder mode
+  (`bytes` for normal decoders, `collection` for `decoder.type = none`)
 - MQTT streams may optionally bind to a shared connector via `connector_key`, but the stream
   definition still owns the topic-level source identity
 - history streams carry connector props in the stream definition even though their runtime behavior
@@ -196,9 +198,11 @@ The effective validation order today is:
 3. decode source-specific props by stream type
 4. resolve decoder configuration
 5. enforce cross-field stream constraints (`shared`, decoder, event time, memory rules)
-6. persist the stream request into storage
-7. install the stream into each flow instance
-8. later, when pipelines are explained or built, validate event-time registry and pruned-schema
+6. for memory streams, validate that the referenced memory topic already exists and that its kind
+   matches decoder mode
+7. persist the stream request into storage
+8. install the stream into each flow instance
+9. later, when pipelines are explained or built, validate event-time registry and pruned-schema
    compatibility
 
 This order explains why some failures are create-time `400` errors while others only appear once a

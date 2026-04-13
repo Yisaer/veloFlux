@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::time::{sleep, Duration, Instant};
 
 use crate::catalog::{CatalogError, StreamDefinition, StreamProps};
-use crate::connector::MockSourceConnector;
+use crate::connector::{MemoryTopicKind, MockSourceConnector};
 use crate::shared_stream::{
     SharedStreamConfig, SharedStreamError, SharedStreamInfo, SharedStreamProcessorStats,
 };
@@ -22,6 +22,7 @@ impl FlowInstance {
         definition: StreamDefinition,
         shared: bool,
     ) -> Result<StreamRuntimeInfo, FlowInstanceError> {
+        self.validate_stream_definition(&definition)?;
         let stored = self.catalog.insert(definition)?;
         let shared_info = if shared {
             match self.ensure_shared_stream(stored.clone()).await {
@@ -38,6 +39,47 @@ impl FlowInstance {
             definition: stored,
             shared_info,
         })
+    }
+
+    fn validate_stream_definition(
+        &self,
+        definition: &StreamDefinition,
+    ) -> Result<(), FlowInstanceError> {
+        let StreamProps::Memory(props) = definition.props() else {
+            return Ok(());
+        };
+
+        let topic = props.topic.trim();
+        if topic.is_empty() {
+            return Err(FlowInstanceError::Invalid(format!(
+                "stream '{}' memory topic must not be empty",
+                definition.id()
+            )));
+        }
+
+        let expected_kind = if definition.decoder().kind() == "none" {
+            MemoryTopicKind::Collection
+        } else {
+            MemoryTopicKind::Bytes
+        };
+        let actual_kind = self.memory_topic_kind(topic).ok_or_else(|| {
+            FlowInstanceError::Invalid(format!(
+                "memory topic '{}' required by stream '{}' not declared in instance",
+                topic,
+                definition.id()
+            ))
+        })?;
+        if actual_kind != expected_kind {
+            return Err(FlowInstanceError::Invalid(format!(
+                "memory topic '{}' kind mismatch for stream '{}': expected {}, got {}",
+                topic,
+                definition.id(),
+                expected_kind,
+                actual_kind
+            )));
+        }
+
+        Ok(())
     }
 
     /// Retrieve a stream definition and its shared runtime (if any).

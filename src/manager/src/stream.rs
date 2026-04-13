@@ -31,7 +31,7 @@ use flow::{
     Int32Type, Int64Type, ListType, StringType, StructField, StructType, Uint8Type, Uint16Type,
     Uint32Type, Uint64Type,
 };
-use storage::StorageError;
+use storage::{StorageError, StorageManager, StoredMemoryTopicKind};
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct CreateStreamRequest {
@@ -326,6 +326,13 @@ pub async fn create_stream_handler(
     }
     if let StreamProps::Memory(memory_props) = &stream_props
         && let Err(err) = validate_memory_stream_topic(&req, memory_props)
+    {
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+    if let StreamProps::Memory(memory_props) = &stream_props
+        && let Err(err) =
+            validate_memory_stream_binding(&req, memory_props, &decoder, &state.storage)
     {
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
@@ -993,6 +1000,48 @@ pub(crate) fn validate_memory_stream_topic(
         return Err(format!(
             "stream `{}` memory topic must not be empty",
             req.name
+        ));
+    }
+
+    Ok(())
+}
+
+fn stored_memory_topic_kind_name(kind: &StoredMemoryTopicKind) -> &'static str {
+    match kind {
+        StoredMemoryTopicKind::Bytes => "bytes",
+        StoredMemoryTopicKind::Collection => "collection",
+    }
+}
+
+pub(crate) fn validate_memory_stream_binding(
+    req: &CreateStreamRequest,
+    props: &MemoryStreamProps,
+    decoder: &StreamDecoderConfig,
+    storage: &StorageManager,
+) -> Result<(), String> {
+    if !req.stream_type.eq_ignore_ascii_case("memory") {
+        return Ok(());
+    }
+
+    let topic = props.topic.trim();
+    let Some(stored_topic) = storage
+        .get_memory_topic(topic)
+        .map_err(|err| format!("failed to read memory topic `{topic}`: {err}"))?
+    else {
+        return Err(format!("memory topic `{topic}` not declared"));
+    };
+
+    let expected_kind = if decoder.kind() == "none" {
+        StoredMemoryTopicKind::Collection
+    } else {
+        StoredMemoryTopicKind::Bytes
+    };
+    if stored_topic.kind != expected_kind {
+        return Err(format!(
+            "memory topic `{topic}` kind mismatch for stream `{}`: expected {}, got {}",
+            req.name,
+            stored_memory_topic_kind_name(&expected_kind),
+            stored_memory_topic_kind_name(&stored_topic.kind)
         ));
     }
 

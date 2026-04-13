@@ -1859,7 +1859,7 @@ async fn memory_source_collection_topic_with_non_none_decoder_is_rejected() {
         "default", None,
     ))
     .expect("create flow instance");
-    let (input_topic, output_topic) =
+    let (input_topic, _output_topic) =
         make_memory_topics("pipeline_memory_source_collection_decoder", case_name);
     instance
         .declare_memory_topic(
@@ -1868,13 +1868,6 @@ async fn memory_source_collection_topic_with_non_none_decoder_is_rejected() {
             flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
         )
         .expect("declare input collection topic");
-    instance
-        .declare_memory_topic(
-            &output_topic,
-            MemoryTopicKind::Bytes,
-            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
-        )
-        .expect("declare output bytes topic");
 
     let schema = Schema::new(vec![ColumnSchema::new(
         "stream".to_string(),
@@ -1887,24 +1880,10 @@ async fn memory_source_collection_topic_with_non_none_decoder_is_rejected() {
         StreamProps::Memory(MemoryStreamProps::new(input_topic.clone())),
         StreamDecoderConfig::json(),
     );
-    instance
-        .create_stream(definition, false)
-        .await
-        .expect("create memory stream");
-
-    let pipeline_id = format!("pipe_{}", output_topic);
-    let pipeline = PipelineDefinition::new(
-        pipeline_id,
-        "SELECT a FROM stream",
-        vec![SinkDefinition::new(
-            "mem_sink",
-            SinkType::Memory,
-            SinkProps::Memory(MemorySinkProps::new(output_topic)),
-        )],
-    );
-    let err = instance
-        .create_pipeline(CreatePipelineRequest::new(pipeline))
-        .expect_err("collection topic with non-none decoder should fail build");
+    let err = match instance.create_stream(definition, false).await {
+        Ok(_) => panic!("collection topic with non-none decoder should fail create_stream"),
+        Err(err) => err,
+    };
     let err_message = err.to_string();
     assert!(
         err_message.contains("kind mismatch"),
