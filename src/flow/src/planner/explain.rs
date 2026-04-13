@@ -1360,8 +1360,12 @@ mod tests {
     #[test]
     fn test_shared_stream_ingest_decoder_wraps_sampler() {
         use crate::catalog::StreamDecoderConfig;
+        use crate::planner::create_physical_plan;
+        use crate::planner::logical::{DataSource, LogicalPlan};
+        use crate::planner::physical::PhysicalPlan;
         use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
         use crate::processor::SamplerConfig;
+        use crate::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
         use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
         use std::time::Duration;
 
@@ -1390,7 +1394,6 @@ mod tests {
             .iter()
             .position(|row| row.id.contains("PhysicalDecoder"))
             .expect("shared stream ingest decoder should exist");
-        let decoder_row = &rows[decoder_pos];
 
         assert!(
             decoder_pos < sampler_pos,
@@ -1402,6 +1405,62 @@ mod tests {
                 && sampler_row.info.contains("strategy=latest"),
             "shared ingest sampler info mismatch: {}",
             sampler_row.info
+        );
+
+        let logical_plan = Arc::new(LogicalPlan::DataSource(DataSource::new(
+            stream_name.to_string(),
+            None,
+            StreamDecoderConfig::json(),
+            0,
+            Arc::clone(&schema),
+            None,
+            Some(SamplerConfig::new(Duration::from_millis(100))),
+        )));
+        let bindings = SchemaBinding::new(vec![SchemaBindingEntry {
+            source_name: stream_name.to_string(),
+            alias: None,
+            schema: Arc::clone(&schema),
+            kind: SourceBindingKind::Shared,
+        }]);
+        let physical_plan = create_physical_plan(
+            Arc::clone(&logical_plan),
+            &bindings,
+            &crate::PipelineRegistries::new_with_builtin(),
+        )
+        .expect("shared physical plan should build");
+        let shared_stream = match physical_plan.as_ref() {
+            PhysicalPlan::SharedStream(plan) => plan,
+            other => panic!(
+                "expected shared stream physical plan, got {}",
+                other.get_plan_type()
+            ),
+        };
+        let builder_report = ExplainReport::from_physical(
+            shared_stream
+                .explain_ingest_plan()
+                .expect("shared stream explain ingest plan should exist"),
+        );
+        let builder_rows = builder_report.rows();
+        let builder_sampler_pos = builder_rows
+            .iter()
+            .position(|row| row.id.contains("PhysicalSampler"))
+            .expect("shared stream explain ingest sampler should exist");
+        let builder_sampler_row = &builder_rows[builder_sampler_pos];
+        let builder_decoder_pos = builder_rows
+            .iter()
+            .position(|row| row.id.contains("PhysicalDecoder"))
+            .expect("shared stream explain ingest decoder should exist");
+
+        assert!(
+            builder_decoder_pos < builder_sampler_pos,
+            "shared stream explain ingest decoder should wrap sampler: {}",
+            builder_report.table_string()
+        );
+        assert!(
+            builder_sampler_row.info.contains("interval=100ms")
+                && builder_sampler_row.info.contains("strategy=latest"),
+            "shared stream explain ingest sampler info mismatch: {}",
+            builder_sampler_row.info
         );
     }
 }
