@@ -41,7 +41,12 @@ Only the following environment variables are recognized:
 | `logging.output` | `VELOFLUX_LOGGING__OUTPUT` |
 | `logging.level` | `VELOFLUX_LOGGING__LEVEL` |
 | `logging.include_source` | `VELOFLUX_LOGGING__INCLUDE_SOURCE` |
+| `logging.disable_timestamp` | `VELOFLUX_LOGGING__DISABLE_TIMESTAMP` |
 | `logging.file.dir` | `VELOFLUX_LOGGING__FILE__DIR` |
+| `logging.syslog.enable` | `VELOFLUX_LOGGING__SYSLOG__ENABLE` |
+| `logging.syslog.level` | `VELOFLUX_LOGGING__SYSLOG__LEVEL` |
+| `logging.syslog.tag` | `VELOFLUX_LOGGING__SYSLOG__TAG` |
+| `logging.syslog.path` | `VELOFLUX_LOGGING__SYSLOG__PATH` |
 | `profiling.enabled` | `VELOFLUX_PROFILING__ENABLED` |
 | `profiling.addr` | `VELOFLUX_PROFILING__ADDR` |
 | `profiling.cpu_profile_freq_hz` | `VELOFLUX_PROFILING__CPU_PROFILE_FREQ_HZ` |
@@ -70,6 +75,8 @@ Environment-variable names follow these rules:
 Examples:
 
 - `logging.level` -> `VELOFLUX_LOGGING__LEVEL`
+- `logging.disable_timestamp` -> `VELOFLUX_LOGGING__DISABLE_TIMESTAMP`
+- `logging.syslog.path` -> `VELOFLUX_LOGGING__SYSLOG__PATH`
 - `metrics.poll_interval_secs` -> `VELOFLUX_METRICS__POLL_INTERVAL_SECS`
 
 ## Merge Priority
@@ -98,6 +105,11 @@ Examples:
 ```bash
 export VELOFLUX_LOGGING__LEVEL=debug
 export VELOFLUX_LOGGING__OUTPUT=stdout
+export VELOFLUX_LOGGING__DISABLE_TIMESTAMP=true
+export VELOFLUX_LOGGING__SYSLOG__ENABLE=true
+export VELOFLUX_LOGGING__SYSLOG__LEVEL=info
+export VELOFLUX_LOGGING__SYSLOG__TAG=veloflux
+export VELOFLUX_LOGGING__SYSLOG__PATH=/dev/log
 export VELOFLUX_PROFILING__ENABLED=false
 export VELOFLUX_PROFILING__ADDR=0.0.0.0:16060
 export VELOFLUX_METRICS__ADDR=0.0.0.0:19898

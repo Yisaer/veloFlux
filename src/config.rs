@@ -41,7 +41,9 @@ pub struct LoggingConfig {
     pub output: LoggingOutput,
     pub level: LogLevel,
     pub include_source: bool,
+    pub disable_timestamp: bool,
     pub file: FileLoggingConfig,
+    pub syslog: SyslogLoggingConfig,
 }
 
 impl Default for LoggingConfig {
@@ -50,7 +52,9 @@ impl Default for LoggingConfig {
             output: LoggingOutput::Stdout,
             level: LogLevel::Info,
             include_source: true,
+            disable_timestamp: false,
             file: FileLoggingConfig::default(),
+            syslog: SyslogLoggingConfig::default(),
         }
     }
 }
@@ -60,6 +64,7 @@ impl Default for LoggingConfig {
 pub enum LoggingOutput {
     Stdout,
     File,
+    Syslog,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -87,6 +92,37 @@ impl Default for FileLoggingConfig {
             file_name: "app.log".to_string(),
             rotation: LogRotationConfig::default(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SyslogLoggingConfig {
+    pub enable: bool,
+    pub level: Option<LogLevel>,
+    pub tag: String,
+    pub path: String,
+}
+
+impl Default for SyslogLoggingConfig {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            level: None,
+            tag: "veloflux".to_string(),
+            path: default_syslog_path().to_string(),
+        }
+    }
+}
+
+fn default_syslog_path() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "/var/run/syslog"
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        "/dev/log"
     }
 }
 
@@ -216,6 +252,11 @@ mod tests {
     const ENV_LOGGING_OUTPUT: &str = "VELOFLUX_LOGGING__OUTPUT";
     const ENV_LOGGING_LEVEL: &str = "VELOFLUX_LOGGING__LEVEL";
     const ENV_LOGGING_INCLUDE_SOURCE: &str = "VELOFLUX_LOGGING__INCLUDE_SOURCE";
+    const ENV_LOGGING_DISABLE_TIMESTAMP: &str = "VELOFLUX_LOGGING__DISABLE_TIMESTAMP";
+    const ENV_LOGGING_SYSLOG_ENABLE: &str = "VELOFLUX_LOGGING__SYSLOG__ENABLE";
+    const ENV_LOGGING_SYSLOG_LEVEL: &str = "VELOFLUX_LOGGING__SYSLOG__LEVEL";
+    const ENV_LOGGING_SYSLOG_TAG: &str = "VELOFLUX_LOGGING__SYSLOG__TAG";
+    const ENV_LOGGING_SYSLOG_PATH: &str = "VELOFLUX_LOGGING__SYSLOG__PATH";
     const ENV_PROFILING_ADDR: &str = "VELOFLUX_PROFILING__ADDR";
     const ENV_METRICS_ADDR: &str = "VELOFLUX_METRICS__ADDR";
     const ENV_METRICS_POLL_INTERVAL_SECS: &str = "VELOFLUX_METRICS__POLL_INTERVAL_SECS";
@@ -306,6 +347,11 @@ server:
         let mut env = EnvTestGuard::new();
         env.set(ENV_LOGGING_LEVEL, "debug");
         env.set(ENV_LOGGING_INCLUDE_SOURCE, "false");
+        env.set(ENV_LOGGING_DISABLE_TIMESTAMP, "true");
+        env.set(ENV_LOGGING_SYSLOG_ENABLE, "true");
+        env.set(ENV_LOGGING_SYSLOG_LEVEL, "warn");
+        env.set(ENV_LOGGING_SYSLOG_TAG, "vf-env");
+        env.set(ENV_LOGGING_SYSLOG_PATH, "/tmp/veloflux.sock");
         env.set(ENV_PROFILING_ADDR, "127.0.0.1:16060");
         env.set(ENV_METRICS_ADDR, "127.0.0.1:19898");
         env.set(ENV_METRICS_POLL_INTERVAL_SECS, "30");
@@ -315,6 +361,11 @@ server:
 
         assert!(matches!(cfg.logging.level, LogLevel::Debug));
         assert!(!cfg.logging.include_source);
+        assert!(cfg.logging.disable_timestamp);
+        assert!(cfg.logging.syslog.enable);
+        assert!(matches!(cfg.logging.syslog.level, Some(LogLevel::Warn)));
+        assert_eq!(cfg.logging.syslog.tag, "vf-env");
+        assert_eq!(cfg.logging.syslog.path, "/tmp/veloflux.sock");
         assert_eq!(cfg.profiling.addr.as_deref(), Some("127.0.0.1:16060"));
         assert_eq!(cfg.metrics.addr.as_deref(), Some("127.0.0.1:19898"));
         assert_eq!(cfg.metrics.poll_interval_secs, Some(30));
@@ -387,10 +438,14 @@ server:
             _ => panic!("expected default logging.output=stdout"),
         }
         assert!(cfg.logging.include_source);
+        assert!(!cfg.logging.disable_timestamp);
         match cfg.logging.level {
             LogLevel::Info => {}
             _ => panic!("expected default logging.level=info"),
         }
+        assert!(!cfg.logging.syslog.enable);
+        assert!(cfg.logging.syslog.level.is_none());
+        assert_eq!(cfg.logging.syslog.tag, "veloflux");
     }
 
     #[test]
@@ -398,9 +453,10 @@ server:
         let _env = EnvTestGuard::new();
         let yaml = r#"
 logging:
-  output: file
+  output: syslog
   level: warn
   include_source: false
+  disable_timestamp: true
   file:
     dir: "./tmp/logs"
     file_name: "app.log"
@@ -408,25 +464,35 @@ logging:
       keep_days: 3
       max_num: 10
       max_size_mb: 16
+  syslog:
+    enable: true
+    level: error
+    tag: "vf-test"
+    path: "/tmp/veloflux-syslog.sock"
 "#;
         let path = unique_temp_path("logging");
         std::fs::write(&path, yaml).unwrap();
 
         let cfg = AppConfig::load_required(&path).unwrap();
         match cfg.logging.output {
-            LoggingOutput::File => {}
-            _ => panic!("expected output=file"),
+            LoggingOutput::Syslog => {}
+            _ => panic!("expected output=syslog"),
         }
         match cfg.logging.level {
             LogLevel::Warn => {}
             _ => panic!("expected level=warn"),
         }
         assert!(!cfg.logging.include_source);
+        assert!(cfg.logging.disable_timestamp);
         assert_eq!(cfg.logging.file.dir, "./tmp/logs");
         assert_eq!(cfg.logging.file.file_name, "app.log");
         assert_eq!(cfg.logging.file.rotation.keep_days, 3);
         assert_eq!(cfg.logging.file.rotation.max_num, 10);
         assert_eq!(cfg.logging.file.rotation.max_size_mb, 16);
+        assert!(cfg.logging.syslog.enable);
+        assert!(matches!(cfg.logging.syslog.level, Some(LogLevel::Error)));
+        assert_eq!(cfg.logging.syslog.tag, "vf-test");
+        assert_eq!(cfg.logging.syslog.path, "/tmp/veloflux-syslog.sock");
 
         let _ = std::fs::remove_file(&path);
     }

@@ -138,7 +138,10 @@ fn run_embedded_runtime(
     runtime.block_on(async move {
         let mut startup_tx = Some(startup_tx);
 
-        let bootstrap = match crate::bootstrap::init_options_from_config_path(&config_path) {
+        let bootstrap = match crate::bootstrap::init_options_from_config_path_with_logging_context(
+            &config_path,
+            &crate::logging::LoggingContext::embedded(),
+        ) {
             Ok(bootstrap) => bootstrap,
             Err(err) => {
                 send_startup_result(&mut startup_tx, Err(err.to_string()));

@@ -275,7 +275,7 @@ async fn process_batch(
                 .iter()
                 .map(|f| f.name().clone())
                 .collect();
-            println!("[WARN] ts column not found, available: {:?}", col_names);
+            tracing::warn!(available_columns = ?col_names, "ts column not found");
             None
         })
         .ok_or(())?;
@@ -288,7 +288,7 @@ async fn process_batch(
                 .iter()
                 .map(|f| f.name().clone())
                 .collect();
-            println!("[WARN] data column not found, available: {:?}", col_names);
+            tracing::warn!(available_columns = ?col_names, "data column not found");
             None
         })
         .ok_or(())?;
@@ -302,7 +302,7 @@ async fn process_batch(
             .map(|v| v.map(|u| u as i64).unwrap_or(0))
             .collect()
     } else {
-        println!("[WARN] ts column type mismatch: {:?}", ts_col.data_type());
+        tracing::warn!(data_type = ?ts_col.data_type(), "ts column type mismatch");
         return Err(());
     };
 
@@ -310,10 +310,7 @@ async fn process_batch(
         .as_any()
         .downcast_ref::<BinaryArray>()
         .ok_or_else(|| {
-            println!(
-                "[WARN] data column type mismatch: {:?}",
-                data_col.data_type()
-            );
+            tracing::warn!(data_type = ?data_col.data_type(), "data column type mismatch");
         })?;
 
     // tracing::debug!(num_rows = batch.num_rows(), "processing batch");

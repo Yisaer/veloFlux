@@ -6,7 +6,7 @@
 //! - Logging setup
 
 use crate::config::AppConfig;
-use crate::logging::LoggingGuard;
+use crate::logging::{LoggingContext, LoggingGuard};
 use crate::server::{self, ServerOptions};
 use crate::startup::StartupPhase;
 use flow::FlowInstance;
@@ -77,8 +77,10 @@ fn init_options_from_loaded_config(
     config: AppConfig,
     loaded_config_path: Option<String>,
     data_dir: Option<&str>,
+    logging_context: &LoggingContext,
 ) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
-    let logging_guard = crate::logging::init_logging(&config.logging)?;
+    let logging_guard =
+        crate::logging::init_logging_with_context(&config.logging, logging_context)?;
     let bootstrap_phase = StartupPhase::new(
         "manager",
         "default",
@@ -122,8 +124,15 @@ fn init_options_from_loaded_config(
 pub fn init_options_from_config_path(
     config_path: &str,
 ) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
+    init_options_from_config_path_with_logging_context(config_path, &LoggingContext::manager())
+}
+
+pub fn init_options_from_config_path_with_logging_context(
+    config_path: &str,
+    logging_context: &LoggingContext,
+) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
     let (config, loaded_config_path) = load_config_with_path(Some(config_path))?;
-    init_options_from_loaded_config(config, loaded_config_path, None)
+    init_options_from_loaded_config(config, loaded_config_path, None, logging_context)
 }
 
 /// Parse CLI/config and initialize logging/options without preparing FlowInstance.
@@ -131,7 +140,12 @@ pub fn default_init_options(
 ) -> Result<BootstrapOptionsResult, Box<dyn std::error::Error + Send + Sync>> {
     let cli_flags = CliFlags::parse();
     let (config, loaded_config_path) = load_config_with_path(cli_flags.config_path.as_deref())?;
-    init_options_from_loaded_config(config, loaded_config_path, cli_flags.data_dir.as_deref())
+    init_options_from_loaded_config(
+        config,
+        loaded_config_path,
+        cli_flags.data_dir.as_deref(),
+        &LoggingContext::manager(),
+    )
 }
 
 /// Perform default initialization: parse CLI, load config, init logging, prepare instance.

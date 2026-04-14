@@ -2,6 +2,7 @@ logging:
   output: stdout
   level: info
   include_source: true
+  disable_timestamp: false
   file:
     dir: "./logs"
     file_name: "app.log"
@@ -9,6 +10,11 @@ logging:
       keep_days: 7
       max_num: 30
       max_size_mb: 256
+  syslog:
+    enable: false
+    level: info
+    tag: "veloflux"
+    path: "/dev/log"
 
 profiling:
   enabled: true

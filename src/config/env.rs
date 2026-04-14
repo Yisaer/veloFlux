@@ -23,7 +23,7 @@ impl EnvBinding {
     }
 }
 
-const ENV_BINDINGS: [EnvBinding; 10] = [
+const ENV_BINDINGS: [EnvBinding; 15] = [
     EnvBinding::new(
         "VELOFLUX_LOGGING__OUTPUT",
         "logging.output",
@@ -40,9 +40,34 @@ const ENV_BINDINGS: [EnvBinding; 10] = [
         set_logging_include_source,
     ),
     EnvBinding::new(
+        "VELOFLUX_LOGGING__DISABLE_TIMESTAMP",
+        "logging.disable_timestamp",
+        set_logging_disable_timestamp,
+    ),
+    EnvBinding::new(
         "VELOFLUX_LOGGING__FILE__DIR",
         "logging.file.dir",
         set_logging_file_dir,
+    ),
+    EnvBinding::new(
+        "VELOFLUX_LOGGING__SYSLOG__ENABLE",
+        "logging.syslog.enable",
+        set_logging_syslog_enable,
+    ),
+    EnvBinding::new(
+        "VELOFLUX_LOGGING__SYSLOG__LEVEL",
+        "logging.syslog.level",
+        set_logging_syslog_level,
+    ),
+    EnvBinding::new(
+        "VELOFLUX_LOGGING__SYSLOG__TAG",
+        "logging.syslog.tag",
+        set_logging_syslog_tag,
+    ),
+    EnvBinding::new(
+        "VELOFLUX_LOGGING__SYSLOG__PATH",
+        "logging.syslog.path",
+        set_logging_syslog_path,
     ),
     EnvBinding::new(
         "VELOFLUX_PROFILING__ENABLED",
@@ -149,12 +174,57 @@ fn set_logging_include_source(
     Ok(())
 }
 
+fn set_logging_disable_timestamp(
+    config: &mut AppConfig,
+    binding: &EnvBinding,
+    raw: &str,
+) -> ConfigResult<()> {
+    config.logging.disable_timestamp = parse_env::<bool>(binding, raw)?;
+    Ok(())
+}
+
 fn set_logging_file_dir(
     config: &mut AppConfig,
     _binding: &EnvBinding,
     raw: &str,
 ) -> ConfigResult<()> {
     config.logging.file.dir = raw.to_string();
+    Ok(())
+}
+
+fn set_logging_syslog_enable(
+    config: &mut AppConfig,
+    binding: &EnvBinding,
+    raw: &str,
+) -> ConfigResult<()> {
+    config.logging.syslog.enable = parse_env::<bool>(binding, raw)?;
+    Ok(())
+}
+
+fn set_logging_syslog_level(
+    config: &mut AppConfig,
+    binding: &EnvBinding,
+    raw: &str,
+) -> ConfigResult<()> {
+    config.logging.syslog.level = Some(parse_env::<LogLevel>(binding, raw)?);
+    Ok(())
+}
+
+fn set_logging_syslog_tag(
+    config: &mut AppConfig,
+    _binding: &EnvBinding,
+    raw: &str,
+) -> ConfigResult<()> {
+    config.logging.syslog.tag = raw.to_string();
+    Ok(())
+}
+
+fn set_logging_syslog_path(
+    config: &mut AppConfig,
+    _binding: &EnvBinding,
+    raw: &str,
+) -> ConfigResult<()> {
+    config.logging.syslog.path = raw.to_string();
     Ok(())
 }
 

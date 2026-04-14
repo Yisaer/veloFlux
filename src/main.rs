@@ -88,10 +88,13 @@ async fn run_worker(
                 .to_string_lossy()
                 .to_string();
         }
-        veloflux::config::LoggingOutput::Stdout => {}
+        veloflux::config::LoggingOutput::Stdout | veloflux::config::LoggingOutput::Syslog => {}
     }
 
-    let logging_guard = veloflux::logging::init_logging(&cfg.logging)?;
+    let logging_guard = veloflux::logging::init_logging_with_context(
+        &cfg.logging,
+        &veloflux::logging::LoggingContext::worker(instance_id.clone()),
+    )?;
     let _logging_guard = logging_guard;
 
     tracing::info!(
