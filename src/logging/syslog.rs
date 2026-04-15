@@ -1,6 +1,7 @@
 use crate::config::SyslogLoggingConfig;
 use std::io;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::Arc;
@@ -14,6 +15,12 @@ use std::os::unix::net::UnixDatagram;
 
 const SYSLOG_QUEUE_CAPACITY: usize = 8192;
 const SYSLOG_USER_FACILITY_CODE: u8 = 1;
+
+#[derive(Debug, Clone)]
+enum SyslogDestination {
+    #[cfg(unix)]
+    Local { paths: Vec<PathBuf> },
+}
 
 pub struct SyslogMakeWriter {
     sender: SyncSender<SyslogRecord>,
@@ -47,16 +54,36 @@ pub fn open_syslog(
     cfg: &SyslogLoggingConfig,
     effective_app_name: &str,
 ) -> io::Result<(SyslogMakeWriter, SyslogWorkerGuard)> {
-    let _ = open_syslog_socket(&cfg.path)?;
+    let destination = resolve_syslog_destination(cfg)?;
+    open_syslog_with_destination(destination, effective_app_name)
+}
+
+fn open_syslog_with_destination(
+    destination: SyslogDestination,
+    effective_app_name: &str,
+) -> io::Result<(SyslogMakeWriter, SyslogWorkerGuard)> {
+    #[cfg(unix)]
+    let _ = open_destination(&destination)?;
+
+    #[cfg(not(unix))]
+    let _ = &destination;
+
     let (sender, receiver) = sync_channel(SYSLOG_QUEUE_CAPACITY);
-    let worker_cfg = cfg.clone();
     let app_name = Arc::<str>::from(effective_app_name.to_string());
+    let worker_destination = destination.clone();
     let worker_app_name = Arc::clone(&app_name);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
     let join_handle = thread::Builder::new()
         .name("veloflux-syslog".to_string())
-        .spawn(move || run_syslog_worker(worker_cfg, worker_app_name, receiver, worker_shutdown))?;
+        .spawn(move || {
+            run_syslog_worker(
+                worker_destination,
+                worker_app_name,
+                receiver,
+                worker_shutdown,
+            )
+        })?;
     let make_writer = SyslogMakeWriter {
         sender: sender.clone(),
     };
@@ -65,6 +92,38 @@ pub fn open_syslog(
         join_handle: Some(join_handle),
     };
     Ok((make_writer, guard))
+}
+
+fn resolve_syslog_destination(cfg: &SyslogLoggingConfig) -> io::Result<SyslogDestination> {
+    let network = cfg.network.trim();
+    let address = cfg.address.trim();
+
+    if network.is_empty() && address.is_empty() {
+        #[cfg(unix)]
+        {
+            return Ok(SyslogDestination::Local {
+                paths: default_local_syslog_paths(),
+            });
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(io::Error::other(
+                "local syslog output requires Unix-domain socket support on this platform",
+            ));
+        }
+    }
+
+    if network.is_empty() || address.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "logging.syslog.network and logging.syslog.address must either both be empty or both be set",
+        ));
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "remote syslog transport is not supported yet; leave logging.syslog.network and logging.syslog.address empty to use local syslog",
+    ))
 }
 
 impl SyslogMakeWriter {
@@ -134,29 +193,29 @@ fn trim_line_endings(buf: &mut Vec<u8>) {
 }
 
 fn run_syslog_worker(
-    cfg: SyslogLoggingConfig,
+    destination: SyslogDestination,
     app_name: Arc<str>,
     receiver: Receiver<SyslogRecord>,
     shutdown: Arc<AtomicBool>,
 ) {
     #[cfg(unix)]
     {
-        run_syslog_worker_unix(cfg, app_name, receiver, shutdown);
+        run_syslog_worker_unix(destination, app_name, receiver, shutdown);
     }
     #[cfg(not(unix))]
     {
-        let _ = (cfg, app_name, receiver, shutdown);
+        let _ = (destination, app_name, receiver, shutdown);
     }
 }
 
 #[cfg(unix)]
 fn run_syslog_worker_unix(
-    cfg: SyslogLoggingConfig,
+    destination: SyslogDestination,
     app_name: Arc<str>,
     receiver: Receiver<SyslogRecord>,
     shutdown: Arc<AtomicBool>,
 ) {
-    let mut socket = open_syslog_socket(&cfg.path).ok();
+    let mut socket = open_destination(&destination).ok();
     let pid = std::process::id();
 
     loop {
@@ -175,7 +234,7 @@ fn run_syslog_worker_unix(
             }
         }
 
-        socket = open_syslog_socket(&cfg.path).ok();
+        socket = open_destination(&destination).ok();
         if let Some(sock) = socket.as_ref() {
             let _ = sock.send(&payload);
         }
@@ -183,17 +242,61 @@ fn run_syslog_worker_unix(
 }
 
 #[cfg(unix)]
-fn open_syslog_socket(path: &str) -> io::Result<UnixDatagram> {
+fn open_destination(destination: &SyslogDestination) -> io::Result<UnixDatagram> {
+    match destination {
+        SyslogDestination::Local { paths } => open_local_syslog_socket(paths),
+    }
+}
+
+#[cfg(unix)]
+fn open_local_syslog_socket(paths: &[PathBuf]) -> io::Result<UnixDatagram> {
+    let mut last_error = None;
+    for path in paths {
+        match open_syslog_socket(path) {
+            Ok(socket) => return Ok(socket),
+            Err(err) => last_error = Some((path.clone(), err)),
+        }
+    }
+
+    if let Some((path, err)) = last_error {
+        return Err(io::Error::new(
+            err.kind(),
+            format!(
+                "failed to connect to local syslog socket via {}: {}",
+                path.display(),
+                err
+            ),
+        ));
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "no local syslog socket candidates are configured",
+    ))
+}
+
+#[cfg(unix)]
+fn open_syslog_socket(path: &Path) -> io::Result<UnixDatagram> {
     let socket = UnixDatagram::unbound()?;
     socket.connect(path)?;
     Ok(socket)
 }
 
-#[cfg(not(unix))]
-fn open_syslog_socket(_path: &str) -> io::Result<()> {
-    Err(io::Error::other(
-        "syslog output requires Unix-domain socket support on this platform",
-    ))
+#[cfg(unix)]
+fn default_local_syslog_paths() -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        vec![PathBuf::from("/var/run/syslog")]
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        vec![
+            PathBuf::from("/dev/log"),
+            PathBuf::from("/var/run/log"),
+            PathBuf::from("/var/run/syslog"),
+        ]
+    }
 }
 
 fn format_syslog_message(
@@ -258,6 +361,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn requires_network_and_address_to_be_set_together() {
+        let cfg = SyslogLoggingConfig {
+            enable: true,
+            level: None,
+            tag: "veloflux".to_string(),
+            network: "udp".to_string(),
+            address: String::new(),
+        };
+
+        let err = resolve_syslog_destination(&cfg).expect_err("missing address should fail");
+        assert!(err
+            .to_string()
+            .contains("must either both be empty or both be set"));
+    }
+
+    #[test]
+    fn rejects_remote_syslog_transport_for_now() {
+        let cfg = SyslogLoggingConfig {
+            enable: true,
+            level: None,
+            tag: "veloflux".to_string(),
+            network: "udp".to_string(),
+            address: "127.0.0.1:514".to_string(),
+        };
+
+        let err = resolve_syslog_destination(&cfg).expect_err("remote transport should fail");
+        assert!(err
+            .to_string()
+            .contains("remote syslog transport is not supported yet"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn worker_sends_record_to_local_socket() {
@@ -267,34 +402,26 @@ mod tests {
             .set_read_timeout(Some(std::time::Duration::from_secs(1)))
             .expect("set read timeout");
 
-        let cfg = SyslogLoggingConfig {
-            enable: true,
-            level: None,
-            tag: "veloflux".to_string(),
-            path: path.to_string_lossy().to_string(),
+        let destination = SyslogDestination::Local {
+            paths: vec![path.clone()],
         };
         let (make_writer, guard) =
-            open_syslog(&cfg, "veloflux-worker-default").expect("open syslog");
+            open_syslog_with_destination(destination, "veloflux-worker-default")
+                .expect("open syslog");
         {
             let mut writer = make_writer.writer_for_level(Level::WARN);
             writer
-                .write_all(b"pipeline stalled\n")
-                .expect("write event");
+                .write_all(b"worker failed to open connector")
+                .expect("write warning");
         }
 
-        let mut buf = [0_u8; 512];
-        let received = receiver.recv(&mut buf).expect("receive datagram");
-        let payload = std::str::from_utf8(&buf[..received]).expect("utf8 payload");
-        assert!(
-            payload.contains("veloflux-worker-default"),
-            "payload should contain effective app name: {payload}"
-        );
-        assert!(
-            payload.ends_with("pipeline stalled"),
-            "payload should contain trimmed event body: {payload}"
-        );
+        let mut buf = [0u8; 512];
+        let len = receiver.recv(&mut buf).expect("receive syslog datagram");
+        let message = std::str::from_utf8(&buf[..len]).expect("utf8 syslog payload");
+        assert!(message.starts_with("<12>veloflux-worker-default["));
+        assert!(message.ends_with(": worker failed to open connector"));
 
         drop(guard);
-        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(&path);
     }
 }

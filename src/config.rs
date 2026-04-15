@@ -101,7 +101,8 @@ pub struct SyslogLoggingConfig {
     pub enable: bool,
     pub level: Option<LogLevel>,
     pub tag: String,
-    pub path: String,
+    pub network: String,
+    pub address: String,
 }
 
 impl Default for SyslogLoggingConfig {
@@ -110,19 +111,9 @@ impl Default for SyslogLoggingConfig {
             enable: false,
             level: None,
             tag: "veloflux".to_string(),
-            path: default_syslog_path().to_string(),
+            network: String::new(),
+            address: String::new(),
         }
-    }
-}
-
-fn default_syslog_path() -> &'static str {
-    #[cfg(target_os = "macos")]
-    {
-        "/var/run/syslog"
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        "/dev/log"
     }
 }
 
@@ -256,7 +247,8 @@ mod tests {
     const ENV_LOGGING_SYSLOG_ENABLE: &str = "VELOFLUX_LOGGING__SYSLOG__ENABLE";
     const ENV_LOGGING_SYSLOG_LEVEL: &str = "VELOFLUX_LOGGING__SYSLOG__LEVEL";
     const ENV_LOGGING_SYSLOG_TAG: &str = "VELOFLUX_LOGGING__SYSLOG__TAG";
-    const ENV_LOGGING_SYSLOG_PATH: &str = "VELOFLUX_LOGGING__SYSLOG__PATH";
+    const ENV_LOGGING_SYSLOG_NETWORK: &str = "VELOFLUX_LOGGING__SYSLOG__NETWORK";
+    const ENV_LOGGING_SYSLOG_ADDRESS: &str = "VELOFLUX_LOGGING__SYSLOG__ADDRESS";
     const ENV_PROFILING_ADDR: &str = "VELOFLUX_PROFILING__ADDR";
     const ENV_METRICS_ADDR: &str = "VELOFLUX_METRICS__ADDR";
     const ENV_METRICS_POLL_INTERVAL_SECS: &str = "VELOFLUX_METRICS__POLL_INTERVAL_SECS";
@@ -351,7 +343,8 @@ server:
         env.set(ENV_LOGGING_SYSLOG_ENABLE, "true");
         env.set(ENV_LOGGING_SYSLOG_LEVEL, "warn");
         env.set(ENV_LOGGING_SYSLOG_TAG, "vf-env");
-        env.set(ENV_LOGGING_SYSLOG_PATH, "/tmp/veloflux.sock");
+        env.set(ENV_LOGGING_SYSLOG_NETWORK, "udp");
+        env.set(ENV_LOGGING_SYSLOG_ADDRESS, "127.0.0.1:514");
         env.set(ENV_PROFILING_ADDR, "127.0.0.1:16060");
         env.set(ENV_METRICS_ADDR, "127.0.0.1:19898");
         env.set(ENV_METRICS_POLL_INTERVAL_SECS, "30");
@@ -365,7 +358,8 @@ server:
         assert!(cfg.logging.syslog.enable);
         assert!(matches!(cfg.logging.syslog.level, Some(LogLevel::Warn)));
         assert_eq!(cfg.logging.syslog.tag, "vf-env");
-        assert_eq!(cfg.logging.syslog.path, "/tmp/veloflux.sock");
+        assert_eq!(cfg.logging.syslog.network, "udp");
+        assert_eq!(cfg.logging.syslog.address, "127.0.0.1:514");
         assert_eq!(cfg.profiling.addr.as_deref(), Some("127.0.0.1:16060"));
         assert_eq!(cfg.metrics.addr.as_deref(), Some("127.0.0.1:19898"));
         assert_eq!(cfg.metrics.poll_interval_secs, Some(30));
@@ -446,6 +440,8 @@ server:
         assert!(!cfg.logging.syslog.enable);
         assert!(cfg.logging.syslog.level.is_none());
         assert_eq!(cfg.logging.syslog.tag, "veloflux");
+        assert!(cfg.logging.syslog.network.is_empty());
+        assert!(cfg.logging.syslog.address.is_empty());
     }
 
     #[test]
@@ -468,7 +464,8 @@ logging:
     enable: true
     level: error
     tag: "vf-test"
-    path: "/tmp/veloflux-syslog.sock"
+    network: "udp"
+    address: "127.0.0.1:514"
 "#;
         let path = unique_temp_path("logging");
         std::fs::write(&path, yaml).unwrap();
@@ -492,7 +489,8 @@ logging:
         assert!(cfg.logging.syslog.enable);
         assert!(matches!(cfg.logging.syslog.level, Some(LogLevel::Error)));
         assert_eq!(cfg.logging.syslog.tag, "vf-test");
-        assert_eq!(cfg.logging.syslog.path, "/tmp/veloflux-syslog.sock");
+        assert_eq!(cfg.logging.syslog.network, "udp");
+        assert_eq!(cfg.logging.syslog.address, "127.0.0.1:514");
 
         let _ = std::fs::remove_file(&path);
     }

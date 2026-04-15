@@ -14,7 +14,11 @@ logging:
     enable: false
     level: info
     tag: "veloflux"
-    path: "/dev/log"
+    # Leave both fields empty to use the host local syslog service.
+    # On macOS this usually resolves to /var/run/syslog.
+    # On Linux this usually resolves to /dev/log.
+    network: ""
+    address: ""
 
 profiling:
   enabled: true

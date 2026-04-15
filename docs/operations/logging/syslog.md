@@ -23,8 +23,10 @@ migration.
 
 ## Non-Goals
 
-- This design does not support remote UDP syslog in the first version.
-- This design does not support remote TCP syslog in the first version.
+- This design does not enable remote UDP syslog transport in the current
+  implementation.
+- This design does not enable remote TCP syslog transport in the current
+  implementation.
 - This design does not support multi-backend fan-out in the first version.
 - This design does not define host-process logging callbacks for the embedded
   runtime.
@@ -45,19 +47,48 @@ logging:
     enable: true
     level: info
     tag: "veloflux"
-    path: "/dev/log"
+    network: ""
+    address: ""
+```
+
+This example is directly usable for local syslog. Leaving both
+`logging.syslog.network` and `logging.syslog.address` empty tells veloFlux to
+connect to the host local syslog service by platform convention, such as
+`/var/run/syslog` on macOS or `/dev/log` on many Linux distributions.
+
+Example local-syslog-focused snippet:
+
+```yaml
+logging:
+  output: syslog
+  level: info
+  disable_timestamp: true
+  syslog:
+    enable: true
+    tag: "veloflux"
+    network: ""
+    address: ""
 ```
 
 ### Fields
 
-#### `logging.syslog.path`
+#### `logging.syslog.network`
 
-Path to the local Unix-domain syslog socket.
+Transport name aligned with eKuiper.
 
-Typical values:
+Current behavior:
 
-- `/dev/log`
-- `/var/run/syslog`
+- keep it empty to use local syslog
+- non-empty values are reserved for a future remote syslog enhancement
+
+#### `logging.syslog.address`
+
+Remote endpoint address aligned with eKuiper.
+
+Current behavior:
+
+- keep it empty to use local syslog
+- non-empty values are reserved for a future remote syslog enhancement
 
 #### `logging.syslog.enable`
 
@@ -130,7 +161,7 @@ When `logging.output=syslog` is selected:
 1. load config;
 2. validate that `logging.syslog.enable=true`;
 3. resolve the effective runtime ident from `logging.syslog.tag`;
-4. connect to the configured local syslog socket;
+4. resolve the platform local syslog endpoint and connect to it;
 5. install the process-global subscriber;
 6. continue normal runtime startup.
 
@@ -161,6 +192,8 @@ derived worker ident is required and should include the flow instance id.
 ## Deployment Notes
 
 - Keep `logging.output=syslog` and `logging.syslog.enable=true` aligned.
+- Keep `logging.syslog.network=""` and `logging.syslog.address=""` for the
+  current local-syslog-only implementation.
 - Prefer `include_source=false` in production unless file/line metadata is
   required for active debugging.
 - Prefer `disable_timestamp=true` when syslog already supplies the timestamp
@@ -178,7 +211,8 @@ The syslog backend adds these explicit override bindings:
 - `VELOFLUX_LOGGING__SYSLOG__ENABLE`
 - `VELOFLUX_LOGGING__SYSLOG__LEVEL`
 - `VELOFLUX_LOGGING__SYSLOG__TAG`
-- `VELOFLUX_LOGGING__SYSLOG__PATH`
+- `VELOFLUX_LOGGING__SYSLOG__NETWORK`
+- `VELOFLUX_LOGGING__SYSLOG__ADDRESS`
 
 These overrides follow the same whitelist-based policy used by the rest of the
 configuration loader.
