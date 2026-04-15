@@ -94,8 +94,13 @@ logging:
     enable: false
     level: info
     tag: "veloflux"
-    path: "/dev/log"
+    network: ""
+    address: ""
 ```
+
+For local syslog deployments, the empty `network` and `address` values above
+are intentional and usable. They mean veloFlux should connect to the host local
+Unix datagram syslog socket instead of a remote syslog endpoint.
 
 ### Common Fields
 
@@ -121,7 +126,10 @@ logging:
   `logging.level`
 - `logging.syslog.tag`: base syslog tag used to derive the effective runtime
   ident
-- `logging.syslog.path`: local Unix-domain syslog socket path
+- `logging.syslog.network`: transport name aligned with eKuiper; keep it empty
+  to use the host local Unix datagram syslog socket
+- `logging.syslog.address`: remote endpoint address aligned with eKuiper; keep
+  it empty to use the host local Unix datagram syslog socket
 
 ## Output Selection Semantics
 
@@ -145,15 +153,20 @@ single-sink backend model.
 
 ### Scope
 
-The first syslog version supports local Unix-domain syslog integration only.
+The configuration surface is aligned with eKuiper by exposing
+`logging.syslog.network` and `logging.syslog.address`.
+
+In the current veloFlux implementation, both fields must be left empty and the
+backend will connect to the host local Unix datagram syslog socket path
+discovered by platform convention.
 
 Examples include:
 
 - `/dev/log`
 - `/var/run/syslog`
 
-Remote UDP or TCP syslog transport is intentionally out of scope for the first
-version.
+Remote UDP or TCP syslog transport is reserved for a future enhancement and is
+not enabled in the current implementation.
 
 ### Why Local Syslog First
 
@@ -278,7 +291,8 @@ The syslog design adds these deployment-facing overrides:
 - `VELOFLUX_LOGGING__SYSLOG__ENABLE`
 - `VELOFLUX_LOGGING__SYSLOG__LEVEL`
 - `VELOFLUX_LOGGING__SYSLOG__TAG`
-- `VELOFLUX_LOGGING__SYSLOG__PATH`
+- `VELOFLUX_LOGGING__SYSLOG__NETWORK`
+- `VELOFLUX_LOGGING__SYSLOG__ADDRESS`
 
 The general override rules are documented in `../config/env_overrides.md`.
 

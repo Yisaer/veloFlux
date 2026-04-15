@@ -23,7 +23,7 @@ impl EnvBinding {
     }
 }
 
-const ENV_BINDINGS: [EnvBinding; 15] = [
+const ENV_BINDINGS: [EnvBinding; 16] = [
     EnvBinding::new(
         "VELOFLUX_LOGGING__OUTPUT",
         "logging.output",
@@ -65,9 +65,14 @@ const ENV_BINDINGS: [EnvBinding; 15] = [
         set_logging_syslog_tag,
     ),
     EnvBinding::new(
-        "VELOFLUX_LOGGING__SYSLOG__PATH",
-        "logging.syslog.path",
-        set_logging_syslog_path,
+        "VELOFLUX_LOGGING__SYSLOG__NETWORK",
+        "logging.syslog.network",
+        set_logging_syslog_network,
+    ),
+    EnvBinding::new(
+        "VELOFLUX_LOGGING__SYSLOG__ADDRESS",
+        "logging.syslog.address",
+        set_logging_syslog_address,
     ),
     EnvBinding::new(
         "VELOFLUX_PROFILING__ENABLED",
@@ -219,12 +224,21 @@ fn set_logging_syslog_tag(
     Ok(())
 }
 
-fn set_logging_syslog_path(
+fn set_logging_syslog_network(
     config: &mut AppConfig,
     _binding: &EnvBinding,
     raw: &str,
 ) -> ConfigResult<()> {
-    config.logging.syslog.path = raw.to_string();
+    config.logging.syslog.network = raw.to_string();
+    Ok(())
+}
+
+fn set_logging_syslog_address(
+    config: &mut AppConfig,
+    _binding: &EnvBinding,
+    raw: &str,
+) -> ConfigResult<()> {
+    config.logging.syslog.address = raw.to_string();
     Ok(())
 }
 
