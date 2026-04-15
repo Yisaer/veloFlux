@@ -67,6 +67,7 @@ async fn publish_json_row(instance: &FlowInstance, input_topic: &str, row: serde
         .expect("publish bytes row");
 }
 
+// coverage-covers: pipeline.runtime.eventtime, stream.watermark.propagation, stream.window.tumbling
 #[tokio::test]
 async fn eventtime_tumbling_window_orders_out_of_order_input_before_flush() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -165,6 +166,7 @@ async fn eventtime_tumbling_window_orders_out_of_order_input_before_flush() {
         .expect("delete eventtime pipeline");
 }
 
+// coverage-covers: pipeline.runtime.eventtime, stream.watermark.propagation, stream.window.tumbling
 #[tokio::test]
 async fn eventtime_tumbling_window_drops_tuple_older_than_current_watermark() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -285,6 +287,7 @@ async fn eventtime_tumbling_window_drops_tuple_older_than_current_watermark() {
         .expect("delete eventtime pipeline");
 }
 
+// coverage-covers: pipeline.runtime.eventtime, stream.watermark.propagation, stream.window.tumbling
 #[tokio::test]
 async fn eventtime_tumbling_window_graceful_stop_flushes_final_window() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(

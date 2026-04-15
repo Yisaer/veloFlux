@@ -4158,6 +4158,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "test_coverage"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "serde",
+ "serde_yaml",
+ "syn 2.0.117",
+ "walkdir",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"

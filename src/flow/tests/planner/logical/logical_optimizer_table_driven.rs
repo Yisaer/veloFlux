@@ -358,76 +358,90 @@ fn build_nop_json_sink(sink_id: &'static str, connector_id: &'static str) -> Pip
 
 #[test]
 fn logical_optimizer_table_driven() {
-    struct Case {
+    struct LogicalOptimizerCase {
         name: &'static str,
         sql: &'static str,
+        covers: &'static [&'static str],
         expected: &'static str,
     }
 
     let cases = vec![
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_prunes_datasource_schema",
             sql: "SELECT a FROM stream_prune",
+            covers: &["planner.logical.top_level_column_pruning"],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_prune","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_keeps_full_schema_for_memory_collection_source",
             sql: "SELECT a FROM memory_collect",
+            covers: &["planner.logical.top_level_column_pruning"],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=memory_collect","decoder=none","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_keeps_window_partition_columns",
             sql: "SELECT a FROM stream_window GROUP BY statewindow(a = 1, a = 4) OVER (PARTITION BY b, c)",
+            covers: &["planner.logical.top_level_column_pruning"],
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_window","decoder=json","schema=[a, b, c]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=state","open=a = 1","emit=a = 4","partition_by=b,c"],"operator":"Window"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_prunes_struct_fields_and_explain_renders_projection",
             sql: "SELECT stream_struct.a, stream_struct.b->c FROM stream_struct",
+            covers: &["planner.logical.struct_field_pruning"],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_struct","decoder=json","schema=[a, b{c}]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_struct.a; stream_struct.b -> c]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_keeps_dynamic_list_index_and_prunes_element_struct_fields",
             sql: "SELECT stream_3.items[a]->c FROM stream_3",
+            covers: &["planner.logical.list_element_pruning"],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[*][struct{c}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[\"a\"] -> c]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_keeps_dynamic_list_index_and_keeps_full_element_struct",
             sql: "SELECT stream_3.items[a] FROM stream_3",
+            covers: &["planner.logical.list_element_pruning"],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[*][struct{c, d}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[\"a\"]]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_inserts_compute_for_repeated_subexpr_in_project_and_filter",
             sql: "SELECT a + 1 AS x, x + 1 AS y FROM stream WHERE x > 1 AND y > 1",
+            covers: &["planner.logical.common_subexpression_elimination"],
             expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Compute_3","info":["temps=[__vf_cse_1 = a + 1; __vf_cse_2 = __vf_cse_1 + 1]"],"operator":"Compute"}],"id":"Filter_1","info":["predicate=__vf_cse_1 > 1 AND __vf_cse_2 > 1"],"operator":"Filter"}],"id":"Project_2","info":["fields=[__vf_cse_1 as x; __vf_cse_2 as y]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_does_not_cse_function_calls",
             sql: "SELECT concat(a) AS x, concat(a) AS y FROM stream",
+            covers: &["planner.logical.common_subexpression_elimination"],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[concat(a) as x; concat(a) as y]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_does_not_cse_plain_identifier_or_literal",
             sql: "SELECT a AS x, a AS y, 1 AS one, 1 AS another_one FROM stream",
+            covers: &["planner.logical.common_subexpression_elimination"],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as x; a as y; 1 as one; 1 as another_one]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_select_star_disables_top_level_pruning",
             sql: "SELECT * FROM stream_prune",
+            covers: &["planner.logical.top_level_column_pruning"],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_prune","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_selecting_whole_list_element_keeps_full_element_struct",
             sql: "SELECT stream_3.items[0] FROM stream_3",
+            covers: &["planner.logical.list_element_pruning"],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[0][struct{c, d}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[0]]"],"operator":"Project"}"##,
         },
-        Case {
+        LogicalOptimizerCase {
             name: "logical_optimizer_cse_keeps_stateful_dependency_boundary",
             sql: "SELECT lag(a) + 1 AS x, x + 1 AS y FROM stream",
+            covers: &["planner.logical.common_subexpression_elimination"],
             expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Compute_3","info":["temps=[__vf_cse_1 = col_1 + 1]"],"operator":"Compute"}],"id":"Project_2","info":["fields=[__vf_cse_1 as x; __vf_cse_1 + 1 as y]"],"operator":"Project"}"##,
         },
     ];
 
     for case in cases {
+        assert!(!case.covers.is_empty(), "case={} missing covers", case.name);
         let got = optimized_logical_json(case.sql);
         assert_eq!(got, case.expected, "case={}", case.name);
     }

@@ -1,0 +1,71 @@
+domain: parser
+features:
+  - id: parser.select.projection
+    title: Select projection
+    summary: Parse projection items from a SELECT statement into the parser AST contract.
+    doc_refs:
+      - docs/syntax/language/README.md
+    status: active
+
+  - id: parser.select.where_clause
+    title: Select WHERE clause
+    summary: Parse WHERE clause predicates from a SELECT statement.
+    doc_refs:
+      - docs/syntax/language/README.md
+    status: active
+
+  - id: parser.select.alias_computing
+    title: Alias computing
+    summary: Parse alias-computing expressions and preserve their SQL-visible semantics.
+    doc_refs:
+      - docs/syntax/language/alias_computing.md
+    status: active
+
+  - id: parser.function.aggregate_rewrite
+    title: Aggregate rewrite
+    summary: Parse aggregate-function syntax that participates in aggregate rewrite behavior.
+    doc_refs:
+      - docs/syntax/functions/aggregate_rewrite.md
+    status: active
+
+  - id: parser.function.stateful_functions
+    title: Stateful functions
+    summary: Parse stateful function syntax and preserve stateful call metadata in the AST contract.
+    doc_refs:
+      - docs/syntax/language/stateful_functions.md
+    status: active
+
+  - id: parser.window.tumbling
+    title: Tumbling window syntax
+    summary: Parse tumbling-window SQL syntax and window-specific arguments.
+    doc_refs:
+      - docs/syntax/windows/tumbling_window.md
+    status: active
+
+  - id: parser.window.sliding
+    title: Sliding window syntax
+    summary: Parse sliding-window SQL syntax and window-specific arguments.
+    doc_refs:
+      - docs/syntax/windows/sliding_window.md
+    status: active
+
+  - id: parser.window.count
+    title: Count window syntax
+    summary: Parse count-window SQL syntax and window-specific arguments.
+    doc_refs:
+      - docs/syntax/windows/count_window.md
+    status: active
+
+  - id: parser.window.state
+    title: State window syntax
+    summary: Parse state-window SQL syntax and window-specific arguments.
+    doc_refs:
+      - docs/syntax/windows/state_window.md
+    status: active
+
+  - id: parser.window.watermarks
+    title: Watermark syntax
+    summary: Parse watermark-related SQL syntax used by windowed queries.
+    doc_refs:
+      - docs/syntax/windows/watermarks.md
+    status: active

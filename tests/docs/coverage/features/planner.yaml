@@ -1,0 +1,57 @@
+domain: planner
+features:
+  - id: planner.logical.top_level_column_pruning
+    title: Top-level column pruning
+    summary: Prune unused top-level datasource columns during logical optimization.
+    doc_refs:
+      - docs/planner/optimize/logical/top_level_column_pruning.md
+    status: active
+
+  - id: planner.logical.struct_field_pruning
+    title: Struct field pruning
+    summary: Prune unused nested struct fields during logical optimization.
+    doc_refs:
+      - docs/planner/optimize/logical/struct_field_pruning.md
+    status: active
+
+  - id: planner.logical.list_element_pruning
+    title: List element pruning
+    summary: Prune nested fields beneath accessed list elements during logical optimization.
+    doc_refs:
+      - docs/planner/optimize/logical/list_element_pruning.md
+    status: active
+
+  - id: planner.logical.common_subexpression_elimination
+    title: Common subexpression elimination
+    summary: Introduce reusable compute nodes for eligible repeated expressions.
+    doc_refs:
+      - docs/planner/optimize/logical/common_subexpression_elimination.md
+    status: active
+
+  - id: planner.physical.streaming_aggregation_rewrite
+    title: Streaming aggregation rewrite
+    summary: Rewrite eligible physical aggregation plans into streaming aggregation operators.
+    doc_refs:
+      - docs/planner/optimize/physical/streaming_aggregation_rewrite.md
+    status: active
+
+  - id: planner.physical.streaming_encoder_rewrite
+    title: Streaming encoder rewrite
+    summary: Rewrite eligible encoder branches from batch-oriented paths to streaming encoder paths.
+    doc_refs:
+      - docs/planner/optimize/physical/streaming_encoder_rewrite.md
+    status: active
+
+  - id: planner.physical.by_index_projection_into_encoder_rewrite
+    title: By-index projection into encoder rewrite
+    summary: Fold eligible by-index projections into the encoder planning path.
+    doc_refs:
+      - docs/planner/optimize/physical/by_index_projection_into_encoder_rewrite.md
+    status: active
+
+  - id: planner.physical.by_index_projection_into_row_diff_rewrite
+    title: By-index projection into row diff rewrite
+    summary: Fold eligible by-index projections into the row-diff planning path.
+    doc_refs:
+      - docs/planner/optimize/physical/by_index_projection_into_row_diff_rewrite.md
+    status: active

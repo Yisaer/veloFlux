@@ -120,6 +120,7 @@ struct PublishedRowSpec {
 struct SourceLayoutTestCase {
     name: &'static str,
     sql: &'static str,
+    covers: &'static [&'static str],
     stream_schema_hint: Vec<(String, Vec<Value>)>, // (column_name, sample values)
     published_rows: Vec<PublishedRowSpec>,
     expected_rows: usize,
@@ -129,6 +130,11 @@ struct SourceLayoutTestCase {
 
 async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
     println!("Running test: {}", test_case.name);
+    assert!(
+        !test_case.covers.is_empty(),
+        "test={} missing covers",
+        test_case.name
+    );
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -229,6 +235,7 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
 struct CollectionSinkTestCase {
     name: &'static str,
     sql: &'static str,
+    covers: &'static [&'static str],
     input_data: Vec<(String, Vec<Value>)>, // (column_name, values)
     expected_rows: usize,
     expected_message_count: usize,
@@ -238,6 +245,11 @@ struct CollectionSinkTestCase {
 
 async fn run_collection_sink_test_case(test_case: CollectionSinkTestCase) {
     println!("Running test: {}", test_case.name);
+    assert!(
+        !test_case.covers.is_empty(),
+        "test={} missing covers",
+        test_case.name
+    );
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -363,6 +375,7 @@ struct RowDiffJsonCase {
     name: &'static str,
     source_name: &'static str,
     sql: &'static str,
+    covers: &'static [&'static str],
     input_data: Vec<(String, Vec<Value>)>,
     sink_common: CommonSinkProps,
     encoder: SinkEncoderConfig,
@@ -372,6 +385,7 @@ struct RowDiffJsonCase {
 
 async fn run_row_diff_json_case(case: RowDiffJsonCase) {
     println!("Running test: {}", case.name);
+    assert!(!case.covers.is_empty(), "case={} missing covers", case.name);
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -441,6 +455,7 @@ struct OmitIfEmptyJsonCase {
     name: &'static str,
     source_name: &'static str,
     sql: &'static str,
+    covers: &'static [&'static str],
     schema_hint: Vec<(String, Vec<Value>)>,
     input_batches: Vec<Vec<(String, Vec<Value>)>>,
     sink_common: CommonSinkProps,
@@ -451,6 +466,7 @@ struct OmitIfEmptyJsonCase {
 
 async fn run_omit_if_empty_json_case(case: OmitIfEmptyJsonCase) {
     println!("Running test: {}", case.name);
+    assert!(!case.covers.is_empty(), "case={} missing covers", case.name);
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -1156,6 +1172,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "emits_sparse_object_for_unchanged_columns",
             source_name: "stream",
             sql: "SELECT a, b FROM stream",
+            covers: &["sink.output.row_diff"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1179,6 +1196,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "preserves_changed_to_null",
             source_name: "stream",
             sql: "SELECT a, b FROM stream",
+            covers: &["sink.output.row_diff"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1202,6 +1220,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "respects_tracked_column_subset",
             source_name: "stream",
             sql: "SELECT a, b FROM stream",
+            covers: &["sink.output.row_diff"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1225,6 +1244,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "row_diff_with_batch_keeps_row_diff_and_rewrites_to_streaming_encoder",
             source_name: "stream_ab",
             sql: "SELECT a, b FROM stream_ab",
+            covers: &["sink.output.row_diff"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1251,6 +1271,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "splits_partial_late_materialization_between_row_diff_and_encoder",
             source_name: "stream",
             sql: "SELECT a, b, flag AS c FROM stream",
+            covers: &["sink.output.row_diff"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1278,6 +1299,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "splits_partial_late_materialization_between_row_diff_and_encoder_with_aliases",
             source_name: "stream",
             sql: "SELECT a AS x, b AS y, flag AS z FROM stream",
+            covers: &["sink.output.row_diff"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1305,6 +1327,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "supports_alias_in_by_index_row_diff_rewrite",
             source_name: "stream",
             sql: "SELECT a AS x FROM stream",
+            covers: &["sink.output.row_diff"],
             input_data: vec![(
                 "a".to_string(),
                 vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
@@ -1322,6 +1345,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "works_with_computed_affiliate_column",
             source_name: "stream",
             sql: "SELECT a, a + 1 AS x FROM stream",
+            covers: &["sink.output.row_diff"],
             input_data: vec![(
                 "a".to_string(),
                 vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
@@ -1339,6 +1363,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "supports_mixed_alias_partial_by_index_row_diff_rewrite",
             source_name: "stream_ab",
             sql: "SELECT a AS x, b + 1 AS y FROM stream_ab",
+            covers: &["sink.output.row_diff"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1362,6 +1387,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "template_transform_still_sees_dense_row_on_delta_branch",
             source_name: "stream",
             sql: "SELECT a, b FROM stream",
+            covers: &["sink.output.row_diff"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1388,6 +1414,7 @@ async fn pipeline_row_diff_json_table_driven() {
     }
 }
 
+// coverage-covers: sink.encoder.transform
 #[tokio::test]
 async fn transform_template_with_alias_projection_keeps_output_correct() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -1480,6 +1507,7 @@ async fn pipeline_omit_if_empty_json_table_driven() {
             name: "full_non_empty_collection_is_forwarded",
             source_name: "stream",
             sql: "SELECT a, b FROM stream",
+            covers: &["sink.output.omit_if_empty"],
             schema_hint: vec![
                 (
                     "a".to_string(),
@@ -1513,6 +1541,7 @@ async fn pipeline_omit_if_empty_json_table_driven() {
             name: "full_empty_collection_is_suppressed",
             source_name: "stream",
             sql: "SELECT a, b FROM stream",
+            covers: &["sink.output.omit_if_empty"],
             schema_hint: vec![
                 ("a".to_string(), vec![Value::Int64(1)]),
                 ("b".to_string(), vec![Value::Int64(10)]),
@@ -1527,6 +1556,7 @@ async fn pipeline_omit_if_empty_json_table_driven() {
             name: "delta_non_empty_collection_is_forwarded",
             source_name: "stream",
             sql: "SELECT a, b FROM stream",
+            covers: &["sink.output.omit_if_empty"],
             schema_hint: vec![
                 (
                     "a".to_string(),
@@ -1560,6 +1590,7 @@ async fn pipeline_omit_if_empty_json_table_driven() {
             name: "delta_repeated_same_row_is_suppressed_after_first_emit",
             source_name: "stream",
             sql: "SELECT a FROM stream",
+            covers: &["sink.output.omit_if_empty"],
             schema_hint: vec![("a".to_string(), vec![Value::Int64(1)])],
             input_batches: vec![
                 vec![("a".to_string(), vec![Value::Int64(1)])],
@@ -1756,6 +1787,7 @@ async fn pipeline_source_on_change_json_table_driven() {
     }
 }
 
+// coverage-covers: source.memory.bytes_input
 #[tokio::test]
 async fn memory_source_bytes_topic_with_json_decoder_emits_expected_rows() {
     let case_name = "memory_source_bytes_topic_with_json_decoder_emits_expected_rows";
@@ -1851,6 +1883,7 @@ async fn memory_source_bytes_topic_with_json_decoder_emits_expected_rows() {
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for {}: {err}", case_name));
 }
 
+// coverage-covers: source.memory.collection_input
 #[tokio::test]
 async fn memory_source_collection_topic_with_non_none_decoder_is_rejected() {
     let case_name = "memory_source_collection_topic_with_non_none_decoder_is_rejected";
@@ -2379,6 +2412,7 @@ async fn pipeline_table_driven_memory_collection_sources_layout_normalize() {
     let test_cases = vec![SourceLayoutTestCase {
         name: "layout_normalize_reorders_and_fills_missing_with_null",
         sql: "SELECT a, b FROM stream",
+        covers: &["source.memory.collection_input"],
         stream_schema_hint: vec![
             ("a".to_string(), vec![Value::Int64(1)]),
             ("b".to_string(), vec![Value::Int64(2)]),
@@ -2420,6 +2454,7 @@ async fn pipeline_table_driven_collection_sinks() {
         CollectionSinkTestCase {
             name: "select_star_with_alias_materializes_single_message",
             sql: "SELECT *, a AS x FROM stream",
+            covers: &["sink.connector.memory_output"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -2451,6 +2486,7 @@ async fn pipeline_table_driven_collection_sinks() {
         CollectionSinkTestCase {
             name: "alias_order_and_derived_columns_materialize_from_output_schema",
             sql: "SELECT b AS second, a + 1 AS plus_one, a AS first FROM stream",
+            covers: &["sink.connector.memory_output"],
             input_data: vec![
                 ("a".to_string(), vec![Value::Int64(10), Value::Int64(20)]),
                 ("b".to_string(), vec![Value::Int64(100), Value::Int64(200)]),
@@ -2480,6 +2516,7 @@ async fn pipeline_table_driven_collection_sinks() {
     }
 }
 
+// coverage-covers: sink.connector.memory_output
 #[tokio::test]
 async fn memory_collection_sink_rejects_duplicate_output_column_names() {
     let case_name = "memory_collection_sink_rejects_duplicate_output_column_names";
@@ -2529,6 +2566,7 @@ async fn memory_collection_sink_rejects_duplicate_output_column_names() {
     );
 }
 
+// coverage-covers: sink.connector.memory_output
 #[tokio::test]
 async fn memory_collection_sink_delta_output_preserves_output_mask() {
     let case_name = "memory_collection_sink_delta_output_preserves_output_mask";
@@ -2656,6 +2694,7 @@ async fn memory_collection_sink_delta_output_preserves_output_mask() {
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
 }
 
+// coverage-covers: sink.connector.memory_output, sink.output.omit_if_empty
 #[tokio::test]
 async fn memory_collection_sink_delta_omit_if_empty_suppresses_unchanged_collection() {
     let case_name = "memory_collection_sink_delta_omit_if_empty_suppresses_unchanged_collection";

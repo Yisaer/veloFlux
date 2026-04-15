@@ -1,0 +1,22 @@
+domain: processor
+features:
+  - id: processor.barrier.alignment
+    title: Barrier alignment
+    summary: Coordinate barrier forwarding only after all required upstream inputs arrive on the same channel.
+    doc_refs:
+      - docs/runtime/processors/barrier_signal.md
+    status: active
+
+  - id: processor.sampler.strategy
+    title: Sampler strategy
+    summary: Apply runtime sampler strategy semantics to source-side processing.
+    doc_refs:
+      - docs/runtime/processors/sampler_strategy.md
+    status: active
+
+  - id: processor.eventtime.watermark_progress
+    title: Eventtime watermark progress
+    summary: Preserve processor-level eventtime and watermark progression semantics.
+    doc_refs:
+      - docs/runtime/time/pipeline_eventtime.md
+    status: active

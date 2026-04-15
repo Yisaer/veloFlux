@@ -1,0 +1,43 @@
+domain: sink
+features:
+  - id: sink.connector.memory_output
+    title: Memory sink connector
+    summary: Emit pipeline output through the memory sink connector contract.
+    doc_refs:
+      - docs/runtime/sinks/connectors/memory.md
+    status: active
+
+  - id: sink.connector.mqtt_output
+    title: MQTT sink connector
+    summary: Emit pipeline output through the MQTT sink connector contract.
+    doc_refs:
+      - docs/runtime/sinks/connectors/mqtt.md
+    status: active
+
+  - id: sink.connector.kuksa_output
+    title: Kuksa sink connector
+    summary: Emit pipeline output through the Kuksa sink connector contract.
+    doc_refs:
+      - docs/runtime/sinks/connectors/kuksa.md
+    status: active
+
+  - id: sink.encoder.transform
+    title: Encoder transform
+    summary: Apply template-based encoder transforms before sink emission when configured.
+    doc_refs:
+      - docs/runtime/sinks/encoders/encoder_transform.md
+    status: active
+
+  - id: sink.output.row_diff
+    title: Row diff output
+    summary: Produce row-diff output according to the documented sink-output contract.
+    doc_refs:
+      - docs/runtime/sinks/output/row_diff_output.md
+    status: active
+
+  - id: sink.output.omit_if_empty
+    title: Omit-if-empty output
+    summary: Suppress sink output when the documented omit-if-empty condition is met.
+    doc_refs:
+      - docs/runtime/sinks/output/omit_if_empty.md
+    status: active

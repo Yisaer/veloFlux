@@ -143,6 +143,7 @@ async fn stop_and_delete_pipeline(instance: &FlowInstance, pipeline_id: &str) {
         .expect("delete pipeline");
 }
 
+// coverage-covers: source.shared.dynamic_decode
 #[tokio::test]
 async fn shared_stream_new_consumer_waits_for_required_columns_before_first_tuple() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -234,6 +235,7 @@ async fn shared_stream_new_consumer_waits_for_required_columns_before_first_tupl
         .expect("delete shared stream");
 }
 
+// coverage-covers: source.shared.dynamic_decode
 #[tokio::test]
 async fn shared_stream_required_columns_shrink_after_consumer_stop() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -337,6 +339,7 @@ async fn shared_stream_required_columns_shrink_after_consumer_stop() {
         .expect("delete shared stream");
 }
 
+// coverage-covers: source.shared.dynamic_decode
 #[tokio::test]
 async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(

@@ -1,0 +1,51 @@
+domain: stream
+features:
+  - id: stream.schema.contract
+    title: Stream schema contract
+    summary: Expose and preserve the documented stream schema contract.
+    doc_refs:
+      - docs/api/streams/schema.md
+    status: active
+
+  - id: stream.shared.stats
+    title: Shared stream stats
+    summary: Report shared-stream runtime statistics according to the documented API contract.
+    doc_refs:
+      - docs/api/streams/shared_stream_stats.md
+    status: active
+
+  - id: stream.window.tumbling
+    title: Tumbling window behavior
+    summary: Execute tumbling-window stream behavior within the documented SQL-visible contract.
+    doc_refs:
+      - docs/syntax/windows/tumbling_window.md
+    status: active
+
+  - id: stream.window.sliding
+    title: Sliding window behavior
+    summary: Execute sliding-window stream behavior within the documented SQL-visible contract.
+    doc_refs:
+      - docs/syntax/windows/sliding_window.md
+    status: active
+
+  - id: stream.window.count
+    title: Count window behavior
+    summary: Execute count-window stream behavior within the documented SQL-visible contract.
+    doc_refs:
+      - docs/syntax/windows/count_window.md
+    status: active
+
+  - id: stream.window.state
+    title: State window behavior
+    summary: Execute state-window stream behavior within the documented SQL-visible contract.
+    doc_refs:
+      - docs/syntax/windows/state_window.md
+    status: active
+
+  - id: stream.watermark.propagation
+    title: Watermark propagation
+    summary: Preserve documented watermark behavior across stream execution paths.
+    doc_refs:
+      - docs/syntax/windows/watermarks.md
+      - docs/runtime/time/pipeline_eventtime.md
+    status: active

@@ -80,6 +80,7 @@ fn find_processor_stats<'a>(
         .unwrap_or_else(|| panic!("missing processor stats for fragment {processor_fragment}"))
 }
 
+// coverage-covers: pipeline.runtime.stats
 #[tokio::test]
 async fn collect_pipeline_stats_returns_base_fields_for_running_pipeline() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -130,6 +131,7 @@ async fn collect_pipeline_stats_returns_base_fields_for_running_pipeline() {
         .expect("delete pipeline");
 }
 
+// coverage-covers: pipeline.runtime.stats
 #[tokio::test]
 async fn collect_pipeline_stats_returns_error_for_stopped_pipeline() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -171,6 +173,7 @@ async fn collect_pipeline_stats_returns_error_for_stopped_pipeline() {
         .expect("delete pipeline");
 }
 
+// coverage-covers: pipeline.runtime.stats
 #[tokio::test]
 async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -276,6 +279,7 @@ async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
         .expect("delete pipeline");
 }
 
+// coverage-covers: pipeline.runtime.stats
 #[tokio::test]
 async fn collect_pipeline_stats_exposes_empty_suppress_custom_metrics() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -376,6 +380,7 @@ async fn collect_pipeline_stats_exposes_empty_suppress_custom_metrics() {
         .expect("delete pipeline");
 }
 
+// coverage-covers: pipeline.runtime.stats
 #[tokio::test]
 async fn collect_pipeline_stats_reports_decoder_errors_without_failing_collection() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(

@@ -4,6 +4,7 @@ members = [
     "src/datatypes",
     "src/parser", "src/manager",
     "src/telemetry", "src/storage",
+    "src/test_coverage",
     "src/build_info",
     "src/sdk",
     "src/ffi",

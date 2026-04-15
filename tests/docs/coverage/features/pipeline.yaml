@@ -1,0 +1,29 @@
+domain: pipeline
+features:
+  - id: pipeline.lifecycle.start_stop
+    title: Pipeline lifecycle
+    summary: Start, stop, and desired-state lifecycle semantics for runtime pipelines.
+    doc_refs:
+      - docs/runtime/pipelines/lifecycle.md
+    status: active
+
+  - id: pipeline.runtime.eventtime
+    title: Eventtime runtime
+    summary: Execute eventtime-aware pipelines with documented watermark and late-data behavior.
+    doc_refs:
+      - docs/runtime/time/pipeline_eventtime.md
+    status: active
+
+  - id: pipeline.runtime.stats
+    title: Pipeline stats
+    summary: Report runtime pipeline statistics according to the documented stats contract.
+    doc_refs:
+      - docs/runtime/pipelines/stats.md
+    status: active
+
+  - id: pipeline.startup.plan_cache
+    title: Pipeline plan cache startup
+    summary: Reuse and validate cached pipeline plans during startup when the cache contract applies.
+    doc_refs:
+      - docs/runtime/startup/pipeline_plan_cache.md
+    status: active
