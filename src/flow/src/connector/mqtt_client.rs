@@ -311,6 +311,8 @@ impl MqttClientManager {
         &self,
         config: SharedMqttClientConfig,
     ) -> Result<(), ConnectorError> {
+        validate_shared_mqtt_client_config(&config)?;
+
         let key = config.key.clone();
         {
             if self.entries.lock().contains_key(&key) {
@@ -383,6 +385,14 @@ impl MqttClientManager {
         let started = entry.runtime.lock().await.is_some();
         started
     }
+}
+
+fn validate_shared_mqtt_client_config(
+    config: &SharedMqttClientConfig,
+) -> Result<(), ConnectorError> {
+    let _ = build_mqtt_options(config)?;
+    let _ = map_qos(config.qos)?;
+    Ok(())
 }
 
 fn normalize_broker_url(url: &str) -> String {
