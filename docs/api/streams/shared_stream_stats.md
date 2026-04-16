@@ -19,7 +19,7 @@ These processors are the true runtime boundary for:
 
 - source ingestion
 - payload decoding
-- broadcast into downstream shared-stream consumers
+- backpressured fan-out into downstream shared-stream consumers
 
 Today, `/pipelines/:id/stats` only reports the stats of the user pipeline itself. That is useful
 for observing one pipeline's consumption path, but it does not expose the stats of the shared
@@ -53,6 +53,9 @@ For a shared stream:
 - the runtime owns a dedicated internal `ProcessorPipeline`
 - the ingest pipeline persists independently of any one consumer pipeline
 - the stream itself is a first-class runtime resource
+- the stream definition is a first-class runtime resource even when the internal ingest pipeline is
+  currently stopped
+- the internal ingest runtime may be reclaimed when the stream has no active consumers
 
 For a non-shared stream:
 
@@ -189,6 +192,10 @@ Recommended behavior:
 - `failed`: return `processors=[]` and set `status_message`
 
 This keeps the endpoint useful even when no internal pipeline is currently active.
+
+The shared stream definition may remain installed while its internal ingest runtime transitions
+between `running` and `stopped`. A `stopped` status is therefore valid both after an explicit
+stop/delete path and after the last active consumer releases the shared stream runtime.
 
 ## Design Constraints
 

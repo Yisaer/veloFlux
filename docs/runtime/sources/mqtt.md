@@ -67,9 +67,9 @@ Shared mode is used when `connector_key` is present.
 Behavior:
 
 - acquire the shared client by key
-- subscribe to the shared client's broadcast event stream instead of opening another MQTT
+- subscribe to the shared client's backpressured event stream instead of opening another MQTT
   connection
-- consume the shared client's payload/error/end-of-stream events
+- consume the shared client's payload/error/close events
 
 In this mode, the stream-local MQTT props are no longer the live subscription owner. The shared
 client config drives broker URL, subscription topic, client id, QoS, and packet-size settings.
@@ -99,6 +99,29 @@ Practical implications:
 - one shared ingest runtime exists per flow instance
 - all consumers on that instance observe the output of that shared ingest runtime
 - shared-stream stats and lifecycle are separate from normal pipeline stats
+
+Shared-stream delivery is part of the source contract:
+
+- fan-out into shared-stream consumers is backpressured
+- shared-stream delivery must not drop messages because one consumer is temporarily slower than
+  another
+- when the final consumer detaches, the shared-stream runtime may be reclaimed while the stream
+  definition remains installed
+
+## Backpressure And Delivery
+
+Shared MQTT source delivery is intentionally different from a lossy pub/sub buffer.
+
+Required semantics:
+
+- shared-client-backed sources must not silently lose payloads due to lagging local subscribers
+- slow subscribers propagate backpressure upstream through the shared-client fan-out path
+- runtime delivery errors are surfaced as ordinary connector/runtime errors
+- runtime delivery errors are non-terminal and must not be converted into implicit
+  `EndOfStream`
+
+This aligns shared MQTT source behavior with processor runtime behavior: errors are recorded and
+handled, while terminal shutdown comes only from explicit lifecycle actions.
 
 ## Event Time Interaction
 
@@ -145,8 +168,13 @@ Standalone source recovery behavior:
 
 Shared-client-backed source behavior:
 
-- payloads, connection errors, and end-of-stream are relayed from the shared client
+- payloads and connection errors are relayed from the shared client
 - acquisition failure for the shared key is surfaced immediately as a connector error
+- connection/runtime errors remain non-terminal unless the shared client is explicitly closed
+- explicit close/delete of the shared client is the only path that relays end-of-stream to the
+  source connector
+- when no source/sink still references the shared client, the running shared-client connection
+  instance may be reclaimed and recreated on the next acquisition
 
 The source also keeps per-connector ingress/egress counters for payload throughput.
 
@@ -177,6 +205,13 @@ runtime warning.
   opening an independent standalone connection.
 - Verify sampler behavior is per shared-ingest runtime for shared streams and per pipeline runtime
   for non-shared streams.
+- Verify shared-client-backed sources do not convert ordinary delivery/runtime errors into
+  `EndOfStream`.
+- Verify a slow shared-client-backed consumer backpressures delivery instead of losing messages.
+- Verify explicit shared-client close/delete is the only path that terminates a shared-client-backed
+  source.
+- Verify the shared-client runtime is recreated when a later pipeline reacquires the same
+  `connector_key` after all prior users released it.
 
 ## Future Work
 

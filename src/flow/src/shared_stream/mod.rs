@@ -1,3 +1,4 @@
+use crate::backpressure_hub::BackpressureHub;
 use crate::catalog::StreamDecoderConfig;
 use crate::codec::RecordDecoder;
 use crate::connector::SourceConnector;
@@ -18,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 use thiserror::Error;
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -383,6 +384,8 @@ pub struct SharedStreamSubscription {
     stream: Arc<SharedStreamInner>,
     consumer_id: String,
     receivers_taken: bool,
+    data_receiver: Option<mpsc::Receiver<StreamData>>,
+    control_receiver: Option<mpsc::Receiver<ControlSignal>>,
     spawner: TaskSpawner,
 }
 
@@ -393,13 +396,8 @@ impl SharedStreamSubscription {
 
     pub fn take_receivers(
         &mut self,
-    ) -> Result<
-        (
-            broadcast::Receiver<StreamData>,
-            broadcast::Receiver<ControlSignal>,
-        ),
-        SharedStreamError,
-    > {
+    ) -> Result<(mpsc::Receiver<StreamData>, mpsc::Receiver<ControlSignal>), SharedStreamError>
+    {
         if self.receivers_taken {
             return Err(SharedStreamError::ReceiversAlreadyTaken {
                 stream: self.stream.name.clone(),
@@ -407,10 +405,19 @@ impl SharedStreamSubscription {
             });
         }
         self.receivers_taken = true;
-        Ok((
-            self.stream.data_sender.subscribe(),
-            self.stream.control_sender.subscribe(),
-        ))
+        let data_receiver = self.data_receiver.take().ok_or_else(|| {
+            SharedStreamError::Internal(format!(
+                "shared stream {} data receiver missing",
+                self.stream.name()
+            ))
+        })?;
+        let control_receiver = self.control_receiver.take().ok_or_else(|| {
+            SharedStreamError::Internal(format!(
+                "shared stream {} control receiver missing",
+                self.stream.name()
+            ))
+        })?;
+        Ok((data_receiver, control_receiver))
     }
 
     pub async fn release(self) {
@@ -440,13 +447,11 @@ struct SharedStreamInner {
     connector_id: String,
     connector_factory: Arc<dyn SharedStreamConnectorFactory>,
     sampler: Option<SamplerConfig>,
-    data_channel_capacity: usize,
-    control_channel_capacity: usize,
     spawner: TaskSpawner,
     runtime_lock: Mutex<()>,
     applied_decode_state: Arc<SyncRwLock<AppliedDecodeState>>,
-    data_sender: broadcast::Sender<StreamData>,
-    control_sender: broadcast::Sender<ControlSignal>,
+    data_hub: Arc<BackpressureHub<StreamData>>,
+    control_hub: Arc<BackpressureHub<ControlSignal>>,
     handles: Mutex<SharedStreamHandles>,
     state: Mutex<SharedStreamState>,
 }
@@ -455,8 +460,6 @@ struct SharedStreamInner {
 struct SharedStreamHandles {
     pipeline: Option<ProcessorPipeline>,
     forward: Option<JoinHandle<()>>,
-    data_anchor: Option<broadcast::Receiver<StreamData>>,
-    control_anchor: Option<broadcast::Receiver<ControlSignal>>,
 }
 
 /// Mutable status tracked for each stream.
@@ -512,11 +515,8 @@ impl SharedStreamInner {
             decode_projection,
         }));
 
-        let (data_sender, _) = broadcast::channel(data_channel_capacity);
-        let (control_sender, _) = broadcast::channel(control_channel_capacity);
-
-        let data_anchor = data_sender.subscribe();
-        let control_anchor = control_sender.subscribe();
+        let data_hub = Arc::new(BackpressureHub::new(data_channel_capacity));
+        let control_hub = Arc::new(BackpressureHub::new(control_channel_capacity));
 
         Ok(Arc::new(Self {
             name: stream_name,
@@ -527,18 +527,14 @@ impl SharedStreamInner {
             connector_id,
             connector_factory,
             sampler,
-            data_channel_capacity,
-            control_channel_capacity,
             spawner,
             runtime_lock: Mutex::new(()),
             applied_decode_state: Arc::clone(&applied_decode_state),
-            data_sender,
-            control_sender,
+            data_hub,
+            control_hub,
             handles: Mutex::new(SharedStreamHandles {
                 pipeline: None,
                 forward: None,
-                data_anchor: Some(data_anchor),
-                control_anchor: Some(control_anchor),
             }),
             state: Mutex::new(SharedStreamState {
                 status: SharedStreamStatus::Stopped,
@@ -586,16 +582,6 @@ impl SharedStreamInner {
         let (connector, decoder) = self.connector_factory.build()?;
 
         {
-            let mut handles = self.handles.lock().await;
-            if handles.data_anchor.is_none() {
-                handles.data_anchor = Some(self.data_sender.subscribe());
-            }
-            if handles.control_anchor.is_none() {
-                handles.control_anchor = Some(self.control_sender.subscribe());
-            }
-        }
-
-        {
             let applied = self.current_decoding_columns().await;
             self.set_applied_decoding_columns(applied);
         }
@@ -641,35 +627,18 @@ impl SharedStreamInner {
 
         pipeline.start();
 
-        let data_tx = self.data_sender.clone();
-        let control_tx = self.control_sender.clone();
-        let data_channel_capacity = self.data_channel_capacity;
-        let control_channel_capacity = self.control_channel_capacity;
+        let data_hub = Arc::clone(&self.data_hub);
+        let control_hub = Arc::clone(&self.control_hub);
         let forward = self.spawner.spawn(async move {
             while let Some(item) = output_rx.recv().await {
                 match item {
                     StreamData::Control(signal) => {
-                        if crate::processor::base::send_control_with_backpressure(
-                            &control_tx,
-                            control_channel_capacity,
-                            signal,
-                        )
-                        .await
-                        .is_err()
-                        {
+                        if control_hub.send(signal).await.is_err() {
                             break;
                         }
                     }
                     other => {
-                        if crate::processor::base::send_with_backpressure(
-                            &data_tx,
-                            data_channel_capacity,
-                            other,
-                            None,
-                        )
-                        .await
-                        .is_err()
-                        {
+                        if data_hub.send(other).await.is_err() {
                             break;
                         }
                     }
@@ -757,6 +726,15 @@ impl SharedStreamInner {
         self: &Arc<Self>,
         consumer_id: String,
     ) -> Result<SharedStreamSubscription, SharedStreamError> {
+        let data_receiver = self.data_hub.subscribe().await.map_err(|_| {
+            SharedStreamError::Internal(format!("shared stream {} data hub is closed", self.name()))
+        })?;
+        let control_receiver = self.control_hub.subscribe().await.map_err(|_| {
+            SharedStreamError::Internal(format!(
+                "shared stream {} control hub is closed",
+                self.name()
+            ))
+        })?;
         {
             let mut state = self.state.lock().await;
             if matches!(state.status, SharedStreamStatus::Stopped) {
@@ -777,6 +755,8 @@ impl SharedStreamInner {
             stream: Arc::clone(self),
             consumer_id,
             receivers_taken: false,
+            data_receiver: Some(data_receiver),
+            control_receiver: Some(control_receiver),
             spawner: self.spawner.clone(),
         })
     }
@@ -905,9 +885,6 @@ impl SharedStreamInner {
             let _ = handle.await;
         }
 
-        let mut handles = self.handles.lock().await;
-        handles.data_anchor.take();
-        handles.control_anchor.take();
         Ok(())
     }
 }
@@ -1107,13 +1084,13 @@ mod tests {
             .expect("send payload");
 
         async fn read_one(
-            rx: &mut broadcast::Receiver<StreamData>,
+            rx: &mut mpsc::Receiver<StreamData>,
         ) -> Box<dyn crate::model::Collection> {
             loop {
                 let data = timeout(Duration::from_secs(2), rx.recv())
                     .await
                     .expect("recv timeout")
-                    .expect("recv");
+                    .expect("recv closed");
                 if let StreamData::Collection(collection) = data {
                     return collection;
                 }

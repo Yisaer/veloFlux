@@ -119,6 +119,10 @@ For shared streams:
   pipeline
 - shared-stream stats are instance-scoped, not globally aggregated
 - all consumer pipelines on the same instance observe the same decoded stream output
+- delivery into consumer pipelines is no-drop and backpressured
+- runtime errors are non-terminal and follow normal processor-style error handling
+- the stream definition remains installed even when the running ingest runtime is reclaimed
+- the running ingest runtime exists only while at least one consumer references it
 
 Current create-time constraints are:
 
@@ -126,7 +130,7 @@ Current create-time constraints are:
 - shared streams cannot use decoder type `none`
 
 This preserves a consistent shared ingest pipeline shape: source -> optional sampler -> decoder ->
-broadcast into consumers.
+backpressured fan-out into consumers.
 
 ## Event Time Rules
 
@@ -188,6 +192,10 @@ Cross-cutting constraints worth preserving in future work:
   (`bytes` for normal decoders, `collection` for `decoder.type = none`)
 - MQTT streams may optionally bind to a shared connector via `connector_key`, but the stream
   definition still owns the topic-level source identity
+- shared MQTT client delivery is no-drop and backpressured when used through `connector_key`
+- shared MQTT runtime errors are non-terminal; explicit close/delete is the only terminal path
+- shared MQTT metadata may remain installed while the running shared connection instance is
+  reclaimed when no source/sink still references it
 - history streams carry connector props in the stream definition even though their runtime behavior
   is different from live ingest connectors
 

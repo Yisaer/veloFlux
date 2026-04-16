@@ -5,13 +5,14 @@ use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
 use rumqttc::{
-    AsyncClient, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS, Transport,
+    AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport,
 };
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use url::Url;
 
+use crate::backpressure_hub::BackpressureHub;
 use crate::connector::ConnectorError;
 use crate::runtime::TaskSpawner;
 use serde::{Deserialize, Serialize};
@@ -71,12 +72,10 @@ impl SharedMqttClient {
         Self { entry, manager }
     }
 
-    pub fn client(&self) -> AsyncClient {
-        self.entry.client.clone()
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<Result<SharedMqttEvent, ConnectorError>> {
-        self.entry.events_tx.subscribe()
+    pub async fn subscribe(
+        &self,
+    ) -> Result<mpsc::Receiver<Result<SharedMqttEvent, ConnectorError>>, ConnectorError> {
+        self.entry.subscribe().await
     }
 
     pub fn is_connected(&self) -> bool {
@@ -99,7 +98,8 @@ impl SharedMqttClient {
         }
 
         self.entry
-            .client
+            .client()
+            .await?
             .publish(topic, qos, retain, payload)
             .await
             .map_err(|err| ConnectorError::Connection(err.to_string()))
@@ -112,66 +112,99 @@ impl Drop for SharedMqttClient {
     }
 }
 
-struct MqttClientEntry {
+struct MqttClientRuntime {
     client: AsyncClient,
-    events_tx: broadcast::Sender<Result<SharedMqttEvent, ConnectorError>>,
+    events_hub: Arc<BackpressureHub<Result<SharedMqttEvent, ConnectorError>>>,
     shutdown_tx: watch::Sender<bool>,
-    join_handle: Mutex<Option<JoinHandle<()>>>,
+    join_handle: JoinHandle<()>,
+}
+
+struct MqttClientEntry {
+    config: SharedMqttClientConfig,
+    runtime: AsyncMutex<Option<MqttClientRuntime>>,
     ref_count: AtomicUsize,
     closing: AtomicBool,
-    topic: String,
-    qos: QoS,
     connected: AtomicBool,
     last_error: RwLock<Option<String>>,
+    spawner: TaskSpawner,
 }
 
 impl MqttClientEntry {
-    async fn new(config: &SharedMqttClientConfig) -> Result<(Self, EventLoop), ConnectorError> {
-        let mut options = build_mqtt_options(config)?;
+    fn new(config: SharedMqttClientConfig, spawner: TaskSpawner) -> Self {
+        Self {
+            config,
+            runtime: AsyncMutex::new(None),
+            ref_count: AtomicUsize::new(0),
+            closing: AtomicBool::new(false),
+            connected: AtomicBool::new(false),
+            last_error: RwLock::new(None),
+            spawner,
+        }
+    }
+
+    async fn subscribe(
+        self: &Arc<Self>,
+    ) -> Result<mpsc::Receiver<Result<SharedMqttEvent, ConnectorError>>, ConnectorError> {
+        self.ensure_runtime_started().await?;
+        let hub = {
+            let runtime = self.runtime.lock().await;
+            runtime
+                .as_ref()
+                .map(|runtime| Arc::clone(&runtime.events_hub))
+                .ok_or_else(|| {
+                    ConnectorError::ResourceBusy(
+                        "shared mqtt client runtime is unavailable".to_string(),
+                    )
+                })?
+        };
+        hub.subscribe()
+            .await
+            .map_err(|_| ConnectorError::ResourceBusy("shared mqtt client is closed".to_string()))
+    }
+
+    async fn client(self: &Arc<Self>) -> Result<AsyncClient, ConnectorError> {
+        self.ensure_runtime_started().await?;
+        let runtime = self.runtime.lock().await;
+        runtime
+            .as_ref()
+            .map(|runtime| runtime.client.clone())
+            .ok_or_else(|| {
+                ConnectorError::ResourceBusy(
+                    "shared mqtt client runtime is unavailable".to_string(),
+                )
+            })
+    }
+
+    async fn ensure_runtime_started(self: &Arc<Self>) -> Result<(), ConnectorError> {
+        if self.runtime.lock().await.is_some() {
+            return Ok(());
+        }
+
+        let config = self.config.clone();
+        let mut options = build_mqtt_options(&config)?;
         options.set_keep_alive(Duration::from_secs(30));
 
         let qos = map_qos(config.qos)?;
         let topic = config.topic.clone();
 
-        let (client, event_loop) = AsyncClient::new(options, 64);
+        let (client, mut event_loop) = AsyncClient::new(options, 64);
         client
             .subscribe(topic.clone(), qos)
             .await
             .map_err(|err| ConnectorError::Connection(err.to_string()))?;
 
-        let (events_tx, _) = broadcast::channel(1024);
+        let events_hub = Arc::new(BackpressureHub::new(1024));
         let (shutdown_tx, _) = watch::channel(false);
+        let mut runtime = self.runtime.lock().await;
+        if runtime.is_some() {
+            return Ok(());
+        }
 
-        Ok((
-            Self {
-                client,
-                events_tx,
-                shutdown_tx,
-                join_handle: Mutex::new(None),
-                ref_count: AtomicUsize::new(0),
-                closing: AtomicBool::new(false),
-                topic,
-                qos,
-                connected: AtomicBool::new(false),
-                last_error: RwLock::new(None),
-            },
-            event_loop,
-        ))
-    }
-
-    fn start_event_loop(
-        spawner: &TaskSpawner,
-        entry: &Arc<MqttClientEntry>,
-        mut event_loop: EventLoop,
-    ) {
-        let entry_for_task = Arc::clone(entry);
-        let mut shutdown_rx = entry.shutdown_tx.subscribe();
-        let events_tx = entry.events_tx.clone();
-        let topic = entry.topic.clone();
-        let qos = entry.qos;
-        let client = entry.client.clone();
-
-        let handle = spawner.spawn(async move {
+        let entry_for_task = Arc::clone(self);
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        let events_hub_for_task = Arc::clone(&events_hub);
+        let client_for_task = client.clone();
+        let handle = self.spawner.spawn(async move {
             let mut backoff = Duration::from_millis(100);
             let max_backoff = Duration::from_secs(5);
 
@@ -183,7 +216,9 @@ impl MqttClientEntry {
                             entry_for_task.connected.store(true, Ordering::Release);
                             backoff = Duration::from_millis(100);
                             if mqtt_topic_matches(&topic, &publish.topic) {
-                                let _ = events_tx.send(Ok(SharedMqttEvent::Payload(publish.payload.to_vec())));
+                                let _ = events_hub_for_task
+                                    .send(Ok(SharedMqttEvent::Payload(publish.payload.to_vec())))
+                                    .await;
                             }
                         }
                         Ok(Event::Incoming(Packet::Disconnect)) => {
@@ -196,18 +231,28 @@ impl MqttClientEntry {
                             entry_for_task.connected.store(true, Ordering::Release);
                             *entry_for_task.last_error.write() = None;
                             backoff = Duration::from_millis(100);
-                            let _ = client.subscribe(topic.clone(), qos).await;
+                            let _ = client_for_task.subscribe(topic.clone(), qos).await;
                         }
                         Ok(_) => {}
                         Err(ConnectionError::RequestsDone) => {
                             entry_for_task.connected.store(false, Ordering::Release);
-                            let _ = events_tx.send(Ok(SharedMqttEvent::EndOfStream));
-                            break;
+                            if entry_for_task.closing.load(Ordering::Acquire) {
+                                break;
+                            }
+                            let message = "mqtt requests done".to_string();
+                            *entry_for_task.last_error.write() = Some(message.clone());
+                            let _ = events_hub_for_task
+                                .send(Err(ConnectorError::Connection(message)))
+                                .await;
+                            sleep(backoff).await;
+                            backoff = std::cmp::min(backoff * 2, max_backoff);
                         }
                         Err(err) => {
                             entry_for_task.connected.store(false, Ordering::Release);
                             *entry_for_task.last_error.write() = Some(err.to_string());
-                            let _ = events_tx.send(Err(ConnectorError::Connection(err.to_string())));
+                            let _ = events_hub_for_task
+                                .send(Err(ConnectorError::Connection(err.to_string())))
+                                .await;
                             sleep(backoff).await;
                             backoff = std::cmp::min(backoff * 2, max_backoff);
                         }
@@ -216,18 +261,37 @@ impl MqttClientEntry {
             }
         });
 
-        *entry.join_handle.lock() = Some(handle);
+        *runtime = Some(MqttClientRuntime {
+            client,
+            events_hub,
+            shutdown_tx,
+            join_handle: handle,
+        });
+        Ok(())
     }
 
-    fn spawn_shutdown(spawner: &TaskSpawner, entry: Arc<Self>) {
-        spawner.spawn(async move {
-            let _ = entry.shutdown_tx.send(true);
-            let _ = entry.client.disconnect().await;
-            if let Some(handle) = entry.join_handle.lock().take() {
-                handle.abort();
-            }
-            let _ = entry.events_tx.send(Ok(SharedMqttEvent::EndOfStream));
-        });
+    async fn shutdown_runtime(self: &Arc<Self>, emit_terminal: bool) {
+        let runtime = {
+            let mut runtime = self.runtime.lock().await;
+            runtime.take()
+        };
+        let Some(runtime) = runtime else {
+            return;
+        };
+
+        let _ = runtime.shutdown_tx.send(true);
+        let _ = runtime.client.disconnect().await;
+        runtime.join_handle.abort();
+        let _ = runtime.join_handle.await;
+        self.connected.store(false, Ordering::Release);
+        if emit_terminal {
+            runtime
+                .events_hub
+                .close(Some(Ok(SharedMqttEvent::EndOfStream)))
+                .await;
+        } else {
+            runtime.events_hub.close(None).await;
+        }
     }
 }
 
@@ -256,9 +320,7 @@ impl MqttClientManager {
             }
         }
 
-        let (entry, event_loop) = MqttClientEntry::new(&config).await?;
-        let entry = Arc::new(entry);
-        MqttClientEntry::start_event_loop(&self.spawner, &entry, event_loop);
+        let entry = Arc::new(MqttClientEntry::new(config, self.spawner.clone()));
 
         self.entries.lock().insert(key, entry);
         Ok(())
@@ -277,6 +339,10 @@ impl MqttClientManager {
             entry.ref_count.fetch_add(1, Ordering::AcqRel);
             entry
         };
+        if let Err(err) = entry.ensure_runtime_started().await {
+            entry.ref_count.fetch_sub(1, Ordering::AcqRel);
+            return Err(err);
+        }
         Ok(SharedMqttClient::from_acquired(entry, self.clone()))
     }
 
@@ -289,16 +355,21 @@ impl MqttClientManager {
 
         entry.closing.store(true, Ordering::Release);
         if entry.ref_count.load(Ordering::Acquire) == 0 {
-            MqttClientEntry::spawn_shutdown(&self.spawner, entry);
+            let shutdown_entry = Arc::clone(&entry);
+            self.spawner.spawn(async move {
+                shutdown_entry.shutdown_runtime(true).await;
+            });
         }
         Ok(())
     }
 
     fn release(&self, entry: &Arc<MqttClientEntry>) {
-        if entry.ref_count.fetch_sub(1, Ordering::AcqRel) == 1
-            && entry.closing.load(Ordering::Acquire)
-        {
-            MqttClientEntry::spawn_shutdown(&self.spawner, Arc::clone(entry));
+        if entry.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+            let emit_terminal = entry.closing.load(Ordering::Acquire);
+            let shutdown_entry = Arc::clone(entry);
+            self.spawner.spawn(async move {
+                shutdown_entry.shutdown_runtime(emit_terminal).await;
+            });
         }
     }
 }

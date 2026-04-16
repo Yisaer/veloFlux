@@ -2,7 +2,7 @@
 
 ## Background
 
-Today a shared stream ingests and decodes the full source schema for every incoming payload (e.g. `a,b,c`) and broadcasts the decoded `Tuple` to all pipelines.
+Today a shared stream ingests and decodes the full source schema for every incoming payload (e.g. `a,b,c`) and fans the decoded `Tuple` out to all pipelines.
 
 This is correct but wastes CPU and memory when multiple pipelines consume the same shared stream while each only uses a subset of columns. Example:
 
@@ -62,6 +62,12 @@ For the initial iteration, only `TopLevelColumnPruning` contributes to `shared_r
    - When a pipeline stops, the shared stream should recompute the union and reduce decoding accordingly.
 5. Wildcard forces full decode
    - If any consumer uses `SELECT *` / `source.*`, the required columns are **ALL**, so the shared stream must fully decode.
+6. No-drop fan-out
+   - Shared-stream delivery to consumers must be backpressured and must not drop messages.
+7. Explicit lifecycle only
+   - Runtime errors must not stop the shared-stream runtime implicitly.
+   - Consumer attach/detach may start or stop the running shared-stream runtime instance without
+     deleting the shared stream definition itself.
 
 ## Registry State (Applied Only)
 
@@ -99,6 +105,8 @@ The shared stream ingest loop:
    - `decoding_columns = union_required_columns` (applied)
 4. Emits decoded tuples with full-index semantics:
    - for undecoded columns, returns `NULL`
+5. Keeps the shared stream definition installed while allowing the running runtime instance to be
+   reclaimed when no consumers remain
 
 Hot path optimization:
 
@@ -150,3 +158,6 @@ This guarantees the decoder applied the projection needed by the pipeline.
    - Two pipelines requiring disjoint columns must both work without wrong-index reads.
    - `SELECT *` / `source.*` must force full decode.
    - `EXPLAIN` for shared sources must show the per-pipeline projected column list.
+   - Removing the last consumer must stop the running shared-stream runtime instance without
+     removing the shared stream definition.
+   - A slow consumer must backpressure shared-stream fan-out instead of losing messages.

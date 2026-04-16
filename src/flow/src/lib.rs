@@ -5,6 +5,7 @@
 #![deny(unsafe_code)]
 
 pub mod aggregation;
+mod backpressure_hub;
 pub mod catalog;
 pub mod codec;
 pub mod connector;

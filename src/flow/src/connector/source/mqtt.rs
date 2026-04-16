@@ -147,13 +147,19 @@ impl SourceConnector for MqttSourceConnector {
                 let mut shutdown_rx = shutdown_rx;
                 match manager.acquire_client(&connector_key).await {
                     Ok(shared_client) => {
-                        let mut events = shared_client.subscribe();
+                        let mut events = match shared_client.subscribe().await {
+                            Ok(events) => events,
+                            Err(err) => {
+                                let _ = sender.send(Err(err)).await;
+                                return;
+                            }
+                        };
                         loop {
                             tokio::select! {
                                 _ = &mut shutdown_rx => break,
                                 event = events.recv() => {
                                     match event {
-                                        Ok(Ok(SharedMqttEvent::Payload(payload))) => {
+                                        Some(Ok(SharedMqttEvent::Payload(payload))) => {
                                             MQTT_SOURCE_RECORDS_IN
                                                 .with_label_values(&[
                                                     flow_instance_id.as_ref(),
@@ -172,16 +178,15 @@ impl SourceConnector for MqttSourceConnector {
                                                 Err(_) => break,
                                             }
                                         }
-                                        Ok(Ok(SharedMqttEvent::EndOfStream)) => {
+                                        Some(Ok(SharedMqttEvent::EndOfStream)) => {
                                             let _ = sender.send(Ok(ConnectorEvent::EndOfStream)).await;
                                             break;
                                         }
-                                        Ok(Err(err)) => {
+                                        Some(Err(err)) => {
                                             let _ = sender.send(Err(err)).await;
                                             continue;
                                         }
-                                        Err(_) => {
-                                            let _ = sender.send(Ok(ConnectorEvent::EndOfStream)).await;
+                                        None => {
                                             break;
                                         }
                                     }
