@@ -22,6 +22,8 @@ pub mod processor;
 mod runtime;
 pub mod shared_stream;
 pub mod stateful;
+#[cfg(test)]
+mod test_support;
 
 pub use aggregation::AggregateFunctionRegistry;
 pub use catalog::{

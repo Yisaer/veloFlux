@@ -4,9 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::{Mutex, RwLock};
-use rumqttc::{
-    AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport,
-};
+use rumqttc::{AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport};
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -372,6 +370,19 @@ impl MqttClientManager {
             });
         }
     }
+
+    #[cfg(test)]
+    pub(crate) async fn test_runtime_started(&self, key: &str) -> bool {
+        let entry = {
+            let guard = self.entries.lock();
+            guard.get(key).cloned()
+        };
+        let Some(entry) = entry else {
+            return false;
+        };
+        let started = entry.runtime.lock().await.is_some();
+        started
+    }
 }
 
 fn normalize_broker_url(url: &str) -> String {
@@ -438,11 +449,14 @@ fn is_tls_scheme(scheme: &str) -> bool {
 mod tests {
     use super::{
         build_mqtt_options, mqtt_topic_matches, MqttClientManager, SharedMqttClientConfig,
+        SharedMqttEvent,
     };
     use crate::connector::ConnectorError;
     use crate::runtime::TaskSpawner;
-    use rumqttc::Transport;
+    use crate::test_support::EmbeddedMqttBroker;
+    use rumqttc::{QoS, Transport};
     use tokio::runtime::Handle;
+    use tokio::time::{sleep, timeout, Duration};
 
     #[test]
     fn mqtt_topic_match_exact() {
@@ -483,10 +497,11 @@ mod tests {
 
     #[tokio::test]
     async fn drop_client_removes_busy_client_from_registry() {
+        let broker = EmbeddedMqttBroker::start().await;
         let manager = MqttClientManager::new(TaskSpawner::from_handle(Handle::current()));
         let cfg = SharedMqttClientConfig {
             key: "shared".to_string(),
-            broker_url: "tcp://127.0.0.1:1883".to_string(),
+            broker_url: broker.broker_url(),
             topic: "fleet/+/telemetry".to_string(),
             client_id: "client_shared".to_string(),
             qos: 0,
@@ -510,6 +525,119 @@ mod tests {
             manager.acquire_client("shared").await,
             Err(ConnectorError::NotFound(_))
         ));
+
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn shared_mqtt_runtime_is_lazy_started_and_reclaimed_when_last_reference_drops() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let manager = MqttClientManager::new(TaskSpawner::from_handle(Handle::current()));
+        let cfg = SharedMqttClientConfig {
+            key: "lazy".to_string(),
+            broker_url: broker.broker_url(),
+            topic: "fleet/+/telemetry".to_string(),
+            client_id: "client_lazy".to_string(),
+            qos: 0,
+            max_packet_size: None,
+        };
+
+        manager
+            .create_client(cfg)
+            .await
+            .expect("create shared mqtt client");
+        assert!(
+            !manager.test_runtime_started("lazy").await,
+            "runtime should not start before first acquisition"
+        );
+
+        let held = manager
+            .acquire_client("lazy")
+            .await
+            .expect("acquire shared mqtt client");
+        assert!(
+            manager.test_runtime_started("lazy").await,
+            "runtime should start on first acquisition"
+        );
+
+        drop(held);
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if !manager.test_runtime_started("lazy").await {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "shared mqtt runtime did not stop after last reference dropped"
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_mqtt_subscribers_receive_payloads_from_embedded_broker() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let manager = MqttClientManager::new(TaskSpawner::from_handle(Handle::current()));
+        let cfg = SharedMqttClientConfig {
+            key: "embedded".to_string(),
+            broker_url: broker.broker_url(),
+            topic: "fleet/+/telemetry".to_string(),
+            client_id: "client_embedded".to_string(),
+            qos: 0,
+            max_packet_size: None,
+        };
+
+        manager
+            .create_client(cfg)
+            .await
+            .expect("create shared mqtt client");
+        let held = manager
+            .acquire_client("embedded")
+            .await
+            .expect("acquire shared mqtt client");
+        let mut events = held
+            .subscribe()
+            .await
+            .expect("subscribe shared mqtt events");
+
+        broker
+            .publish("fleet/device_a/telemetry", b"first-payload".to_vec())
+            .await
+            .expect("publish first embedded mqtt payload");
+        broker
+            .publish("fleet/device_b/telemetry", b"second-payload".to_vec())
+            .await
+            .expect("publish second embedded mqtt payload");
+
+        let first = timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("recv first payload timeout")
+            .expect("first payload event should exist");
+        let second = timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("recv second payload timeout")
+            .expect("second payload event should exist");
+
+        match first {
+            Ok(SharedMqttEvent::Payload(payload)) => assert_eq!(payload, b"first-payload".to_vec()),
+            other => panic!("expected first payload event, got {other:?}"),
+        }
+        match second {
+            Ok(SharedMqttEvent::Payload(payload)) => {
+                assert_eq!(payload, b"second-payload".to_vec());
+            }
+            other => panic!("expected second payload event, got {other:?}"),
+        }
+
+        held.publish(
+            "fleet/device_c/telemetry".to_string(),
+            QoS::AtMostOnce,
+            false,
+            b"published-through-shared-client".to_vec(),
+        )
+        .await
+        .expect("publish through shared mqtt client");
 
         drop(held);
     }

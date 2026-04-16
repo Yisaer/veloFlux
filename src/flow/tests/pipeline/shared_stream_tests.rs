@@ -5,6 +5,7 @@ use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, Stre
 use flow::connector::{MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY};
 use flow::pipeline::{MemorySinkProps, PipelineDefinition};
 use flow::FlowInstance;
+use flow::SharedStreamStatus;
 use flow::{CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
 use serde_json::json;
 use std::sync::Arc;
@@ -90,6 +91,45 @@ async fn wait_for_shared_stream_subscriber_count(
             Instant::now() < deadline,
             "shared stream subscriber_count did not converge before timeout: expected={} actual={} decoding_columns={:?}",
             expected_subscriber_count,
+            info.subscriber_count,
+            info.decoding_columns
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+fn shared_stream_status_name(status: &SharedStreamStatus) -> &'static str {
+    match status {
+        SharedStreamStatus::Starting => "starting",
+        SharedStreamStatus::Running => "running",
+        SharedStreamStatus::Stopped => "stopped",
+        SharedStreamStatus::Failed(_) => "failed",
+    }
+}
+
+async fn wait_for_shared_stream_status(
+    instance: &FlowInstance,
+    stream_name: &str,
+    expected_status: &str,
+    timeout_duration: Duration,
+) {
+    let deadline = Instant::now() + timeout_duration;
+    loop {
+        let info = instance
+            .get_stream(stream_name)
+            .await
+            .expect("get shared stream")
+            .shared_info
+            .expect("shared stream info");
+        let actual_status = shared_stream_status_name(&info.status);
+        if actual_status == expected_status {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "shared stream status did not converge before timeout: expected={} actual={} subscribers={} decoding_columns={:?}",
+            expected_status,
+            actual_status,
             info.subscriber_count,
             info.decoding_columns
         );
@@ -446,6 +486,146 @@ async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {
     assert_eq!(actual_a_after_fallback, json!([{"a": 4}]));
 
     stop_and_delete_pipeline(&instance, pipeline_a_id).await;
+    instance
+        .delete_stream(stream_name)
+        .await
+        .expect("delete shared stream");
+}
+
+// coverage-covers: source.shared.lifecycle
+#[tokio::test]
+async fn shared_stream_runtime_is_lazy_started_and_reclaimed_when_last_consumer_leaves() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let stream_name = "shared_stream_lifecycle";
+    install_shared_mock_json_stream(&instance, stream_name).await;
+    wait_for_shared_stream_status(&instance, stream_name, "stopped", Duration::from_secs(5)).await;
+
+    let (_, output_topic) = make_memory_topics(
+        "pipeline_shared_stream",
+        "shared_stream_runtime_is_lazy_started_and_reclaimed_when_last_consumer_leaves",
+    );
+    declare_output_topic(&instance, &output_topic);
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe shared stream output");
+    let pipeline_id = "shared_stream_lifecycle_pipeline";
+    create_memory_sink_pipeline(
+        &instance,
+        pipeline_id,
+        &format!("SELECT a FROM {stream_name}"),
+        &output_topic,
+    );
+
+    instance
+        .start_pipeline(pipeline_id)
+        .expect("start pipeline");
+    wait_for_shared_stream_status(&instance, stream_name, "running", Duration::from_secs(5)).await;
+    wait_for_shared_stream_subscriber_count(&instance, stream_name, 1, Duration::from_secs(5))
+        .await;
+
+    instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":7,"b":8,"c":9}"#.as_ref())
+        .await
+        .expect("send running shared stream payload");
+    let actual = recv_next_json(&mut output, Duration::from_secs(5)).await;
+    assert_eq!(actual, json!([{"a": 7}]));
+
+    stop_and_delete_pipeline(&instance, pipeline_id).await;
+    wait_for_shared_stream_status(&instance, stream_name, "stopped", Duration::from_secs(5)).await;
+    wait_for_shared_stream_subscriber_count(&instance, stream_name, 0, Duration::from_secs(5))
+        .await;
+
+    let err = instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":10,"b":11,"c":12}"#.as_ref())
+        .await
+        .expect_err("stopped shared stream runtime should reject mock payload injection");
+    let message = err.to_string();
+    assert!(
+        message.contains("not ready to receive payloads") || message.contains("mock source closed"),
+        "unexpected stopped shared stream send error: {message}"
+    );
+
+    let info = instance
+        .get_stream(stream_name)
+        .await
+        .expect("get shared stream after runtime reclaim");
+    assert!(
+        info.shared_info.is_some(),
+        "shared stream definition should still exist after runtime reclaim"
+    );
+
+    instance
+        .delete_stream(stream_name)
+        .await
+        .expect("delete shared stream");
+}
+
+// coverage-covers: source.shared.lifecycle
+#[tokio::test]
+async fn shared_stream_runtime_can_restart_after_all_consumers_released() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let stream_name = "shared_stream_restart";
+    install_shared_mock_json_stream(&instance, stream_name).await;
+    wait_for_shared_stream_status(&instance, stream_name, "stopped", Duration::from_secs(5)).await;
+
+    let (_, output_topic_first) = make_memory_topics(
+        "pipeline_shared_stream",
+        "shared_stream_runtime_can_restart_after_all_consumers_released_first",
+    );
+    let (_, output_topic_second) = make_memory_topics(
+        "pipeline_shared_stream",
+        "shared_stream_runtime_can_restart_after_all_consumers_released_second",
+    );
+    declare_output_topic(&instance, &output_topic_first);
+    declare_output_topic(&instance, &output_topic_second);
+
+    let pipeline_first = "shared_stream_restart_pipeline_first";
+    create_memory_sink_pipeline(
+        &instance,
+        pipeline_first,
+        &format!("SELECT a FROM {stream_name}"),
+        &output_topic_first,
+    );
+    instance
+        .start_pipeline(pipeline_first)
+        .expect("start first pipeline");
+    wait_for_shared_stream_status(&instance, stream_name, "running", Duration::from_secs(5)).await;
+
+    stop_and_delete_pipeline(&instance, pipeline_first).await;
+    wait_for_shared_stream_status(&instance, stream_name, "stopped", Duration::from_secs(5)).await;
+
+    let mut output_second = instance
+        .open_memory_subscribe_bytes(&output_topic_second)
+        .expect("subscribe second output");
+    let pipeline_second = "shared_stream_restart_pipeline_second";
+    create_memory_sink_pipeline(
+        &instance,
+        pipeline_second,
+        &format!("SELECT c FROM {stream_name}"),
+        &output_topic_second,
+    );
+    instance
+        .start_pipeline(pipeline_second)
+        .expect("start second pipeline");
+    wait_for_shared_stream_status(&instance, stream_name, "running", Duration::from_secs(5)).await;
+    wait_for_shared_stream_subscriber_count(&instance, stream_name, 1, Duration::from_secs(5))
+        .await;
+
+    instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":1,"b":2,"c":13}"#.as_ref())
+        .await
+        .expect("send payload after shared stream restart");
+    let actual = recv_next_json(&mut output_second, Duration::from_secs(5)).await;
+    assert_eq!(actual, json!([{"c": 13}]));
+
+    stop_and_delete_pipeline(&instance, pipeline_second).await;
     instance
         .delete_stream(stream_name)
         .await
