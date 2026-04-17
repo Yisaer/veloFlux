@@ -1340,11 +1340,10 @@ fn collect_non_placeholder_column_refs(expr: &sqlparser::ast::Expr) -> Vec<Strin
 
     fn collect(expr: &Expr, out: &mut std::collections::HashSet<String>) {
         match expr {
-            Expr::Identifier(ident) => {
-                if !is_placeholder(ident) {
-                    out.insert(ident.value.clone());
-                }
+            Expr::Identifier(ident) if !is_placeholder(ident) => {
+                out.insert(ident.value.clone());
             }
+            Expr::Identifier(_) => {}
             Expr::CompoundIdentifier(idents) => {
                 out.insert(Expr::CompoundIdentifier(idents.clone()).to_string());
             }

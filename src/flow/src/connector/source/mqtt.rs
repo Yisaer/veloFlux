@@ -122,6 +122,45 @@ impl MqttSourceConnector {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SharedEventForwardOutcome {
+    Continue,
+    Break,
+}
+
+async fn forward_shared_mqtt_event(
+    sender: &mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
+    flow_instance_id: &Arc<str>,
+    metrics_id: &str,
+    event: Option<Result<SharedMqttEvent, ConnectorError>>,
+) -> SharedEventForwardOutcome {
+    match event {
+        Some(Ok(SharedMqttEvent::Payload(payload))) => {
+            MQTT_SOURCE_RECORDS_IN
+                .with_label_values(&[flow_instance_id.as_ref(), metrics_id])
+                .inc();
+            match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
+                Ok(_) => {
+                    MQTT_SOURCE_RECORDS_OUT
+                        .with_label_values(&[flow_instance_id.as_ref(), metrics_id])
+                        .inc();
+                    SharedEventForwardOutcome::Continue
+                }
+                Err(_) => SharedEventForwardOutcome::Break,
+            }
+        }
+        Some(Ok(SharedMqttEvent::EndOfStream)) => {
+            let _ = sender.send(Ok(ConnectorEvent::EndOfStream)).await;
+            SharedEventForwardOutcome::Break
+        }
+        Some(Err(err)) => {
+            let _ = sender.send(Err(err)).await;
+            SharedEventForwardOutcome::Continue
+        }
+        None => SharedEventForwardOutcome::Break,
+    }
+}
+
 impl SourceConnector for MqttSourceConnector {
     fn id(&self) -> &str {
         &self.id
@@ -147,43 +186,28 @@ impl SourceConnector for MqttSourceConnector {
                 let mut shutdown_rx = shutdown_rx;
                 match manager.acquire_client(&connector_key).await {
                     Ok(shared_client) => {
-                        let mut events = shared_client.subscribe();
+                        let mut events = match shared_client.subscribe().await {
+                            Ok(events) => events,
+                            Err(err) => {
+                                let _ = sender.send(Err(err)).await;
+                                return;
+                            }
+                        };
                         loop {
                             tokio::select! {
                                 _ = &mut shutdown_rx => break,
                                 event = events.recv() => {
-                                    match event {
-                                        Ok(Ok(SharedMqttEvent::Payload(payload))) => {
-                                            MQTT_SOURCE_RECORDS_IN
-                                                .with_label_values(&[
-                                                    flow_instance_id.as_ref(),
-                                                    metrics_id.as_str(),
-                                                ])
-                                                .inc();
-                                            match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
-                                                Ok(_) => {
-                                                    MQTT_SOURCE_RECORDS_OUT
-                                                        .with_label_values(&[
-                                                            flow_instance_id.as_ref(),
-                                                            metrics_id.as_str(),
-                                                        ])
-                                                        .inc();
-                                                }
-                                                Err(_) => break,
-                                            }
-                                        }
-                                        Ok(Ok(SharedMqttEvent::EndOfStream)) => {
-                                            let _ = sender.send(Ok(ConnectorEvent::EndOfStream)).await;
-                                            break;
-                                        }
-                                        Ok(Err(err)) => {
-                                            let _ = sender.send(Err(err)).await;
-                                            continue;
-                                        }
-                                        Err(_) => {
-                                            let _ = sender.send(Ok(ConnectorEvent::EndOfStream)).await;
-                                            break;
-                                        }
+                                    if matches!(
+                                        forward_shared_mqtt_event(
+                                            &sender,
+                                            &flow_instance_id,
+                                            metrics_id.as_str(),
+                                            event,
+                                        )
+                                        .await,
+                                        SharedEventForwardOutcome::Break
+                                    ) {
+                                        break;
                                     }
                                 }
                             }
@@ -362,8 +386,22 @@ fn normalize_broker_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_mqtt_options, MqttSourceConfig};
+    use super::{
+        build_mqtt_options, forward_shared_mqtt_event, MqttSourceConfig, MqttSourceConnector,
+        SharedEventForwardOutcome,
+    };
+    use crate::connector::mqtt_client::{MqttClientManager, SharedMqttEvent};
+    use crate::connector::{
+        ConnectorError, ConnectorEvent, SharedMqttClientConfig, SourceConnector,
+    };
+    use crate::runtime::TaskSpawner;
+    use crate::test_support::EmbeddedMqttBroker;
+    use futures::StreamExt;
     use rumqttc::Transport;
+    use std::sync::Arc;
+    use tokio::runtime::Handle;
+    use tokio::sync::mpsc;
+    use tokio::time::{sleep, timeout, Duration};
 
     #[test]
     fn mqtt_source_build_mqtt_options_uses_stream_local_broker_and_client_id() {
@@ -400,5 +438,115 @@ mod tests {
         );
         assert_eq!(options.client_id(), "source_tls_client");
         assert!(matches!(options.transport(), Transport::Tls(_)));
+    }
+
+    #[tokio::test]
+    async fn shared_client_backed_source_forwards_errors_without_ending_stream() {
+        let flow_instance_id = Arc::<str>::from("default");
+        let (sender, mut receiver) = mpsc::channel(4);
+
+        let first = forward_shared_mqtt_event(
+            &sender,
+            &flow_instance_id,
+            "shared_source_connector",
+            Some(Err(ConnectorError::Connection(
+                "injected source runtime error".to_string(),
+            ))),
+        )
+        .await;
+        let second = forward_shared_mqtt_event(
+            &sender,
+            &flow_instance_id,
+            "shared_source_connector",
+            Some(Ok(SharedMqttEvent::Payload(b"after-error".to_vec()))),
+        )
+        .await;
+
+        assert_eq!(first, SharedEventForwardOutcome::Continue);
+        assert_eq!(second, SharedEventForwardOutcome::Continue);
+
+        match receiver
+            .recv()
+            .await
+            .expect("receive forwarded error event")
+        {
+            Err(ConnectorError::Connection(message)) => {
+                assert_eq!(message, "injected source runtime error");
+            }
+            other => panic!("expected forwarded runtime error, got {other:?}"),
+        }
+        match receiver
+            .recv()
+            .await
+            .expect("receive forwarded payload event")
+        {
+            Ok(ConnectorEvent::Payload(payload)) => {
+                assert_eq!(payload, b"after-error".to_vec());
+            }
+            other => panic!("expected payload after runtime error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_client_backed_source_receives_payloads_from_embedded_broker() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let spawner = TaskSpawner::from_handle(Handle::current());
+        let manager = MqttClientManager::new(spawner.clone());
+        let topic_filter = broker.scoped_filter("fleet/+/telemetry");
+        let shared_cfg = SharedMqttClientConfig {
+            key: "shared_source".to_string(),
+            broker_url: broker.broker_url(),
+            topic: topic_filter.clone(),
+            client_id: "shared_source_client".to_string(),
+            qos: 0,
+            max_packet_size: None,
+        };
+        manager
+            .create_client(shared_cfg)
+            .await
+            .expect("create shared mqtt client");
+
+        let config = MqttSourceConfig::new("source_stream", broker.broker_url(), &topic_filter, 0)
+            .with_connector_key("shared_source");
+        let mut connector = MqttSourceConnector::new(
+            "shared_source_connector",
+            config,
+            "default",
+            manager.clone(),
+            spawner,
+        );
+        let mut stream = connector.subscribe().expect("subscribe source connector");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if manager.test_runtime_started("shared_source").await {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "shared mqtt runtime did not start for shared-client-backed source"
+            );
+            sleep(Duration::from_millis(20)).await;
+        }
+        sleep(Duration::from_millis(300)).await;
+
+        broker
+            .publish("fleet/device_a/telemetry", b"from-embedded-broker".to_vec())
+            .await
+            .expect("publish embedded mqtt payload");
+
+        let item = timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("recv embedded broker payload timeout")
+            .expect("shared-client-backed source event should exist");
+
+        match item {
+            Ok(ConnectorEvent::Payload(payload)) => {
+                assert_eq!(payload, b"from-embedded-broker".to_vec());
+            }
+            other => panic!("expected payload from embedded broker, got {other:?}"),
+        }
+
+        connector.close().expect("close source connector");
     }
 }

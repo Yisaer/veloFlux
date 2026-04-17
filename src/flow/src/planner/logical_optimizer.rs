@@ -145,13 +145,12 @@ fn max_existing_cse_temp_id_in_plan(plan: &LogicalPlan) -> u64 {
 
     fn visit_expr(expr: &SqlExpr, max_id: &mut u64) {
         match expr {
-            SqlExpr::Identifier(ident) => {
-                if is_cse_temp(&ident.value) {
-                    if let Some(id) = parse_id(&ident.value) {
-                        *max_id = (*max_id).max(id);
-                    }
+            SqlExpr::Identifier(ident) if is_cse_temp(&ident.value) => {
+                if let Some(id) = parse_id(&ident.value) {
+                    *max_id = (*max_id).max(id);
                 }
             }
+            SqlExpr::Identifier(_) => {}
             SqlExpr::BinaryOp { left, right, .. } => {
                 visit_expr(left, max_id);
                 visit_expr(right, max_id);

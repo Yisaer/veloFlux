@@ -5,6 +5,7 @@
 #![deny(unsafe_code)]
 
 pub mod aggregation;
+mod backpressure_hub;
 pub mod catalog;
 pub mod codec;
 pub mod connector;
@@ -21,6 +22,8 @@ pub mod processor;
 mod runtime;
 pub mod shared_stream;
 pub mod stateful;
+#[cfg(test)]
+mod test_support;
 
 pub use aggregation::AggregateFunctionRegistry;
 pub use catalog::{

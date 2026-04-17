@@ -552,15 +552,14 @@ fn parse_stateful_window_spec_partition_by(
 
 fn validate_stateful_builtin_args(func_name: &str, args: &[Expr]) -> Result<(), String> {
     match func_name {
-        "latest" => {
-            if args.len() != 1 {
-                return Err(format!(
-                    "stateful function '{}' expects exactly 1 argument, got {}",
-                    func_name,
-                    args.len()
-                ));
-            }
+        "latest" if args.len() != 1 => {
+            return Err(format!(
+                "stateful function '{}' expects exactly 1 argument, got {}",
+                func_name,
+                args.len()
+            ));
         }
+        "latest" => {}
         "changed_col" => {
             if args.len() != 2 {
                 return Err(format!(

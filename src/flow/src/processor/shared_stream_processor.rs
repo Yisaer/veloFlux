@@ -1,5 +1,5 @@
 use crate::processor::base::{
-    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
+    default_channel_capacities, fan_in_control_streams, fan_in_streams,
     send_control_with_backpressure, send_with_backpressure, ProcessorChannelCapacities,
 };
 use crate::processor::{ControlSignal, Processor, ProcessorError, ProcessorStats, StreamData};
@@ -10,8 +10,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration, Instant};
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
 
 pub struct SharedStreamProcessor {
@@ -156,8 +154,8 @@ impl Processor for SharedStreamProcessor {
             let (shared_data_rx, shared_control_rx) = subscription
                 .take_receivers()
                 .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
-            let mut shared_data = BroadcastStream::new(shared_data_rx);
-            let mut shared_control = BroadcastStream::new(shared_control_rx);
+            let mut shared_data = shared_data_rx;
+            let mut shared_control = shared_control_rx;
             loop {
                 tokio::select! {
                     biased;
@@ -177,8 +175,8 @@ impl Processor for SharedStreamProcessor {
                             control_inputs_active = false;
                         }
                     }
-                    shared_control_msg = shared_control.next() => {
-                        if let Some(Ok(signal)) = shared_control_msg {
+                    shared_control_msg = shared_control.recv() => {
+                        if let Some(signal) = shared_control_msg {
                             let is_terminal = signal.is_terminal();
                             send_control_with_backpressure(
                                 &control_output,
@@ -217,9 +215,9 @@ impl Processor for SharedStreamProcessor {
                             input_active = false;
                         }
                     }
-                    shared_data_msg = shared_data.next() => {
+                    shared_data_msg = shared_data.recv() => {
                         match shared_data_msg {
-                            Some(Ok(data)) => {
+                            Some(data) => {
                                 if let Some(rows) = data.num_rows_hint() {
                                     stats.record_in(rows);
                                 }
@@ -238,10 +236,6 @@ impl Processor for SharedStreamProcessor {
                                 if is_terminal {
                                     return Ok(());
                                 }
-                            }
-                            Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                log_broadcast_lagged(&processor_id, skipped, "shared stream data");
-                                continue;
                             }
                             None => return Ok(()),
                         }

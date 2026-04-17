@@ -51,11 +51,34 @@ At runtime, each flow instance owns its own per-key client registry. A shared cl
 
 - one `rumqttc::AsyncClient`
 - one background event loop task
-- one broadcast fan-out of payload/error/end-of-stream events
+- one backpressured fan-out hub of payload/error/close events
 - reference counting for acquired handles
 
 The resource is therefore shared within one flow instance, not across instances. `key` names the
 logical resource; each instance still creates its own network client.
+
+## Delivery And Lifecycle Semantics
+
+Shared MQTT client delivery must follow the same high-level runtime principles as processors:
+
+- fan-out is **no-drop**
+- slow downstream subscribers apply backpressure to the shared client instead of silently losing
+  old messages
+- runtime errors are **non-terminal**
+- the shared client runtime exists only while it has active references
+- explicit close/delete still defines resource removal, but the running connection instance is
+  reclaimed once the last active user releases it
+
+The shared client therefore does **not** treat connection errors, reconnect attempts, or subscriber
+delivery errors as implicit end-of-stream conditions.
+
+Instead:
+
+- payloads are fanned out through a backpressured delivery path
+- runtime errors are surfaced to attached sources/sinks as ordinary runtime errors
+- an explicit close operation emits the terminal close/end event
+- reaching zero active references tears down the running connection instance without deleting the
+  shared client metadata resource
 
 ## Source-Side Binding
 
@@ -69,7 +92,7 @@ When `connector_key` is absent:
 When `connector_key` is present:
 
 - the source connector acquires the shared client by key
-- payloads come from the shared client's broadcast event stream
+- payloads and runtime errors come from the shared client's backpressured event stream
 - the shared client config becomes the live owner of subscription topic, client id, QoS, and
   packet-size settings
 
@@ -157,6 +180,9 @@ This produces a useful invariant:
 
 - new acquisitions fail immediately after delete
 - already-running users may finish with their held handle during shutdown
+- the shared client only emits its terminal close/end event as part of that explicit shutdown path
+- when the key is still configured but no source/sink currently holds it, the running connection
+  instance may be absent and will be recreated on the next acquisition
 
 ## Multi-Instance / Worker Behavior
 
@@ -188,6 +214,9 @@ Important failure behaviors:
 - shared client event loops reconnect with exponential backoff on runtime connection errors
 - source/sink publish or acquisition errors surface at connector runtime, not as metadata mutation
   errors
+- connection/runtime errors do not implicitly terminate the shared client runtime
+- only explicit close/delete drives terminal end-of-stream delivery to attached users
+- zero active references reclaim the running runtime instance without removing metadata
 
 ## Testing Guidance
 
@@ -200,6 +229,12 @@ Important failure behaviors:
 - Verify worker apply reconciles shared clients before building streams/pipelines.
 - Verify busy-key conflicts reject pipeline start before desired state is mutated.
 - Verify one key can be referenced by both a source and a sink in the same pipeline/runtime.
+- Verify a slow subscriber backpressures the shared client fan-out instead of losing messages.
+- Verify runtime connection errors are delivered as non-terminal runtime errors and do not emit
+  end-of-stream.
+- Verify explicit close/delete emits the terminal end event exactly once.
+- Verify the running connection instance is lazily created on first acquisition and reclaimed when
+  the last active reference is released.
 
 ## Future Work
 
