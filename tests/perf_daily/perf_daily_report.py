@@ -18,14 +18,16 @@ import os
 import re
 from typing import Dict, List, Optional, Tuple
 
+import perf_daily
+
 Sample = Tuple[int, float]  # (ts_ms, value)
 
 TRACKED_METRICS = (
-    "cpu_usage",
-    "memory_usage_bytes",
-    "heap_in_use_bytes",
-    "heap_in_allocator_bytes",
-    "processor_records_in_total",
+    perf_daily.RUNTIME_CPU_USAGE_METRIC,
+    perf_daily.RUNTIME_MEMORY_USAGE_METRIC,
+    perf_daily.RUNTIME_HEAP_IN_USE_METRIC,
+    perf_daily.RUNTIME_HEAP_IN_ALLOCATOR_METRIC,
+    perf_daily.PROCESSOR_RECORDS_IN_METRIC,
 )
 
 # We render in GitHub Actions Job Summary; prefer dark theme and high-contrast lines.
@@ -68,7 +70,7 @@ def parse_openmetrics(path: str, instance: Optional[str]) -> Dict[str, List[Samp
             if name not in series:
                 continue
             labels = m.group(2) or ""
-            if instance is not None and f'instance="{instance}"' not in labels:
+            if instance is not None and f'{perf_daily.FLOW_INSTANCE_LABEL}="{instance}"' not in labels:
                 continue
             try:
                 val = float(m.group(3))
@@ -217,15 +219,25 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
     lines.append("")
 
     # Build x-axis as seconds from start.
-    cpu_items = series.get("cpu_usage", [])
+    cpu_items = series.get(perf_daily.RUNTIME_CPU_USAGE_METRIC, [])
     if cpu_items:
         xs, cpu_vals = _bin_by_second(cpu_items, start_ms=start_ms_eff)
         y0, y1 = _pad_range(min(cpu_vals), max(cpu_vals))
         lines.append("### CPU (Grafana-like)")
-        lines.append(mermaid_xychart("cpu_usage", "t (s)", "%", xs, [("cpu_usage", cpu_vals)], y_min=y0, y_max=y1))
+        lines.append(
+            mermaid_xychart(
+                perf_daily.RUNTIME_CPU_USAGE_METRIC,
+                "t (s)",
+                "%",
+                xs,
+                [("cpu_usage_percent", cpu_vals)],
+                y_min=y0,
+                y_max=y1,
+            )
+        )
 
     # Ingress throughput: datasource records_in rate.
-    ds_in = series.get("processor_records_in_total", [])
+    ds_in = series.get(perf_daily.PROCESSOR_RECORDS_IN_METRIC, [])
     if ds_in:
         xs_r, rs = _compute_rate(ds_in, start_ms=start_ms_eff)
         if xs_r and rs:
@@ -233,7 +245,7 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
             lines.append("### Datasource Records In Rate (Grafana-like)")
             lines.append(
                 mermaid_xychart(
-                    "processor_records_in_total kind=datasource rate",
+                    f"{perf_daily.PROCESSOR_RECORDS_IN_METRIC} datasource rate",
                     "t (s)",
                     "records/s",
                     xs_r,
@@ -243,9 +255,9 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
                 )
             )
 
-    mem_items = series.get("memory_usage_bytes", [])
-    heap_items = series.get("heap_in_use_bytes", [])
-    heap_sys_items = series.get("heap_in_allocator_bytes", [])
+    mem_items = series.get(perf_daily.RUNTIME_MEMORY_USAGE_METRIC, [])
+    heap_items = series.get(perf_daily.RUNTIME_HEAP_IN_USE_METRIC, [])
+    heap_sys_items = series.get(perf_daily.RUNTIME_HEAP_IN_ALLOCATOR_METRIC, [])
     if mem_items:
         xs_mem, mem_raw = _bin_by_second(mem_items, start_ms=start_ms_eff)
         mem_vals = [_to_mib(v) for v in mem_raw]
@@ -270,9 +282,9 @@ def build_summary_markdown(result: Dict, series: Dict[str, List[Sample]], openme
         lines.append("### Memory (Grafana-like)")
         lines.append(mermaid_xychart("memory/heap", "t (s)", "MiB", xs_mem, chart_series, y_min=y0, y_max=y1))
         lines.append(
-            f"Legend: [{MERMAID_PALETTE[0]}]=memory_usage_bytes (rss), "
-            f"[{MERMAID_PALETTE[1]}]=heap_in_use_bytes, "
-            f"[{MERMAID_PALETTE[2]}]=heap_in_allocator_bytes"
+            f"Legend: [{MERMAID_PALETTE[0]}]={perf_daily.RUNTIME_MEMORY_USAGE_METRIC} (rss), "
+            f"[{MERMAID_PALETTE[1]}]={perf_daily.RUNTIME_HEAP_IN_USE_METRIC}, "
+            f"[{MERMAID_PALETTE[2]}]={perf_daily.RUNTIME_HEAP_IN_ALLOCATOR_METRIC}"
         )
         lines.append("")
     return "\n".join(lines) + "\n"
@@ -334,10 +346,30 @@ def svg_line_chart(
 def build_html_report(result: Dict, series: Dict[str, List[Sample]], openmetrics_path: str, title: str) -> str:
     start_ms = int(result.get("publish_start_ts_ms") or 0)
     charts = [
-        svg_line_chart("cpu_usage", "pct", series.get("cpu_usage", []), start_ms=start_ms),
-        svg_line_chart("memory_usage_bytes", "MiB", series.get("memory_usage_bytes", []), start_ms=start_ms),
-        svg_line_chart("heap_in_use_bytes", "MiB", series.get("heap_in_use_bytes", []), start_ms=start_ms),
-        svg_line_chart("heap_in_allocator_bytes", "MiB", series.get("heap_in_allocator_bytes", []), start_ms=start_ms),
+        svg_line_chart(
+            perf_daily.RUNTIME_CPU_USAGE_METRIC,
+            "pct",
+            series.get(perf_daily.RUNTIME_CPU_USAGE_METRIC, []),
+            start_ms=start_ms,
+        ),
+        svg_line_chart(
+            perf_daily.RUNTIME_MEMORY_USAGE_METRIC,
+            "MiB",
+            series.get(perf_daily.RUNTIME_MEMORY_USAGE_METRIC, []),
+            start_ms=start_ms,
+        ),
+        svg_line_chart(
+            perf_daily.RUNTIME_HEAP_IN_USE_METRIC,
+            "MiB",
+            series.get(perf_daily.RUNTIME_HEAP_IN_USE_METRIC, []),
+            start_ms=start_ms,
+        ),
+        svg_line_chart(
+            perf_daily.RUNTIME_HEAP_IN_ALLOCATOR_METRIC,
+            "MiB",
+            series.get(perf_daily.RUNTIME_HEAP_IN_ALLOCATOR_METRIC, []),
+            start_ms=start_ms,
+        ),
     ]
 
     return f"""<!doctype html>
