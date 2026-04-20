@@ -2,9 +2,7 @@
 
 use super::{SinkConnector, SinkConnectorError};
 use async_trait::async_trait;
-use once_cell::sync::Lazy;
 use parking_lot::RwLock;
-use prometheus::{IntCounterVec, Opts};
 use rumqttc::{
     AsyncClient, ClientError, ConnectionError, Event, EventLoop, MqttOptions, Packet, QoS,
     Transport,
@@ -85,33 +83,6 @@ pub(crate) struct MqttSinkConnector {
     mqtt_clients: MqttClientManager,
     spawner: TaskSpawner,
 }
-
-static MQTT_SINK_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
-    let vec = IntCounterVec::new(
-        Opts::new(
-            "mqtt_sink_records_in_total",
-            "Number of records received by MQTT sink connectors",
-        ),
-        &["flow_instance", "connector"],
-    )
-    .expect("create mqtt sink records_in counter vec");
-    prometheus::register(Box::new(vec.clone())).expect("register mqtt sink records_in counter vec");
-    vec
-});
-
-static MQTT_SINK_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
-    let vec = IntCounterVec::new(
-        Opts::new(
-            "mqtt_sink_records_out_total",
-            "Number of records successfully published by MQTT sink connectors",
-        ),
-        &["flow_instance", "connector"],
-    )
-    .expect("create mqtt sink records_out counter vec");
-    prometheus::register(Box::new(vec.clone()))
-        .expect("register mqtt sink records_out counter vec");
-    vec
-});
 
 enum SinkClient {
     Shared(SharedMqttClient),
@@ -324,7 +295,7 @@ impl SinkConnector for MqttSinkConnector {
         self.ensure_client().await?;
         let qos = self.publish_qos()?;
         if let Some(client) = &self.client {
-            MQTT_SINK_RECORDS_IN
+            veloflux_metrics::mqtt_sink_records_in_total()
                 .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
                 .inc();
             client
@@ -336,7 +307,7 @@ impl SinkConnector for MqttSinkConnector {
                 )
                 .await
                 .map(|_| {
-                    MQTT_SINK_RECORDS_OUT
+                    veloflux_metrics::mqtt_sink_records_out_total()
                         .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
                         .inc()
                 })

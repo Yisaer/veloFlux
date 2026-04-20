@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 once_cell = "1.19"
-prometheus = "0.13"
+veloflux_metrics = { path = "../metrics" }
 tokio = { version = "1", default-features = false, features = ["rt", "time", "sync"] }
 tokio-metrics = { version = "0.4.5", features = ["rt"] }
 

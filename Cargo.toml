@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "src/flow",
+    "src/metrics",
     "src/datatypes",
     "src/parser", "src/manager",
     "src/telemetry", "src/storage",
@@ -42,6 +43,7 @@ telemetry = { path = "src/telemetry", optional = true }
 storage = { path = "src/storage" }
 build_info = { path = "src/build_info" }
 sdk = { path = "src/sdk" }
+veloflux_metrics = { path = "src/metrics" }
 veloflux_sdv = { package = "veloflux-sdv", path = "distros/sdv" }
 
 [features]

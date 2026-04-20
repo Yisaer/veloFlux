@@ -29,10 +29,7 @@ use pprof::{protos::Message, ProfilerGuardBuilder};
 #[cfg(feature = "metrics")]
 use sysinfo::{Pid, System};
 #[cfg(feature = "metrics")]
-use telemetry::{
-    spawn_tokio_metrics_collector, CPU_USAGE_GAUGE, HEAP_IN_ALLOCATOR_GAUGE, HEAP_IN_USE_GAUGE,
-    MEMORY_USAGE_GAUGE,
-};
+use telemetry::spawn_tokio_metrics_collector;
 #[cfg(all(
     feature = "profiling",
     feature = "allocator-jemalloc",
@@ -47,6 +44,11 @@ use tikv_jemalloc_ctl::raw;
 use tikv_jemalloc_ctl::{epoch, stats};
 #[cfg(feature = "metrics")]
 use tokio::time::{sleep, Duration};
+#[cfg(feature = "metrics")]
+use veloflux_metrics::{
+    runtime_cpu_usage_percent, runtime_heap_in_allocator_bytes, runtime_heap_in_use_bytes,
+    runtime_memory_usage_bytes,
+};
 
 #[cfg(feature = "profiling")]
 const DEFAULT_PROFILE_ADDR: &str = "0.0.0.0:6060";
@@ -200,9 +202,7 @@ pub async fn init(
         opts.config_path.as_deref(),
     );
     flow::init_process_once();
-    flow::metrics::set_flow_instance_id("default");
-    #[cfg(feature = "metrics")]
-    telemetry::set_flow_instance_id("default");
+    veloflux_metrics::set_default_flow_instance_id("default");
     log_allocator();
 
     let profiling_enabled = opts.profiling_enabled.unwrap_or(false);
@@ -1068,11 +1068,11 @@ async fn init_metrics_exporter_runtime(
             system.refresh_process(pid);
             if let Some(proc_info) = system.process(pid) {
                 let cpu_usage_percent = proc_info.cpu_usage() as f64;
-                CPU_USAGE_GAUGE.set(cpu_usage_percent as i64);
-                MEMORY_USAGE_GAUGE.set(proc_info.memory() as i64);
+                runtime_cpu_usage_percent().set(cpu_usage_percent);
+                runtime_memory_usage_bytes().set(proc_info.memory() as i64);
             } else {
-                CPU_USAGE_GAUGE.set(0);
-                MEMORY_USAGE_GAUGE.set(0);
+                runtime_cpu_usage_percent().set(0.0);
+                runtime_memory_usage_bytes().set(0);
             }
             flow::collect_flow_instance_cpu_metrics_once();
             update_heap_metrics();
@@ -1139,8 +1139,8 @@ fn update_heap_metrics() {
     }
     let allocated = stats::allocated::read().unwrap_or(0);
     let resident = stats::resident::read().unwrap_or(0);
-    HEAP_IN_USE_GAUGE.set(clamp_usize_to_i64(allocated));
-    HEAP_IN_ALLOCATOR_GAUGE.set(clamp_usize_to_i64(resident));
+    runtime_heap_in_use_bytes().set(clamp_usize_to_i64(allocated));
+    runtime_heap_in_allocator_bytes().set(clamp_usize_to_i64(resident));
 }
 
 #[cfg(all(
@@ -1148,8 +1148,8 @@ fn update_heap_metrics() {
     any(not(feature = "allocator-jemalloc"), target_env = "msvc")
 ))]
 fn update_heap_metrics() {
-    HEAP_IN_USE_GAUGE.set(0);
-    HEAP_IN_ALLOCATOR_GAUGE.set(0);
+    runtime_heap_in_use_bytes().set(0);
+    runtime_heap_in_allocator_bytes().set(0);
 }
 
 #[cfg(not(feature = "metrics"))]

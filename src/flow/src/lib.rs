@@ -14,7 +14,6 @@ pub mod eventtime;
 mod explain_shared_stream;
 pub mod expr;
 pub mod instance;
-pub mod metrics;
 pub mod model;
 pub mod pipeline;
 pub mod planner;
@@ -311,7 +310,7 @@ pub(crate) fn create_pipeline(
     let pipeline = create_processor_pipeline(
         physical_plan,
         ProcessorPipelineDependencies::new(
-            crate::metrics::flow_instance_id(),
+            veloflux_metrics::default_flow_instance_id(),
             mqtt_client_manager,
             Arc::clone(&shared_stream_registry),
             registries,

@@ -4,8 +4,6 @@ use crate::connector::mqtt_client::{MqttClientManager, SharedMqttEvent};
 use crate::connector::{ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector};
 use crate::processor::base::normalize_channel_capacity;
 use crate::runtime::TaskSpawner;
-use once_cell::sync::Lazy;
-use prometheus::{IntCounterVec, Opts};
 use rumqttc::{AsyncClient, ConnectionError, Event, MqttOptions, Packet, QoS, Transport};
 use std::sync::Arc;
 use std::time::Duration;
@@ -69,34 +67,6 @@ pub(crate) struct MqttSourceConnector {
     spawner: TaskSpawner,
 }
 
-static MQTT_SOURCE_RECORDS_IN: Lazy<IntCounterVec> = Lazy::new(|| {
-    let vec = IntCounterVec::new(
-        Opts::new(
-            "mqtt_source_records_in_total",
-            "Number of records received from MQTT sources",
-        ),
-        &["flow_instance", "connector"],
-    )
-    .expect("create mqtt source records_in counter vec");
-    prometheus::register(Box::new(vec.clone()))
-        .expect("register mqtt source records_in counter vec");
-    vec
-});
-
-static MQTT_SOURCE_RECORDS_OUT: Lazy<IntCounterVec> = Lazy::new(|| {
-    let vec = IntCounterVec::new(
-        Opts::new(
-            "mqtt_source_records_out_total",
-            "Number of records emitted downstream by MQTT sources",
-        ),
-        &["flow_instance", "connector"],
-    )
-    .expect("create mqtt source records_out counter vec");
-    prometheus::register(Box::new(vec.clone()))
-        .expect("register mqtt source records_out counter vec");
-    vec
-});
-
 impl MqttSourceConnector {
     pub fn new(
         id: impl Into<String>,
@@ -136,12 +106,12 @@ async fn forward_shared_mqtt_event(
 ) -> SharedEventForwardOutcome {
     match event {
         Some(Ok(SharedMqttEvent::Payload(payload))) => {
-            MQTT_SOURCE_RECORDS_IN
+            veloflux_metrics::mqtt_source_records_in_total()
                 .with_label_values(&[flow_instance_id.as_ref(), metrics_id])
                 .inc();
             match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                 Ok(_) => {
-                    MQTT_SOURCE_RECORDS_OUT
+                    veloflux_metrics::mqtt_source_records_out_total()
                         .with_label_values(&[flow_instance_id.as_ref(), metrics_id])
                         .inc();
                     SharedEventForwardOutcome::Continue
@@ -277,7 +247,7 @@ async fn run_standalone_loop(
             event = event_loop.poll() => {
                 match event {
                     Ok(Event::Incoming(Packet::Publish(publish))) => {
-                        MQTT_SOURCE_RECORDS_IN
+                        veloflux_metrics::mqtt_source_records_in_total()
                             .with_label_values(&[
                                 flow_instance_id.as_ref(),
                                 connector_id.as_str(),
@@ -286,7 +256,7 @@ async fn run_standalone_loop(
                         let payload = publish.payload.to_vec();
                         match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                             Ok(_) => {
-                                MQTT_SOURCE_RECORDS_OUT
+                                veloflux_metrics::mqtt_source_records_out_total()
                                     .with_label_values(&[
                                         flow_instance_id.as_ref(),
                                         connector_id.as_str(),
