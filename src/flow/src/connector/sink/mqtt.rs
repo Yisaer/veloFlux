@@ -414,7 +414,7 @@ mod tests {
                 0,
             ),
             Arc::<str>::from("default"),
-            MqttClientManager::new(spawner.clone()),
+            MqttClientManager::new("default", spawner.clone()),
             spawner,
         );
 

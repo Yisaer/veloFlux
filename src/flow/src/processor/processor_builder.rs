@@ -1826,7 +1826,7 @@ mod tests {
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let context = ProcessorBuilderContext {
             flow_instance_id: Arc::<str>::from("default"),
-            mqtt_clients: Some(MqttClientManager::new(spawner.clone())),
+            mqtt_clients: Some(MqttClientManager::new("default", spawner.clone())),
             connector_registry: Some(connector_registry),
             encoder_registry: Some(encoder_registry),
             decoder_registry: Some(decoder_registry),
@@ -1889,7 +1889,7 @@ mod tests {
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let context = ProcessorBuilderContext {
             flow_instance_id: Arc::<str>::from("default"),
-            mqtt_clients: Some(MqttClientManager::new(spawner.clone())),
+            mqtt_clients: Some(MqttClientManager::new("default", spawner.clone())),
             connector_registry: Some(connector_registry),
             encoder_registry: Some(encoder_registry),
             decoder_registry: Some(decoder_registry),
