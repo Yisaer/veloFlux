@@ -28,12 +28,26 @@ DEFAULT_PIPELINE_ID = "perf_daily_pipeline"
 DEFAULT_METRICS_URL = "http://127.0.0.1:9898/metrics"
 DEFAULT_OUT_DIR = "tmp/perf_daily"
 
+FLOW_INSTANCE_LABEL = "flow_instance"
+PIPELINE_ID_LABEL = "pipeline_id"
+PROCESSOR_ID_LABEL = "processor_id"
+
+RUNTIME_CPU_USAGE_METRIC = "veloflux_runtime_cpu_usage_percent"
+RUNTIME_MEMORY_USAGE_METRIC = "veloflux_runtime_memory_usage_bytes"
+RUNTIME_HEAP_IN_USE_METRIC = "veloflux_runtime_heap_in_use_bytes"
+RUNTIME_HEAP_IN_ALLOCATOR_METRIC = "veloflux_runtime_heap_in_allocator_bytes"
+PROCESSOR_RECORDS_IN_METRIC = "veloflux_processor_records_in_total"
+PROCESSOR_RECORDS_OUT_METRIC = "veloflux_processor_records_out_total"
+
+DATASOURCE_PROCESSOR_ID_PREFIX = "datasource_"
+RESULT_COLLECT_PROCESSOR_ID_PREFIX = "result_collect_"
+
 TRACKED_METRICS = (
-    "cpu_usage",
-    "memory_usage_bytes",
-    "heap_in_use_bytes",
-    "heap_in_allocator_bytes",
-    "processor_records_in_total",
+    RUNTIME_CPU_USAGE_METRIC,
+    RUNTIME_MEMORY_USAGE_METRIC,
+    RUNTIME_HEAP_IN_USE_METRIC,
+    RUNTIME_HEAP_IN_ALLOCATOR_METRIC,
+    PROCESSOR_RECORDS_IN_METRIC,
 )
 
 _SAMPLE_RE = re.compile(
@@ -296,20 +310,24 @@ def scrape_prometheus_text(url: str, timeout_secs: float) -> str:
         return raw.decode("utf-8", errors="replace") if raw else ""
 
 
-def _ensure_instance_label(labels: Optional[str], instance: str) -> str:
+def _ensure_flow_instance_label(labels: Optional[str], flow_instance: str) -> str:
     if labels is None:
-        return f'{{instance="{instance}"}}'
-    if "instance=" in labels:
+        return f'{{{FLOW_INSTANCE_LABEL}="{flow_instance}"}}'
+    if f"{FLOW_INSTANCE_LABEL}=" in labels:
         return labels
     inner = labels[1:-1].strip()
     if not inner:
-        return f'{{instance="{instance}"}}'
-    return f'{{instance="{instance}",{inner}}}'
+        return f'{{{FLOW_INSTANCE_LABEL}="{flow_instance}"}}'
+    return f'{{{FLOW_INSTANCE_LABEL}="{flow_instance}",{inner}}}'
 
 
 def _labels_have_kv(labels: str, key: str, value: str) -> bool:
     # Simple substring check is sufficient for Prometheus label format in our dumps.
     return f'{key}="{value}"' in labels
+
+
+def _labels_have_processor_id_prefix(labels: str, prefix: str) -> bool:
+    return f'{PROCESSOR_ID_LABEL}="{prefix}' in labels
 
 
 def extract_openmetrics_block(text: str, ts_ms: int, instance: str, include_meta: bool) -> str:
@@ -328,9 +346,12 @@ def extract_openmetrics_block(text: str, ts_ms: int, instance: str, include_meta
         name = m.group(1)
         if name not in TRACKED_METRICS:
             continue
-        labels = _ensure_instance_label(m.group(2), instance=instance)
+        labels = _ensure_flow_instance_label(m.group(2), flow_instance=instance)
         # Only keep datasource input counter; this is the closest approximation of "ingress throughput".
-        if name == "processor_records_in_total" and not _labels_have_kv(labels, "kind", "datasource"):
+        if (
+            name == PROCESSOR_RECORDS_IN_METRIC
+            and not _labels_have_processor_id_prefix(labels, DATASOURCE_PROCESSOR_ID_PREFIX)
+        ):
             continue
         value = m.group(3)
         out_lines.append(f"{name}{labels} {value} {ts_ms}")

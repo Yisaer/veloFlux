@@ -8,7 +8,7 @@ Reads:
   - metrics.openmetrics: counter samples with timestamps
 
 Computes average QPS over the publish window for:
-  processor_records_out_total{kind="result_collect", pipeline_id="...", instance="..."}
+  veloflux_processor_records_out_total{flow_instance="...", pipeline_id="...", processor_id="result_collect_*"}
 
 Stdlib only.
 """
@@ -28,6 +28,12 @@ _SAMPLE_RE = re.compile(
     r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([-+]?(?:\d+\.?\d*|\d*\.?\d+)(?:[eE][-+]?\d+)?)(?:\s+(\d+))?$"
 )
 _LABEL_KV_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"\\\\]*(?:\\\\.[^"\\\\]*)*)"')
+
+PROCESSOR_RECORDS_OUT_METRIC = "veloflux_processor_records_out_total"
+FLOW_INSTANCE_LABEL = "flow_instance"
+PIPELINE_ID_LABEL = "pipeline_id"
+PROCESSOR_ID_LABEL = "processor_id"
+RESULT_COLLECT_PROCESSOR_ID_PREFIX = "result_collect_"
 
 
 def _read_json(path: str) -> Dict:
@@ -137,12 +143,13 @@ def main(argv: List[str]) -> int:
 
     windows: Dict[Tuple[str, str], CounterWindow] = {}
     for name, labels, val, ts_ms in _iter_samples(args.openmetrics):
-        if name != "processor_records_out_total":
+        if name != PROCESSOR_RECORDS_OUT_METRIC:
             continue
-        if labels.get("kind") != "result_collect":
+        processor_id = labels.get(PROCESSOR_ID_LABEL) or ""
+        if not processor_id.startswith(RESULT_COLLECT_PROCESSOR_ID_PREFIX):
             continue
-        inst = labels.get("instance") or labels.get("flow_instance") or ""
-        pipeline_id = labels.get("pipeline_id") or ""
+        inst = labels.get(FLOW_INSTANCE_LABEL) or ""
+        pipeline_id = labels.get(PIPELINE_ID_LABEL) or ""
         if not inst or not pipeline_id:
             continue
         if pipeline_id_set is not None and pipeline_id not in pipeline_id_set:
@@ -184,4 +191,3 @@ def main(argv: List[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-

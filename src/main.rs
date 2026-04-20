@@ -66,9 +66,7 @@ async fn run_worker(
     let config_path = worker_args.config_path;
 
     flow::init_process_once();
-    flow::metrics::set_flow_instance_id(&instance_id);
-    #[cfg(feature = "metrics")]
-    telemetry::set_flow_instance_id(&instance_id);
+    veloflux_metrics::set_default_flow_instance_id(&instance_id);
     let mut cfg = veloflux::config::AppConfig::load_required(&config_path)?;
 
     let spec = cfg

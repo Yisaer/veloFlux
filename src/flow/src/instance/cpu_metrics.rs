@@ -132,7 +132,9 @@ pub(crate) fn collect_registered_flow_instance_cpu_metrics() {
     for (instance_id, state) in samplers {
         match sample_flow_instance_cpu_usage_percent(&state) {
             Ok(Some(value)) => {
-                crate::metrics::set_flow_instance_cpu_usage_percent(&instance_id, value);
+                veloflux_metrics::flow_instance_cpu_usage_percent()
+                    .with_label_values(&[&instance_id])
+                    .set(value);
             }
             Ok(None) => {}
             Err(err) => {

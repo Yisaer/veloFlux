@@ -1,0 +1,8 @@
+[package]
+name = "veloflux_metrics"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+once_cell = "1.19"
+prometheus = "0.13"

@@ -1,7 +1,3 @@
-use once_cell::sync::Lazy;
-use prometheus::{
-    exponential_buckets, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts,
-};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -9,95 +5,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use parking_lot::RwLock;
-
-fn opts_with_flow_instance(name: &str, help: &str) -> Opts {
-    Opts::new(name, help)
-}
-
-static PROCESSOR_RECORDS_IN_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let vec = IntCounterVec::new(
-        opts_with_flow_instance("processor_records_in_total", "Rows received by processors"),
-        &["flow_instance", "pipeline_id", "processor_id"],
-    )
-    .expect("create processor records_in counter vec");
-    prometheus::register(Box::new(vec.clone())).expect("register processor records_in counter vec");
-    vec
-});
-
-static PROCESSOR_RECORDS_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let vec = IntCounterVec::new(
-        opts_with_flow_instance("processor_records_out_total", "Rows emitted by processors"),
-        &["flow_instance", "pipeline_id", "processor_id"],
-    )
-    .expect("create processor records_out counter vec");
-    prometheus::register(Box::new(vec.clone()))
-        .expect("register processor records_out counter vec");
-    vec
-});
-
-static PROCESSOR_ERRORS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let vec = IntCounterVec::new(
-        opts_with_flow_instance("processor_errors_total", "Errors observed by processors"),
-        &["flow_instance", "pipeline_id", "processor_id"],
-    )
-    .expect("create processor errors counter vec");
-    prometheus::register(Box::new(vec.clone())).expect("register processor errors counter vec");
-    vec
-});
-
-static PROCESSOR_METRIC_GAUGE: Lazy<IntGaugeVec> = Lazy::new(|| {
-    let vec = IntGaugeVec::new(
-        opts_with_flow_instance(
-            "processor_metric_gauge",
-            "Gauge metrics reported by processors",
-        ),
-        &["flow_instance", "pipeline_id", "processor_id", "metric"],
-    )
-    .expect("create processor metric gauge vec");
-    prometheus::register(Box::new(vec.clone())).expect("register processor metric gauge vec");
-    vec
-});
-
-static PROCESSOR_METRIC_COUNTER_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let vec = IntCounterVec::new(
-        opts_with_flow_instance(
-            "processor_metric_counter_total",
-            "Counter metrics reported by processors",
-        ),
-        &["flow_instance", "pipeline_id", "processor_id", "metric"],
-    )
-    .expect("create processor metric counter vec");
-    prometheus::register(Box::new(vec.clone())).expect("register processor metric counter vec");
-    vec
-});
-
-static PROCESSOR_HANDLE_DURATION_SECONDS: Lazy<HistogramVec> = Lazy::new(|| {
-    let buckets = exponential_buckets(0.000_001, 2.0, 20).expect("create handle duration buckets");
-    let opts = HistogramOpts::new(
-        "processor_handle_duration_seconds",
-        "Time spent handling one processor input batch",
-    )
-    .buckets(buckets);
-    let vec = HistogramVec::new(opts, &["flow_instance", "pipeline_id", "processor_id"])
-        .expect("create processor handle duration histogram vec");
-    prometheus::register(Box::new(vec.clone()))
-        .expect("register processor handle duration histogram vec");
-    vec
-});
-
-static PROCESSOR_SEND_BACKPRESSURE_WAITS_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
-    let vec = IntCounterVec::new(
-        opts_with_flow_instance(
-            "processor_send_backpressure_waits_total",
-            "Number of cooperative backpressure sleep ticks taken while sending processor data",
-        ),
-        &["flow_instance", "pipeline_id", "processor_id"],
-    )
-    .expect("create processor send backpressure waits counter vec");
-    prometheus::register(Box::new(vec.clone()))
-        .expect("register processor send backpressure waits counter vec");
-    vec
-});
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -136,7 +43,7 @@ impl GaugeHandle {
             return;
         };
         let prom_value = i64::try_from(value).unwrap_or(i64::MAX);
-        PROCESSOR_METRIC_GAUGE
+        veloflux_metrics::processor_custom_gauge()
             .with_label_values(&[
                 self.flow_instance_id.as_ref(),
                 pipeline_id.as_ref(),
@@ -161,7 +68,7 @@ impl CounterHandle {
         let Some(pipeline_id) = self.pipeline_id.get() else {
             return;
         };
-        PROCESSOR_METRIC_COUNTER_TOTAL
+        veloflux_metrics::processor_custom_counter_total()
             .with_label_values(&[
                 self.flow_instance_id.as_ref(),
                 pipeline_id.as_ref(),
@@ -278,7 +185,7 @@ impl ProcessorStats {
     pub fn record_in(&self, rows: u64) {
         self.records_in.fetch_add(rows, Ordering::Relaxed);
         if let Some(pipeline_id) = self.pipeline_id.get() {
-            PROCESSOR_RECORDS_IN_TOTAL
+            veloflux_metrics::processor_records_in_total()
                 .with_label_values(&[
                     self.flow_instance_id.as_ref(),
                     pipeline_id.as_ref(),
@@ -291,7 +198,7 @@ impl ProcessorStats {
     pub fn record_out(&self, rows: u64) {
         self.records_out.fetch_add(rows, Ordering::Relaxed);
         if let Some(pipeline_id) = self.pipeline_id.get() {
-            PROCESSOR_RECORDS_OUT_TOTAL
+            veloflux_metrics::processor_records_out_total()
                 .with_label_values(&[
                     self.flow_instance_id.as_ref(),
                     pipeline_id.as_ref(),
@@ -339,7 +246,7 @@ impl ProcessorStats {
     pub fn record_error_count(&self, count: u64, message: impl Into<String>) {
         self.error_count.fetch_add(count, Ordering::Relaxed);
         if let Some(pipeline_id) = self.pipeline_id.get() {
-            PROCESSOR_ERRORS_TOTAL
+            veloflux_metrics::processor_errors_total()
                 .with_label_values(&[
                     self.flow_instance_id.as_ref(),
                     pipeline_id.as_ref(),
@@ -359,7 +266,7 @@ impl ProcessorStats {
         // - For processors that enqueue/update local state and emit asynchronously, the recommended
         //   definition is local work time only, excluding any later flush/send work.
         if let Some(pipeline_id) = self.pipeline_id.get() {
-            PROCESSOR_HANDLE_DURATION_SECONDS
+            veloflux_metrics::processor_handle_duration_seconds()
                 .with_label_values(&[
                     self.flow_instance_id.as_ref(),
                     pipeline_id.as_ref(),
@@ -373,7 +280,7 @@ impl ProcessorStats {
         let Some(pipeline_id) = self.pipeline_id.get() else {
             return;
         };
-        PROCESSOR_SEND_BACKPRESSURE_WAITS_TOTAL
+        veloflux_metrics::processor_send_backpressure_waits_total()
             .with_label_values(&[
                 self.flow_instance_id.as_ref(),
                 pipeline_id.as_ref(),

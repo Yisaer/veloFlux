@@ -4,8 +4,6 @@ use tokio::runtime::Handle;
 use tokio::time::sleep;
 use tokio_metrics::{RuntimeMetrics, RuntimeMonitor};
 
-use crate::metrics::TOKIO_TASKS_GAUGE;
-
 static TOKIO_METRICS_STARTED: OnceCell<()> = OnceCell::new();
 
 /// Spawn a background task that samples Tokio runtime metrics and updates gauges.
@@ -19,7 +17,7 @@ pub fn spawn_tokio_metrics_collector(poll_interval: Duration) {
     tokio::spawn(async move {
         for interval in monitor.intervals() {
             let live_tasks = live_tasks_from_interval(&interval, &runtime_handle);
-            TOKIO_TASKS_GAUGE.set(clamp_usize_to_i64(live_tasks));
+            veloflux_metrics::runtime_tokio_tasks_inflight().set(clamp_usize_to_i64(live_tasks));
             sleep(poll_interval).await;
         }
     });
