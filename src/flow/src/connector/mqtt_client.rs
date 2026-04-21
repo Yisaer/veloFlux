@@ -280,7 +280,6 @@ impl MqttClientEntry {
                     event = event_loop.poll() => match event {
                         Ok(Event::Incoming(Packet::Publish(publish))) => {
                             entry_for_task.connected.store(true, Ordering::Release);
-                            entry_for_task.set_connected_metric(true);
                             backoff = Duration::from_millis(100);
                             if mqtt_topic_matches(&topic, &publish.topic) {
                                 entry_for_task.record_rx_message_metric();
@@ -455,7 +454,6 @@ impl MqttClientManager {
             .ok_or_else(|| ConnectorError::NotFound(key.to_string()))?;
 
         entry.closing.store(true, Ordering::Release);
-        entry.set_connected_metric(false);
         if entry.ref_count.load(Ordering::Acquire) == 0 {
             let shutdown_entry = Arc::clone(&entry);
             self.spawner.spawn(async move {

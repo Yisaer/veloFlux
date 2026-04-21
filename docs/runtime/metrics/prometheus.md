@@ -106,6 +106,7 @@ Shared label keys:
 - `connector`
 - `key`
 - `metric`
+- `kind`
 
 Alias labels must not be introduced when an existing canonical label already exists.
 
@@ -391,7 +392,6 @@ The proposed first-stage metrics are:
   - `kind` must be a small stable enum
   - `kind` values should describe a lifecycle stage, not carry free-form error messages
   - recommended values:
-    - `connect`
     - `subscribe`
     - `poll`
     - `publish`
