@@ -433,11 +433,21 @@ fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, St
         .and_then(|v| v.as_str())
         .ok_or_else(|| "mqtt sink settings missing sink_name".to_string())?
         .to_string();
+    let connector_key = obj
+        .get("connector_key")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|s| s.to_string());
     let broker_url = obj
         .get("broker_url")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "mqtt sink settings missing broker_url".to_string())?
-        .to_string();
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|s| s.to_string());
+    if connector_key.is_none() && broker_url.is_none() {
+        return Err("mqtt sink settings missing broker_url".to_string());
+    }
     let topic = obj
         .get("topic")
         .and_then(|v| v.as_str())
@@ -452,17 +462,18 @@ fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, St
         .get("client_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let connector_key = obj
-        .get("connector_key")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
     let max_packet_size = obj
         .get("max_packet_size")
         .and_then(|v| v.as_u64())
         .map(|v| v as usize);
 
-    let mut config =
-        MqttSinkConfig::new(sink_name.clone(), broker_url, topic, qos).with_retain(retain);
+    let mut config = MqttSinkConfig::new(
+        sink_name.clone(),
+        broker_url.unwrap_or_default(),
+        topic,
+        qos,
+    )
+    .with_retain(retain);
     if let Some(client_id) = client_id {
         config = config.with_client_id(client_id);
     }
@@ -848,5 +859,20 @@ mod tests {
 
         let raw = logical.encode().unwrap();
         assert_eq!(LogicalPlanIR::decode(&raw).unwrap(), logical);
+    }
+
+    #[test]
+    fn mqtt_sink_ir_allows_missing_broker_url_when_connector_key_is_present() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "topic": "out/topic",
+            "qos": 1,
+            "connector_key": "shared_mqtt"
+        });
+
+        let config = mqtt_sink_from_ir_settings(&settings).expect("decode mqtt sink config");
+        assert_eq!(config.broker_url, "");
+        assert_eq!(config.topic, "out/topic");
+        assert_eq!(config.connector_key.as_deref(), Some("shared_mqtt"));
     }
 }

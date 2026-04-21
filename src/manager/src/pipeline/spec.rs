@@ -23,6 +23,13 @@ struct KuksaSinkPropsRequest {
     pub vss_path: Option<String>,
 }
 
+fn normalized_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
 pub(crate) fn validate_create_request(req: &CreatePipelineRequest) -> Result<(), String> {
     if req.id.trim().is_empty() {
         return Err("pipeline id must not be empty".to_string());
@@ -162,10 +169,11 @@ pub(crate) fn build_pipeline_definition(
                 let mqtt_props: MqttSinkPropsRequest =
                     serde_json::from_value(sink_req.props.to_value())
                         .map_err(|err| format!("invalid mqtt sink props: {err}"))?;
-                let broker = mqtt_props
-                    .broker_url
-                    .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| "mqtt sink requires broker_url".to_string())?;
+                let connector_key = normalized_optional_string(mqtt_props.connector_key);
+                let broker = normalized_optional_string(mqtt_props.broker_url);
+                if connector_key.is_none() && broker.is_none() {
+                    return Err("mqtt sink requires broker_url".to_string());
+                }
                 let topic = mqtt_props
                     .topic
                     .filter(|value| !value.trim().is_empty())
@@ -173,11 +181,12 @@ pub(crate) fn build_pipeline_definition(
                 let qos = mqtt_props.qos.unwrap_or(MQTT_QOS);
                 let retain = mqtt_props.retain.unwrap_or(false);
 
-                let mut props = MqttSinkProps::new(broker, topic, qos).with_retain(retain);
+                let mut props =
+                    MqttSinkProps::new(broker.unwrap_or_default(), topic, qos).with_retain(retain);
                 if let Some(client_id) = mqtt_props.client_id {
                     props = props.with_client_id(client_id);
                 }
-                if let Some(connector_key) = mqtt_props.connector_key {
+                if let Some(connector_key) = connector_key {
                     props = props.with_connector_key(connector_key);
                 }
                 if let Some(max_packet_size) = mqtt_props.max_packet_size {
@@ -711,5 +720,76 @@ mod tests {
             err.contains("pipeline source `vehicle_stream` is configured more than once"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_allows_shared_mqtt_sink_without_broker_url() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_shared_mqtt_sink",
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "sink_1",
+                    "type": "mqtt",
+                    "props": {
+                        "topic": "out/topic",
+                        "qos": 1,
+                        "connector_key": "shared_mqtt"
+                    }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("build pipeline definition");
+        let sink = &definition.sinks()[0];
+        let flow::pipeline::SinkProps::Mqtt(mqtt) = &sink.props else {
+            panic!("expected mqtt sink props");
+        };
+        assert_eq!(mqtt.broker_url, "");
+        assert_eq!(mqtt.topic, "out/topic");
+        assert_eq!(mqtt.connector_key.as_deref(), Some("shared_mqtt"));
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_rejects_mqtt_sink_without_broker_url_when_not_shared() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_invalid_mqtt_sink",
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "sink_1",
+                    "type": "mqtt",
+                    "props": {
+                        "topic": "out/topic",
+                        "qos": 1
+                    }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let err =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect_err("standalone mqtt sink should require broker_url");
+        assert_eq!(err, "mqtt sink requires broker_url");
     }
 }

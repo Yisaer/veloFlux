@@ -37,8 +37,8 @@ MQTT sink definitions currently accept:
 - sink output config (`full` / `delta`, `omit_if_empty`, encoder transform, batching, common sink
   props)
 
-Manager validates `broker_url` and `topic` as required sink props. `retain` defaults to `false`,
-and `qos` falls back to the manager default when omitted.
+Manager validates `topic` as required. `broker_url` is required only when `connector_key` is
+absent. `retain` defaults to `false`, and `qos` falls back to the manager default when omitted.
 
 Flow runtime fills a default standalone client id when none is provided:
 

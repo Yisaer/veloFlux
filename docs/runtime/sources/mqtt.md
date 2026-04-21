@@ -41,8 +41,9 @@ MQTT stream definitions currently carry:
 - optional sampler config
 - optional `shared=true`
 
-Manager requires `broker_url` and `topic` in the stream request shape even when `connector_key` is
-used. The meaning of those fields changes once a shared client is bound:
+Manager requires `topic` in the stream request shape. `broker_url` is required only when
+`connector_key` is absent. The meaning of stream-local fields changes once a shared client is
+bound:
 
 - without `connector_key`, the stream owns its own live connection settings
 - with `connector_key`, the shared client resource becomes the live connection/subscription owner
@@ -215,6 +216,6 @@ runtime warning.
 
 ## Future Work
 
-- If stream-local MQTT props should become optional when `connector_key` is present, that would be
-  a request-shape simplification on top of the existing runtime ownership model, not a change to
-  the runtime binding semantics themselves.
+- Stream-local `broker_url` is already optional when `connector_key` is present. Any further
+  request-shape simplification would be on top of the existing runtime ownership model, not a
+  change to the runtime binding semantics themselves.
