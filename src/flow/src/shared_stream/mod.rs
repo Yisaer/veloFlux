@@ -471,6 +471,48 @@ struct SharedStreamState {
 }
 
 impl SharedStreamInner {
+    fn metric_labels(&self) -> [&str; 2] {
+        [self.flow_instance_id.as_ref(), self.name.as_str()]
+    }
+
+    fn set_running_metric(&self, running: bool) {
+        let value = if running { 1 } else { 0 };
+        veloflux_metrics::shared_stream_running()
+            .with_label_values(&self.metric_labels())
+            .set(value);
+    }
+
+    fn set_active_subscribers_metric(&self, subscribers: usize) {
+        let value = i64::try_from(subscribers).unwrap_or(i64::MAX);
+        veloflux_metrics::shared_stream_active_subscribers()
+            .with_label_values(&self.metric_labels())
+            .set(value);
+    }
+
+    fn record_start_metric(&self) {
+        veloflux_metrics::shared_stream_starts_total()
+            .with_label_values(&self.metric_labels())
+            .inc();
+    }
+
+    fn record_error_metric(&self, kind: &'static str) {
+        veloflux_metrics::shared_stream_errors_total()
+            .with_label_values(&[self.flow_instance_id.as_ref(), self.name.as_str(), kind])
+            .inc();
+    }
+
+    fn record_message_in_metric(&self) {
+        veloflux_metrics::shared_stream_messages_in_total()
+            .with_label_values(&self.metric_labels())
+            .inc();
+    }
+
+    fn record_message_out_metric(&self) {
+        veloflux_metrics::shared_stream_messages_out_total()
+            .with_label_values(&self.metric_labels())
+            .inc();
+    }
+
     fn new(
         config: SharedStreamConfig,
         spawner: TaskSpawner,
@@ -518,7 +560,7 @@ impl SharedStreamInner {
         let data_hub = Arc::new(BackpressureHub::new(data_channel_capacity));
         let control_hub = Arc::new(BackpressureHub::new(control_channel_capacity));
 
-        Ok(Arc::new(Self {
+        let entry = Arc::new(Self {
             name: stream_name,
             flow_instance_id,
             schema,
@@ -542,7 +584,10 @@ impl SharedStreamInner {
                 consumer_required_columns: HashMap::new(),
                 union_required_columns: Vec::new(),
             }),
-        }))
+        });
+        entry.set_running_metric(false);
+        entry.set_active_subscribers_metric(0);
+        Ok(entry)
     }
 
     fn name(&self) -> &str {
@@ -575,7 +620,14 @@ impl SharedStreamInner {
                 return Ok(());
             }
         }
-        self.start_runtime().await
+        match self.start_runtime().await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.record_error_metric("start");
+                self.set_running_metric(false);
+                Err(err)
+            }
+        }
     }
 
     async fn start_runtime(self: &Arc<Self>) -> Result<(), SharedStreamError> {
@@ -629,18 +681,23 @@ impl SharedStreamInner {
 
         let data_hub = Arc::clone(&self.data_hub);
         let control_hub = Arc::clone(&self.control_hub);
+        let stream = Arc::clone(self);
         let forward = self.spawner.spawn(async move {
             while let Some(item) = output_rx.recv().await {
                 match item {
                     StreamData::Control(signal) => {
                         if control_hub.send(signal).await.is_err() {
+                            stream.record_error_metric("forward");
                             break;
                         }
                     }
                     other => {
+                        stream.record_message_in_metric();
                         if data_hub.send(other).await.is_err() {
+                            stream.record_error_metric("forward");
                             break;
                         }
+                        stream.record_message_out_metric();
                     }
                 }
             }
@@ -659,6 +716,8 @@ impl SharedStreamInner {
 
         let mut state = self.state.lock().await;
         state.status = SharedStreamStatus::Running;
+        self.set_running_metric(true);
+        self.record_start_metric();
         Ok(())
     }
 
@@ -738,17 +797,20 @@ impl SharedStreamInner {
         {
             let mut state = self.state.lock().await;
             if matches!(state.status, SharedStreamStatus::Stopped) {
+                self.record_error_metric("consumer");
                 return Err(SharedStreamError::Internal(format!(
                     "shared stream {} is stopped",
                     self.name()
                 )));
             }
             if !state.subscribers.insert(consumer_id.clone()) {
+                self.record_error_metric("consumer");
                 return Err(SharedStreamError::Internal(format!(
                     "consumer {consumer_id} already registered for {}",
                     self.name()
                 )));
             }
+            self.set_active_subscribers_metric(state.subscribers.len());
         }
 
         Ok(SharedStreamSubscription {
@@ -768,6 +830,7 @@ impl SharedStreamInner {
     ) -> Result<Vec<String>, SharedStreamError> {
         let mut state = self.state.lock().await;
         if !state.subscribers.contains(consumer_id) {
+            self.record_error_metric("consumer");
             return Err(SharedStreamError::Internal(format!(
                 "consumer {consumer_id} not registered for {}",
                 self.name()
@@ -842,6 +905,7 @@ impl SharedStreamInner {
         self.set_applied_decoding_columns(applied);
 
         let should_stop = state.subscribers.is_empty();
+        self.set_active_subscribers_metric(state.subscribers.len());
         drop(state);
         if should_stop {
             if let Err(err) = Arc::clone(self).stop_runtime().await {
@@ -878,12 +942,17 @@ impl SharedStreamInner {
             pipeline
                 .quick_close(Duration::from_secs(5))
                 .await
-                .map_err(|err| SharedStreamError::Internal(err.to_string()))?;
+                .map_err(|err| {
+                    self.record_error_metric("stop");
+                    SharedStreamError::Internal(err.to_string())
+                })?;
         }
 
         if let Some(handle) = forward {
             let _ = handle.await;
         }
+
+        self.set_running_metric(false);
 
         Ok(())
     }

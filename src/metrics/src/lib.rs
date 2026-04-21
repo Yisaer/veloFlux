@@ -11,6 +11,7 @@ mod mqtt_sink;
 mod mqtt_source;
 mod processor;
 mod runtime;
+mod shared_stream;
 
 use prometheus::{Gauge, GaugeVec, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec};
 
@@ -60,6 +61,30 @@ pub fn mqtt_shared_client_errors_total() -> &'static IntCounterVec {
 
 pub fn mqtt_shared_client_reconnects_total() -> &'static IntCounterVec {
     mqtt_shared_client::reconnects_total()
+}
+
+pub fn shared_stream_running() -> &'static IntGaugeVec {
+    shared_stream::running()
+}
+
+pub fn shared_stream_active_subscribers() -> &'static IntGaugeVec {
+    shared_stream::active_subscribers()
+}
+
+pub fn shared_stream_starts_total() -> &'static IntCounterVec {
+    shared_stream::starts_total()
+}
+
+pub fn shared_stream_errors_total() -> &'static IntCounterVec {
+    shared_stream::errors_total()
+}
+
+pub fn shared_stream_messages_in_total() -> &'static IntCounterVec {
+    shared_stream::messages_in_total()
+}
+
+pub fn shared_stream_messages_out_total() -> &'static IntCounterVec {
+    shared_stream::messages_out_total()
 }
 
 pub fn processor_records_in_total() -> &'static IntCounterVec {
