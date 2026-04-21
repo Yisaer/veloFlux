@@ -229,7 +229,7 @@ pub fn build_expected_json(expected_rows: usize, column_checks: &[ColumnCheck]) 
                     check.expected_name, expected_rows
                 );
             };
-            obj.insert(check.expected_name.clone(), datatype_value_to_json(value));
+            insert_expected_json_field(&mut obj, check.expected_name.clone(), value);
         }
         rows.push(JsonValue::Object(obj));
     }
@@ -277,7 +277,7 @@ fn datatype_value_to_json(value: &Value) -> JsonValue {
             let fields = struct_value.fields().fields();
             let mut map = serde_json::Map::with_capacity(fields.len());
             for (field, item) in fields.iter().zip(struct_value.items().iter()) {
-                map.insert(field.name().to_string(), datatype_value_to_json(item));
+                insert_expected_json_field(&mut map, field.name().to_string(), item);
             }
             JsonValue::Object(map)
         }
@@ -285,4 +285,16 @@ fn datatype_value_to_json(value: &Value) -> JsonValue {
             JsonValue::Array(list.items().iter().map(datatype_value_to_json).collect())
         }
     }
+}
+
+fn insert_expected_json_field(
+    json_object: &mut serde_json::Map<String, JsonValue>,
+    key: String,
+    value: &Value,
+) {
+    if matches!(value, Value::Null) {
+        return;
+    }
+
+    json_object.insert(key, datatype_value_to_json(value));
 }
