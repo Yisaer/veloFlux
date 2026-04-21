@@ -58,7 +58,7 @@ The runtime currently registers the following built-in encoder kinds:
 
 | Encoder | Runtime built-in | Output type | Streaming support | By-index projection support | Notes |
 |--------|-------------------|-------------|-------------------|-----------------------------|-------|
-| `json` | yes | bytes | yes | yes | Encodes a `Collection` as a JSON array payload. |
+| `json` | yes | bytes | yes | yes | Encodes a `Collection` as a JSON array payload and supports encoder-local JSON formatting options. |
 | `none` | planner pseudo-mode | collection passthrough | n/a | n/a | No encoder node is built; the connector receives decoded collections directly. |
 
 Current transform support:
@@ -67,10 +67,13 @@ Current transform support:
 - The transform is item-level (`row -> transformed JSON item`), not a standalone collection
   transform stage.
 - When `encoder.type=none`, any configured transform is ignored by design.
+- `encoder.props.omit_null_columns` is a JSON-encoder-local option that controls omission of
+  `null` object fields during native JSON object encoding.
 
 See also:
 
 - [Encoder Transform](encoders/encoder_transform.md)
+- [JSON Null Field Omission](encoders/json_null_column_omit.md)
 - [Omit If Empty](output/omit_if_empty.md)
 - [Row Diff Output](output/row_diff_output.md)
 
@@ -219,18 +222,23 @@ These capabilities already exist near the sink boundary:
    - `encoder.transform=template`
    - implemented inside the JSON encoder, not as a standalone plan stage.
 
-3. **Streaming encoder rewrite**
+3. **JSON null-field omission**
+   - `encoder.type=json`
+   - `encoder.props.omit_null_columns`
+   - implemented inside the JSON encoder's native object-formatting path.
+
+4. **Streaming encoder rewrite**
    - Rewrites `Batch -> Encoder` into `StreamingEncoder` when the encoder supports streaming.
 
-4. **By-index projection into encoder rewrite**
+5. **By-index projection into encoder rewrite**
    - Delays materialization of eligible by-index projected columns into the encoder.
 
-5. **Memory collection materialization**
+6. **Memory collection materialization**
    - Normalizes collection rows into a stable layout before publishing to memory collection topics.
 
 Proposed / documented sink-side capabilities:
 
-6. **Empty-result suppression**
+7. **Empty-result suppression**
    - `output.omit_if_empty`
    - modeled as a sink-side output policy, not as an encoder or connector behavior
 
@@ -260,5 +268,6 @@ In particular:
 - [Omit If Empty](output/omit_if_empty.md)
 - [Row Diff Output](output/row_diff_output.md)
 - [Encoder Transform](encoders/encoder_transform.md)
+- [JSON Null Field Omission](encoders/json_null_column_omit.md)
 - [StreamingEncoderRewrite](../../planner/optimize/physical/streaming_encoder_rewrite.md)
 - [ByIndexProjectionIntoEncoderRewrite](../../planner/optimize/physical/by_index_projection_into_encoder_rewrite.md)

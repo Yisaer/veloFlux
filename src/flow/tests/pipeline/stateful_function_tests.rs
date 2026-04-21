@@ -1058,7 +1058,7 @@ async fn stateful_projection_with_batched_streaming_encoder() {
 
     let actual_first: JsonValue = recv_next_json(&mut output, timeout_duration).await;
     let expected_first = serde_json::json!([
-        {"prev": null},
+        {},
         {"prev": 1}
     ]);
     assert_eq!(

@@ -304,6 +304,15 @@ impl SinkEncoderConfig {
         &self.props
     }
 
+    pub fn json_omit_null_columns(&self) -> Result<bool, String> {
+        match self.props.get("omit_null_columns") {
+            None => Ok(true),
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "encoder.props.omit_null_columns must be a boolean".to_string()),
+        }
+    }
+
     pub fn transform(&self) -> Option<&SinkEncoderTransformConfig> {
         if matches!(self.kind, SinkEncoderKind::None) {
             return None;
@@ -331,7 +340,19 @@ impl SinkEncoderConfig {
         self
     }
 
+    pub fn with_json_omit_null_columns(mut self, omit_null_columns: bool) -> Self {
+        self.props.insert(
+            "omit_null_columns".to_string(),
+            JsonValue::Bool(omit_null_columns),
+        );
+        self
+    }
+
     pub fn validate(&self) -> Result<(), String> {
+        if matches!(self.kind, SinkEncoderKind::Json) {
+            self.json_omit_null_columns()?;
+        }
+
         let Some(_transform) = self.transform.as_ref() else {
             return Ok(());
         };
@@ -392,6 +413,24 @@ mod tests {
             .expect_err("custom encoder should reject transform");
         assert!(
             err.contains("only supported for encoder.type=json"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn json_encoder_rejects_non_boolean_omit_null_columns() {
+        let mut props = JsonMap::new();
+        props.insert(
+            "omit_null_columns".to_string(),
+            JsonValue::String("false".to_string()),
+        );
+        let config = SinkEncoderConfig::new("json", props);
+
+        let err = config
+            .validate()
+            .expect_err("non-boolean omit_null_columns should be rejected");
+        assert!(
+            err.contains("omit_null_columns must be a boolean"),
             "unexpected error: {err}"
         );
     }
