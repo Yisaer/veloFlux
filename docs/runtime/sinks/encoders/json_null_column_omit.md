@@ -1,7 +1,7 @@
-# JSON Null Column Omission
+# JSON Null Field Omission
 
-This document records the planned JSON encoder behavior for omitting top-level `null` columns from
-encoded JSON row objects.
+This document records the JSON encoder behavior for omitting `null` object fields from encoded JSON
+row objects.
 
 ## Background
 
@@ -14,7 +14,7 @@ For normal full-output rows, every output column is currently serialized:
 
 For some downstream systems, this is not the preferred payload shape.
 Those systems treat a missing field as the desired representation for an unset optional value, and
-they do not want top-level `null` fields to be emitted by default.
+they do not want `null` object fields to be emitted by default.
 
 At the same time, row-diff output already has a separate sparse-output contract driven by
 `output_mask`.
@@ -29,8 +29,7 @@ We will add a JSON-encoder-local option:
 
 - `omit_null_columns`
 
-This option controls whether the JSON encoder omits top-level row-object fields whose value is
-`null`.
+This option controls whether the JSON encoder omits object fields whose value is `null`.
 
 Default:
 
@@ -81,8 +80,18 @@ Why `encoder.props`:
 
 For normal JSON object encoding without `output_mask`:
 
-- if `omit_null_columns = true`, a top-level column whose runtime value is `null` is omitted
-- if `omit_null_columns = false`, the column is emitted as `"field": null`
+- if `omit_null_columns = true`, any JSON object field whose runtime value is `null` is omitted
+- if `omit_null_columns = false`, the field is emitted as `"field": null`
+
+This rule is recursive for object values:
+
+- row-object fields are checked
+- nested object fields inside `struct` values are also checked
+
+This rule does **not** remove `null` array items:
+
+- array position is preserved
+- only object fields are omitted
 
 Example input row:
 
@@ -100,6 +109,34 @@ Encoded result with `omit_null_columns = false`:
 
 ```json
 {"a": 1, "b": null}
+```
+
+Nested object example:
+
+Input:
+
+```json
+{"a":{"b":1,"c":null}}
+```
+
+Encoded result with `omit_null_columns = true`:
+
+```json
+{"a":{"b":1}}
+```
+
+Array example:
+
+Input:
+
+```json
+{"a":[1,null,2]}
+```
+
+Encoded result with `omit_null_columns = true`:
+
+```json
+{"a":[1,null,2]}
 ```
 
 ### Row-Diff Output With `output_mask`
@@ -141,8 +178,8 @@ template contract extension, not inferred from the plain object-encoding path.
 
 This is a visible default behavior change for normal full-output JSON encoding:
 
-- before: top-level `null` columns were emitted as `"field": null`
-- after: top-level `null` columns are omitted by default
+- before: `null` object fields were emitted as `"field": null`
+- after: `null` object fields are omitted by default
 
 However, the following behavior remains unchanged:
 
@@ -155,6 +192,6 @@ However, the following behavior remains unchanged:
 The intended implementation direction is:
 
 1. Parse `omit_null_columns` from `SinkEncoderConfig` / `encoder.props`, defaulting to `true`.
-2. Apply the omission rule in the JSON encoder's native row-object materialization helpers.
+2. Apply the omission rule recursively while converting values into JSON objects.
 3. Keep row-diff mask-aware helpers explicit so they still emit mask-selected `null` fields.
 4. Leave `encoder.transform=template` behavior unchanged in the first iteration.
