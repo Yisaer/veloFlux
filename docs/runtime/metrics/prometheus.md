@@ -47,6 +47,7 @@ The subsystem identifies a stable observability domain:
 
 - `mqtt_source`
 - `mqtt_sink`
+- `shared_stream`
 - `processor`
 - `runtime`
 - `flow_instance`
@@ -69,6 +70,7 @@ Examples:
 
 - `veloflux_mqtt_source_records_in_total`
 - `veloflux_mqtt_sink_records_out_total`
+- `veloflux_shared_stream_messages_out_total`
 - `veloflux_processor_errors_total`
 - `veloflux_processor_handle_duration_seconds`
 - `veloflux_runtime_memory_usage_bytes`
@@ -194,6 +196,50 @@ It must not be used to describe:
 - process-wide runtime state
 
 Those concerns belong to `mqtt_source`, `mqtt_sink`, and `runtime` respectively.
+
+### `shared_stream`
+
+This subsystem contains metrics for the shared stream runtime resource addressed by shared stream
+`key`.
+
+These metrics describe the manager-owned shared ingest runtime itself, not any individual
+downstream pipeline processor that consumes the stream.
+
+Examples:
+
+- `veloflux_shared_stream_running`
+- `veloflux_shared_stream_active_subscribers`
+- `veloflux_shared_stream_starts_total`
+- `veloflux_shared_stream_errors_total`
+- `veloflux_shared_stream_messages_in_total`
+- `veloflux_shared_stream_messages_out_total`
+
+Expected labels:
+
+- `flow_instance`
+- `key`
+
+For error counters that need stable classification, add:
+
+- `kind`
+
+This subsystem should be used for observability of:
+
+- lazy start and zero-subscriber reclaim behavior
+- active subscriber fan-out state
+- shared-stream publish activity at the shared runtime boundary
+- non-terminal runtime error trends
+
+It must not be used to describe:
+
+- one downstream consumer pipeline
+- one processor inside the shared ingest pipeline
+- row-level processor throughput
+
+Those concerns belong to `processor`.
+
+The `messages_*_total` metrics in this subsystem count one successful shared-stream publish event
+as one message, regardless of how many subscribers are currently attached.
 
 ### `processor`
 
