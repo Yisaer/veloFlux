@@ -12,6 +12,7 @@ use std::sync::Arc;
 pub struct JsonEncoder {
     id: String,
     props: JsonMap<String, JsonValue>,
+    omit_null_columns: bool,
     transform: Option<Arc<JsonTemplateTransform>>,
     by_index_projection: Option<Arc<ByIndexProjection>>,
     output_schema: Option<Arc<OutputSchema>>,
@@ -23,6 +24,7 @@ impl JsonEncoder {
         let id = id.into();
         Ok(Self {
             id,
+            omit_null_columns: config.json_omit_null_columns(),
             transform: json_template_transform_from_config(config)?,
             props: config.props().clone(),
             by_index_projection: None,
@@ -54,12 +56,17 @@ impl CollectionEncoder for JsonEncoder {
             serde_json::to_vec(&JsonValue::Array(Vec::new()))
         } else {
             let mut json_rows = Vec::with_capacity(rows.len());
+            let options = JsonRowEncodeOptions::native(
+                self.by_index_projection.as_deref(),
+                self.output_schema.as_deref(),
+                if self.omit_null_columns {
+                    NullColumnPolicy::OmitTopLevelNulls
+                } else {
+                    NullColumnPolicy::KeepNulls
+                },
+            );
             for tuple in rows {
-                json_rows.push(tuple_to_json_with_encoder_state(
-                    tuple,
-                    self.by_index_projection.as_deref(),
-                    self.output_schema.as_deref(),
-                )?);
+                json_rows.push(tuple_to_json_with_options(tuple, options)?);
             }
             serde_json::to_vec(&JsonValue::Array(json_rows))
         }
@@ -88,6 +95,7 @@ impl CollectionEncoder for JsonEncoder {
         Ok(Arc::new(Self {
             id: self.id.clone(),
             props: self.props.clone(),
+            omit_null_columns: self.omit_null_columns,
             transform: self.transform.clone(),
             by_index_projection: Some(spec),
             output_schema: self.output_schema.clone(),
@@ -101,6 +109,7 @@ impl CollectionEncoder for JsonEncoder {
         Ok(Arc::new(Self {
             id: self.id.clone(),
             props: self.props.clone(),
+            omit_null_columns: self.omit_null_columns,
             transform: self.transform.clone(),
             by_index_projection: self.by_index_projection.clone(),
             output_schema: Some(output_schema),
@@ -138,6 +147,53 @@ impl JsonStreamingEncoder {
             output_schema,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct JsonRowEncodeOptions<'a> {
+    by_index_projection: Option<&'a ByIndexProjection>,
+    output_schema: Option<&'a OutputSchema>,
+    output_mask_mode: OutputMaskMode,
+    null_policy: NullColumnPolicy,
+}
+
+impl<'a> JsonRowEncodeOptions<'a> {
+    fn native(
+        by_index_projection: Option<&'a ByIndexProjection>,
+        output_schema: Option<&'a OutputSchema>,
+        null_policy: NullColumnPolicy,
+    ) -> Self {
+        Self {
+            by_index_projection,
+            output_schema,
+            output_mask_mode: OutputMaskMode::HonorMask,
+            null_policy,
+        }
+    }
+
+    fn transform(
+        by_index_projection: Option<&'a ByIndexProjection>,
+        output_schema: Option<&'a OutputSchema>,
+    ) -> Self {
+        Self {
+            by_index_projection,
+            output_schema,
+            output_mask_mode: OutputMaskMode::DenseForTemplate,
+            null_policy: NullColumnPolicy::KeepNulls,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OutputMaskMode {
+    HonorMask,
+    DenseForTemplate,
+}
+
+#[derive(Clone, Copy)]
+enum NullColumnPolicy {
+    KeepNulls,
+    OmitTopLevelNulls,
 }
 
 impl CollectionEncoderStream for JsonStreamingEncoder {
@@ -189,43 +245,39 @@ fn value_to_json(value: &Value) -> JsonValue {
     }
 }
 
-fn tuple_to_json(tuple: &Tuple) -> JsonValue {
-    let mut json_row = JsonMap::with_capacity(tuple.len());
-    for ((_, column_name), value) in tuple.entries() {
-        json_row.insert(column_name.to_string(), value_to_json(value));
+fn insert_json_field(
+    json_row: &mut JsonMap<String, JsonValue>,
+    key: String,
+    value: &Value,
+    null_policy: NullColumnPolicy,
+) {
+    if matches!(null_policy, NullColumnPolicy::OmitTopLevelNulls) && matches!(value, Value::Null) {
+        return;
     }
-    JsonValue::Object(json_row)
+
+    json_row.insert(key, value_to_json(value));
 }
 
-fn tuple_to_json_with_output_mask(
+fn tuple_to_json_with_options(
     tuple: &Tuple,
-    output_schema: &OutputSchema,
+    options: JsonRowEncodeOptions<'_>,
 ) -> Result<JsonValue, EncodeError> {
-    let output_mask = tuple.output_mask().ok_or_else(|| {
-        EncodeError::Other("output_mask is required for mask-aware JSON encoding".to_string())
-    })?;
-    if output_mask.len() != output_schema.columns.len() {
-        return Err(EncodeError::Other(format!(
-            "output_mask width {} does not match output schema width {}",
-            output_mask.len(),
-            output_schema.columns.len()
-        )));
+    if tuple.output_mask().is_some() {
+        let output_schema = options.output_schema.ok_or_else(|| {
+            let message = match options.output_mask_mode {
+                OutputMaskMode::HonorMask => {
+                    "output_mask-aware JSON encoding requires the final output schema"
+                }
+                OutputMaskMode::DenseForTemplate => {
+                    "output_mask-aware JSON template encoding requires the final output schema"
+                }
+            };
+            EncodeError::Other(message.to_string())
+        })?;
+        return encode_row_from_output_schema(tuple, output_schema, options);
     }
 
-    let mut json_row = JsonMap::new();
-    for (column, selected) in output_schema.columns.iter().zip(output_mask.iter()) {
-        if !selected {
-            continue;
-        }
-        let value = resolve_output_value(tuple, &column.getter).ok_or_else(|| {
-            EncodeError::Other(format!(
-                "output schema column `{}` could not be resolved from runtime tuple",
-                column.name
-            ))
-        })?;
-        json_row.insert(column.name.as_ref().to_string(), value_to_json(value));
-    }
-    Ok(JsonValue::Object(json_row))
+    encode_row_from_tuple_layout(tuple, options.by_index_projection, options.null_policy)
 }
 
 fn resolve_by_index_output_value<'a>(
@@ -246,49 +298,51 @@ fn resolve_by_index_output_value<'a>(
     })
 }
 
-fn tuple_to_json_with_output_mask_and_by_index_projection(
+fn encode_row_from_output_schema(
     tuple: &Tuple,
     output_schema: &OutputSchema,
-    by_index_projection: &ByIndexProjection,
+    options: JsonRowEncodeOptions<'_>,
 ) -> Result<JsonValue, EncodeError> {
-    let output_mask = tuple.output_mask().ok_or_else(|| {
-        EncodeError::Other("output_mask is required for mask-aware JSON encoding".to_string())
-    })?;
-    if output_mask.len() != output_schema.columns.len() {
-        return Err(EncodeError::Other(format!(
-            "output_mask width {} does not match output schema width {}",
-            output_mask.len(),
-            output_schema.columns.len()
-        )));
-    }
-
     let mut json_row = JsonMap::new();
-    for (column, selected) in output_schema.columns.iter().zip(output_mask.iter()) {
-        if !selected {
-            continue;
-        }
-        let value = resolve_by_index_output_value(tuple, by_index_projection, column.name.as_ref())
-            .or_else(|| resolve_output_value(tuple, &column.getter))
-            .ok_or_else(|| {
-                EncodeError::Other(format!(
-                    "output schema column `{}` could not be resolved from runtime tuple",
-                    column.name
-                ))
+    match options.output_mask_mode {
+        OutputMaskMode::HonorMask => {
+            let output_mask = tuple.output_mask().ok_or_else(|| {
+                EncodeError::Other(
+                    "output_mask is required for mask-aware JSON encoding".to_string(),
+                )
             })?;
-        json_row.insert(column.name.as_ref().to_string(), value_to_json(value));
-    }
-    Ok(JsonValue::Object(json_row))
-}
+            if output_mask.len() != output_schema.columns.len() {
+                return Err(EncodeError::Other(format!(
+                    "output_mask width {} does not match output schema width {}",
+                    output_mask.len(),
+                    output_schema.columns.len()
+                )));
+            }
 
-fn tuple_to_json_dense_with_output_schema(
-    tuple: &Tuple,
-    output_schema: &OutputSchema,
-) -> Result<JsonValue, EncodeError> {
-    let mut json_row = JsonMap::new();
-    for column in output_schema.columns.iter() {
-        let value = resolve_output_value(tuple, &column.getter).unwrap_or(&Value::Null);
-        json_row.insert(column.name.as_ref().to_string(), value_to_json(value));
+            for (column, selected) in output_schema.columns.iter().zip(output_mask.iter()) {
+                if !selected {
+                    continue;
+                }
+                let value = resolve_output_value_for_schema_column(
+                    tuple,
+                    options.by_index_projection,
+                    column.name.as_ref(),
+                    &column.getter,
+                )?;
+                json_row.insert(column.name.as_ref().to_string(), value_to_json(value));
+            }
+        }
+        OutputMaskMode::DenseForTemplate => {
+            // Row-diff branches still expose `.row` as the dense current output row. Until the
+            // template contract becomes mask-aware, unchanged tracked columns remain visible as
+            // `null` here.
+            for column in output_schema.columns.iter() {
+                let value = resolve_output_value(tuple, &column.getter).unwrap_or(&Value::Null);
+                json_row.insert(column.name.as_ref().to_string(), value_to_json(value));
+            }
+        }
     }
+
     Ok(JsonValue::Object(json_row))
 }
 
@@ -309,79 +363,60 @@ fn resolve_output_value<'a>(tuple: &'a Tuple, getter: &OutputValueGetter) -> Opt
     }
 }
 
-fn tuple_to_json_with_encoder_state(
-    tuple: &Tuple,
+fn resolve_output_value_for_schema_column<'a>(
+    tuple: &'a Tuple,
     by_index_projection: Option<&ByIndexProjection>,
-    output_schema: Option<&OutputSchema>,
-) -> Result<JsonValue, EncodeError> {
-    if tuple.output_mask().is_some() {
-        let output_schema = output_schema.ok_or_else(|| {
-            EncodeError::Other(
-                "output_mask-aware JSON encoding requires the final output schema".to_string(),
-            )
-        })?;
-        if let Some(by_index_projection) = by_index_projection {
-            return tuple_to_json_with_output_mask_and_by_index_projection(
-                tuple,
-                output_schema,
-                by_index_projection,
-            );
-        }
-        return tuple_to_json_with_output_mask(tuple, output_schema);
-    }
-
-    tuple_to_json_maybe_by_index_projection(tuple, by_index_projection)
+    output_name: &str,
+    getter: &OutputValueGetter,
+) -> Result<&'a Value, EncodeError> {
+    by_index_projection
+        .and_then(|projection| resolve_by_index_output_value(tuple, projection, output_name))
+        .or_else(|| resolve_output_value(tuple, getter))
+        .ok_or_else(|| {
+            EncodeError::Other(format!(
+                "output schema column `{output_name}` could not be resolved from runtime tuple"
+            ))
+        })
 }
 
-fn tuple_to_json_for_transform(
+fn encode_row_from_tuple_layout(
     tuple: &Tuple,
     by_index_projection: Option<&ByIndexProjection>,
-    output_schema: Option<&OutputSchema>,
+    null_policy: NullColumnPolicy,
 ) -> Result<JsonValue, EncodeError> {
-    // Row-diff branches still expose `.row` as the dense current output row. Until the template
-    // contract becomes mask-aware, unchanged tracked columns remain visible as `null` here.
-    if tuple.output_mask().is_some() {
-        let output_schema = output_schema.ok_or_else(|| {
-            EncodeError::Other(
-                "output_mask-aware JSON template encoding requires the final output schema"
-                    .to_string(),
-            )
-        })?;
-        return tuple_to_json_dense_with_output_schema(tuple, output_schema);
-    }
-
-    tuple_to_json_maybe_by_index_projection(tuple, by_index_projection)
-}
-
-fn tuple_to_json_maybe_by_index_projection(
-    tuple: &Tuple,
-    by_index_projection: Option<&ByIndexProjection>,
-) -> Result<JsonValue, EncodeError> {
-    let Some(by_index_projection) = by_index_projection else {
-        return Ok(tuple_to_json(tuple));
+    let mut json_row = match by_index_projection {
+        Some(by_index_projection) => JsonMap::with_capacity(by_index_projection.columns().len()),
+        None => JsonMap::with_capacity(tuple.len()),
     };
 
-    let mut json_row = JsonMap::with_capacity(by_index_projection.columns().len());
-    if let Some(affiliate) = tuple.affiliate() {
-        for (key, value) in affiliate.entries() {
-            json_row.insert(key.as_ref().to_string(), value_to_json(value));
+    if let Some(by_index_projection) = by_index_projection {
+        if let Some(affiliate) = tuple.affiliate() {
+            for (key, value) in affiliate.entries() {
+                insert_json_field(&mut json_row, key.as_ref().to_string(), value, null_policy);
+            }
         }
-    }
 
-    for column in by_index_projection.columns().iter() {
-        let value = tuple
-            .value_by_index(column.source_name.as_ref(), column.column_index)
-            .ok_or_else(|| {
-                EncodeError::Other(format!(
-                    "by_index_projection column not found: {}#{}",
-                    column.source_name.as_ref(),
-                    column.column_index
-                ))
-            })?;
-        json_row.insert(
-            column.output_name.as_ref().to_string(),
-            value_to_json(value),
-        );
+        for column in by_index_projection.columns().iter() {
+            let value = tuple
+                .value_by_index(column.source_name.as_ref(), column.column_index)
+                .ok_or_else(|| {
+                    EncodeError::Other(format!(
+                        "by_index_projection column not found: {}#{}",
+                        column.source_name.as_ref(),
+                        column.column_index
+                    ))
+                })?;
+            insert_json_field(
+                &mut json_row,
+                column.output_name.as_ref().to_string(),
+                value,
+                null_policy,
+            );
+        }
+    } else {
+        for ((_, column_name), value) in tuple.entries() {
+            insert_json_field(&mut json_row, column_name.to_string(), value, null_policy);
+        }
     }
 
     Ok(JsonValue::Object(json_row))
@@ -401,11 +436,16 @@ fn append_tuple_to_payload(
         payload.push(b',');
     }
 
-    let row = if transform.is_some() {
-        tuple_to_json_for_transform(tuple, by_index_projection, output_schema)?
+    let options = if transform.is_some() {
+        JsonRowEncodeOptions::transform(by_index_projection, output_schema)
     } else {
-        tuple_to_json_with_encoder_state(tuple, by_index_projection, output_schema)?
+        JsonRowEncodeOptions::native(
+            by_index_projection,
+            output_schema,
+            NullColumnPolicy::KeepNulls,
+        )
     };
+    let row = tuple_to_json_with_options(tuple, options)?;
     if let Some(transform) = transform {
         payload.extend(transform.render_item(row)?);
     } else {
@@ -469,6 +509,53 @@ mod tests {
                 {"amount":20, "status":"fail"}
             ])
         );
+    }
+
+    #[test]
+    fn json_encoder_omits_top_level_null_columns_by_default() {
+        let batch = batch_from_columns_simple(vec![
+            (
+                "orders".to_string(),
+                "amount".to_string(),
+                vec![Value::Int64(10)],
+            ),
+            (
+                "orders".to_string(),
+                "status".to_string(),
+                vec![Value::Null],
+            ),
+        ])
+        .expect("valid batch");
+
+        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
+        let payload = encoder.encode(&batch).expect("encode collection");
+
+        let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(json, serde_json::json!([{ "amount": 10 }]));
+    }
+
+    #[test]
+    fn json_encoder_keeps_top_level_null_columns_when_disabled() {
+        let batch = batch_from_columns_simple(vec![
+            (
+                "orders".to_string(),
+                "amount".to_string(),
+                vec![Value::Int64(10)],
+            ),
+            (
+                "orders".to_string(),
+                "status".to_string(),
+                vec![Value::Null],
+            ),
+        ])
+        .expect("valid batch");
+
+        let config = SinkEncoderConfig::json().with_json_omit_null_columns(false);
+        let encoder = JsonEncoder::new("json", &config).expect("encoder");
+        let payload = encoder.encode(&batch).expect("encode collection");
+
+        let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(json, serde_json::json!([{ "amount": 10, "status": null }]));
     }
 
     #[test]

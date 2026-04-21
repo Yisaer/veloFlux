@@ -304,6 +304,13 @@ impl SinkEncoderConfig {
         &self.props
     }
 
+    pub fn json_omit_null_columns(&self) -> bool {
+        self.props
+            .get("omit_null_columns")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(true)
+    }
+
     pub fn transform(&self) -> Option<&SinkEncoderTransformConfig> {
         if matches!(self.kind, SinkEncoderKind::None) {
             return None;
@@ -328,6 +335,14 @@ impl SinkEncoderConfig {
 
     pub fn with_transform(mut self, transform: SinkEncoderTransformConfig) -> Self {
         self.transform = Some(transform);
+        self
+    }
+
+    pub fn with_json_omit_null_columns(mut self, omit_null_columns: bool) -> Self {
+        self.props.insert(
+            "omit_null_columns".to_string(),
+            JsonValue::Bool(omit_null_columns),
+        );
         self
     }
 
