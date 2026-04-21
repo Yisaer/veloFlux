@@ -28,6 +28,9 @@ impl CreatePipelineRequest {
         for source in &mut self.sources {
             source.normalize();
         }
+        for sink in &mut self.sinks {
+            sink.normalize();
+        }
     }
 }
 
@@ -203,6 +206,32 @@ pub struct CreatePipelineSinkRequest {
     pub encoder: EncoderConfigRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<SinkOutputConfigRequest>,
+}
+
+impl CreatePipelineSinkRequest {
+    pub(crate) fn normalize(&mut self) {
+        if !self.sink_type.eq_ignore_ascii_case("mqtt") {
+            return;
+        }
+
+        let normalized = match self.props.fields.get("connector_key") {
+            Some(JsonValue::String(value)) => {
+                let trimmed = value.trim();
+                Some((!trimmed.is_empty()).then(|| JsonValue::String(trimmed.to_string())))
+            }
+            _ => None,
+        };
+
+        match normalized {
+            Some(Some(value)) => {
+                self.props.fields.insert("connector_key".to_string(), value);
+            }
+            Some(None) => {
+                self.props.fields.remove("connector_key");
+            }
+            None => {}
+        }
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone)]

@@ -17,8 +17,10 @@ use storage::{
 
 /// Serialize a create-stream request for storage.
 pub fn stored_stream_from_request(req: &CreateStreamRequest) -> Result<StoredStream, String> {
+    let mut req = req.clone();
+    req.normalize();
     let raw_json =
-        serde_json::to_string(req).map_err(|err| format!("serialize stream request: {err}"))?;
+        serde_json::to_string(&req).map_err(|err| format!("serialize stream request: {err}"))?;
     Ok(StoredStream {
         id: req.name.clone(),
         raw_json,

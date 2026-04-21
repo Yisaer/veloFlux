@@ -51,6 +51,32 @@ pub struct CreateStreamRequest {
     pub sampler: Option<SamplerConfig>,
 }
 
+impl CreateStreamRequest {
+    pub(crate) fn normalize(&mut self) {
+        if !self.stream_type.eq_ignore_ascii_case("mqtt") {
+            return;
+        }
+
+        let normalized = match self.props.fields.get("connector_key") {
+            Some(JsonValue::String(value)) => {
+                let trimmed = value.trim();
+                Some((!trimmed.is_empty()).then(|| JsonValue::String(trimmed.to_string())))
+            }
+            _ => None,
+        };
+
+        match normalized {
+            Some(Some(value)) => {
+                self.props.fields.insert("connector_key".to_string(), value);
+            }
+            Some(None) => {
+                self.props.fields.remove("connector_key");
+            }
+            None => {}
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 pub struct EventtimeConfigRequest {
     pub column: String,
@@ -290,6 +316,8 @@ pub async fn create_stream_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateStreamRequest>,
 ) -> impl IntoResponse {
+    let mut req = req;
+    req.normalize();
     let audit = ResourceMutationLog::new("stream", "create", req.name.as_str(), None);
     if req.name.trim().is_empty() {
         let err = "stream name must not be empty".to_string();
@@ -785,14 +813,23 @@ fn stream_type_label(stream_type: flow::catalog::StreamType) -> &'static str {
     }
 }
 
+fn normalized_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
 fn stream_props_value(props: &StreamProps) -> JsonValue {
     match props {
         StreamProps::Mqtt(mqtt) => {
             let mut map = JsonMap::new();
-            map.insert(
-                "broker_url".to_string(),
-                JsonValue::String(mqtt.broker_url.clone()),
-            );
+            if !mqtt.broker_url.trim().is_empty() {
+                map.insert(
+                    "broker_url".to_string(),
+                    JsonValue::String(mqtt.broker_url.clone()),
+                );
+            }
             map.insert("topic".to_string(), JsonValue::String(mqtt.topic.clone()));
             map.insert("qos".to_string(), JsonValue::from(mqtt.qos));
             if let Some(client_id) = &mqtt.client_id {
@@ -801,7 +838,11 @@ fn stream_props_value(props: &StreamProps) -> JsonValue {
                     JsonValue::String(client_id.clone()),
                 );
             }
-            if let Some(connector_key) = &mqtt.connector_key {
+            if let Some(connector_key) = mqtt
+                .connector_key
+                .as_ref()
+                .filter(|connector_key| !connector_key.trim().is_empty())
+            {
                 map.insert(
                     "connector_key".to_string(),
                     JsonValue::String(connector_key.clone()),
@@ -880,21 +921,22 @@ pub(crate) fn build_stream_props(
         "mqtt" => {
             let mqtt_props: MqttStreamPropsRequest = serde_json::from_value(props.to_value())
                 .map_err(|err| format!("invalid mqtt props: {}", err))?;
-            let broker = mqtt_props
-                .broker_url
-                .filter(|value| !value.trim().is_empty())
-                .ok_or_else(|| "mqtt stream requires broker_url".to_string())?;
+            let connector_key = normalized_optional_string(mqtt_props.connector_key);
+            let broker = normalized_optional_string(mqtt_props.broker_url);
+            if connector_key.is_none() && broker.is_none() {
+                return Err("mqtt stream requires broker_url".to_string());
+            }
             let topic = mqtt_props
                 .topic
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| "mqtt stream requires topic".to_string())?;
             let qos = mqtt_props.qos.unwrap_or(MQTT_QOS);
             Ok(StreamProps::Mqtt(MqttStreamProps {
-                broker_url: broker,
+                broker_url: broker.unwrap_or_default(),
                 topic,
                 qos,
                 client_id: mqtt_props.client_id,
-                connector_key: mqtt_props.connector_key,
+                connector_key,
             }))
         }
         "history" => {
@@ -1210,6 +1252,45 @@ mod tests {
         }
     }
 
+    fn mqtt_stream_request_with_connector_key(
+        name: &str,
+        connector_key: &str,
+    ) -> CreateStreamRequest {
+        let schema_props: JsonMap<String, JsonValue> = json!({
+            "columns": [
+                { "name": "value", "data_type": "int64" }
+            ]
+        })
+        .as_object()
+        .expect("schema props object")
+        .clone();
+
+        let props_fields: JsonMap<String, JsonValue> = json!({
+            "topic": format!("{name}/topic"),
+            "qos": 0,
+            "connector_key": connector_key
+        })
+        .as_object()
+        .expect("stream props object")
+        .clone();
+
+        CreateStreamRequest {
+            name: name.to_string(),
+            stream_type: "mqtt".to_string(),
+            schema: SchemaConfigRequest {
+                schema_type: "json".to_string(),
+                props: schema_props,
+            },
+            props: StreamPropsRequest {
+                fields: props_fields,
+            },
+            shared: false,
+            decoder: DecoderConfigRequest::default(),
+            eventtime: None,
+            sampler: None,
+        }
+    }
+
     fn mock_stream_request(name: &str) -> CreateStreamRequest {
         let schema_props: JsonMap<String, JsonValue> = json!({
             "columns": [
@@ -1429,6 +1510,45 @@ mod tests {
     }
 
     #[test]
+    fn build_stream_props_allows_shared_mqtt_without_broker_url() {
+        let props = StreamPropsRequest {
+            fields: json!({
+                "topic": "shared/topic",
+                "qos": 1,
+                "connector_key": "shared_mqtt"
+            })
+            .as_object()
+            .expect("mqtt props object")
+            .clone(),
+        };
+
+        let built = build_stream_props("mqtt", &props).expect("build shared mqtt stream props");
+        let StreamProps::Mqtt(mqtt) = built else {
+            panic!("expected mqtt stream props");
+        };
+        assert_eq!(mqtt.broker_url, "");
+        assert_eq!(mqtt.topic, "shared/topic");
+        assert_eq!(mqtt.qos, 1);
+        assert_eq!(mqtt.connector_key.as_deref(), Some("shared_mqtt"));
+    }
+
+    #[test]
+    fn build_stream_props_rejects_missing_broker_url_without_connector_key() {
+        let props = StreamPropsRequest {
+            fields: json!({
+                "topic": "shared/topic",
+                "qos": 1
+            })
+            .as_object()
+            .expect("mqtt props object")
+            .clone(),
+        };
+
+        let err = build_stream_props("mqtt", &props).unwrap_err();
+        assert_eq!(err, "mqtt stream requires broker_url");
+    }
+
+    #[test]
     fn validate_stream_decoder_config_rejects_shared_memory_stream() {
         let mut req = base_stream_request("memory");
         req.shared = true;
@@ -1585,6 +1705,40 @@ mod tests {
         assert_eq!(json["spec"]["decoder"]["type"], "json");
         assert_eq!(json["spec"]["eventtime"]["column"], "event_ts");
         assert_eq!(json["spec"]["eventtime"]["type"], "unixtimestamp_ms");
+    }
+
+    #[tokio::test]
+    async fn describe_stream_omits_empty_broker_url_for_shared_mqtt_stream() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
+        let req = mqtt_stream_request_with_connector_key("shared_stream_no_broker", "shared_mqtt");
+
+        state
+            .storage
+            .create_stream(
+                crate::storage_bridge::stored_stream_from_request(&req)
+                    .expect("serialize stored stream"),
+            )
+            .expect("store stream");
+
+        let response = describe_stream_handler(State(state), Path(req.name.clone()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("read response body");
+        let json: JsonValue = serde_json::from_slice(&body).expect("decode describe response");
+        assert_eq!(
+            json["spec"]["props"]["topic"],
+            format!("{}/topic", req.name)
+        );
+        assert_eq!(json["spec"]["props"]["connector_key"], "shared_mqtt");
+        assert!(
+            json["spec"]["props"].get("broker_url").is_none(),
+            "shared mqtt stream describe response should omit empty broker_url",
+        );
     }
 
     #[tokio::test]

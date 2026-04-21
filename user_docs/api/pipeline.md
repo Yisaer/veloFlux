@@ -182,7 +182,7 @@ Response:
 
 `type == "mqtt"`:
 
-- `broker_url: string` (required)
+- `broker_url: string` (required when `connector_key` is absent)
 - `topic: string` (required)
 - Optional `qos: number` (default: `0`)
 - Optional `retain: boolean` (default: `false`)
