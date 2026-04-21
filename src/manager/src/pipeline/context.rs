@@ -14,6 +14,11 @@ use super::types::{
     CreatePipelineRequest, CreatePipelineSinkRequest, MemorySinkPropsRequest, MqttSinkPropsRequest,
 };
 
+fn normalized_optional_string(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn select_stmt_from_sql(
     instance: &FlowInstance,
     pipeline_id: &str,
@@ -39,7 +44,7 @@ fn connector_keys_from_pipeline_sinks(
         let mqtt_props: MqttSinkPropsRequest = serde_json::from_value(sink.props.to_value())
             .map_err(|err| format!("decode pipeline {pipeline_id} mqtt sink props: {err}"))?;
         if let Some(key) = mqtt_props.connector_key
-            && !key.trim().is_empty()
+            && let Some(key) = normalized_optional_string(key)
         {
             keys.insert(key);
         }
@@ -58,7 +63,7 @@ fn connector_key_from_stream(
             .map_err(|err| format!("decode mqtt stream {} props: {err}", req.name))?;
     Ok(mqtt_props
         .connector_key
-        .filter(|key| !key.trim().is_empty()))
+        .and_then(normalized_optional_string))
 }
 
 pub(super) type PipelineContextPayload = (

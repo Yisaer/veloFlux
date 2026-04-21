@@ -51,6 +51,32 @@ pub struct CreateStreamRequest {
     pub sampler: Option<SamplerConfig>,
 }
 
+impl CreateStreamRequest {
+    pub(crate) fn normalize(&mut self) {
+        if !self.stream_type.eq_ignore_ascii_case("mqtt") {
+            return;
+        }
+
+        let normalized = match self.props.fields.get("connector_key") {
+            Some(JsonValue::String(value)) => {
+                let trimmed = value.trim();
+                Some((!trimmed.is_empty()).then(|| JsonValue::String(trimmed.to_string())))
+            }
+            _ => None,
+        };
+
+        match normalized {
+            Some(Some(value)) => {
+                self.props.fields.insert("connector_key".to_string(), value);
+            }
+            Some(None) => {
+                self.props.fields.remove("connector_key");
+            }
+            None => {}
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 pub struct EventtimeConfigRequest {
     pub column: String,
@@ -290,6 +316,8 @@ pub async fn create_stream_handler(
     State(state): State<AppState>,
     Json(req): Json<CreateStreamRequest>,
 ) -> impl IntoResponse {
+    let mut req = req;
+    req.normalize();
     let audit = ResourceMutationLog::new("stream", "create", req.name.as_str(), None);
     if req.name.trim().is_empty() {
         let err = "stream name must not be empty".to_string();
