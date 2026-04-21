@@ -461,7 +461,7 @@ mod tests {
     async fn shared_client_backed_source_receives_payloads_from_embedded_broker() {
         let broker = EmbeddedMqttBroker::start().await;
         let spawner = TaskSpawner::from_handle(Handle::current());
-        let manager = MqttClientManager::new(spawner.clone());
+        let manager = MqttClientManager::new("default", spawner.clone());
         let topic_filter = broker.scoped_filter("fleet/+/telemetry");
         let shared_cfg = SharedMqttClientConfig {
             key: "shared_source".to_string(),

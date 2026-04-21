@@ -31,6 +31,12 @@ pub enum SharedMqttEvent {
     EndOfStream,
 }
 
+const MQTT_SHARED_CLIENT_ERROR_SUBSCRIBE: &str = "subscribe";
+const MQTT_SHARED_CLIENT_ERROR_PUBLISH: &str = "publish";
+const MQTT_SHARED_CLIENT_ERROR_DISCONNECT: &str = "disconnect";
+const MQTT_SHARED_CLIENT_ERROR_REQUESTS_DONE: &str = "requests_done";
+const MQTT_SHARED_CLIENT_ERROR_POLL: &str = "poll";
+
 fn mqtt_topic_matches(filter: &str, topic: &str) -> bool {
     let filter_levels = filter.split('/').collect::<Vec<_>>();
     let topic_levels = topic.split('/').collect::<Vec<_>>();
@@ -88,6 +94,8 @@ impl SharedMqttClient {
         payload: Vec<u8>,
     ) -> Result<(), ConnectorError> {
         if !self.is_connected() {
+            self.entry
+                .record_error_metric(MQTT_SHARED_CLIENT_ERROR_PUBLISH);
             let last_error = self.entry.last_error.read().clone();
             let message = last_error
                 .map(|err| format!("mqtt not connected: {err}"))
@@ -100,7 +108,12 @@ impl SharedMqttClient {
             .await?
             .publish(topic, qos, retain, payload)
             .await
-            .map_err(|err| ConnectorError::Connection(err.to_string()))
+            .map(|_| self.entry.record_tx_message_metric())
+            .map_err(|err| {
+                self.entry
+                    .record_error_metric(MQTT_SHARED_CLIENT_ERROR_PUBLISH);
+                ConnectorError::Connection(err.to_string())
+            })
     }
 }
 
@@ -118,6 +131,7 @@ struct MqttClientRuntime {
 }
 
 struct MqttClientEntry {
+    flow_instance_id: Arc<str>,
     config: SharedMqttClientConfig,
     runtime: AsyncMutex<Option<MqttClientRuntime>>,
     ref_count: AtomicUsize,
@@ -128,8 +142,13 @@ struct MqttClientEntry {
 }
 
 impl MqttClientEntry {
-    fn new(config: SharedMqttClientConfig, spawner: TaskSpawner) -> Self {
+    fn new(
+        flow_instance_id: Arc<str>,
+        config: SharedMqttClientConfig,
+        spawner: TaskSpawner,
+    ) -> Self {
         Self {
+            flow_instance_id,
             config,
             runtime: AsyncMutex::new(None),
             ref_count: AtomicUsize::new(0),
@@ -138,6 +157,52 @@ impl MqttClientEntry {
             last_error: RwLock::new(None),
             spawner,
         }
+    }
+
+    fn metric_labels(&self) -> [&str; 2] {
+        [self.flow_instance_id.as_ref(), self.config.key.as_str()]
+    }
+
+    fn set_connected_metric(&self, connected: bool) {
+        let value = if connected { 1 } else { 0 };
+        veloflux_metrics::mqtt_shared_client_connected()
+            .with_label_values(&self.metric_labels())
+            .set(value);
+    }
+
+    fn set_active_refs_metric(&self, refs: usize) {
+        let value = i64::try_from(refs).unwrap_or(i64::MAX);
+        veloflux_metrics::mqtt_shared_client_active_refs()
+            .with_label_values(&self.metric_labels())
+            .set(value);
+    }
+
+    fn record_error_metric(&self, kind: &'static str) {
+        veloflux_metrics::mqtt_shared_client_errors_total()
+            .with_label_values(&[
+                self.flow_instance_id.as_ref(),
+                self.config.key.as_str(),
+                kind,
+            ])
+            .inc();
+    }
+
+    fn record_rx_message_metric(&self) {
+        veloflux_metrics::mqtt_shared_client_rx_messages_total()
+            .with_label_values(&self.metric_labels())
+            .inc();
+    }
+
+    fn record_tx_message_metric(&self) {
+        veloflux_metrics::mqtt_shared_client_tx_messages_total()
+            .with_label_values(&self.metric_labels())
+            .inc();
+    }
+
+    fn record_reconnect_metric(&self) {
+        veloflux_metrics::mqtt_shared_client_reconnects_total()
+            .with_label_values(&self.metric_labels())
+            .inc();
     }
 
     async fn subscribe(
@@ -192,10 +257,10 @@ impl MqttClientEntry {
         let topic = config.topic.clone();
 
         let (client, mut event_loop) = AsyncClient::new(options, 64);
-        client
-            .subscribe(topic.clone(), qos)
-            .await
-            .map_err(|err| ConnectorError::Connection(err.to_string()))?;
+        client.subscribe(topic.clone(), qos).await.map_err(|err| {
+            self.record_error_metric(MQTT_SHARED_CLIENT_ERROR_SUBSCRIBE);
+            ConnectorError::Connection(err.to_string())
+        })?;
 
         let events_hub = Arc::new(BackpressureHub::new(1024));
         let (shutdown_tx, _) = watch::channel(false);
@@ -207,6 +272,7 @@ impl MqttClientEntry {
         let handle = self.spawner.spawn(async move {
             let mut backoff = Duration::from_millis(100);
             let max_backoff = Duration::from_secs(5);
+            let mut seen_connected = false;
 
             loop {
                 tokio::select! {
@@ -216,6 +282,7 @@ impl MqttClientEntry {
                             entry_for_task.connected.store(true, Ordering::Release);
                             backoff = Duration::from_millis(100);
                             if mqtt_topic_matches(&topic, &publish.topic) {
+                                entry_for_task.record_rx_message_metric();
                                 let _ = events_hub_for_task
                                     .send(Ok(SharedMqttEvent::Payload(publish.payload.to_vec())))
                                     .await;
@@ -223,12 +290,19 @@ impl MqttClientEntry {
                         }
                         Ok(Event::Incoming(Packet::Disconnect)) => {
                             entry_for_task.connected.store(false, Ordering::Release);
+                            entry_for_task.set_connected_metric(false);
+                            entry_for_task.record_error_metric(MQTT_SHARED_CLIENT_ERROR_DISCONNECT);
                             *entry_for_task.last_error.write() = Some("disconnect".to_string());
                             tracing::warn!("shared mqtt client disconnected; reconnecting");
                             event_loop.clean();
                         }
                         Ok(Event::Incoming(Packet::ConnAck(_))) => {
-                            entry_for_task.connected.store(true, Ordering::Release);
+                            let was_connected = entry_for_task.connected.swap(true, Ordering::AcqRel);
+                            entry_for_task.set_connected_metric(true);
+                            if seen_connected && !was_connected {
+                                entry_for_task.record_reconnect_metric();
+                            }
+                            seen_connected = true;
                             *entry_for_task.last_error.write() = None;
                             backoff = Duration::from_millis(100);
                             let _ = client_for_task.subscribe(topic.clone(), qos).await;
@@ -236,9 +310,11 @@ impl MqttClientEntry {
                         Ok(_) => {}
                         Err(ConnectionError::RequestsDone) => {
                             entry_for_task.connected.store(false, Ordering::Release);
+                            entry_for_task.set_connected_metric(false);
                             if entry_for_task.closing.load(Ordering::Acquire) {
                                 break;
                             }
+                            entry_for_task.record_error_metric(MQTT_SHARED_CLIENT_ERROR_REQUESTS_DONE);
                             let message = "mqtt requests done".to_string();
                             *entry_for_task.last_error.write() = Some(message.clone());
                             let _ = events_hub_for_task
@@ -249,6 +325,8 @@ impl MqttClientEntry {
                         }
                         Err(err) => {
                             entry_for_task.connected.store(false, Ordering::Release);
+                            entry_for_task.set_connected_metric(false);
+                            entry_for_task.record_error_metric(MQTT_SHARED_CLIENT_ERROR_POLL);
                             *entry_for_task.last_error.write() = Some(err.to_string());
                             let _ = events_hub_for_task
                                 .send(Err(ConnectorError::Connection(err.to_string())))
@@ -293,6 +371,7 @@ impl MqttClientEntry {
         runtime.join_handle.abort();
         let _ = runtime.join_handle.await;
         self.connected.store(false, Ordering::Release);
+        self.set_connected_metric(false);
         if emit_terminal {
             runtime
                 .events_hub
@@ -306,13 +385,15 @@ impl MqttClientEntry {
 
 #[derive(Clone)]
 pub(crate) struct MqttClientManager {
+    flow_instance_id: Arc<str>,
     entries: Arc<Mutex<HashMap<String, Arc<MqttClientEntry>>>>,
     spawner: TaskSpawner,
 }
 
 impl MqttClientManager {
-    pub(crate) fn new(spawner: TaskSpawner) -> Self {
+    pub(crate) fn new(flow_instance_id: impl Into<Arc<str>>, spawner: TaskSpawner) -> Self {
         Self {
+            flow_instance_id: flow_instance_id.into(),
             entries: Arc::new(Mutex::new(HashMap::new())),
             spawner,
         }
@@ -331,7 +412,13 @@ impl MqttClientManager {
             }
         }
 
-        let entry = Arc::new(MqttClientEntry::new(config, self.spawner.clone()));
+        let entry = Arc::new(MqttClientEntry::new(
+            Arc::clone(&self.flow_instance_id),
+            config,
+            self.spawner.clone(),
+        ));
+        entry.set_connected_metric(false);
+        entry.set_active_refs_metric(0);
 
         self.entries.lock().insert(key, entry);
         Ok(())
@@ -347,11 +434,13 @@ impl MqttClientManager {
                 .get(key)
                 .cloned()
                 .ok_or_else(|| ConnectorError::NotFound(key.to_string()))?;
-            entry.ref_count.fetch_add(1, Ordering::AcqRel);
+            let refs = entry.ref_count.fetch_add(1, Ordering::AcqRel) + 1;
+            entry.set_active_refs_metric(refs);
             entry
         };
         if let Err(err) = entry.ensure_runtime_started().await {
-            entry.ref_count.fetch_sub(1, Ordering::AcqRel);
+            let refs = entry.ref_count.fetch_sub(1, Ordering::AcqRel) - 1;
+            entry.set_active_refs_metric(refs);
             return Err(err);
         }
         Ok(SharedMqttClient::from_acquired(entry, self.clone()))
@@ -375,7 +464,10 @@ impl MqttClientManager {
     }
 
     fn release(&self, entry: &Arc<MqttClientEntry>) {
-        if entry.ref_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+        let previous = entry.ref_count.fetch_sub(1, Ordering::AcqRel);
+        let refs = previous.saturating_sub(1);
+        entry.set_active_refs_metric(refs);
+        if previous == 1 {
             let emit_terminal = entry.closing.load(Ordering::Acquire);
             let shutdown_entry = Arc::clone(entry);
             self.spawner.spawn(async move {
@@ -519,7 +611,8 @@ mod tests {
     #[tokio::test]
     async fn drop_client_removes_busy_client_from_registry() {
         let broker = EmbeddedMqttBroker::start().await;
-        let manager = MqttClientManager::new(TaskSpawner::from_handle(Handle::current()));
+        let manager =
+            MqttClientManager::new("default", TaskSpawner::from_handle(Handle::current()));
         let topic_filter = broker.scoped_filter("fleet/+/telemetry");
         let cfg = SharedMqttClientConfig {
             key: "shared".to_string(),
@@ -554,7 +647,8 @@ mod tests {
     #[tokio::test]
     async fn shared_mqtt_runtime_is_lazy_started_and_reclaimed_when_last_reference_drops() {
         let broker = EmbeddedMqttBroker::start().await;
-        let manager = MqttClientManager::new(TaskSpawner::from_handle(Handle::current()));
+        let manager =
+            MqttClientManager::new("default", TaskSpawner::from_handle(Handle::current()));
         let topic_filter = broker.scoped_filter("fleet/+/telemetry");
         let cfg = SharedMqttClientConfig {
             key: "lazy".to_string(),
@@ -601,7 +695,8 @@ mod tests {
     #[tokio::test]
     async fn shared_mqtt_subscribers_receive_payloads_from_embedded_broker() {
         let broker = EmbeddedMqttBroker::start().await;
-        let manager = MqttClientManager::new(TaskSpawner::from_handle(Handle::current()));
+        let manager =
+            MqttClientManager::new("default", TaskSpawner::from_handle(Handle::current()));
         let topic_filter = broker.scoped_filter("fleet/+/telemetry");
         let cfg = SharedMqttClientConfig {
             key: "embedded".to_string(),

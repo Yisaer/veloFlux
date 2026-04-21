@@ -6,6 +6,7 @@
 
 mod common;
 mod flow_instance;
+mod mqtt_shared_client;
 mod mqtt_sink;
 mod mqtt_source;
 mod processor;
@@ -35,6 +36,30 @@ pub fn mqtt_sink_records_in_total() -> &'static IntCounterVec {
 
 pub fn mqtt_sink_records_out_total() -> &'static IntCounterVec {
     mqtt_sink::records_out_total()
+}
+
+pub fn mqtt_shared_client_connected() -> &'static IntGaugeVec {
+    mqtt_shared_client::connected()
+}
+
+pub fn mqtt_shared_client_active_refs() -> &'static IntGaugeVec {
+    mqtt_shared_client::active_refs()
+}
+
+pub fn mqtt_shared_client_rx_messages_total() -> &'static IntCounterVec {
+    mqtt_shared_client::rx_messages_total()
+}
+
+pub fn mqtt_shared_client_tx_messages_total() -> &'static IntCounterVec {
+    mqtt_shared_client::tx_messages_total()
+}
+
+pub fn mqtt_shared_client_errors_total() -> &'static IntCounterVec {
+    mqtt_shared_client::errors_total()
+}
+
+pub fn mqtt_shared_client_reconnects_total() -> &'static IntCounterVec {
+    mqtt_shared_client::reconnects_total()
 }
 
 pub fn processor_records_in_total() -> &'static IntCounterVec {

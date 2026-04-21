@@ -104,7 +104,9 @@ Shared label keys:
 - `pipeline_id`
 - `processor_id`
 - `connector`
+- `key`
 - `metric`
+- `kind`
 
 Alias labels must not be introduced when an existing canonical label already exists.
 
@@ -112,6 +114,14 @@ For example:
 
 - use `flow_instance`
 - do not use `flow_instance_id`
+
+The `key` label is reserved for manager-owned shared runtime resources that are addressed by a
+stable metadata key instead of a connector id or pipeline id.
+
+Examples:
+
+- shared MQTT client key
+- future shared runtime resource keys
 
 ## Subsystem Boundaries
 
@@ -142,6 +152,48 @@ Expected labels:
 
 - `flow_instance`
 - `connector`
+
+### `mqtt_shared_client`
+
+This subsystem contains metrics for the shared MQTT client runtime resource addressed by shared
+client `key`.
+
+These metrics describe the manager-owned shared connection itself, not any individual source or
+sink connector that happens to use that shared connection.
+
+Examples:
+
+- `veloflux_mqtt_shared_client_connected`
+- `veloflux_mqtt_shared_client_active_refs`
+- `veloflux_mqtt_shared_client_rx_messages_total`
+- `veloflux_mqtt_shared_client_tx_messages_total`
+- `veloflux_mqtt_shared_client_errors_total`
+- `veloflux_mqtt_shared_client_reconnects_total`
+
+Expected labels:
+
+- `flow_instance`
+- `key`
+
+For error counters that need stable classification, add:
+
+- `kind`
+
+This subsystem should be used for observability of:
+
+- lazy start and zero-reference reclaim behavior
+- shared-client connection health
+- shared-client ingress and egress throughput
+- non-terminal runtime error trends
+- reconnect churn
+
+It must not be used to describe:
+
+- one source connector instance
+- one sink connector instance
+- process-wide runtime state
+
+Those concerns belong to `mqtt_source`, `mqtt_sink`, and `runtime` respectively.
 
 ### `processor`
 
@@ -242,6 +294,14 @@ sum by (connector) (rate(veloflux_mqtt_source_records_in_total[5m]))
 ```
 
 ```promql
+sum by (flow_instance, key) (rate(veloflux_mqtt_shared_client_rx_messages_total[5m]))
+```
+
+```promql
+veloflux_mqtt_shared_client_connected{flow_instance="default", key="shared_demo"}
+```
+
+```promql
 sum by (flow_instance, pipeline_id, processor_id) (
   rate(veloflux_processor_records_out_total[5m])
 )
@@ -264,3 +324,103 @@ After the redesign, the metrics system follows four hard rules:
 3. Labels are canonicalized and reused consistently.
 4. Runtime, connector, processor, and flow-instance metrics are separated by stable subsystem
    boundaries.
+
+## Shared MQTT Client Metrics
+
+The shared MQTT client is a first-class runtime resource. It must therefore expose its own metrics
+through the `mqtt_shared_client` subsystem instead of reusing `mqtt_source`, `mqtt_sink`, or
+`runtime`.
+
+The proposed first-stage metrics are:
+
+### `veloflux_mqtt_shared_client_connected`
+
+- Type: gauge
+- Labels: `flow_instance`, `key`
+- Meaning: whether the shared MQTT client is currently connected to the broker (`0` or `1`)
+- Update points:
+  - set to `1` after a successful connection acknowledgement
+  - set to `0` after disconnect, poll failure, requests-done transition, or runtime shutdown
+- Notes:
+  - this metric describes broker connectivity only
+  - it must not be overloaded to mean that the shared-client runtime exists
+
+### `veloflux_mqtt_shared_client_active_refs`
+
+- Type: gauge
+- Labels: `flow_instance`, `key`
+- Meaning: number of active runtime handles currently holding the shared MQTT client
+- Update points:
+  - increment after successful acquire
+  - decrement when the held shared client is released
+- Notes:
+  - this metric is the main lifecycle driver for lazy start and zero-reference reclaim analysis
+  - it must be sourced from manager reference tracking, not inferred from subscriber count
+
+### `veloflux_mqtt_shared_client_rx_messages_total`
+
+- Type: counter
+- Labels: `flow_instance`, `key`
+- Meaning: total number of MQTT publish messages accepted from the broker by the shared client
+- Update points:
+  - increment after a broker publish event is received and accepted by the shared client
+- Notes:
+  - this is the upstream ingress counter for the shared client itself
+  - it should count MQTT messages, not decoded rows and not bytes
+
+### `veloflux_mqtt_shared_client_tx_messages_total`
+
+- Type: counter
+- Labels: `flow_instance`, `key`
+- Meaning: total number of MQTT publish messages successfully sent to the broker through the shared
+  client
+- Update points:
+  - increment only after shared-client publish succeeds
+- Notes:
+  - this counter allows one shared client key to be observed when it is reused by sink-side
+    traffic
+
+### `veloflux_mqtt_shared_client_errors_total`
+
+- Type: counter
+- Labels: `flow_instance`, `key`, `kind`
+- Meaning: total number of shared-client runtime errors
+- Update points:
+  - increment whenever the shared-client runtime observes an error that should remain
+    non-terminal
+- Notes:
+  - `kind` must be a small stable enum
+  - `kind` values should describe a lifecycle stage, not carry free-form error messages
+  - recommended values:
+    - `subscribe`
+    - `poll`
+    - `publish`
+    - `disconnect`
+    - `requests_done`
+
+### `veloflux_mqtt_shared_client_reconnects_total`
+
+- Type: counter
+- Labels: `flow_instance`, `key`
+- Meaning: total number of successful reconnect transitions of the shared MQTT client
+- Update points:
+  - increment when the shared client returns to connected state after previously being disconnected
+- Notes:
+  - this metric should count reconnect success events rather than every retry loop iteration
+  - this keeps reconnect churn observable without inflating the counter with internal retry noise
+
+## Shared MQTT Client Design Constraints
+
+When adding shared MQTT client metrics, the following constraints apply:
+
+- Definitions must be added to `veloflux_metrics`, not to flow business modules.
+- Final names must be generated through:
+  - `namespace = veloflux`
+  - `subsystem = mqtt_shared_client`
+  - the specific metric `name`
+- Business code may only fetch collector handles and update them.
+- The canonical resource label is `key`.
+- Do not introduce alias labels such as `connector_key` or `flow_instance_id`.
+- Do not label these metrics by `topic`, `broker_url`, `client_id`, or free-form error message.
+- Do not merge shared-client metrics into `mqtt_source` or `mqtt_sink`; those subsystems describe
+  connector behavior, not shared runtime resources.

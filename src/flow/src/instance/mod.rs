@@ -203,7 +203,7 @@ impl FlowInstance {
         shared_registries: Option<FlowInstanceSharedRegistries>,
     ) -> Self {
         let shared_stream_registry = Arc::new(SharedStreamRegistry::new(spawner.clone()));
-        let mqtt_client_manager = MqttClientManager::new(spawner.clone());
+        let mqtt_client_manager = MqttClientManager::new(id.clone(), spawner.clone());
         let memory_pubsub_registry = MemoryPubSubRegistry::new();
         let connector_registry =
             ConnectorRegistry::with_builtin_sinks(memory_pubsub_registry.clone());
