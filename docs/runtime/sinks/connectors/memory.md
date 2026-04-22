@@ -11,6 +11,9 @@ for process-local integration and testing scenarios (no network I/O).
 - Topics must be **predeclared** via the manager API before a pipeline can publish to them.
 - Publishing when there are no subscribers is treated as success (delivered count is `0`).
 
+For the shared resource model, declaration semantics, and startup/import-export behavior, see
+[`memory_topics.md`](../../instances/memory_topics.md).
+
 ## Topic Declaration (Manager)
 
 Declare the topic before creating a pipeline that uses a memory sink:
@@ -29,6 +32,8 @@ Notes:
 
 - `capacity` defaults to `1024` when omitted.
 - Declaring an existing topic with a different `kind`/`capacity` is rejected.
+- The persisted topic resource is documented in
+  [`memory_topics.md`](../../instances/memory_topics.md).
 
 ## Sink Configuration (Manager)
 

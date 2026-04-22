@@ -2,7 +2,7 @@
 
 ## Overview
 
-`ByIndexProjectionIntoRowDiffRewrite` is a proposed physical-plan optimization rule that prepares
+`ByIndexProjectionIntoRowDiffRewrite` is a physical-plan optimization rule that prepares
 **row-diff-side delayed materialization** for sink branches shaped like:
 
 ```text
@@ -27,9 +27,9 @@ after rewrite:
 
 This keeps row-diff semantics unchanged while reducing CPU cost in wide-output pipelines.
 
-Planned implementation location:
+Implementation:
 
-- `src/flow/src/planner/optimizer.rs` (`ByIndexProjectionIntoRowDiffRewrite`, proposed)
+- `src/flow/src/planner/optimizer.rs` (`ByIndexProjectionIntoRowDiffRewrite`)
 
 ## Background (Why This Exists)
 

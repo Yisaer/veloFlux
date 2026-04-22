@@ -14,11 +14,19 @@ Implementation entrypoint: `src/flow/src/planner/optimizer.rs` (`optimize_physic
 
 ## Rules
 
+- `InsertBarrierForFanIn` (`insert_barrier_for_fan_in`):
+  [`../../../runtime/processors/barrier_signal.md`](../../../runtime/processors/barrier_signal.md)
 - `StreamingAggregationRewrite` (`streaming_aggregation_rewrite`):
   [`streaming_aggregation_rewrite.md`](streaming_aggregation_rewrite.md)
 - `StreamingEncoderRewrite` (`streaming_encoder_rewrite`):
   [`streaming_encoder_rewrite.md`](streaming_encoder_rewrite.md)
+- `ByIndexProjectionAcrossMixedConsumersRewrite`
+  (`by_index_projection_across_mixed_consumers_rewrite`):
+  [`by_index_projection_across_mixed_consumers_rewrite.md`](by_index_projection_across_mixed_consumers_rewrite.md)
+- `PartialByIndexRowDiffAndEncoderRewrite`
+  (`partial_by_index_row_diff_and_encoder_rewrite`):
+  [`partial_by_index_row_diff_and_encoder_rewrite.md`](partial_by_index_row_diff_and_encoder_rewrite.md)
 - `ByIndexProjectionIntoEncoderRewrite` (`by_index_projection_into_encoder_rewrite`):
   [`by_index_projection_into_encoder_rewrite.md`](by_index_projection_into_encoder_rewrite.md)
-- `ByIndexProjectionIntoRowDiffRewrite` (`by_index_projection_into_row_diff_rewrite`, proposed):
+- `ByIndexProjectionIntoRowDiffRewrite` (`by_index_projection_into_row_diff_rewrite`):
   [`by_index_projection_into_row_diff_rewrite.md`](by_index_projection_into_row_diff_rewrite.md)

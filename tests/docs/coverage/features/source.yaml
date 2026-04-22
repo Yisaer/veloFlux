@@ -42,6 +42,13 @@ features:
       - docs/runtime/sources/shared_mqtt_client.md
     status: active
 
+  - id: source.shared_mqtt_client.management
+    title: Shared MQTT client management
+    summary: Reconcile shared MQTT client metadata, mutation serialization, and runtime cleanup through the documented manager-owned resource model.
+    doc_refs:
+      - docs/runtime/sources/shared_mqtt_client.md
+    status: active
+
   - id: source.history.replay
     title: History source replay
     summary: Consume historical source data according to the documented history-source contract.

@@ -1,5 +1,12 @@
 domain: stream
 features:
+  - id: stream.memory_topic.lifecycle
+    title: Memory topic lifecycle
+    summary: Declare, restore, and bind instance-scoped memory topics according to the documented resource contract.
+    doc_refs:
+      - docs/runtime/instances/memory_topics.md
+    status: active
+
   - id: stream.shared.stats
     title: Shared stream stats
     summary: Report shared-stream runtime statistics according to the documented API contract.

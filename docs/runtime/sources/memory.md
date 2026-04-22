@@ -11,6 +11,9 @@ is intended for process-local integration and testing scenarios (no network I/O)
 - Topics must be **predeclared** via the manager API before a memory stream can use them.
 - Message loss is possible when subscribers lag (drops are logged).
 
+For the shared resource model, declaration semantics, and startup/import-export behavior, see
+[`memory_topics.md`](../instances/memory_topics.md).
+
 ## Topic Declaration (Manager)
 
 Before creating a memory stream, declare the topic:
@@ -29,6 +32,8 @@ Notes:
 
 - `capacity` defaults to `1024` when omitted.
 - Declaring an existing topic with a different `kind`/`capacity` is rejected.
+- The persisted topic resource is documented in
+  [`memory_topics.md`](../instances/memory_topics.md).
 
 ## Stream Configuration (Manager)
 
