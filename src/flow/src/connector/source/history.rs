@@ -413,6 +413,7 @@ mod tests {
         assert_eq!(files[1].seq, 2);
     }
 
+    // coverage-covers: source.history.replay
     #[tokio::test]
     async fn test_connector_flow() {
         let dir = tempdir().unwrap();

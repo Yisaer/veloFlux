@@ -59,6 +59,7 @@ fn select_stmt_to_json(select_stmt: parser::SelectStmt) -> Value {
     })
 }
 
+// coverage-covers: parser.function.stateful_functions
 #[test]
 fn case_1_select_lag() {
     let got = parse_to_json("SELECT lag(a) FROM stream");

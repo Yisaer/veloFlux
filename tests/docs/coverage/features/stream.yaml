@@ -1,12 +1,5 @@
 domain: stream
 features:
-  - id: stream.schema.contract
-    title: Stream schema contract
-    summary: Expose and preserve the documented stream schema contract.
-    doc_refs:
-      - docs/api/streams/schema.md
-    status: active
-
   - id: stream.shared.stats
     title: Shared stream stats
     summary: Report shared-stream runtime statistics according to the documented API contract.

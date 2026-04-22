@@ -375,6 +375,7 @@ mod tests {
         ScalarExpr::Literal(Value::Bool(v), ConcreteDatatype::Bool(BooleanType))
     }
 
+    // coverage-covers: stream.window.state
     #[tokio::test]
     async fn statewindow_open_then_emit_buffers_and_flushes() {
         let spawner = test_spawner();

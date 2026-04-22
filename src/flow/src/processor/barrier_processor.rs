@@ -264,6 +264,7 @@ mod tests {
         (processor, Upstreams { data, control }, out, control_out)
     }
 
+    // coverage-covers: processor.barrier.alignment
     #[tokio::test]
     async fn data_channel_barrier_waits_until_all_upstreams_arrive() {
         let spawner = test_spawner();

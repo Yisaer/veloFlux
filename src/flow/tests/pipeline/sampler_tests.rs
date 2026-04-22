@@ -137,6 +137,7 @@ async fn assert_no_output(output: &mut mpsc::Receiver<StreamData>, timeout_durat
     }
 }
 
+// coverage-covers: processor.sampler.strategy
 #[tokio::test]
 async fn sampler_latest_emits_only_last_value_per_interval() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(

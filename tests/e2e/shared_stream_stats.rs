@@ -21,6 +21,7 @@ fn records_value(entry: &JsonValue, field: &str) -> u64 {
         .unwrap_or_else(|| panic!("missing numeric stats field {field} in {entry}"))
 }
 
+// coverage-covers: stream.shared.stats
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");

@@ -99,6 +99,7 @@ fn demo_where_condition_functionality() {
     println!("WHERE Condition Functionality Demo Complete!");
 }
 
+// coverage-covers: parser.select.where_clause
 #[test]
 fn test_stream_dialect_where_condition_parsing() {
     let sql = "SELECT id, name FROM users WHERE age >= 21 AND status = 'active' OR city = 'NYC'";
@@ -151,6 +152,7 @@ fn test_stream_dialect_where_without_condition() {
     println!("✓ WHERE condition correctly set to None for SQL without WHERE clause");
 }
 
+// coverage-covers: parser.window.tumbling
 #[test]
 fn test_stream_dialect_tumblingwindow_parsing() {
     let tumbling_sql = r#"
@@ -178,6 +180,7 @@ fn test_stream_dialect_tumblingwindow_parsing() {
     }
 }
 
+// coverage-covers: parser.select.projection
 #[test]
 fn test_stream_dialect_expression_fields() {
     let sql = "SELECT a + b, CONCAT(name, 'test'), 42";
@@ -215,6 +218,7 @@ fn test_stream_dialect_expression_fields() {
     }
 }
 
+// coverage-covers: parser.select.alias_computing
 #[test]
 fn test_stream_dialect_alias_support() {
     let sql = "SELECT a + b AS total, CONCAT(name, '_test') AS full_name, 42 AS answer";

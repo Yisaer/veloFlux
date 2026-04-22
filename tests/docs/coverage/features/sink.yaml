@@ -14,13 +14,6 @@ features:
       - docs/runtime/sinks/connectors/mqtt.md
     status: active
 
-  - id: sink.connector.kuksa_output
-    title: Kuksa sink connector
-    summary: Emit pipeline output through the Kuksa sink connector contract.
-    doc_refs:
-      - docs/runtime/sinks/connectors/kuksa.md
-    status: active
-
   - id: sink.encoder.transform
     title: Encoder transform
     summary: Apply template-based encoder transforms before sink emission when configured.

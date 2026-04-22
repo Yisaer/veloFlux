@@ -4,6 +4,7 @@
 use parser::parse_sql;
 use sqlparser::ast::Expr;
 
+// coverage-covers: parser.function.aggregate_rewrite
 #[test]
 fn test_basic_aggregate_transformation() {
     println!("\n=== Testing Basic Aggregate Transformation ===");

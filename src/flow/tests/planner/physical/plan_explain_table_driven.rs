@@ -724,6 +724,7 @@ fn plan_explain_two_sinks_inserts_physical_barrier() {
     assert_eq!(got, expected, "case=two_sinks_inserts_physical_barrier");
 }
 
+// coverage-covers: parser.window.count
 #[test]
 fn plan_explain_table_driven() {
     struct Case {

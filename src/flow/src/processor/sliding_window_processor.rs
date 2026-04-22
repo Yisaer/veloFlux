@@ -505,6 +505,7 @@ mod tests {
         )
     }
 
+    // coverage-covers: stream.window.sliding
     #[tokio::test]
     async fn sliding_window_without_lookahead_emits_on_data() {
         let spawner = test_spawner();

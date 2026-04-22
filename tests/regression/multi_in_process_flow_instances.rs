@@ -45,6 +45,7 @@ async fn wait_pipeline_status(client: &sdk::ManagerClient, pipeline_id: &str, ex
     );
 }
 
+// coverage-covers: pipeline.lifecycle.start_stop
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_in_process_flow_instances_pipeline_lifecycle_via_rest() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");

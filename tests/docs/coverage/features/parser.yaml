@@ -62,10 +62,3 @@ features:
     doc_refs:
       - docs/syntax/windows/state_window.md
     status: active
-
-  - id: parser.window.watermarks
-    title: Watermark syntax
-    summary: Parse watermark-related SQL syntax used by windowed queries.
-    doc_refs:
-      - docs/syntax/windows/watermarks.md
-    status: active

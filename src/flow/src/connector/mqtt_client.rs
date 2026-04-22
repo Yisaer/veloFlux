@@ -644,6 +644,7 @@ mod tests {
         drop(held);
     }
 
+    // coverage-covers: source.shared_mqtt_client.lifecycle
     #[tokio::test]
     async fn shared_mqtt_runtime_is_lazy_started_and_reclaimed_when_last_reference_drops() {
         let broker = EmbeddedMqttBroker::start().await;

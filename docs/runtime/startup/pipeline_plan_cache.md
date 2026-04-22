@@ -1,5 +1,10 @@
 # Pipeline Plan Cache (Plan Snapshot)
 
+## Status
+
+Deprecated. The plan cache startup path is no longer part of the supported feature surface and is
+excluded from the feature coverage registry.
+
 ## Background
 
 Today, every pipeline start rebuilds the full execution stack:

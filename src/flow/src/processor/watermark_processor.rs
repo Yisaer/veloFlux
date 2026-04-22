@@ -1228,6 +1228,7 @@ mod tests {
         }
     }
 
+    // coverage-covers: processor.eventtime.watermark_progress
     #[tokio::test]
     async fn eventtime_watermark_sorts_and_emits_monotonic_watermarks() {
         let spawner = test_spawner();
@@ -1309,6 +1310,7 @@ mod tests {
         assert_eq!(saw_watermark, Some(3));
     }
 
+    // coverage-covers: processor.eventtime.watermark_progress
     #[test]
     fn eventtime_state_computes_target_and_emits_watermarks() {
         /*
@@ -1376,6 +1378,7 @@ mod tests {
         }
     }
 
+    // coverage-covers: processor.eventtime.watermark_progress
     #[test]
     fn eventtime_state_drops_late_events() {
         /*

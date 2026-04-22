@@ -20,10 +20,3 @@ features:
     doc_refs:
       - docs/runtime/pipelines/stats.md
     status: active
-
-  - id: pipeline.startup.plan_cache
-    title: Pipeline plan cache startup
-    summary: Reuse and validate cached pipeline plans during startup when the cache contract applies.
-    doc_refs:
-      - docs/runtime/startup/pipeline_plan_cache.md
-    status: active

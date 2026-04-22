@@ -28,6 +28,13 @@ features:
       - docs/runtime/sources/shared/dynamic_decode.md
     status: active
 
+  - id: source.shared.lifecycle
+    title: Shared source lifecycle
+    summary: Start shared-source runtime on consumer attach and reclaim it after the last consumer leaves without deleting the stream definition.
+    doc_refs:
+      - docs/runtime/sources/shared/dynamic_decode.md
+    status: active
+
   - id: source.shared_mqtt_client.lifecycle
     title: Shared MQTT client lifecycle
     summary: Manage shared MQTT client runtime lifecycle and reuse semantics.

@@ -21,6 +21,9 @@ This version intentionally excludes:
 - weight-based scoring
 - automatic semantic inference from SQL or plan shape
 - case tags such as `boundary`, `negative`, or `null`
+- pure manager/control-plane REST DTO field-shape contracts; API documents may
+  still define those contracts, but they should be validated by manager API
+  tests unless the endpoint is the documented surface for a runtime feature
 
 ## Source of Truth
 
@@ -208,6 +211,7 @@ The following items are explicitly left for later versions:
 - pairwise or higher-order interaction coverage
 - risk-weighted coverage scoring
 - automatic mapping from SQL text or EXPLAIN JSON to feature IDs
+- REST response field-shape coverage for manager metadata APIs
 
 ## Maintenance Rules
 

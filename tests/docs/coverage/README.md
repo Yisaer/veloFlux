@@ -10,6 +10,8 @@ coverage tooling.
   coverage evaluation.
 - Runtime coverage calculation should read these YAML files instead of parsing
   Markdown headings directly.
+- This registry is not API schema coverage. Do not add feature IDs only to track
+  manager REST field names or DTO shape stability.
 
 ## Layout
 
@@ -61,6 +63,9 @@ Each feature entry uses the following minimal schema:
 
 - Add or update a feature here when a new documented capability becomes part of
   the supported test coverage space.
+- Keep pure manager/control-plane REST DTO contracts in API docs and manager API
+  tests, unless the endpoint itself is the documented surface for a runtime
+  feature.
 - Keep `doc_refs` aligned with the current design documents.
 - Prefer adding new IDs over renaming existing ones. If a rename is required,
   handle it as an explicit migration in follow-up tooling instead of silently

@@ -457,6 +457,7 @@ mod tests {
         }
     }
 
+    // coverage-covers: source.mqtt.basic_ingest
     #[tokio::test]
     async fn shared_client_backed_source_receives_payloads_from_embedded_broker() {
         let broker = EmbeddedMqttBroker::start().await;

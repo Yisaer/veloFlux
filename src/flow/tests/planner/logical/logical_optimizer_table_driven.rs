@@ -604,6 +604,7 @@ fn create_logical_plan_table_driven() {
     struct Case {
         name: &'static str,
         sql: &'static str,
+        covers: &'static [&'static str],
         expected: &'static str,
     }
 
@@ -611,57 +612,68 @@ fn create_logical_plan_table_driven() {
         Case {
             name: "test_create_logical_plan_simple",
             sql: "SELECT a, b FROM users",
+            covers: &[],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_order_by_single_key",
             sql: "SELECT a FROM users ORDER BY b",
+            covers: &[],
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Order_1","info":["keys=[b ASC]"],"operator":"Order"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_filter_then_order_by_multi_key",
             sql: "SELECT a FROM users WHERE a > 10 ORDER BY b DESC, c",
+            covers: &[],
             expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Order_2","info":["keys=[b DESC; c ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_order_by_stateful_key",
             sql: "SELECT a FROM users ORDER BY lag(a)",
+            covers: &[],
             expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Order_2","info":["keys=[col_1 ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_filter",
             sql: "SELECT a, b FROM users WHERE a > 10",
+            covers: &[],
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a; b]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_state_window",
             sql: "SELECT * FROM users GROUP BY statewindow(a > 0, b = 1)",
+            covers: &["parser.window.state"],
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=state","open=a > 0","emit=b = 1"],"operator":"Window"}],"id":"Project_2","info":["fields=[*]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_state_window_partition_by",
             sql:
                 "SELECT * FROM users GROUP BY statewindow(a > 0, b = 1) OVER (PARTITION BY k1, k2)",
+            covers: &["parser.window.state"],
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=state","open=a > 0","emit=b = 1","partition_by=k1,k2"],"operator":"Window"}],"id":"Project_2","info":["fields=[*]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_sliding_window",
             sql: "SELECT * FROM users GROUP BY slidingwindow('ss', 10)",
+            covers: &["parser.window.sliding"],
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c, k1, k2]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"Window"}],"id":"Project_2","info":["fields=[*]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_alias",
             sql: "SELECT a, b FROM users AS u WHERE a > 10",
+            covers: &[],
             expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=users","alias=u","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 10"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a; b]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_func_field",
             sql: "SELECT a, concat(b), c AS custom_name FROM users",
+            covers: &[],
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=users","decoder=json","schema=[a, b, c]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; concat(b); c as custom_name]"],"operator":"Project"}"##,
         },
     ];
 
     for case in cases {
+        let _ = case.covers;
         let got = optimized_logical_json(case.sql);
         assert_eq!(got, case.expected, "case={}", case.name);
     }

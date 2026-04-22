@@ -391,7 +391,11 @@ mod tests {
     use crate::connector::SinkConnector;
     use crate::model::batch_from_columns_simple;
     use crate::runtime::TaskSpawner;
+    use crate::test_support::EmbeddedMqttBroker;
     use datatypes::Value;
+    use tokio::runtime::Handle;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio::time::{timeout, Duration};
 
     fn test_spawner() -> TaskSpawner {
         TaskSpawner::new(
@@ -434,6 +438,101 @@ mod tests {
                 .contains("does not support collection payloads"),
             "unexpected error: {err}"
         );
+    }
+
+    // coverage-covers: sink.connector.mqtt_output
+    #[tokio::test]
+    async fn mqtt_sink_connector_publishes_bytes_to_embedded_broker() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let topic = broker.scoped_topic("sink/out");
+
+        let mut options = MqttOptions::new(
+            "mqtt_sink_output_subscriber",
+            "127.0.0.1",
+            Url::parse(&broker.broker_url())
+                .expect("parse embedded broker url")
+                .port()
+                .expect("embedded broker url should include port"),
+        );
+        options.set_keep_alive(Duration::from_secs(5));
+        let (subscriber, mut event_loop) = AsyncClient::new(options, 8);
+        let (connack_tx, connack_rx) = oneshot::channel();
+        let (suback_tx, suback_rx) = oneshot::channel();
+        let (payload_tx, mut payload_rx) = mpsc::channel::<Vec<u8>>(1);
+        let subscriber_task = tokio::spawn(async move {
+            let mut connack_tx = Some(connack_tx);
+            let mut suback_tx = Some(suback_tx);
+            loop {
+                match event_loop.poll().await {
+                    Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                        if let Some(tx) = connack_tx.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                    Ok(Event::Incoming(Packet::SubAck(_))) => {
+                        if let Some(tx) = suback_tx.take() {
+                            let _ = tx.send(());
+                        }
+                    }
+                    Ok(Event::Incoming(Packet::Publish(publish))) => {
+                        if payload_tx.send(publish.payload.to_vec()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+
+        timeout(Duration::from_secs(5), connack_rx)
+            .await
+            .expect("subscriber connack timeout")
+            .expect("subscriber connack channel");
+        subscriber
+            .subscribe(topic.clone(), QoS::AtLeastOnce)
+            .await
+            .expect("subscribe embedded broker topic");
+        timeout(Duration::from_secs(5), suback_rx)
+            .await
+            .expect("subscriber suback timeout")
+            .expect("subscriber suback channel");
+
+        let spawner = TaskSpawner::from_handle(Handle::current());
+        let mut connector = MqttSinkConnector::new(
+            "mqtt_sink_output",
+            MqttSinkConfig::new("mqtt_sink_output", broker.broker_url(), topic, 1),
+            Arc::<str>::from("default"),
+            MqttClientManager::new("default", spawner.clone()),
+            spawner,
+        );
+        connector.ready().await.expect("mqtt sink ready");
+
+        let expected_payload = br#"{"a":1}"#;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match connector.send(expected_payload).await {
+                Ok(()) => break,
+                Err(err)
+                    if err.to_string().contains("mqtt not connected")
+                        && tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Err(err) => panic!("mqtt sink publish failed: {err}"),
+            }
+        }
+
+        let received = timeout(Duration::from_secs(5), payload_rx.recv())
+            .await
+            .expect("mqtt sink output payload timeout")
+            .expect("mqtt sink output payload");
+        assert_eq!(received, expected_payload);
+
+        connector.close().await.expect("close mqtt sink connector");
+        let _ = subscriber.disconnect().await;
+        subscriber_task.abort();
+        let _ = subscriber_task.await;
     }
 
     #[test]

@@ -3,11 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use proc_macro2::Span;
+use syn::parse::Parser;
+use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{
-    Expr, ExprArray, ExprLit, ExprReference, ExprStruct, Item, ItemFn, ItemMod, ItemStruct, Lit,
-    Member, Stmt,
+    Expr, ExprArray, ExprLit, ExprMacro, ExprReference, ExprStruct, Item, ItemFn, ItemMod,
+    ItemStruct, Lit, Member, Stmt, Token,
 };
 use walkdir::WalkDir;
 
@@ -81,12 +83,7 @@ fn collect_test_files(repo_root: &Path) -> Result<Vec<PathBuf>, String> {
             if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
                 continue;
             }
-            if path
-                .components()
-                .any(|component| component.as_os_str() == "tests")
-            {
-                files.insert(path);
-            }
+            files.insert(path);
         }
     }
 
@@ -206,7 +203,7 @@ fn extract_function_name(line: &str) -> Option<String> {
 
 struct TestCaseVisitor {
     path: PathBuf,
-    tracked_types: BTreeSet<String>,
+    tracked_types: BTreeSet<(String, String)>,
     module_path: Vec<String>,
     current_function: Option<String>,
     records: Vec<CoverageRecord>,
@@ -234,6 +231,26 @@ impl TestCaseVisitor {
             parts.push(function_name.clone());
         }
         parts.join("::")
+    }
+
+    fn current_module_scope_id(&self) -> String {
+        let mut parts = vec![self.path.display().to_string()];
+        parts.extend(self.module_path.iter().cloned());
+        parts.join("::")
+    }
+
+    fn track_type(&mut self, struct_name: impl Into<String>) {
+        self.tracked_types
+            .insert((self.current_scope_id(), struct_name.into()));
+    }
+
+    fn is_tracked_type(&self, struct_name: &str) -> bool {
+        let current_scope = self.current_scope_id();
+        let module_scope = self.current_module_scope_id();
+        let struct_name = struct_name.to_string();
+        self.tracked_types
+            .contains(&(current_scope, struct_name.clone()))
+            || self.tracked_types.contains(&(module_scope, struct_name))
     }
 
     fn push_case_record(
@@ -278,69 +295,19 @@ impl TestCaseVisitor {
             location,
         });
     }
-}
 
-impl<'ast> Visit<'ast> for TestCaseVisitor {
-    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
-        if let Stmt::Item(Item::Struct(item_struct)) = stmt {
-            let has_covers_field = item_struct.fields.iter().any(|field| {
-                field
-                    .ident
-                    .as_ref()
-                    .map(|ident| ident == "covers")
-                    .unwrap_or(false)
-            });
-            if has_covers_field {
-                self.tracked_types.insert(item_struct.ident.to_string());
-            }
-        }
-        syn::visit::visit_stmt(self, stmt);
-    }
-
-    fn visit_item_struct(&mut self, item_struct: &'ast ItemStruct) {
-        let has_covers_field = item_struct.fields.iter().any(|field| {
-            field
-                .ident
-                .as_ref()
-                .map(|ident| ident == "covers")
-                .unwrap_or(false)
-        });
-        if has_covers_field {
-            self.tracked_types.insert(item_struct.ident.to_string());
-        }
-        syn::visit::visit_item_struct(self, item_struct);
-    }
-
-    fn visit_item_mod(&mut self, item_mod: &'ast ItemMod) {
-        if let Some((_, items)) = &item_mod.content {
-            self.module_path.push(item_mod.ident.to_string());
-            for item in items {
-                self.visit_item(item);
-            }
-            self.module_path.pop();
-        }
-    }
-
-    fn visit_item_fn(&mut self, item_fn: &'ast ItemFn) {
-        let previous_function = self.current_function.replace(item_fn.sig.ident.to_string());
-        syn::visit::visit_item_fn(self, item_fn);
-        self.current_function = previous_function;
-    }
-
-    fn visit_expr_struct(&mut self, expr: &'ast ExprStruct) {
+    fn record_expr_struct_if_tracked(&mut self, expr: &ExprStruct) -> bool {
         let Some(struct_name) = expr
             .path
             .segments
             .last()
             .map(|segment| segment.ident.to_string())
         else {
-            syn::visit::visit_expr_struct(self, expr);
-            return;
+            return false;
         };
 
-        if !self.tracked_types.contains(&struct_name) {
-            syn::visit::visit_expr_struct(self, expr);
-            return;
+        if !self.is_tracked_type(&struct_name) {
+            return false;
         }
 
         let mut case_name = None;
@@ -385,7 +352,76 @@ impl<'ast> Visit<'ast> for TestCaseVisitor {
             });
         }
 
+        true
+    }
+
+    fn visit_macro_expression_list(&mut self, expr_macro: &ExprMacro) {
+        let parser = Punctuated::<Expr, Token![,]>::parse_terminated;
+        let Ok(expressions) = parser.parse2(expr_macro.mac.tokens.clone()) else {
+            return;
+        };
+
+        for expression in expressions {
+            self.visit_expr(&expression);
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for TestCaseVisitor {
+    fn visit_stmt(&mut self, stmt: &'ast Stmt) {
+        if let Stmt::Item(Item::Struct(item_struct)) = stmt {
+            let has_covers_field = item_struct.fields.iter().any(|field| {
+                field
+                    .ident
+                    .as_ref()
+                    .map(|ident| ident == "covers")
+                    .unwrap_or(false)
+            });
+            if has_covers_field {
+                self.track_type(item_struct.ident.to_string());
+            }
+        }
+        syn::visit::visit_stmt(self, stmt);
+    }
+
+    fn visit_item_struct(&mut self, item_struct: &'ast ItemStruct) {
+        let has_covers_field = item_struct.fields.iter().any(|field| {
+            field
+                .ident
+                .as_ref()
+                .map(|ident| ident == "covers")
+                .unwrap_or(false)
+        });
+        if has_covers_field {
+            self.track_type(item_struct.ident.to_string());
+        }
+        syn::visit::visit_item_struct(self, item_struct);
+    }
+
+    fn visit_item_mod(&mut self, item_mod: &'ast ItemMod) {
+        if let Some((_, items)) = &item_mod.content {
+            self.module_path.push(item_mod.ident.to_string());
+            for item in items {
+                self.visit_item(item);
+            }
+            self.module_path.pop();
+        }
+    }
+
+    fn visit_item_fn(&mut self, item_fn: &'ast ItemFn) {
+        let previous_function = self.current_function.replace(item_fn.sig.ident.to_string());
+        syn::visit::visit_item_fn(self, item_fn);
+        self.current_function = previous_function;
+    }
+
+    fn visit_expr_struct(&mut self, expr: &'ast ExprStruct) {
+        self.record_expr_struct_if_tracked(expr);
         syn::visit::visit_expr_struct(self, expr);
+    }
+
+    fn visit_expr_macro(&mut self, expr_macro: &'ast ExprMacro) {
+        self.visit_macro_expression_list(expr_macro);
+        syn::visit::visit_expr_macro(self, expr_macro);
     }
 }
 
@@ -448,5 +484,54 @@ mod tests {
         let expr: Expr = syn::parse_str("&[FEATURE_ID]").expect("parse expr");
         let err = covers_from_expr(&expr).expect_err("should reject");
         assert_eq!(err, "`covers` must use string literals only");
+    }
+
+    #[test]
+    fn scans_testcases_inside_vec_macro() {
+        let content = r#"
+            #[test]
+            fn table_driven_cases() {
+                struct Case {
+                    name: &'static str,
+                    covers: &'static [&'static str],
+                }
+
+                let cases = vec![
+                    Case {
+                        name: "macro_case",
+                        covers: &["planner.logical.rule"],
+                    },
+                ];
+
+                assert_eq!(cases.len(), 1);
+            }
+
+            #[test]
+            fn unrelated_same_name_case_is_not_tracked() {
+                struct Case {
+                    name: &'static str,
+                }
+
+                let cases = vec![
+                    Case {
+                        name: "untracked_macro_case",
+                    },
+                ];
+
+                assert_eq!(cases.len(), 1);
+            }
+        "#;
+        let parsed = syn::parse_file(content).expect("parse test content");
+        let mut visitor = TestCaseVisitor::new(PathBuf::from("tests/file.rs"));
+
+        visitor.visit_file(&parsed);
+
+        assert!(visitor.errors.is_empty());
+        assert_eq!(visitor.records.len(), 1);
+        assert_eq!(
+            visitor.records[0].features,
+            vec!["planner.logical.rule".to_string()]
+        );
+        assert!(visitor.records[0].id.ends_with("macro_case"));
     }
 }

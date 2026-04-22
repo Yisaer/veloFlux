@@ -40,6 +40,11 @@ If the stream does not exist, the API should return `404` with a descriptive mes
 
 Clients should treat field names as stable API contract. Optional fields may be absent.
 
+This manager API field-shape contract is covered by manager API tests rather
+than the feature coverage registry. Feature coverage focuses on documented
+parser, planner, flow, and runtime behavior; it does not track this endpoint as
+a standalone stream feature.
+
 ### `GET /streams` → `StreamInfo[]`
 
 - `name: string` (identifier used in SQL)

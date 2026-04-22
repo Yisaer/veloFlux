@@ -2,6 +2,12 @@
 
 This document describes the background and implementation design of the **Kuksa sink** in veloFlux.
 
+## Coverage Scope
+
+The Kuksa sink depends on an external Eclipse Kuksa DataBroker instance for end-to-end output
+validation. Its connector-level output behavior is intentionally excluded from the feature coverage
+registry; planner and configuration behavior may still be covered by focused tests.
+
 ## Background
 
 Some deployments need to forward streaming signal values into an Eclipse Kuksa DataBroker instance and update Vehicle Signal Specification (VSS) paths. veloFlux provides a Kuksa sink that consumes decoded rows (`Collection` / `Tuple`) and publishes updates to the broker using the `kuksa.val.v2` API via the `kuksa-rust-sdk`.

@@ -128,6 +128,7 @@ async fn run_stateful_case(case: StatefulCase) {
         .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
 }
 
+// coverage-covers: stream.window.count
 #[tokio::test]
 async fn stateful_function_table_driven() {
     let cases = vec![
