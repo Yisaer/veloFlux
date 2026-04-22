@@ -1149,6 +1149,7 @@ fn plan_explain_by_index_projection_rewrite_table_driven() {
                     .with_forward_to_result(true),
             ],
             covers: &[
+                "planner.physical.by_index_projection_across_mixed_consumers_rewrite",
                 "planner.physical.by_index_projection_into_encoder_rewrite",
                 "planner.physical.by_index_projection_into_row_diff_rewrite",
             ],
@@ -1164,6 +1165,7 @@ fn plan_explain_by_index_projection_rewrite_table_driven() {
                     .with_forward_to_result(true),
             ],
             covers: &[
+                "planner.physical.by_index_projection_across_mixed_consumers_rewrite",
                 "planner.physical.by_index_projection_into_encoder_rewrite",
                 "planner.physical.by_index_projection_into_row_diff_rewrite",
             ],
@@ -1214,7 +1216,10 @@ fn plan_explain_row_diff_table_driven() {
                 Some(2),
                 Some(&["b"]),
             )],
-            covers: &["planner.physical.by_index_projection_into_row_diff_rewrite"],
+            covers: &[
+                "planner.physical.by_index_projection_into_row_diff_rewrite",
+                "planner.physical.partial_by_index_row_diff_and_encoder_rewrite",
+            ],
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","output.mode=delta","output.columns=[b]","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[]","passthrough_messages=true"],"operator":"PhysicalProject"}],"id":"PhysicalRowDiff_4","info":["sink_id=test_sink","mode=delta","columns=[b]","by_index_projection=[stream_ab.b]"],"operator":"PhysicalRowDiff"}],"id":"PhysicalStreamingEncoder_6","info":["sink_id=test_sink","encoder=json","batching=true","by_index_projection=[stream_ab#0->a]"],"operator":"PhysicalStreamingEncoder"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_7","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         RowDiffExplainCase {

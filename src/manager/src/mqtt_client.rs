@@ -462,6 +462,7 @@ mod tests {
         );
     }
 
+    // coverage-covers: source.shared_mqtt_client.management
     #[tokio::test]
     async fn create_shared_mqtt_client_is_idempotent_for_identical_config() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");

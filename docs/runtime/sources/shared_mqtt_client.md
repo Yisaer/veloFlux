@@ -143,6 +143,24 @@ Worker runtimes do not hydrate shared clients independently from manager metadat
 includes the required shared MQTT configs in worker apply context, and worker reconcile logic
 ensures the runtime has matching entries before stream/pipeline installation proceeds.
 
+## Management Surface
+
+The shared MQTT client is a documented runtime resource, not only a connector implementation
+detail.
+
+Manager-side control-plane operations currently provide:
+
+- create with exact-match idempotency
+- get and list from storage-backed metadata
+- delete with storage-authoritative removal and best-effort runtime cleanup
+
+This management surface exists to keep `connector_key` bindings stable across:
+
+- startup hydration
+- worker apply context building
+- import/export bundles
+- concurrent pipeline create, update, and start operations
+
 ## Busy Guard And Mutation Serialization
 
 Manager serializes shared MQTT mutations with per-key semaphores.

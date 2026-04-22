@@ -194,6 +194,7 @@ mod tests {
         .expect("build app state")
     }
 
+    // coverage-covers: stream.memory_topic.lifecycle
     #[tokio::test]
     async fn create_memory_topic_defaults_capacity_when_omitted() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
