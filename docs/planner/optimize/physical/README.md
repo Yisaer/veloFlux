@@ -14,8 +14,6 @@ Implementation entrypoint: `src/flow/src/planner/optimizer.rs` (`optimize_physic
 
 ## Rules
 
-- `InsertBarrierForFanIn` (`insert_barrier_for_fan_in`):
-  [`../../../runtime/processors/barrier_signal.md`](../../../runtime/processors/barrier_signal.md)
 - `StreamingAggregationRewrite` (`streaming_aggregation_rewrite`):
   [`streaming_aggregation_rewrite.md`](streaming_aggregation_rewrite.md)
 - `StreamingEncoderRewrite` (`streaming_encoder_rewrite`):
@@ -30,3 +28,5 @@ Implementation entrypoint: `src/flow/src/planner/optimizer.rs` (`optimize_physic
   [`by_index_projection_into_encoder_rewrite.md`](by_index_projection_into_encoder_rewrite.md)
 - `ByIndexProjectionIntoRowDiffRewrite` (`by_index_projection_into_row_diff_rewrite`):
   [`by_index_projection_into_row_diff_rewrite.md`](by_index_projection_into_row_diff_rewrite.md)
+- `InsertBarrierForFanIn` (`insert_barrier_for_fan_in`):
+  [`../../../runtime/processors/barrier_signal.md`](../../../runtime/processors/barrier_signal.md)
