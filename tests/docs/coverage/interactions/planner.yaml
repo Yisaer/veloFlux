@@ -41,10 +41,54 @@ interactions:
       - planner.physical.streaming_encoder_rewrite
     status: active
 
+  - id: planner.physical.streaming_encoder_batch_by_index
+    title: Streaming encoder batch by-index rewrite
+    summary: Validate streaming encoder rewrite with sink batching and by-index projection folded into the encoder branch.
+    features:
+      - sink.output.batching
+      - planner.physical.streaming_encoder_rewrite
+      - planner.physical.by_index_projection_into_encoder_rewrite
+    status: active
+
+  - id: planner.physical.row_diff_batching_partial_late_materialization
+    title: Row-diff batching partial late materialization
+    summary: Validate partial late materialization between row-diff tracked columns and batched streaming encoder output.
+    features:
+      - sink.output.batching
+      - planner.physical.by_index_projection_into_row_diff_rewrite
+      - planner.physical.partial_by_index_row_diff_and_encoder_rewrite
+    status: active
+
+  - id: planner.physical.memory_collection_row_diff_materialize
+    title: Memory collection row-diff materialize
+    summary: Validate row-diff placement before memory collection materialization in collection sink planning.
+    features:
+      - sink.memory_collection.materialize
+      - sink.output.row_diff
+      - planner.physical.by_index_projection_into_row_diff_rewrite
+    status: active
+
+  - id: planner.physical.row_diff_omit_if_empty_empty_suppress
+    title: Row-diff omit-if-empty empty suppress
+    summary: Validate empty suppress insertion after row-diff and before encoder emission for omit-if-empty sinks.
+    features:
+      - sink.output.row_diff
+      - sink.output.omit_if_empty
+      - planner.physical.by_index_projection_into_row_diff_rewrite
+    status: active
+
   - id: planner.eventtime.on_change_hidden_column_preservation
     title: Eventtime on-change hidden column preservation
     summary: Validate that eventtime-required hidden columns survive source on-change projection pruning.
     features:
       - planner.eventtime.hidden_column_preservation
       - source.on_change.gating
+    status: active
+
+  - id: planner.source_on_change.hidden_tracked_column
+    title: Source on-change hidden tracked column
+    summary: Validate that source on-change tracked columns survive projection pruning even when hidden from final output.
+    features:
+      - source.on_change.gating
+      - planner.logical.top_level_column_pruning
     status: active
