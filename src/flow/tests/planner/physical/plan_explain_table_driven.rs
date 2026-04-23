@@ -1333,6 +1333,7 @@ fn plan_explain_source_on_change_table_driven() {
         name: &'static str,
         sql: &'static str,
         source_inputs: HashMap<String, SourceInputConfig>,
+        covers: &'static [&'static str],
         expected: &'static str,
     }
 
@@ -1344,6 +1345,7 @@ fn plan_explain_source_on_change_table_driven() {
                 "vehicle_stream".to_string(),
                 SourceInputConfig::on_change_with_columns(["speed", "rpm"]),
             )]),
+            covers: &["source.on_change.gating"],
             expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=vehicle_stream","decoder=json","schema=[speed, rpm]","input.mode=on_change","input.columns=[speed, rpm]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[speed; rpm]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=vehicle_stream","schema=[speed, rpm]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[speed, rpm]"],"operator":"PhysicalDecoder"}],"id":"PhysicalSourceChangeGate_2","info":["source=vehicle_stream","mode=on_change","columns=[speed, rpm]"],"operator":"PhysicalSourceChangeGate"}],"id":"PhysicalProject_3","info":["fields=[speed; rpm]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
@@ -1353,6 +1355,7 @@ fn plan_explain_source_on_change_table_driven() {
                 "vehicle_stream".to_string(),
                 SourceInputConfig::on_change(),
             )]),
+            covers: &["source.on_change.gating"],
             expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=vehicle_stream","decoder=json","schema=[speed, rpm, gear]","input.mode=on_change","input.columns=[ALL]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=vehicle_stream","schema=[speed, rpm, gear]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[speed, rpm, gear]"],"operator":"PhysicalDecoder"}],"id":"PhysicalSourceChangeGate_2","info":["source=vehicle_stream","mode=on_change","columns=[speed, rpm, gear]"],"operator":"PhysicalSourceChangeGate"}],"id":"PhysicalProject_3","info":["fields=[speed]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
@@ -1362,11 +1365,13 @@ fn plan_explain_source_on_change_table_driven() {
                 "vehicle_stream".to_string(),
                 SourceInputConfig::on_change_with_columns(["rpm"]),
             )]),
+            covers: &["source.on_change.gating"],
             expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=vehicle_stream","decoder=json","schema=[speed, rpm]","input.mode=on_change","input.columns=[rpm]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=vehicle_stream","schema=[speed, rpm]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[speed, rpm]"],"operator":"PhysicalDecoder"}],"id":"PhysicalSourceChangeGate_2","info":["source=vehicle_stream","mode=on_change","columns=[rpm]"],"operator":"PhysicalSourceChangeGate"}],"id":"PhysicalProject_3","info":["fields=[speed]"],"operator":"PhysicalProject"}}"##,
         },
     ];
 
     for case in cases {
+        let _ = case.covers;
         let got = explain_json_with_source_inputs(case.sql, vec![], case.source_inputs);
         assert_eq!(got, case.expected, "case={}", case.name);
     }
@@ -1484,6 +1489,7 @@ fn explain_pipeline_with_eventtime_enabled_rejects_when_no_stream_declares_event
     );
 }
 
+// coverage-covers: planner.eventtime.hidden_column_preservation, source.on_change.gating
 #[test]
 fn explain_pipeline_with_eventtime_enabled_keeps_hidden_eventtime_column_alive() {
     let stream_name = "stream_eventtime";

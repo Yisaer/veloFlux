@@ -40,3 +40,11 @@ interactions:
       - sink.encoder.transform
       - planner.physical.streaming_encoder_rewrite
     status: active
+
+  - id: planner.eventtime.on_change_hidden_column_preservation
+    title: Eventtime on-change hidden column preservation
+    summary: Validate that eventtime-required hidden columns survive source on-change projection pruning.
+    features:
+      - planner.eventtime.hidden_column_preservation
+      - source.on_change.gating
+    status: active

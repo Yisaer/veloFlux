@@ -56,3 +56,87 @@ interactions:
       - processor.sampler.strategy
       - sink.output.omit_if_empty
     status: active
+
+  - id: runtime.sampler.count_window_row_diff
+    title: Sampler count-window row-diff output
+    summary: Validate that sampler output feeds count-window aggregation before row-diff delta emission.
+    features:
+      - processor.sampler.strategy
+      - stream.window.count
+      - sink.output.row_diff
+    status: active
+
+  - id: runtime.stateful.memory_output
+    title: Stateful memory output
+    summary: Validate stateful projection results emitted through memory sink output.
+    features:
+      - parser.function.stateful_functions
+      - sink.connector.memory_output
+    status: active
+
+  - id: runtime.alias_memory_collection_output
+    title: Alias memory collection output
+    summary: Validate SQL-visible aliases when materializing memory collection sink output.
+    features:
+      - parser.select.alias_computing
+      - sink.connector.memory_output
+    status: active
+
+  - id: runtime.memory_collection_row_diff_output_mask
+    title: Memory collection row-diff output mask
+    summary: Validate row-diff output mask preservation through memory collection sink output.
+    features:
+      - sink.connector.memory_output
+      - sink.output.row_diff
+    status: active
+
+  - id: runtime.source_on_change_row_diff_omit_if_empty
+    title: Source on-change row-diff omit-if-empty
+    summary: Validate hidden tracked source-on-change columns with downstream row-diff and omit-if-empty output suppression.
+    features:
+      - source.on_change.gating
+      - sink.output.row_diff
+      - sink.output.omit_if_empty
+    status: active
+
+  - id: runtime.row_diff_batching_omit_if_empty
+    title: Row-diff batching omit-if-empty
+    summary: Validate row-diff output before batching while omit-if-empty suppresses empty batches and keeps non-empty batches.
+    features:
+      - sink.output.row_diff
+      - sink.output.batching
+      - sink.output.omit_if_empty
+    status: active
+
+  - id: runtime.sampler.count_window_batching
+    title: Sampler count-window batching
+    summary: Validate sampler output before count-window aggregation while sink batching preserves aggregate rows.
+    features:
+      - processor.sampler.strategy
+      - stream.window.count
+      - sink.output.batching
+    status: active
+
+  - id: runtime.memory_collection_source_layout_normalize
+    title: Memory collection source layout normalize
+    summary: Validate collection-source layout normalization for reordered and missing source columns.
+    features:
+      - source.memory.collection_input
+      - source.memory.layout_normalize
+    status: active
+
+  - id: runtime.memory_collection_materialize_output
+    title: Memory collection materialize output
+    summary: Validate stable memory collection materialization before memory sink output emission.
+    features:
+      - sink.memory_collection.materialize
+      - sink.connector.memory_output
+    status: active
+
+  - id: runtime.alias_memory_collection_materialize
+    title: Alias memory collection materialize
+    summary: Validate SQL-visible aliases and derived columns when materializing memory collection sink output.
+    features:
+      - parser.select.alias_computing
+      - sink.memory_collection.materialize
+    status: active

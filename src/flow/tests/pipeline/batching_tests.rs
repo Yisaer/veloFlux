@@ -269,6 +269,7 @@ async fn pipeline_encoder_transform_table_driven() {
     }
 }
 
+// coverage-covers: sink.output.batching
 #[tokio::test]
 async fn streaming_encoder_flushes_partial_batch_on_graceful_stop() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -480,6 +481,7 @@ async fn multi_sink_graceful_stop_flushes_partial_batch_and_keeps_collection_sin
         .expect("delete pipeline");
 }
 
+// coverage-covers: sink.output.row_diff, sink.output.batching, sink.output.omit_if_empty
 #[tokio::test]
 async fn delta_batched_output_suppresses_empty_batches_but_keeps_non_empty_ones() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(

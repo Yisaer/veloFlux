@@ -14,6 +14,20 @@ features:
       - docs/runtime/sources/memory.md
     status: active
 
+  - id: source.memory.layout_normalize
+    title: Memory collection layout normalize
+    summary: Normalize collection-source tuple layout to the declared stream schema before downstream processing.
+    doc_refs:
+      - docs/runtime/sources/memory.md
+    status: active
+
+  - id: source.on_change.gating
+    title: Source on-change gating
+    summary: Forward source rows only when configured tracked source columns change.
+    doc_refs:
+      - docs/runtime/sources/on_change.md
+    status: active
+
   - id: source.mqtt.basic_ingest
     title: MQTT source ingest
     summary: Consume MQTT source data through the documented runtime source connector path.

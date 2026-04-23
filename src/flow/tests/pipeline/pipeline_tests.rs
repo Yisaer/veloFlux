@@ -1625,7 +1625,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             name: "explicit_columns_filters_rows_within_single_collection",
             source_name: "stream",
             sql: "SELECT speed, rpm FROM stream",
-            covers: &[],
+            covers: &["source.on_change.gating"],
             schema_hint: vec![
                 (
                     "speed".to_string(),
@@ -1657,7 +1657,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             name: "hidden_tracked_column_controls_emission",
             source_name: "stream",
             sql: "SELECT speed FROM stream",
-            covers: &[],
+            covers: &["source.on_change.gating"],
             schema_hint: vec![
                 (
                     "speed".to_string(),
@@ -1689,7 +1689,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             name: "on_change_without_columns_tracks_all_top_level_columns",
             source_name: "stream",
             sql: "SELECT speed FROM stream",
-            covers: &[],
+            covers: &["source.on_change.gating"],
             schema_hint: vec![
                 (
                     "speed".to_string(),
@@ -1725,7 +1725,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             name: "state_is_preserved_across_batches",
             source_name: "stream",
             sql: "SELECT speed FROM stream",
-            covers: &[],
+            covers: &["source.on_change.gating"],
             schema_hint: vec![("speed".to_string(), vec![Value::Int64(1), Value::Int64(2)])],
             source_input: SourceInputConfig::on_change_with_columns(["speed"]),
             output: SinkOutputConfig::default(),
@@ -1748,7 +1748,11 @@ async fn pipeline_source_on_change_json_table_driven() {
             name: "hidden_tracked_column_with_delta_omit_if_empty_suppresses_redundant_rows",
             source_name: "stream",
             sql: "SELECT speed FROM stream",
-            covers: &["sink.output.row_diff", "sink.output.omit_if_empty"],
+            covers: &[
+                "source.on_change.gating",
+                "sink.output.row_diff",
+                "sink.output.omit_if_empty",
+            ],
             schema_hint: vec![
                 (
                     "speed".to_string(),
@@ -2420,7 +2424,10 @@ async fn pipeline_table_driven_memory_collection_sources_layout_normalize() {
     let test_cases = vec![SourceLayoutTestCase {
         name: "layout_normalize_reorders_and_fills_missing_with_null",
         sql: "SELECT a, b FROM stream",
-        covers: &["source.memory.collection_input"],
+        covers: &[
+            "source.memory.collection_input",
+            "source.memory.layout_normalize",
+        ],
         stream_schema_hint: vec![
             ("a".to_string(), vec![Value::Int64(1)]),
             ("b".to_string(), vec![Value::Int64(2)]),
@@ -2462,7 +2469,10 @@ async fn pipeline_table_driven_collection_sinks() {
         CollectionSinkTestCase {
             name: "select_star_with_alias_materializes_single_message",
             sql: "SELECT *, a AS x FROM stream",
-            covers: &["sink.connector.memory_output"],
+            covers: &[
+                "sink.memory_collection.materialize",
+                "sink.connector.memory_output",
+            ],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -2494,7 +2504,11 @@ async fn pipeline_table_driven_collection_sinks() {
         CollectionSinkTestCase {
             name: "alias_order_and_derived_columns_materialize_from_output_schema",
             sql: "SELECT b AS second, a + 1 AS plus_one, a AS first FROM stream",
-            covers: &["sink.connector.memory_output"],
+            covers: &[
+                "parser.select.alias_computing",
+                "sink.memory_collection.materialize",
+                "sink.connector.memory_output",
+            ],
             input_data: vec![
                 ("a".to_string(), vec![Value::Int64(10), Value::Int64(20)]),
                 ("b".to_string(), vec![Value::Int64(100), Value::Int64(200)]),
@@ -2574,7 +2588,7 @@ async fn memory_collection_sink_rejects_duplicate_output_column_names() {
     );
 }
 
-// coverage-covers: sink.connector.memory_output
+// coverage-covers: sink.connector.memory_output, sink.memory_collection.materialize, sink.output.row_diff
 #[tokio::test]
 async fn memory_collection_sink_delta_output_preserves_output_mask() {
     let case_name = "memory_collection_sink_delta_output_preserves_output_mask";
