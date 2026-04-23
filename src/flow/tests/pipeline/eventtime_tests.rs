@@ -166,7 +166,7 @@ async fn eventtime_tumbling_window_orders_out_of_order_input_before_flush() {
         .expect("delete eventtime pipeline");
 }
 
-// coverage-covers: pipeline.runtime.eventtime, stream.watermark.propagation, stream.window.tumbling
+// coverage-covers: planner.eventtime.hidden_column_preservation, planner.physical.streaming_aggregation_rewrite, pipeline.runtime.eventtime, stream.watermark.propagation, stream.window.tumbling
 #[tokio::test]
 async fn eventtime_tumbling_window_drops_tuple_older_than_current_watermark() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(

@@ -753,6 +753,7 @@ async fn run_source_on_change_json_case(case: SourceOnChangeJsonCase) {
         .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", name));
 }
 
+// coverage-covers: parser.select.alias_computing, planner.physical.by_index_projection_into_encoder_rewrite, sink.connector.memory_output
 #[tokio::test]
 async fn pipeline_table_driven_queries() {
     let test_cases = vec![
@@ -1247,7 +1248,12 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "row_diff_with_batch_keeps_row_diff_and_rewrites_to_streaming_encoder",
             source_name: "stream_ab",
             sql: "SELECT a, b FROM stream_ab",
-            covers: &["sink.output.row_diff"],
+            covers: &[
+                "sink.output.row_diff",
+                "sink.output.batching",
+                "planner.physical.streaming_encoder_rewrite",
+                "planner.physical.by_index_projection_into_row_diff_rewrite",
+            ],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1274,7 +1280,11 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "splits_partial_late_materialization_between_row_diff_and_encoder",
             source_name: "stream",
             sql: "SELECT a, b, flag AS c FROM stream",
-            covers: &["sink.output.row_diff"],
+            covers: &[
+                "sink.output.row_diff",
+                "planner.physical.by_index_projection_into_row_diff_rewrite",
+                "planner.physical.partial_by_index_row_diff_and_encoder_rewrite",
+            ],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1302,7 +1312,12 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "splits_partial_late_materialization_between_row_diff_and_encoder_with_aliases",
             source_name: "stream",
             sql: "SELECT a AS x, b AS y, flag AS z FROM stream",
-            covers: &["sink.output.row_diff"],
+            covers: &[
+                "sink.output.row_diff",
+                "parser.select.alias_computing",
+                "planner.physical.by_index_projection_into_row_diff_rewrite",
+                "planner.physical.partial_by_index_row_diff_and_encoder_rewrite",
+            ],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1390,7 +1405,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "template_transform_still_sees_dense_row_on_delta_branch",
             source_name: "stream",
             sql: "SELECT a, b FROM stream",
-            covers: &["sink.output.row_diff"],
+            covers: &["sink.output.row_diff", "sink.encoder.transform"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1749,6 +1764,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             source_name: "stream",
             sql: "SELECT speed FROM stream",
             covers: &[
+                "planner.logical.top_level_column_pruning",
                 "source.on_change.gating",
                 "sink.output.row_diff",
                 "sink.output.omit_if_empty",
@@ -2161,6 +2177,7 @@ async fn run_mixed_consumers_json_case(case: MixedConsumersJsonCase) {
         .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
 }
 
+// coverage-covers: planner.physical.by_index_projection_across_mixed_consumers_rewrite, planner.physical.by_index_projection_into_encoder_rewrite, planner.physical.by_index_projection_into_row_diff_rewrite, sink.connector.memory_output, sink.output.row_diff, parser.select.alias_computing
 #[tokio::test]
 async fn pipeline_mixed_consumers_json_table_driven() {
     let cases = vec![
@@ -2463,6 +2480,7 @@ async fn pipeline_table_driven_memory_collection_sources_layout_normalize() {
     }
 }
 
+// coverage-covers: source.memory.collection_input, sink.memory_collection.materialize, sink.connector.memory_output, parser.select.alias_computing
 #[tokio::test]
 async fn pipeline_table_driven_collection_sinks() {
     let test_cases = vec![
