@@ -1,0 +1,58 @@
+domain: runtime
+interactions:
+  - id: runtime.eventtime.tumbling_watermark
+    title: Eventtime tumbling watermark behavior
+    summary: Validate eventtime execution, watermark propagation, and tumbling-window flushing as one combined runtime behavior.
+    features:
+      - pipeline.runtime.eventtime
+      - stream.watermark.propagation
+      - stream.window.tumbling
+    status: active
+
+  - id: runtime.alias_projection.encoder_transform
+    title: Alias projection encoder transform
+    summary: Validate that encoder transforms observe SQL-visible alias output after projection.
+    features:
+      - parser.select.alias_computing
+      - sink.encoder.transform
+    status: active
+
+  - id: runtime.stateful_projection.row_diff
+    title: Stateful projection row-diff output
+    summary: Validate stateful projection results when row-diff output tracks changed rows.
+    features:
+      - parser.function.stateful_functions
+      - sink.output.row_diff
+    status: active
+
+  - id: runtime.shared_source.dynamic_decode_lifecycle
+    title: Shared source dynamic decode lifecycle
+    summary: Validate shared-source decode-column updates across consumer attach and detach lifecycle.
+    features:
+      - source.shared.dynamic_decode
+      - source.shared.lifecycle
+    status: active
+
+  - id: runtime.row_diff_omit_if_empty
+    title: Row-diff omit-if-empty output
+    summary: Validate that row-diff output and omit-if-empty suppression compose without emitting redundant empty deltas.
+    features:
+      - sink.output.row_diff
+      - sink.output.omit_if_empty
+    status: active
+
+  - id: runtime.sampler.row_diff
+    title: Sampler row-diff output
+    summary: Validate that sampler output feeds row-diff tracking without leaking unsampled rows.
+    features:
+      - processor.sampler.strategy
+      - sink.output.row_diff
+    status: active
+
+  - id: runtime.sampler.omit_if_empty
+    title: Sampler omit-if-empty output
+    summary: Validate that sampler windows with no effective changes are suppressed by omit-if-empty.
+    features:
+      - processor.sampler.strategy
+      - sink.output.omit_if_empty
+    status: active

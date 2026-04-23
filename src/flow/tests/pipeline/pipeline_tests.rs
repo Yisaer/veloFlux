@@ -561,6 +561,7 @@ struct SourceOnChangeJsonCase {
     name: &'static str,
     source_name: &'static str,
     sql: &'static str,
+    covers: &'static [&'static str],
     schema_hint: Vec<(String, Vec<Value>)>,
     source_input: SourceInputConfig,
     output: SinkOutputConfig,
@@ -636,6 +637,7 @@ async fn run_source_on_change_json_case(case: SourceOnChangeJsonCase) {
         name,
         source_name,
         sql,
+        covers,
         schema_hint,
         source_input,
         output: sink_output,
@@ -643,6 +645,7 @@ async fn run_source_on_change_json_case(case: SourceOnChangeJsonCase) {
         expected_outputs,
     } = case;
 
+    let _ = covers;
     println!("Running test: {}", name);
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -1414,7 +1417,7 @@ async fn pipeline_row_diff_json_table_driven() {
     }
 }
 
-// coverage-covers: sink.encoder.transform
+// coverage-covers: parser.select.alias_computing, sink.encoder.transform
 #[tokio::test]
 async fn transform_template_with_alias_projection_keeps_output_correct() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -1622,6 +1625,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             name: "explicit_columns_filters_rows_within_single_collection",
             source_name: "stream",
             sql: "SELECT speed, rpm FROM stream",
+            covers: &[],
             schema_hint: vec![
                 (
                     "speed".to_string(),
@@ -1653,6 +1657,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             name: "hidden_tracked_column_controls_emission",
             source_name: "stream",
             sql: "SELECT speed FROM stream",
+            covers: &[],
             schema_hint: vec![
                 (
                     "speed".to_string(),
@@ -1684,6 +1689,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             name: "on_change_without_columns_tracks_all_top_level_columns",
             source_name: "stream",
             sql: "SELECT speed FROM stream",
+            covers: &[],
             schema_hint: vec![
                 (
                     "speed".to_string(),
@@ -1719,6 +1725,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             name: "state_is_preserved_across_batches",
             source_name: "stream",
             sql: "SELECT speed FROM stream",
+            covers: &[],
             schema_hint: vec![("speed".to_string(), vec![Value::Int64(1), Value::Int64(2)])],
             source_input: SourceInputConfig::on_change_with_columns(["speed"]),
             output: SinkOutputConfig::default(),
@@ -1741,6 +1748,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             name: "hidden_tracked_column_with_delta_omit_if_empty_suppresses_redundant_rows",
             source_name: "stream",
             sql: "SELECT speed FROM stream",
+            covers: &["sink.output.row_diff", "sink.output.omit_if_empty"],
             schema_hint: vec![
                 (
                     "speed".to_string(),

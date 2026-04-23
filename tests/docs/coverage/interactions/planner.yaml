@@ -1,0 +1,42 @@
+domain: planner
+interactions:
+  - id: planner.physical.by_index_mixed_consumers
+    title: By-index mixed consumers
+    summary: Validate delayed by-index projection when a shared projection feeds both encoder and row-diff consumers.
+    features:
+      - planner.physical.by_index_projection_across_mixed_consumers_rewrite
+      - planner.physical.by_index_projection_into_encoder_rewrite
+      - planner.physical.by_index_projection_into_row_diff_rewrite
+    status: active
+
+  - id: planner.physical.partial_row_diff_encoder_late_materialization
+    title: Partial row-diff encoder late materialization
+    summary: Validate the split of row-diff-owned columns and encoder-owned pass-through columns during physical planning.
+    features:
+      - planner.physical.by_index_projection_into_row_diff_rewrite
+      - planner.physical.partial_by_index_row_diff_and_encoder_rewrite
+    status: active
+
+  - id: planner.physical.alias_by_index_encoder_projection
+    title: Alias by-index encoder projection
+    summary: Validate that by-index projection folded into encoder preserves SQL-visible aliases.
+    features:
+      - parser.select.alias_computing
+      - planner.physical.by_index_projection_into_encoder_rewrite
+    status: active
+
+  - id: planner.physical.alias_by_index_row_diff_projection
+    title: Alias by-index row-diff projection
+    summary: Validate that row-diff late projection preserves SQL-visible aliases when folding by-index projection.
+    features:
+      - parser.select.alias_computing
+      - planner.physical.by_index_projection_into_row_diff_rewrite
+    status: active
+
+  - id: planner.physical.transform_batch_streaming_encoder
+    title: Transform batch streaming encoder
+    summary: Validate that template-transform sinks can still use the streaming encoder rewrite when batching is enabled.
+    features:
+      - sink.encoder.transform
+      - planner.physical.streaming_encoder_rewrite
+    status: active

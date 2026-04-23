@@ -933,6 +933,7 @@ async fn stateful_function_table_driven() {
     }
 }
 
+// coverage-covers: parser.function.stateful_functions, sink.output.row_diff
 #[tokio::test]
 async fn stateful_projection_followed_by_row_diff_delta_output() {
     let case_name = "stateful_projection_followed_by_row_diff_delta_output";

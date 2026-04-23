@@ -334,6 +334,7 @@ async fn sampler_latest_before_filter_and_projection() {
     .expect("close pipeline");
 }
 
+// coverage-covers: processor.sampler.strategy, sink.output.omit_if_empty
 #[tokio::test]
 async fn sampler_latest_with_omit_if_empty_suppresses_empty_windows() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -409,6 +410,7 @@ async fn sampler_latest_with_omit_if_empty_suppresses_empty_windows() {
     .expect("close pipeline");
 }
 
+// coverage-covers: processor.sampler.strategy, sink.output.row_diff
 #[tokio::test]
 async fn sampler_latest_before_row_diff_delta_output() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
