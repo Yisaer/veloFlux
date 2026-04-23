@@ -141,9 +141,40 @@ jobs:
         if: ${{ always() && (env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily') }}
         run: |
           set +e
+          wait_for_process_exit() {
+            pid="$1"
+            for _ in $(seq 1 30); do
+              if ! kill -0 "$pid" 2>/dev/null; then
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
+          wait_for_port_release() {
+            port="$1"
+            for _ in $(seq 1 30); do
+              if ! ss -ltn | awk '{print $4}' | grep -E "[:.]${port}$" -q; then
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
           if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/veloflux.pid)" 2>/dev/null || true
+            pid="$(cat tmp/perf_daily_ci/veloflux.pid)"
+            if kill -0 "$pid" 2>/dev/null; then
+              kill "$pid" 2>/dev/null || true
+              if ! wait_for_process_exit "$pid"; then
+                kill -9 "$pid" 2>/dev/null || true
+                wait_for_process_exit "$pid" || true
+              fi
+            fi
+            rm -f tmp/perf_daily_ci/veloflux.pid
           fi
+          wait_for_port_release 8080 || true
+          wait_for_port_release 9898 || true
+          wait_for_port_release 6060 || true
 
       - name: Start veloflux (for select *)
         if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily' }}
@@ -153,8 +184,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci
+          rm -f tmp/perf_daily_ci/veloflux.pid
           target/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/data > tmp/perf_daily_ci/veloflux.log 2>&1 &
-          echo $! > tmp/perf_daily_ci/veloflux.pid
+          pid="$!"
+          echo "$pid" > tmp/perf_daily_ci/veloflux.pid
+          sleep 2
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "veloflux exited shortly after restart" >&2
+            tail -n 200 tmp/perf_daily_ci/veloflux.log >&2 || true
+            exit 1
+          fi
 
       - name: Run perf scenario (select *)
         if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily' }}
@@ -214,6 +253,24 @@ jobs:
         if: ${{ always() && (env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily') }}
         run: |
           set +e
+          wait_for_process_exit() {
+            pid="$1"
+            for _ in $(seq 1 30); do
+              if ! kill -0 "$pid" 2>/dev/null; then
+                return 0
+              fi
+              sleep 1
+            done
+            return 1
+          }
           if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/veloflux.pid)" 2>/dev/null || true
+            pid="$(cat tmp/perf_daily_ci/veloflux.pid)"
+            if kill -0 "$pid" 2>/dev/null; then
+              kill "$pid" 2>/dev/null || true
+              if ! wait_for_process_exit "$pid"; then
+                kill -9 "$pid" 2>/dev/null || true
+                wait_for_process_exit "$pid" || true
+              fi
+            fi
+            rm -f tmp/perf_daily_ci/veloflux.pid
           fi
