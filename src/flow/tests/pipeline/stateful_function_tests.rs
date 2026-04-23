@@ -933,6 +933,7 @@ async fn stateful_function_table_driven() {
     }
 }
 
+// coverage-covers: parser.function.stateful_functions, sink.output.row_diff
 #[tokio::test]
 async fn stateful_projection_followed_by_row_diff_delta_output() {
     let case_name = "stateful_projection_followed_by_row_diff_delta_output";
@@ -1008,6 +1009,7 @@ async fn stateful_projection_followed_by_row_diff_delta_output() {
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
 }
 
+// coverage-covers: parser.function.stateful_functions, sink.connector.memory_output
 #[tokio::test]
 async fn stateful_projection_with_batched_streaming_encoder() {
     let case_name = "stateful_projection_with_batched_streaming_encoder";

@@ -1,23 +1,29 @@
-# Feature Coverage V1
+# Feature Coverage
 
 ## Goal
 
-This document defines the first version of feature-oriented test coverage for
-veloFlux.
+This document defines feature-oriented test coverage for veloFlux.
 
-The goal is to measure whether a documented single feature is explicitly covered
-by at least one test. This is not code coverage and it is not interaction
-coverage yet.
+The primary goal is to measure whether a documented single feature is explicitly
+covered by at least one test. Explicit interaction coverage additionally
+measures whether selected feature combinations are covered by the same test unit
+or testcase.
+
+This is not code coverage.
 
 ## Scope
 
-Feature coverage v1 answers one question only:
+Single-feature coverage answers one question:
 
 - Is a feature covered by at least one test unit or testcase?
 
+Interaction coverage answers one additional question:
+
+- Is an explicitly registered feature combination covered by at least one test
+  unit or testcase?
+
 This version intentionally excludes:
 
-- multi-feature interaction coverage
 - weight-based scoring
 - automatic semantic inference from SQL or plan shape
 - case tags such as `boundary`, `negative`, or `null`
@@ -41,6 +47,16 @@ Machine-readable feature IDs live in:
 
 Coverage evaluation must read the YAML registry instead of parsing Markdown
 headings from `docs/`.
+
+Machine-readable interaction IDs live in:
+
+- `tests/docs/coverage/interactions/planner.yaml`
+- `tests/docs/coverage/interactions/runtime.yaml`
+- `tests/docs/coverage/interactions/sink.yaml`
+
+Interaction registries are split by interaction domain. Interaction domains may
+describe cross-domain behavior and are not limited to the single-feature domain
+list.
 
 ## Feature ID Model
 
@@ -70,7 +86,7 @@ Feature IDs describe stable observable behavior. They must not encode:
 
 ## Coverage Semantics
 
-The only coverage field in v1 is `covers`.
+The only test-side coverage field is `covers`.
 
 `covers` means:
 
@@ -87,7 +103,7 @@ listed in `covers`.
 
 ## Annotation Format
 
-V1 uses two annotation forms, depending on test shape.
+Coverage uses two annotation forms, depending on test shape.
 
 ### Test Function Annotation
 
@@ -153,13 +169,36 @@ Rules:
 
 ## Test Shape Rules
 
-V1 keeps function-level coverage and testcase-level coverage separate.
+Coverage keeps function-level coverage and testcase-level coverage separate.
 
 - plain test functions use the `coverage-covers` comment
 - table-driven testcases use the `covers` field inside each case
-- there is no inheritance or merge rule between function-level and testcase-level coverage in v1
+- there is no inheritance or merge rule between function-level and testcase-level coverage
 
 This keeps scanning and validation simple.
+
+## Interaction Coverage
+
+Interaction coverage uses a separate registry and the existing `covers`
+annotations.
+
+An interaction entry uses this schema:
+
+- `id`: Stable interaction identifier.
+- `title`: Human-readable title.
+- `summary`: Short statement of the combined behavior being covered.
+- `features`: The single-feature IDs that must be covered together.
+- `status`: Current lifecycle state. Use `active` unless the interaction is
+  retired.
+
+An active interaction is covered when at least one coverage record contains all
+of the interaction's features in the same `covers` list. Matching is a superset
+match: a record that covers `[A, B, C]` also covers an interaction that requires
+`[A, B]`.
+
+Interaction coverage does not introduce another test annotation. It is derived
+from function-level `coverage-covers` comments and testcase-level `covers`
+fields.
 
 ## Evaluator Requirements
 
@@ -168,11 +207,12 @@ Coverage evaluation should be CPU-only and should rely on static scanning.
 The evaluator should:
 
 1. load all feature IDs from `tests/docs/coverage/features/*.yaml`
-2. scan test functions for `coverage-covers` comments
-3. scan table-driven testcase literals for `covers: &[...]`
-4. validate every referenced feature ID
-5. compute the set of covered features
-6. report uncovered features
+2. load all interaction IDs from `tests/docs/coverage/interactions/*.yaml`
+3. scan test functions for `coverage-covers` comments
+4. scan table-driven testcase literals for `covers: &[...]`
+5. validate every referenced feature ID and interaction feature reference
+6. compute the set of covered features and interactions
+7. report uncovered features and interactions
 
 The evaluator must not depend on model inference or token-based semantic
 classification during normal coverage calculation.
@@ -187,16 +227,24 @@ The evaluator should report at least the following errors:
 - malformed `coverage-covers` comment format
 - missing `covers` field in a tracked table-driven testcase
 - duplicate testcase `name` values within one table-driven test group
+- invalid interaction status
+- interaction ID whose first segment does not match its registry domain
+- interaction with fewer than two features
+- duplicate feature ID within one interaction
+- unknown feature ID referenced by an interaction
+- active interaction referencing an inactive feature
 
 ## Reporting Model
 
-The minimal v1 reporting model is:
+The minimal reporting model is:
 
 - total feature count
 - covered feature count
 - uncovered feature list
 - coverage ratio by all features
 - coverage ratio by top-level domain
+- interaction coverage count and ratio
+- interaction coverage ratio by interaction domain
 
 The basic formula is:
 
@@ -208,7 +256,7 @@ The following items are explicitly left for later versions:
 
 - primary versus secondary coverage
 - testcase tags
-- pairwise or higher-order interaction coverage
+- automatic pairwise or higher-order interaction generation
 - risk-weighted coverage scoring
 - automatic mapping from SQL text or EXPLAIN JSON to feature IDs
 - REST response field-shape coverage for manager metadata APIs
@@ -217,6 +265,8 @@ The following items are explicitly left for later versions:
 
 - Update the YAML registry when a documented feature becomes part of supported
   behavior.
+- Update the interaction registry when a documented combination should be
+  tracked as a required same-record coverage target.
 - Add or update `covers` annotations whenever a new test explicitly validates a
   feature.
 - Prefer adding new feature IDs over renaming existing IDs.

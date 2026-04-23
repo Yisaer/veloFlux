@@ -28,6 +28,14 @@ features:
       - docs/planner/optimize/logical/common_subexpression_elimination.md
     status: active
 
+  - id: planner.eventtime.hidden_column_preservation
+    title: Eventtime hidden column preservation
+    summary: Preserve hidden eventtime columns required by eventtime planning across projection and source-input pruning.
+    doc_refs:
+      - docs/runtime/time/pipeline_eventtime.md
+      - docs/planner/optimize/logical/top_level_column_pruning.md
+    status: active
+
   - id: planner.physical.streaming_aggregation_rewrite
     title: Streaming aggregation rewrite
     summary: Rewrite eligible physical aggregation plans into streaming aggregation operators.

@@ -1,0 +1,9 @@
+domain: sink
+interactions:
+  - id: sink.memory_delta_omit_if_empty
+    title: Memory delta omit-if-empty output
+    summary: Validate memory sink emission together with omit-if-empty suppression for unchanged delta collection output.
+    features:
+      - sink.connector.memory_output
+      - sink.output.omit_if_empty
+    status: active

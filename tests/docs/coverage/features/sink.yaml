@@ -14,6 +14,13 @@ features:
       - docs/runtime/sinks/connectors/mqtt.md
     status: active
 
+  - id: sink.memory_collection.materialize
+    title: Memory collection materialize
+    summary: Materialize sink output rows into the stable memory collection sink layout.
+    doc_refs:
+      - docs/runtime/sinks/connectors/memory.md
+    status: active
+
   - id: sink.encoder.transform
     title: Encoder transform
     summary: Apply template-based encoder transforms before sink emission when configured.
@@ -26,6 +33,13 @@ features:
     summary: Produce row-diff output according to the documented sink-output contract.
     doc_refs:
       - docs/runtime/sinks/output/row_diff_output.md
+    status: active
+
+  - id: sink.output.batching
+    title: Sink output batching
+    summary: Buffer sink output rows according to configured batch count and duration semantics before emission.
+    doc_refs:
+      - docs/runtime/sinks/README.md
     status: active
 
   - id: sink.output.omit_if_empty

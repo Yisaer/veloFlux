@@ -379,6 +379,146 @@ async fn shared_stream_required_columns_shrink_after_consumer_stop() {
         .expect("delete shared stream");
 }
 
+// coverage-covers: source.shared.dynamic_decode, source.shared.lifecycle
+#[tokio::test]
+async fn shared_stream_decode_projection_survives_consumer_lifecycle_changes() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let stream_name = "shared_stream_decode_lifecycle";
+    install_shared_mock_json_stream(&instance, stream_name).await;
+    wait_for_shared_stream_status(&instance, stream_name, "stopped", Duration::from_secs(5)).await;
+
+    let (_, output_topic_a) = make_memory_topics(
+        "pipeline_shared_stream",
+        "shared_stream_decode_projection_survives_consumer_lifecycle_changes_a",
+    );
+    let (_, output_topic_b) = make_memory_topics(
+        "pipeline_shared_stream",
+        "shared_stream_decode_projection_survives_consumer_lifecycle_changes_b",
+    );
+    let (_, output_topic_c) = make_memory_topics(
+        "pipeline_shared_stream",
+        "shared_stream_decode_projection_survives_consumer_lifecycle_changes_c",
+    );
+    declare_output_topic(&instance, &output_topic_a);
+    declare_output_topic(&instance, &output_topic_b);
+    declare_output_topic(&instance, &output_topic_c);
+
+    let mut output_a = instance
+        .open_memory_subscribe_bytes(&output_topic_a)
+        .expect("subscribe pipeline a output");
+    let mut output_b = instance
+        .open_memory_subscribe_bytes(&output_topic_b)
+        .expect("subscribe pipeline b output");
+
+    let pipeline_a_id = "shared_stream_decode_lifecycle_pipeline_a";
+    let pipeline_b_id = "shared_stream_decode_lifecycle_pipeline_b";
+    create_memory_sink_pipeline(
+        &instance,
+        pipeline_a_id,
+        &format!("SELECT a FROM {stream_name}"),
+        &output_topic_a,
+    );
+    create_memory_sink_pipeline(
+        &instance,
+        pipeline_b_id,
+        &format!("SELECT b FROM {stream_name}"),
+        &output_topic_b,
+    );
+
+    instance
+        .start_pipeline(pipeline_a_id)
+        .expect("start pipeline a");
+    wait_for_shared_stream_decoding_columns(
+        &instance,
+        stream_name,
+        1,
+        &["a"],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    instance
+        .start_pipeline(pipeline_b_id)
+        .expect("start pipeline b");
+    wait_for_shared_stream_decoding_columns(
+        &instance,
+        stream_name,
+        2,
+        &["a", "b"],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":1,"b":2,"c":3}"#.as_ref())
+        .await
+        .expect("send shared mock payload");
+    assert_eq!(
+        recv_next_json(&mut output_a, Duration::from_secs(5)).await,
+        json!([{"a": 1}])
+    );
+    assert_eq!(
+        recv_next_json(&mut output_b, Duration::from_secs(5)).await,
+        json!([{"b": 2}])
+    );
+
+    stop_and_delete_pipeline(&instance, pipeline_b_id).await;
+    wait_for_shared_stream_decoding_columns(
+        &instance,
+        stream_name,
+        1,
+        &["a"],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    stop_and_delete_pipeline(&instance, pipeline_a_id).await;
+    wait_for_shared_stream_status(&instance, stream_name, "stopped", Duration::from_secs(5)).await;
+    wait_for_shared_stream_subscriber_count(&instance, stream_name, 0, Duration::from_secs(5))
+        .await;
+
+    let mut output_c = instance
+        .open_memory_subscribe_bytes(&output_topic_c)
+        .expect("subscribe pipeline c output");
+    let pipeline_c_id = "shared_stream_decode_lifecycle_pipeline_c";
+    create_memory_sink_pipeline(
+        &instance,
+        pipeline_c_id,
+        &format!("SELECT c FROM {stream_name}"),
+        &output_topic_c,
+    );
+    instance
+        .start_pipeline(pipeline_c_id)
+        .expect("start pipeline c");
+    wait_for_shared_stream_status(&instance, stream_name, "running", Duration::from_secs(5)).await;
+    wait_for_shared_stream_decoding_columns(
+        &instance,
+        stream_name,
+        1,
+        &["c"],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":4,"b":5,"c":6}"#.as_ref())
+        .await
+        .expect("send shared mock payload after restart");
+    assert_eq!(
+        recv_next_json(&mut output_c, Duration::from_secs(5)).await,
+        json!([{"c": 6}])
+    );
+
+    stop_and_delete_pipeline(&instance, pipeline_c_id).await;
+    instance
+        .delete_stream(stream_name)
+        .await
+        .expect("delete shared stream");
+}
+
 // coverage-covers: source.shared.dynamic_decode
 #[tokio::test]
 async fn shared_stream_wildcard_consumer_forces_full_decode_until_it_stops() {

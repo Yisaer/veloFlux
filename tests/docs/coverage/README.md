@@ -12,6 +12,8 @@ coverage tooling.
   Markdown headings directly.
 - This registry is not API schema coverage. Do not add feature IDs only to track
   manager REST field names or DTO shape stability.
+- Interaction coverage is declared separately from single-feature coverage and
+  is derived from existing test `covers` annotations.
 
 ## Layout
 
@@ -24,6 +26,15 @@ coverage tooling.
 - `features/stream.yaml`
 
 Each file owns a single top-level feature domain.
+
+Interaction registry files live in:
+
+- `interactions/planner.yaml`
+- `interactions/runtime.yaml`
+- `interactions/sink.yaml`
+
+Interaction files are also split by domain, but interaction domains may describe
+cross-domain behavior and are not limited to the single-feature domain list.
 
 ## Naming Rules
 
@@ -59,10 +70,26 @@ Each feature entry uses the following minimal schema:
 - `doc_refs`: Design or behavior documents that justify the feature.
 - `status`: Current lifecycle state. Use `active` unless the feature is retired.
 
+Each interaction entry uses the following minimal schema:
+
+- `id`: Stable interaction identifier.
+- `title`: Human-readable title.
+- `summary`: Short statement of the combined behavior being covered.
+- `features`: The single-feature IDs that must be covered by one test unit or
+  testcase for this interaction to count as covered.
+- `status`: Current lifecycle state. Use `active` unless the interaction is
+  retired.
+
+Interaction coverage uses superset matching. A test record whose `covers` list
+contains all interaction `features` covers that interaction, even if the test
+record also covers additional features.
+
 ## Maintenance Rules
 
 - Add or update a feature here when a new documented capability becomes part of
   the supported test coverage space.
+- Add or update an interaction when an important documented behavior depends on
+  multiple features being validated by the same test unit or testcase.
 - Keep pure manager/control-plane REST DTO contracts in API docs and manager API
   tests, unless the endpoint itself is the documented surface for a runtime
   feature.
