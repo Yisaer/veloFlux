@@ -4,6 +4,7 @@ use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::connector::{MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY};
 use flow::pipeline::{MemorySinkProps, PipelineDefinition};
+use flow::processor::SamplerConfig;
 use flow::FlowInstance;
 use flow::SharedStreamStatus;
 use flow::{CreatePipelineRequest, PipelineStopMode, SinkDefinition, SinkProps, SinkType};
@@ -41,6 +42,41 @@ async fn install_shared_mock_json_stream(instance: &FlowInstance, stream_name: &
         .create_stream(definition, true)
         .await
         .expect("create shared mock stream");
+}
+
+async fn install_shared_mock_json_stream_with_sampler(
+    instance: &FlowInstance,
+    stream_name: &str,
+    interval: Duration,
+) {
+    let schema = Schema::new(vec![
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "b".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            stream_name.to_string(),
+            "c".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]);
+    let definition = StreamDefinition::new(
+        stream_name.to_string(),
+        Arc::new(schema),
+        StreamProps::Mock(MockStreamProps::default()),
+        StreamDecoderConfig::json(),
+    )
+    .with_sampler(SamplerConfig::new(interval));
+    instance
+        .create_stream(definition, true)
+        .await
+        .expect("create shared mock stream with sampler");
 }
 
 fn declare_output_topic(instance: &FlowInstance, output_topic: &str) {
@@ -766,6 +802,128 @@ async fn shared_stream_runtime_can_restart_after_all_consumers_released() {
     assert_eq!(actual, json!([{"c": 13}]));
 
     stop_and_delete_pipeline(&instance, pipeline_second).await;
+    instance
+        .delete_stream(stream_name)
+        .await
+        .expect("delete shared stream");
+}
+
+// coverage-covers: processor.sampler.strategy, source.shared.dynamic_decode, source.shared.lifecycle
+#[tokio::test]
+async fn shared_stream_sampler_dynamic_decode_lifecycle_keeps_outputs_in_sync() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let stream_name = "shared_stream_sampler_dynamic_decode";
+    install_shared_mock_json_stream_with_sampler(
+        &instance,
+        stream_name,
+        Duration::from_millis(200),
+    )
+    .await;
+    wait_for_shared_stream_status(&instance, stream_name, "stopped", Duration::from_secs(5)).await;
+
+    let (_, output_topic_a) = make_memory_topics(
+        "pipeline_shared_stream",
+        "shared_stream_sampler_dynamic_decode_lifecycle_keeps_outputs_in_sync_a",
+    );
+    let (_, output_topic_c) = make_memory_topics(
+        "pipeline_shared_stream",
+        "shared_stream_sampler_dynamic_decode_lifecycle_keeps_outputs_in_sync_c",
+    );
+    declare_output_topic(&instance, &output_topic_a);
+    declare_output_topic(&instance, &output_topic_c);
+
+    let mut output_a = instance
+        .open_memory_subscribe_bytes(&output_topic_a)
+        .expect("subscribe pipeline a output");
+    let mut output_c = instance
+        .open_memory_subscribe_bytes(&output_topic_c)
+        .expect("subscribe pipeline c output");
+
+    let pipeline_a_id = "shared_stream_sampler_pipeline_a";
+    let pipeline_c_id = "shared_stream_sampler_pipeline_c";
+    create_memory_sink_pipeline(
+        &instance,
+        pipeline_a_id,
+        &format!("SELECT a FROM {stream_name}"),
+        &output_topic_a,
+    );
+    create_memory_sink_pipeline(
+        &instance,
+        pipeline_c_id,
+        &format!("SELECT c FROM {stream_name}"),
+        &output_topic_c,
+    );
+
+    instance
+        .start_pipeline(pipeline_a_id)
+        .expect("start pipeline a");
+    wait_for_shared_stream_status(&instance, stream_name, "running", Duration::from_secs(5)).await;
+    wait_for_shared_stream_decoding_columns(
+        &instance,
+        stream_name,
+        1,
+        &["a"],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":1,"b":10,"c":100}"#.as_ref())
+        .await
+        .expect("send first sampler payload");
+    instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":2,"b":20,"c":200}"#.as_ref())
+        .await
+        .expect("send second sampler payload");
+    let actual_a = recv_next_json(&mut output_a, Duration::from_secs(5)).await;
+    assert_eq!(actual_a, json!([{"a": 2}]));
+
+    instance
+        .start_pipeline(pipeline_c_id)
+        .expect("start pipeline c");
+    wait_for_shared_stream_decoding_columns(
+        &instance,
+        stream_name,
+        2,
+        &["a", "c"],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":3,"b":30,"c":300}"#.as_ref())
+        .await
+        .expect("send third sampler payload");
+    instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":4,"b":40,"c":400}"#.as_ref())
+        .await
+        .expect("send fourth sampler payload");
+    let actual_a_second = recv_next_json(&mut output_a, Duration::from_secs(5)).await;
+    let actual_c = recv_next_json(&mut output_c, Duration::from_secs(5)).await;
+    assert_eq!(actual_a_second, json!([{"a": 4}]));
+    assert_eq!(actual_c, json!([{"c": 400}]));
+
+    stop_and_delete_pipeline(&instance, pipeline_c_id).await;
+    wait_for_shared_stream_decoding_columns(
+        &instance,
+        stream_name,
+        1,
+        &["a"],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    instance
+        .send_shared_mock_stream_payload(stream_name, br#"{"a":5,"b":50,"c":500}"#.as_ref())
+        .await
+        .expect("send post-detach sampler payload");
+    let actual_a_final = recv_next_json(&mut output_a, Duration::from_secs(5)).await;
+    assert_eq!(actual_a_final, json!([{"a": 5}]));
+
+    stop_and_delete_pipeline(&instance, pipeline_a_id).await;
     instance
         .delete_stream(stream_name)
         .await

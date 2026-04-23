@@ -898,6 +898,56 @@ fn plan_explain_table_driven() {
     }
 }
 
+// coverage-covers: planner.physical.sampler_placement, planner.physical.shared_tail_barrier_insertion
+#[test]
+fn plan_explain_additional_physical_pairings_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        sinks: Vec<PipelineSink>,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "shared_stream_sampler_placement_keeps_sampler_before_decoder",
+            sql: "SELECT a FROM shared_stream_sampler",
+            sinks: vec![build_nop_json_sink("test_sink", None)],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=shared_stream_sampler","decoder=json","schema=[a]","sampler.strategy=latest"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"shared/shared_stream_sampler/PhysicalDataSource_0","info":["scope=shared_stream","source=shared_stream_sampler","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"shared/shared_stream_sampler/PhysicalSampler_1","info":["scope=shared_stream","interval=100ms","strategy=latest"],"operator":"PhysicalSampler"}],"id":"shared/shared_stream_sampler/PhysicalDecoder_2","info":["scope=shared_stream","decoder=json"],"operator":"PhysicalDecoder"}],"id":"shared/shared_stream_sampler/PhysicalResultCollect_3","info":["scope=shared_stream"],"operator":"PhysicalResultCollect"}],"id":"PhysicalSharedStream_0","info":["source=shared_stream_sampler","schema=[a]"],"operator":"PhysicalSharedStream"}],"id":"PhysicalProject_1","info":["fields=[]","passthrough_messages=true"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_3","info":["sink_id=test_sink","encoder=json","by_index_projection=[shared_stream_sampler#0->a]"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_2","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_4","info":[],"operator":"PhysicalResultCollect"}}"##,
+        },
+        Case {
+            name: "two_sinks_inserts_physical_barrier_for_shared_tail",
+            sql: "SELECT a FROM stream",
+            sinks: vec![
+                PipelineSink::new(
+                    "sink_a",
+                    PipelineSinkConnector::new(
+                        "connector_a",
+                        SinkConnectorConfig::Nop(NopSinkConfig::default()),
+                        SinkEncoderConfig::json(),
+                    ),
+                )
+                .with_forward_to_result(true),
+                PipelineSink::new(
+                    "sink_b",
+                    PipelineSinkConnector::new(
+                        "connector_b",
+                        SinkConnectorConfig::Nop(NopSinkConfig::default()),
+                        SinkEncoderConfig::json(),
+                    ),
+                )
+                .with_forward_to_result(true),
+            ],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=sink_a","connector=nop","encoder=json"],"operator":"DataSink"},{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_3","info":["sink_id=sink_b","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_4","info":["sink_count=2"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[]","passthrough_messages=true"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_4","info":["sink_id=sink_a","encoder=json","by_index_projection=[stream#0->a]"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_3","info":["sink_id=sink_a","connector=nop"],"operator":"PhysicalDataSink"},{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[]","passthrough_messages=true"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_6","info":["sink_id=sink_b","encoder=json","by_index_projection=[stream#0->a]"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_5","info":["sink_id=sink_b","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalBarrier_8","info":["upstream_count=2"],"operator":"PhysicalBarrier"}],"id":"PhysicalResultCollect_7","info":[],"operator":"PhysicalResultCollect"}}"##,
+        },
+    ];
+
+    for case in cases {
+        let got = explain_json(case.sql, case.sinks);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
 #[test]
 fn plan_explain_stateful_table_driven() {
     struct Case {
