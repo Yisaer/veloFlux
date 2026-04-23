@@ -6,28 +6,28 @@ use veloflux_sdv::schema::gbf::GbfSchema;
 fn get_bench_schema() -> GbfSchema {
     let json = r#"
     {
-        "types": {
-            "can_frame": {
-                "fields": [
-                    { "name": "magic", "type": "u8", "const": 85 },
-                    { "name": "can_id", "type": "u16be" },
-                    { "name": "data_len", "type": "u8" },
-                    {
-                        "name": "payload",
-                        "type": "bytes",
-                        "length_ref": "data_len"
-                    }
-                ]
-            }
-        },
-        "packet": {
+        "structure": {
+            "type": "struct",
             "fields": [
                 { "name": "ts", "type": "u64be" },
                 { "name": "total_len", "type": "u16be" },
                 {
                     "name": "frames",
                     "type": "sequence",
-                    "item": { "type": "can_frame" },
+                    "structure": {
+                        "type": "struct",
+                        "fields": [
+                            { "name": "magic", "type": "u8", "const": 85 },
+                            { "name": "can_id", "type": "u16be" },
+                            { "name": "data_len", "type": "u8" },
+                            {
+                                "name": "payload",
+                                "type": "bytes",
+                                "length_ref": "data_len",
+                                "format": { "id_ref": "can_id" }
+                            }
+                        ]
+                    },
                     "length_ref": "total_len",
                     "length_unit": "bytes"
                 }
@@ -78,7 +78,7 @@ fn bench_merge_only(c: &mut Criterion) {
         })
         .collect();
 
-    let mut merger = GbfMerger::new(schema);
+    let mut merger = GbfMerger::new(schema).unwrap();
 
     c.bench_function("gbf_merger_merge_10_packets", |b| {
         b.iter(|| {
@@ -96,7 +96,7 @@ fn bench_round_trip(c: &mut Criterion) {
     // Create one GBF packet with 10 frames
     let packet = create_gbf_packet(10, 8);
 
-    let mut merger = GbfMerger::new(schema);
+    let mut merger = GbfMerger::new(schema).unwrap();
 
     c.bench_function("gbf_merger_round_trip_10_frames", |b| {
         b.iter(|| {
@@ -112,11 +112,11 @@ fn bench_payload_sizes(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("payload_size");
 
-    for payload_size in [8, 64, 256].iter() {
+    for payload_size in [8, 64, 255].iter() {
         // Create packet with 10 frames of given payload size
         let packet = create_gbf_packet(10, *payload_size);
 
-        let mut merger = GbfMerger::new(schema.clone());
+        let mut merger = GbfMerger::new(schema.clone()).unwrap();
 
         group.bench_with_input(
             BenchmarkId::new("round_trip", payload_size),

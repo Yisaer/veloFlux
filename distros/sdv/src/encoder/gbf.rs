@@ -3,7 +3,7 @@
 //! This module provides schema-driven encoding of binary packets based on GBF schema definitions.
 //! All encoding logic is derived from the schema - no hardcoded values.
 
-use crate::schema::gbf::{Field, GbfSchema, TypeDef};
+use crate::schema::gbf::{Field, GbfSchema};
 use rand::Rng;
 use std::collections::HashMap;
 
@@ -12,12 +12,6 @@ use std::collections::HashMap;
 pub enum GbfEncodeError {
     /// Field type is not supported.
     UnsupportedType(String),
-    /// Required field is missing.
-    MissingField(String),
-    /// Referenced type not found in schema.
-    TypeNotFound(String),
-    /// Length reference field not found.
-    LengthRefNotFound(String),
     /// Invalid field value type.
     InvalidValue(String),
 }
@@ -26,9 +20,6 @@ impl std::fmt::Display for GbfEncodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             GbfEncodeError::UnsupportedType(t) => write!(f, "unsupported field type: {}", t),
-            GbfEncodeError::MissingField(n) => write!(f, "missing required field: {}", n),
-            GbfEncodeError::TypeNotFound(t) => write!(f, "type not found in schema: {}", t),
-            GbfEncodeError::LengthRefNotFound(r) => write!(f, "length_ref field not found: {}", r),
             GbfEncodeError::InvalidValue(m) => write!(f, "invalid field value: {}", m),
         }
     }
@@ -72,7 +63,7 @@ impl GbfEncoder {
     /// Fields with `const` values are auto-filled from schema.
     /// Missing fields use defaults (0 for integers, empty for bytes).
     pub fn encode(&self, values: &FieldValues) -> Result<Vec<u8>, GbfEncodeError> {
-        self.encode_type_def(&self.schema.packet, values)
+        self.encode_type_def_from_fields(&self.schema.structure.fields, values)
     }
 
     /// Encode data and return as uppercase hex string.
@@ -83,13 +74,17 @@ impl GbfEncoder {
 
     /// Generate random field values based on schema structure.
     pub fn generate_random<R: Rng>(&self, rng: &mut R, items_per_sequence: usize) -> FieldValues {
-        self.generate_random_for_type(&self.schema.packet, rng, items_per_sequence)
+        self.generate_random_for_type_from_fields(
+            &self.schema.structure.fields,
+            rng,
+            items_per_sequence,
+        )
     }
 
     /// Encode a type definition with provided values.
-    fn encode_type_def(
+    fn encode_type_def_from_fields(
         &self,
-        type_def: &TypeDef,
+        fields_def: &[Field],
         values: &FieldValues,
     ) -> Result<Vec<u8>, GbfEncodeError> {
         let mut buffer = Vec::new();
@@ -98,7 +93,7 @@ impl GbfEncoder {
         let mut field_sizes: HashMap<String, usize> = HashMap::new();
 
         // Pre-calculate sequence/bytes sizes for length_ref fields
-        for field in &type_def.fields {
+        for field in fields_def {
             if let Some(ref length_ref) = field.length_ref {
                 // This field has a length reference, calculate its size
                 let size = self.calculate_field_size(field, values)?;
@@ -107,7 +102,7 @@ impl GbfEncoder {
         }
 
         // Second pass: encode fields
-        for field in &type_def.fields {
+        for field in fields_def {
             let field_bytes = self.encode_field(field, values, &field_sizes)?;
             buffer.extend(field_bytes);
         }
@@ -130,22 +125,27 @@ impl GbfEncoder {
                 }
             }
             "sequence" => {
+                if let Some(unit) = field.length_unit.as_deref()
+                    && unit != "bytes"
+                {
+                    return Err(GbfEncodeError::InvalidValue(format!(
+                        "sequence field '{}' has unsupported length_unit '{}'; \
+                         only \"bytes\" is supported",
+                        field.name, unit
+                    )));
+                }
                 if let Some(FieldValue::Sequence(items)) = values.get(&field.name) {
-                    let item_ref = field.item.as_ref().ok_or_else(|| {
+                    let item_ref = field.structure.as_ref().ok_or_else(|| {
                         GbfEncodeError::InvalidValue(format!(
-                            "sequence field {} missing item type",
+                            "sequence field '{}' is missing 'structure' definition",
                             field.name
                         ))
                     })?;
 
-                    let item_type = self
-                        .schema
-                        .get_type(&item_ref.type_name)
-                        .ok_or_else(|| GbfEncodeError::TypeNotFound(item_ref.type_name.clone()))?;
-
                     let mut total_size = 0;
                     for item_values in items {
-                        let encoded = self.encode_type_def(item_type, item_values)?;
+                        let encoded =
+                            self.encode_type_def_from_fields(&item_ref.fields, item_values)?;
                         total_size += encoded.len();
                     }
                     Ok(total_size)
@@ -191,26 +191,31 @@ impl GbfEncoder {
                 Ok(data)
             }
             "sequence" => {
+                if let Some(unit) = field.length_unit.as_deref()
+                    && unit != "bytes"
+                {
+                    return Err(GbfEncodeError::InvalidValue(format!(
+                        "sequence field '{}' has unsupported length_unit '{}'; \
+                         only \"bytes\" is supported",
+                        field.name, unit
+                    )));
+                }
                 let items = match values.get(&field.name) {
                     Some(FieldValue::Sequence(s)) => s,
                     _ => return Ok(Vec::new()),
                 };
 
-                let item_ref = field.item.as_ref().ok_or_else(|| {
+                let item_ref = field.structure.as_ref().ok_or_else(|| {
                     GbfEncodeError::InvalidValue(format!(
-                        "sequence field {} missing item type",
+                        "sequence field '{}' is missing 'structure' definition",
                         field.name
                     ))
                 })?;
 
-                let item_type = self
-                    .schema
-                    .get_type(&item_ref.type_name)
-                    .ok_or_else(|| GbfEncodeError::TypeNotFound(item_ref.type_name.clone()))?;
-
                 let mut buffer = Vec::new();
                 for item_values in items {
-                    let encoded = self.encode_type_def(item_type, item_values)?;
+                    let encoded =
+                        self.encode_type_def_from_fields(&item_ref.fields, item_values)?;
                     buffer.extend(encoded);
                 }
                 Ok(buffer)
@@ -262,23 +267,22 @@ impl GbfEncoder {
     }
 
     /// Generate random values for a type definition.
-    fn generate_random_for_type<R: Rng>(
+    fn generate_random_for_type_from_fields<R: Rng>(
         &self,
-        type_def: &TypeDef,
+        fields_def: &[Field],
         rng: &mut R,
         items_per_sequence: usize,
     ) -> FieldValues {
         let mut values = FieldValues::new();
 
-        for field in &type_def.fields {
+        for field in fields_def {
             // Skip const fields (they're auto-filled)
             if field.const_value.is_some() {
                 continue;
             }
 
             // Skip length_ref target fields (they're auto-calculated)
-            let is_length_target = type_def
-                .fields
+            let is_length_target = fields_def
                 .iter()
                 .any(|f| f.length_ref.as_ref().is_some_and(|lr| lr == &field.name));
             if is_length_target {
@@ -313,11 +317,16 @@ impl GbfEncoder {
                 Some(FieldValue::Bytes(data))
             }
             "sequence" => {
-                let item_ref = field.item.as_ref()?;
-                let item_type = self.schema.get_type(&item_ref.type_name)?;
+                let item_ref = field.structure.as_ref()?;
 
                 let items: Vec<FieldValues> = (0..items_per_sequence)
-                    .map(|_| self.generate_random_for_type(item_type, rng, items_per_sequence))
+                    .map(|_| {
+                        self.generate_random_for_type_from_fields(
+                            &item_ref.fields,
+                            rng,
+                            items_per_sequence,
+                        )
+                    })
                     .collect();
 
                 Some(FieldValue::Sequence(items))
@@ -334,29 +343,28 @@ mod tests {
     fn get_test_schema() -> GbfSchema {
         let json = r#"
         {
-            "types": {
-                "can_frame": {
-                    "fields": [
-                        { "name": "magic", "type": "u8", "const": 85 },
-                        { "name": "can_id", "type": "u16be" },
-                        { "name": "data_len", "type": "u8" },
-                        {
-                            "name": "payload",
-                            "type": "bytes",
-                            "length_ref": "data_len"
-                        }
-                    ]
-                }
-            },
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "ts", "type": "u64be" },
                     { "name": "total_len", "type": "u16be" },
                     {
                         "name": "frames",
                         "type": "sequence",
-                        "item": { "type": "can_frame" },
-                        "length_ref": "total_len",
+                        "length_ref": "total_len", 
+                        "structure": { 
+                            "type": "struct",
+                            "fields": [
+                                { "name": "magic", "type": "u8", "const": 85 },
+                                { "name": "can_id", "type": "u16be" },
+                                { "name": "data_len", "type": "u8" },
+                                {
+                                    "name": "payload",
+                                    "type": "bytes",
+                                    "length_ref": "data_len"
+                                }
+                            ]
+                        },
                         "length_unit": "bytes"
                     }
                 ]
@@ -452,7 +460,7 @@ mod tests {
         assert!(values.contains_key("ts"));
         assert!(values.contains_key("frames"));
 
-        // ts should not be present (will use default 0), but frames should have items
+        // ts should be present, and frames should have items
         if let Some(FieldValue::Sequence(items)) = values.get("frames") {
             assert_eq!(items.len(), 2);
 

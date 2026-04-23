@@ -4,9 +4,13 @@ GBF (General Binary Format) schema defines binary packet structures for decoding
 
 ## Overview
 
+> **Breaking change (VF-83.1):** The root packet key has been renamed from
+> `"packet"` to `"structure"`. The named-type library (`"types"` key) has been
+> removed. All struct definitions must be inlined inside the `"structure"` field
+> of the sequence that uses them (replaces `"item"`). See the Migration Guide below.
+
 GBF schemas describe:
 - **Packet structure**: Header fields, payload fields
-- **Custom types**: Reusable frame definitions
 - **Embedded formats**: Payload decoding (e.g., CAN signals)
 
 ---
@@ -15,10 +19,8 @@ GBF schemas describe:
 
 ```json
 {
-  "types": {
-    "frame_type": { ... }
-  },
-  "packet": {
+  "structure": {
+    "type": "struct",
     "fields": [ ... ]
   }
 }
@@ -26,8 +28,7 @@ GBF schemas describe:
 
 | Property | Description |
 |----------|-------------|
-| `types` | Named type definitions (reusable structures) |
-| `packet` | Root packet definition |
+| `structure` | Root packet definition |
 
 ---
 
@@ -55,9 +56,10 @@ GBF schemas describe:
 | `type` | String | Field type |
 | `const` | u64 | Magic byte constraint |
 | `length_ref` | String | Reference to length field |
-| `length_unit` | String | `"bytes"` or `"count"` |
-| `item` | Object | Type for sequence items |
+| `length_unit` | String | `"bytes"` (only supported value) |
+| `structure` | Object | Definition for sequence items (replaces `"item"`) |
 | `format` | Object | Marks embedded payload |
+| `format.id_ref` | String | **Required** when `format` is present — name of the sibling integer field that carries the CAN ID |
 | `read_mask` | u64 | Bit mask after reading |
 | `read_shift` | u32 | Bit shift after masking |
 
@@ -67,31 +69,30 @@ GBF schemas describe:
 
 ```json
 {
-  "types": {
-    "can_frame": {
-      "fields": [
-        { "name": "magic", "type": "u8", "const": 85 },
-        { "name": "can_id", "type": "u16be" },
-        { "name": "data_len", "type": "u8" },
-        {
-          "name": "payload",
-          "type": "bytes",
-          "length_ref": "data_len",
-          "format": { "id_ref": "can_id" }
-        }
-      ]
-    }
-  },
-  "packet": {
+  "structure": {
+    "type": "struct",
     "fields": [
       { "name": "ts", "type": "u64be" },
       { "name": "total_len", "type": "u16be" },
       {
         "name": "frames",
         "type": "sequence",
-        "item": { "type": "can_frame" },
         "length_ref": "total_len",
-        "length_unit": "bytes"
+        "length_unit": "bytes",
+        "structure": {
+          "type": "struct",
+          "fields": [
+            { "name": "magic", "type": "u8", "const": 85 },
+            { "name": "can_id", "type": "u16be" },
+            { "name": "data_len", "type": "u8" },
+            {
+              "name": "payload",
+              "type": "bytes",
+              "length_ref": "data_len",
+              "format": { "id_ref": "can_id" }
+            }
+          ]
+        }
       }
     ]
   }
@@ -120,7 +121,7 @@ Extracts: `value & 0x7F`
 ## Loading
 
 ```rust
-use veloflux_ex::schema::gbf::GbfSchema;
+use veloflux_sdv::schema::gbf::GbfSchema;
 
 let schema = GbfSchema::load("/path/to/packet.json")?;
 ```
@@ -131,3 +132,61 @@ let schema = GbfSchema::load("/path/to/packet.json")?;
 
 - [GBF Decoder](../decoder/gbf.md) - Full decoder documentation
 - [DBC Schema](dbc.md) - CAN signal definitions
+
+---
+
+## Migration Guide
+
+When migrating from earlier schema versions:
+
+**Before:**
+```json
+{
+  "types": {
+    "can_frame": {
+      "fields": [
+        { "name": "magic",    "type": "u8",    "const": 85 },
+        { "name": "can_id",   "type": "u16be" },
+        { "name": "data_len", "type": "u8",    "read_mask": 127 },
+        { "name": "payload",  "type": "bytes", "length_ref": "data_len",
+          "format": { "id_ref": "can_id" } }
+      ]
+    }
+  },
+  "packet": {
+    "fields": [
+      { "name": "ts",        "type": "u64be" },
+      { "name": "total_len", "type": "u16be" },
+      { "name": "frames",    "type": "sequence",
+        "item": { "type": "can_frame" },
+        "length_ref": "total_len", "length_unit": "bytes" }
+    ]
+  }
+}
+```
+
+**After:**
+```json
+{
+  "structure": {
+    "type": "struct",
+    "fields": [
+      { "name": "ts",        "type": "u64be" },
+      { "name": "total_len", "type": "u16be" },
+      { "name": "frames",    "type": "sequence",
+        "length_ref": "total_len", "length_unit": "bytes",
+        "structure": {
+          "type": "struct",
+          "fields": [
+            { "name": "magic",    "type": "u8",    "const": 85 },
+            { "name": "can_id",   "type": "u16be" },
+            { "name": "data_len", "type": "u8",    "read_mask": 127 },
+            { "name": "payload",  "type": "bytes", "length_ref": "data_len",
+              "format": { "id_ref": "can_id" } }
+          ]
+        }
+      }
+    ]
+  }
+}
+```

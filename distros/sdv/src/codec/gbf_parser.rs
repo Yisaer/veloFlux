@@ -3,23 +3,23 @@
 //! This module provides shared GBF packet parsing logic that can be reused
 //! by both decoders (for decoding to records) and mergers (for repacking).
 
-use crate::schema::gbf::{GbfSchema, TypeDef};
+use crate::schema::gbf::{Field, GbfSchema};
 use flow::codec::CodecError;
 use std::collections::HashMap;
 
 /// A parsed frame from a GBF packet.
 #[derive(Debug, Clone)]
 pub struct GbfFrame {
-    pub can_id: u16,
+    pub can_id: u32,
     pub payload: Vec<u8>,
 }
 
 /// Field name mappings extracted from schema for dynamic encoding/decoding.
 #[derive(Debug, Clone)]
 pub struct SchemaFieldMap {
-    /// Timestamp field name in packet (e.g., "ts")
+    /// Timestamp field name in root structure (e.g., "ts")
     pub timestamp_field: String,
-    /// Sequence field name in packet (e.g., "frames")
+    /// Sequence field name in root structure (e.g., "frames")
     pub sequence_field: String,
     /// Item type name for the sequence (e.g., "can_frame")
     pub sequence_item_type: String,
@@ -34,56 +34,96 @@ impl SchemaFieldMap {
     ///
     /// The timestamp field must be named "ts" or "timestamp".
     pub fn from_schema(schema: &GbfSchema) -> Result<Self, CodecError> {
+        let root = &schema.structure;
+
         // Find timestamp field - must be named "ts" or "timestamp"
-        let timestamp_field = schema
-            .packet
+        let timestamp_field = root
             .fields
             .iter()
             .find(|f| f.name == "ts" || f.name == "timestamp")
             .map(|f| f.name.clone())
             .ok_or_else(|| {
                 CodecError::Other(
-                    "No timestamp field found in packet. Field must be named 'ts' or 'timestamp'."
+                    "No timestamp field found in root structure. Field must be named 'ts' or 'timestamp'."
                         .to_string(),
                 )
             })?;
 
         // Find sequence field
-        let sequence_field_def = schema
-            .packet
+        let sequence_field_def = root
             .fields
             .iter()
             .find(|f| f.field_type == "sequence")
-            .ok_or_else(|| CodecError::Other("No sequence field found in packet".to_string()))?;
+            .ok_or_else(|| {
+                CodecError::Other("No sequence field found in root structure".to_string())
+            })?;
 
         let sequence_field = sequence_field_def.name.clone();
-        let sequence_item_type = sequence_field_def
-            .item
-            .as_ref()
-            .ok_or_else(|| CodecError::Other("Sequence field missing item type".to_string()))?
-            .type_name
-            .clone();
 
-        // Get the frame type definition
-        let frame_type = schema.get_type(&sequence_item_type).ok_or_else(|| {
-            CodecError::Other(format!("Frame type '{}' not found", sequence_item_type))
+        // Validate: no bytes field may appear before the sequence length field.
+        // split_packets() uses fixed-width arithmetic to locate the length field;
+        // a bytes field with a variable length would make that offset incalculable.
+        if let Some(ref_name) = sequence_field_def.length_ref.as_ref() {
+            for f in root.fields.iter().take_while(|f| &f.name != ref_name) {
+                if f.field_type == "bytes" {
+                    return Err(CodecError::Other(format!(
+                        "bytes field '{}' appears before the sequence length field '{}' \
+                         in the root structure; packet splitting requires all header \
+                         fields preceding the length field to be fixed-width",
+                        f.name, ref_name
+                    )));
+                }
+            }
+        }
+
+        let sequence_item = sequence_field_def.structure.as_ref().ok_or_else(|| {
+            CodecError::Other("Sequence field missing structure definition".to_string())
         })?;
 
-        // Find CAN ID field (typically u16 type or named "can_id" or contains "id")
-        let frame_id_field = frame_type
-            .fields
-            .iter()
-            .find(|f| f.name == "can_id" || f.name.contains("id"))
-            .map(|f| f.name.clone())
-            .ok_or_else(|| CodecError::Other("No ID field found in frame type".to_string()))?;
+        let sequence_item_type = sequence_item.type_name.clone();
 
-        // Find payload field (bytes type or named "payload"/"data")
-        let frame_payload_field = frame_type
-            .fields
-            .iter()
-            .find(|f| f.field_type == "bytes" || f.name == "payload" || f.name == "data")
-            .map(|f| f.name.clone())
-            .ok_or_else(|| CodecError::Other("No payload field found in frame type".to_string()))?;
+        // Get the frame type definition
+        let frame_fields = &sequence_item.fields;
+
+        // Exactly one bytes field must carry 'format', and it must have 'format.id_ref'.
+        // Deriving both frame_payload_field and frame_id_field from the same field ensures
+        // they can never disagree.
+        let payload_field = {
+            let mut candidates = frame_fields.iter().filter(|f| f.format.is_some());
+            let first = candidates.next().ok_or_else(|| {
+                CodecError::Other(
+                    "No payload field (bytes field with 'format') found in frame type".to_string(),
+                )
+            })?;
+            if candidates.next().is_some() {
+                return Err(CodecError::Other(
+                    "Frame struct has more than one field with 'format'; \
+                     exactly one bytes payload field is allowed"
+                        .to_string(),
+                ));
+            }
+            if first.field_type != "bytes" {
+                return Err(CodecError::Other(format!(
+                    "Field '{}' has 'format' but is not a bytes field (type: '{}'). \
+                     'format' is only valid on bytes fields.",
+                    first.name, first.field_type
+                )));
+            }
+            first
+        };
+        let frame_payload_field = payload_field.name.clone();
+        let frame_id_field = payload_field
+            .format
+            .as_ref()
+            .and_then(|fmt| fmt.id_ref.as_ref())
+            .ok_or_else(|| {
+                CodecError::Other(format!(
+                    "Payload field '{}' is missing 'format.id_ref'; \
+                     it must point to the ID field in the frame struct.",
+                    frame_payload_field
+                ))
+            })?
+            .clone();
 
         Ok(Self {
             timestamp_field,
@@ -118,16 +158,20 @@ pub(crate) enum OptFieldType {
         id_ref: bool,
     },
     U16Le {
-        #[allow(dead_code)]
         id_ref: bool,
     },
-    U32Be,
-    U32Le,
+    U32Be {
+        id_ref: bool,
+    },
+    U32Le {
+        id_ref: bool,
+    },
     U64Be,
     U64Le,
     Sequence {
         length_ref_index: usize,
-        item_type: String,
+        /// Pre-compiled item struct for this specific sequence field.
+        item_def: Option<Box<OptTypeDef>>,
     },
     Bytes {
         length_ref_index: usize,
@@ -135,6 +179,7 @@ pub(crate) enum OptFieldType {
     },
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct OptTypeDef {
     pub fields: Vec<OptField>,
     /// Number of storage slots needed for this type's context
@@ -144,31 +189,20 @@ pub(crate) struct OptTypeDef {
 /// GBF parser that converts binary packets into structured frames based on JSON schema.
 pub struct GbfParser {
     packet_def: OptTypeDef,
-    type_defs: HashMap<String, OptTypeDef>,
     field_map: SchemaFieldMap,
 }
 
 impl GbfParser {
     /// Create a new GBF parser from a schema.
-    pub fn new(gbf_schema: GbfSchema) -> Self {
-        // Extract field name mappings first
-        let field_map = SchemaFieldMap::from_schema(&gbf_schema)
-            .expect("Failed to extract field mappings from schema");
+    pub fn new(gbf_schema: GbfSchema) -> Result<Self, CodecError> {
+        let field_map = SchemaFieldMap::from_schema(&gbf_schema)?;
 
-        // Compile schema into optimized form
-        let type_defs: HashMap<String, OptTypeDef> = gbf_schema
-            .types
-            .iter()
-            .map(|(k, v)| (k.clone(), Self::compile_type_def(v)))
-            .collect();
+        let packet_def = Self::compile_type_def_from_fields(&gbf_schema.structure.fields)?;
 
-        let packet_def = Self::compile_type_def(&gbf_schema.packet);
-
-        Self {
+        Ok(Self {
             packet_def,
-            type_defs,
             field_map,
-        }
+        })
     }
 
     /// Get the schema field name mappings.
@@ -176,16 +210,16 @@ impl GbfParser {
         &self.field_map
     }
 
-    fn compile_type_def(def: &TypeDef) -> OptTypeDef {
-        let mut fields = Vec::with_capacity(def.fields.len());
+    fn compile_type_def_from_fields(fields_def: &[Field]) -> Result<OptTypeDef, CodecError> {
+        let mut fields = Vec::with_capacity(fields_def.len());
         let mut name_to_index = HashMap::new();
 
         // First pass: assign storage indices to all fields that might be referenced
-        for (i, field) in def.fields.iter().enumerate() {
+        for (i, field) in fields_def.iter().enumerate() {
             name_to_index.insert(field.name.clone(), i);
         }
 
-        for (i, field) in def.fields.iter().enumerate() {
+        for (i, field) in fields_def.iter().enumerate() {
             let kind = match field.field_type.as_str() {
                 "u8" => OptFieldType::U8 {
                     const_val: field.const_value,
@@ -193,80 +227,156 @@ impl GbfParser {
                     shift: field.read_shift,
                 },
                 "u16be" => {
-                    let is_id_ref = field.format.as_ref().is_some_and(|f| f.id_ref.is_some())
-                        || def.fields.iter().any(|f| {
-                            f.format.as_ref().and_then(|fmt| fmt.id_ref.as_ref())
-                                == Some(&field.name)
-                        })
-                        || field.name == "can_id"; // Also treat can_id as id_ref by convention
+                    let is_id_ref = fields_def.iter().any(|f| {
+                        f.format.as_ref().and_then(|fmt| fmt.id_ref.as_ref()) == Some(&field.name)
+                    });
                     OptFieldType::U16Be { id_ref: is_id_ref }
                 }
                 "u16le" => {
-                    let is_id_ref = field.format.as_ref().is_some_and(|f| f.id_ref.is_some())
-                        || def.fields.iter().any(|f| {
-                            f.format.as_ref().and_then(|fmt| fmt.id_ref.as_ref())
-                                == Some(&field.name)
-                        });
+                    let is_id_ref = fields_def.iter().any(|f| {
+                        f.format.as_ref().and_then(|fmt| fmt.id_ref.as_ref()) == Some(&field.name)
+                    });
                     OptFieldType::U16Le { id_ref: is_id_ref }
                 }
-                "u32be" => OptFieldType::U32Be,
-                "u32le" => OptFieldType::U32Le,
+                "u32be" => {
+                    let is_id_ref = fields_def.iter().any(|f| {
+                        f.format.as_ref().and_then(|fmt| fmt.id_ref.as_ref()) == Some(&field.name)
+                    });
+                    OptFieldType::U32Be { id_ref: is_id_ref }
+                }
+                "u32le" => {
+                    let is_id_ref = fields_def.iter().any(|f| {
+                        f.format.as_ref().and_then(|fmt| fmt.id_ref.as_ref()) == Some(&field.name)
+                    });
+                    OptFieldType::U32Le { id_ref: is_id_ref }
+                }
                 "u64be" => OptFieldType::U64Be,
                 "u64le" => OptFieldType::U64Le,
                 "sequence" => {
-                    let ref_name = field
-                        .length_ref
+                    let ref_name = field.length_ref.as_ref().ok_or_else(|| {
+                        CodecError::Other(format!(
+                            "sequence field '{}' is missing 'length_ref'",
+                            field.name
+                        ))
+                    })?;
+                    let ref_idx = *name_to_index.get(ref_name).ok_or_else(|| {
+                        CodecError::Other(format!(
+                            "sequence field '{}' has unknown length_ref '{}'",
+                            field.name, ref_name
+                        ))
+                    })?;
+                    if ref_idx >= i {
+                        return Err(CodecError::Other(format!(
+                            "sequence field '{}' has length_ref '{}' that must refer to an earlier field",
+                            field.name, ref_name
+                        )));
+                    }
+                    let item_def = field
+                        .structure
                         .as_ref()
-                        .expect("sequence must have length_ref");
-                    let ref_idx = *name_to_index.get(ref_name).expect("invalid length_ref");
+                        .ok_or_else(|| {
+                            CodecError::Other(format!(
+                                "sequence field '{}' is missing 'structure' definition",
+                                field.name
+                            ))
+                        })
+                        .and_then(|s| {
+                            if let Some(nested) =
+                                s.fields.iter().find(|f| f.field_type == "sequence")
+                            {
+                                return Err(CodecError::Other(format!(
+                                    "sequence field '{}' contains unsupported nested \
+                                     sequence field '{}'",
+                                    field.name, nested.name
+                                )));
+                            }
+                            Self::compile_type_def_from_fields(&s.fields).map(Box::new)
+                        })?;
+                    if let Some(unit) = field.length_unit.as_deref()
+                        && unit != "bytes"
+                    {
+                        return Err(CodecError::Other(format!(
+                            "sequence field '{}' has unsupported length_unit '{}'; \
+                             only \"bytes\" is supported",
+                            field.name, unit
+                        )));
+                    }
                     OptFieldType::Sequence {
                         length_ref_index: ref_idx,
-                        item_type: field
-                            .item
-                            .as_ref()
-                            .map(|i| i.type_name.clone())
-                            .unwrap_or_default(),
+                        item_def: Some(item_def),
                     }
                 }
                 "bytes" => {
-                    let ref_name = field
-                        .length_ref
-                        .as_ref()
-                        .expect("bytes must have length_ref");
-                    let ref_idx = *name_to_index.get(ref_name).expect("invalid length_ref");
-                    let id_ref_idx = field
-                        .format
-                        .as_ref()
-                        .and_then(|f| f.id_ref.as_ref())
-                        .map(|name| *name_to_index.get(name).expect("invalid id_ref"));
-
+                    let ref_name = field.length_ref.as_ref().ok_or_else(|| {
+                        CodecError::Other(format!(
+                            "bytes field '{}' is missing 'length_ref'",
+                            field.name
+                        ))
+                    })?;
+                    let ref_idx = *name_to_index.get(ref_name).ok_or_else(|| {
+                        CodecError::Other(format!(
+                            "bytes field '{}' has unknown length_ref '{}'",
+                            field.name, ref_name
+                        ))
+                    })?;
+                    if ref_idx >= i {
+                        return Err(CodecError::Other(format!(
+                            "bytes field '{}' has length_ref '{}' that must refer to an earlier field",
+                            field.name, ref_name
+                        )));
+                    }
+                    let id_ref_idx = if let Some(fmt) = field.format.as_ref() {
+                        if let Some(name) = fmt.id_ref.as_ref() {
+                            let idx = *name_to_index.get(name).ok_or_else(|| {
+                                CodecError::Other(format!(
+                                    "bytes field '{}' has unknown id_ref '{}'",
+                                    field.name, name
+                                ))
+                            })?;
+                            const CAN_ID_INTEGER_TYPES: &[&str] =
+                                &["u8", "u16be", "u16le", "u32be", "u32le"];
+                            let target_type = fields_def[idx].field_type.as_str();
+                            if !CAN_ID_INTEGER_TYPES.contains(&target_type) {
+                                return Err(CodecError::Other(format!(
+                                    "bytes field '{}' has id_ref '{}' pointing to \
+                                     unsupported field type '{}'; id_ref must refer \
+                                     to a CAN-ID-compatible integer field (u8/u16*/u32*)",
+                                    field.name, name, target_type
+                                )));
+                            }
+                            Some(idx)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     OptFieldType::Bytes {
                         length_ref_index: ref_idx,
                         format_id_ref_index: id_ref_idx,
                     }
                 }
-                _ => OptFieldType::U8 {
-                    const_val: None,
-                    mask: None,
-                    shift: None,
-                }, // fallback
+                _ => {
+                    return Err(CodecError::Other(format!(
+                        "field '{}' has unsupported type '{}'",
+                        field.name, field.field_type
+                    )));
+                }
             };
 
             fields.push(OptField {
                 _name: field.name.clone(),
                 kind,
                 index: i,
-                is_ts: field.name == "ts"
-                    || field.name == "timestamp"
-                    || field.name.contains("time"),
+                is_ts: field.name == "ts" || field.name == "timestamp",
                 store_index: Some(i), // Store everything for now
             });
         }
 
-        OptTypeDef {
+        Ok(OptTypeDef {
             fields,
-            storage_size: def.fields.len(),
-        }
+            storage_size: fields_def.len(),
+        })
     }
 
     /// Split a payload into individual packets based on the schema.
@@ -357,7 +467,7 @@ impl GbfParser {
                     }
                     cursor += 2;
                 }
-                OptFieldType::U32Be => {
+                OptFieldType::U32Be { .. } => {
                     if cursor + 4 > packet.len() {
                         break;
                     }
@@ -374,7 +484,7 @@ impl GbfParser {
                     }
                     cursor += 4;
                 }
-                OptFieldType::U32Le => {
+                OptFieldType::U32Le { .. } => {
                     if cursor + 4 > packet.len() {
                         break;
                     }
@@ -427,17 +537,22 @@ impl GbfParser {
                 }
                 OptFieldType::Sequence {
                     length_ref_index,
-                    item_type,
+                    item_def,
                 } => {
                     let seq_len = context[*length_ref_index] as usize;
-                    let seq_end = (cursor + seq_len).min(packet.len());
+                    let seq_end = cursor.saturating_add(seq_len).min(packet.len());
 
-                    if let Some(frame_type) = self.type_defs.get(item_type) {
-                        frames = self.parse_frames(&packet[cursor..seq_end], frame_type)?;
+                    if let Some(def) = item_def {
+                        frames = self.parse_frames(&packet[cursor..seq_end], def)?;
                     }
                     cursor = seq_end;
                 }
-                _ => {}
+                OptFieldType::Bytes {
+                    length_ref_index, ..
+                } => {
+                    let len = context[*length_ref_index] as usize;
+                    cursor += len.min(packet.len() - cursor);
+                }
             }
         }
 
@@ -520,7 +635,7 @@ impl GbfParser {
                         }
                         frame_cursor += 2;
                     }
-                    OptFieldType::U32Be => {
+                    OptFieldType::U32Be { id_ref } => {
                         if frame_cursor + 4 > buffer.len() {
                             break;
                         }
@@ -532,26 +647,88 @@ impl GbfParser {
                         if let Some(idx) = field.store_index {
                             context[idx] = value;
                         }
-                        // For u32be fields containing "id" in name, treat as can_id
-                        if field._name.contains("id") {
+                        if *id_ref {
                             can_id = Some(value as u32);
                         }
                         frame_cursor += 4;
+                    }
+                    OptFieldType::U16Le { id_ref } => {
+                        if frame_cursor + 2 > buffer.len() {
+                            break;
+                        }
+                        let value =
+                            u16::from_le_bytes([buffer[frame_cursor], buffer[frame_cursor + 1]])
+                                as u64;
+                        if let Some(idx) = field.store_index {
+                            context[idx] = value;
+                        }
+                        if *id_ref {
+                            can_id = Some(value as u32);
+                        }
+                        frame_cursor += 2;
+                    }
+                    OptFieldType::U32Le { id_ref } => {
+                        if frame_cursor + 4 > buffer.len() {
+                            break;
+                        }
+                        let value = u32::from_le_bytes(
+                            buffer[frame_cursor..frame_cursor + 4]
+                                .try_into()
+                                .expect("4-byte slice; bounds checked above"),
+                        ) as u64;
+                        if let Some(idx) = field.store_index {
+                            context[idx] = value;
+                        }
+                        if *id_ref {
+                            can_id = Some(value as u32);
+                        }
+                        frame_cursor += 4;
+                    }
+                    OptFieldType::U64Be => {
+                        if frame_cursor + 8 > buffer.len() {
+                            break;
+                        }
+                        let value = u64::from_be_bytes(
+                            buffer[frame_cursor..frame_cursor + 8]
+                                .try_into()
+                                .expect("8-byte slice; bounds checked above"),
+                        );
+                        if let Some(idx) = field.store_index {
+                            context[idx] = value;
+                        }
+                        frame_cursor += 8;
+                    }
+                    OptFieldType::U64Le => {
+                        if frame_cursor + 8 > buffer.len() {
+                            break;
+                        }
+                        let value = u64::from_le_bytes(
+                            buffer[frame_cursor..frame_cursor + 8]
+                                .try_into()
+                                .expect("8-byte slice; bounds checked above"),
+                        );
+                        if let Some(idx) = field.store_index {
+                            context[idx] = value;
+                        }
+                        frame_cursor += 8;
                     }
                     OptFieldType::Bytes {
                         length_ref_index,
                         format_id_ref_index,
                     } => {
                         let len = context[*length_ref_index] as usize;
-                        payload_start = frame_cursor;
-                        payload_len = len.min(buffer.len() - frame_cursor);
+                        let clamped_len = len.min(buffer.len() - frame_cursor);
 
-                        // Check if we need to get can_id from a reference field
+                        // Only capture payload boundaries for the bytes field that carries
+                        // format.id_ref. Raw sibling bytes fields (e.g. checksum, metadata)
+                        // still advance frame_cursor but must not overwrite the payload bounds.
                         if let Some(id_idx) = format_id_ref_index {
+                            payload_start = frame_cursor;
+                            payload_len = clamped_len;
                             can_id = Some(context[*id_idx] as u32);
                         }
 
-                        frame_cursor += payload_len;
+                        frame_cursor += clamped_len;
                     }
                     _ => {}
                 }
@@ -566,7 +743,7 @@ impl GbfParser {
                 && let Some(cid) = can_id
             {
                 frames.push(GbfFrame {
-                    can_id: cid as u16, // Cast to u16 for GbfFrame compatibility
+                    can_id: cid,
                     payload: buffer[payload_start..payload_start + payload_len].to_vec(),
                 });
             }
@@ -587,7 +764,7 @@ impl GbfParser {
             match field.kind {
                 OptFieldType::U8 { .. } => size += 1,
                 OptFieldType::U16Be { .. } | OptFieldType::U16Le { .. } => size += 2,
-                OptFieldType::U32Be | OptFieldType::U32Le => size += 4,
+                OptFieldType::U32Be { .. } | OptFieldType::U32Le { .. } => size += 4,
                 OptFieldType::U64Be | OptFieldType::U64Le => size += 8,
                 OptFieldType::Sequence { .. } | OptFieldType::Bytes { .. } => break,
             }
@@ -615,7 +792,7 @@ impl GbfParser {
                 let size = match field.kind {
                     OptFieldType::U8 { .. } => 1,
                     OptFieldType::U16Be { .. } => 2,
-                    OptFieldType::U32Be => 4,
+                    OptFieldType::U32Be { .. } => 4,
                     OptFieldType::U64Be => 8,
                     _ => return None,
                 };
@@ -657,21 +834,25 @@ mod tests {
     fn get_standard_schema() -> GbfSchema {
         let json = r#"
         {
-            "types": {
-                "can_frame": {
-                    "fields": [
-                        { "name": "magic", "type": "u8", "const": 85 },
-                        { "name": "can_id", "type": "u16be" },
-                        { "name": "data_len", "type": "u8" },
-                        { "name": "payload", "type": "bytes", "length_ref": "data_len", "format": { "id_ref": "can_id" } }
-                    ]
-                }
-            },
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "ts", "type": "u64be" },
                     { "name": "total_len", "type": "u16be" },
-                    { "name": "frames", "type": "sequence", "length_ref": "total_len", "item": { "type": "can_frame" } }
+                    { 
+                        "name": "frames", 
+                        "type": "sequence", 
+                        "length_ref": "total_len", 
+                        "structure": { 
+                            "type": "struct",
+                            "fields": [
+                                { "name": "magic", "type": "u8", "const": 85 },
+                                { "name": "can_id", "type": "u16be" },
+                                { "name": "data_len", "type": "u8" },
+                                { "name": "payload", "type": "bytes", "length_ref": "data_len", "format": { "id_ref": "can_id" } }
+                            ]
+                        }
+                    }
                 ]
             }
         }
@@ -685,19 +866,23 @@ mod tests {
         // Schema where total_len (u32) comes before timestamp
         let json = r#"
         {
-            "types": {
-                "frame": {
-                    "fields": [
-                        { "name": "id", "type": "u16be" },
-                        { "name": "data", "type": "bytes", "length_ref": "id" }
-                    ]
-                }
-            },
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "total_len", "type": "u32be" },
                     { "name": "ts", "type": "u64be" },
-                    { "name": "frames", "type": "sequence", "length_ref": "total_len", "item": { "type": "frame" } }
+                    { 
+                        "name": "frames", 
+                        "type": "sequence", 
+                        "length_ref": "total_len", 
+                        "structure": { 
+                            "type": "struct",
+                            "fields": [
+                                { "name": "id", "type": "u16be" },
+                                { "name": "data", "type": "bytes", "length_ref": "id", "format": { "id_ref": "id" } }
+                            ]
+                        } 
+                    }
                 ]
             }
         }
@@ -714,19 +899,23 @@ mod tests {
     fn test_timestamp_requires_ts_or_timestamp_name() {
         let json = r#"
         {
-            "types": {
-                "frame": {
-                    "fields": [
-                        { "name": "id", "type": "u16be" },
-                        { "name": "data", "type": "bytes", "length_ref": "id" }
-                    ]
-                }
-            },
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "epoch", "type": "u64be" },
                     { "name": "count", "type": "u16be" },
-                    { "name": "items", "type": "sequence", "length_ref": "count", "item": { "type": "frame" } }
+                    { 
+                        "name": "items", 
+                        "type": "sequence", 
+                        "length_ref": "count", 
+                        "structure": { 
+                            "type": "struct",
+                            "fields": [
+                                { "name": "id", "type": "u16be" },
+                                { "name": "data", "type": "bytes", "length_ref": "id", "format": { "id_ref": "id" } }
+                            ]
+                        } 
+                    }
                 ]
             }
         }
@@ -743,7 +932,7 @@ mod tests {
     #[test]
     fn test_split_packets_empty_payload() {
         let schema = get_standard_schema();
-        let parser = GbfParser::new(schema);
+        let parser = GbfParser::new(schema).expect("create parser");
 
         let packets = parser.split_packets(&[]);
         assert!(packets.is_empty());
@@ -753,7 +942,7 @@ mod tests {
     #[test]
     fn test_split_packets_payload_smaller_than_header() {
         let schema = get_standard_schema();
-        let parser = GbfParser::new(schema);
+        let parser = GbfParser::new(schema).expect("create parser");
 
         // Only 5 bytes, but header needs 10 (8 for ts + 2 for total_len)
         let packets = parser.split_packets(&[0, 0, 0, 0, 0]);
@@ -764,7 +953,7 @@ mod tests {
     #[test]
     fn test_parse_packet_extracts_timestamp_and_frames() {
         let schema = get_standard_schema();
-        let parser = GbfParser::new(schema);
+        let parser = GbfParser::new(schema).expect("create parser");
 
         let mut packet = Vec::new();
         packet.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 100]); // ts = 100
@@ -785,7 +974,7 @@ mod tests {
     #[test]
     fn test_parse_packet_heartbeat_no_frames() {
         let schema = get_standard_schema();
-        let parser = GbfParser::new(schema);
+        let parser = GbfParser::new(schema).expect("create parser");
 
         let mut packet = Vec::new();
         packet.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 50]); // ts = 50
@@ -800,12 +989,12 @@ mod tests {
     #[test]
     fn test_field_map_returns_correct_mappings() {
         let schema = get_standard_schema();
-        let parser = GbfParser::new(schema);
+        let parser = GbfParser::new(schema).expect("create parser");
         let map = parser.field_map();
 
         assert_eq!(map.timestamp_field, "ts");
         assert_eq!(map.sequence_field, "frames");
-        assert_eq!(map.sequence_item_type, "can_frame");
+        assert_eq!(map.sequence_item_type, "struct");
         assert_eq!(map.frame_id_field, "can_id");
         assert_eq!(map.frame_payload_field, "payload");
     }
@@ -814,7 +1003,7 @@ mod tests {
     #[test]
     fn test_split_multiple_packets() {
         let schema = get_standard_schema();
-        let parser = GbfParser::new(schema);
+        let parser = GbfParser::new(schema).expect("create parser");
 
         let mut payload = Vec::new();
         // Packet 1
@@ -832,7 +1021,7 @@ mod tests {
     #[test]
     fn test_parse_packet_skips_invalid_magic() {
         let schema = get_standard_schema();
-        let parser = GbfParser::new(schema);
+        let parser = GbfParser::new(schema).expect("create parser");
 
         let mut packet = Vec::new();
         packet.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 100]); // ts
@@ -847,13 +1036,54 @@ mod tests {
         assert!(frames.is_empty());
     }
 
+    // Test that a schema with no root 'structure' field is rejected at deserialization time.
+    #[test]
+    fn test_parser_rejects_missing_root_structure() {
+        let json = r#"{ "other": {} }"#;
+        let result: Result<GbfSchema, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "expected serde to reject a schema missing the 'structure' field"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("structure"),
+            "expected error to mention 'structure', got: {err}"
+        );
+    }
+
+    // Test that GbfParser::new() rejects a sequence field with no nested 'structure'.
+    #[test]
+    fn test_parser_rejects_sequence_missing_structure() {
+        let json = r#"
+        {
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "total_len", "type": "u16be" },
+                    { "name": "frames", "type": "sequence", "length_ref": "total_len" }
+                ]
+            }
+        }
+        "#;
+        let schema: GbfSchema = serde_json::from_str(json).expect("parse");
+        match GbfParser::new(schema) {
+            Err(e) => assert!(
+                e.to_string().to_lowercase().contains("missing structure"),
+                "unexpected error: {e}"
+            ),
+            Ok(_) => panic!("expected an error for sequence missing structure"),
+        }
+    }
+
     // Test SchemaFieldMap error cases
     #[test]
     fn test_schema_field_map_no_sequence_error() {
         let json = r#"
         {
-            "types": {},
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "ts", "type": "u64be" }
                 ]
@@ -868,6 +1098,205 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("No sequence field")
+        );
+    }
+
+    // Test that field names containing "time" but not matching "ts"/"timestamp" exactly
+    // are NOT flagged as the timestamp field.
+    #[test]
+    fn test_is_ts_not_matched_by_time_substring() {
+        let json = r#"
+        {
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "uptime", "type": "u64be" },
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "total_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "total_len",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "id", "type": "u16be" },
+                                { "name": "data", "type": "bytes", "length_ref": "id", "format": { "id_ref": "id" } }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        "#;
+        let schema: GbfSchema = serde_json::from_str(json).expect("parse");
+        let parser = GbfParser::new(schema).expect("create parser");
+
+        // Build a packet: uptime=999, ts=42, total_len=0
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&999u64.to_be_bytes()); // uptime
+        packet.extend_from_slice(&42u64.to_be_bytes()); // ts
+        packet.extend_from_slice(&0u16.to_be_bytes()); // total_len
+
+        let (timestamp, _) = parser.parse_packet(&packet).expect("parse");
+        // The timestamp should be 42 (from "ts"), not 999 (from "uptime")
+        assert_eq!(timestamp, 42);
+    }
+
+    // Test that a root-level bytes field advances cursor correctly so the
+    // sequence field that follows parses from the right offset.
+    #[test]
+    fn test_parser_rejects_bytes_field_before_sequence_length() {
+        // A schema with a bytes field before the sequence length field is rejected at
+        // compile time (GbfParser::new), because split_packets() cannot compute the
+        // offset to the length field when a variable-length field precedes it.
+        let json = r#"
+        {
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "hdr_len", "type": "u8" },
+                    { "name": "header", "type": "bytes", "length_ref": "hdr_len" },
+                    { "name": "seq_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "seq_len",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "can_id", "type": "u16be" },
+                                { "name": "dlen", "type": "u8" },
+                                { "name": "payload", "type": "bytes", "length_ref": "dlen", "format": { "id_ref": "can_id" } }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        "#;
+        let schema: GbfSchema = serde_json::from_str(json).expect("parse");
+        let result = GbfParser::new(schema);
+        assert!(
+            result.is_err(),
+            "should reject bytes field before length field"
+        );
+        let msg = result.err().unwrap().to_string();
+        assert!(
+            msg.contains("bytes field 'header'") && msg.contains("seq_len"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    // Test that frame items with u64be fields have their cursor advanced correctly.
+    #[test]
+    fn test_parse_frames_u64be_field_advances_cursor() {
+        let json = r#"
+        {
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "seq_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "seq_len",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "epoch", "type": "u64be" },
+                                { "name": "can_id", "type": "u16be" },
+                                { "name": "dlen", "type": "u8" },
+                                { "name": "payload", "type": "bytes", "length_ref": "dlen", "format": { "id_ref": "can_id" } }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        "#;
+        let schema: GbfSchema = serde_json::from_str(json).expect("parse");
+        let parser = GbfParser::new(schema).expect("create parser");
+
+        let frame_epoch: u64 = 0x0102030405060708;
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&50u64.to_be_bytes()); // ts = 50
+        // frame: epoch(8) + can_id(2) + dlen(1) + payload(2) = 13
+        packet.extend_from_slice(&13u16.to_be_bytes()); // seq_len = 13
+        packet.extend_from_slice(&frame_epoch.to_be_bytes()); // epoch
+        packet.extend_from_slice(&0x0300u16.to_be_bytes()); // can_id
+        packet.push(2); // dlen
+        packet.extend_from_slice(&[0xDE, 0xAD]); // payload
+
+        let (timestamp, frames) = parser.parse_packet(&packet).expect("parse");
+        assert_eq!(timestamp, 50);
+        assert_eq!(frames.len(), 1, "u64be frame field must advance cursor");
+        assert_eq!(frames[0].can_id, 0x0300);
+        assert_eq!(frames[0].payload, vec![0xDE, 0xAD]);
+    }
+
+    // Regression test: a frame struct with both a formatted payload field and a raw bytes
+    // sibling (e.g. checksum) must capture only the payload field's boundaries.
+    // The raw bytes sibling must advance the cursor but must NOT overwrite payload_start /
+    // payload_len, regardless of whether it appears before or after the payload field.
+    #[test]
+    fn test_parse_frames_raw_bytes_sibling_does_not_overwrite_payload() {
+        // Schema: frame has can_id, dlen, csum_len, payload (format), checksum (no format).
+        // The checksum field appears AFTER the payload field, which previously caused it to
+        // overwrite the payload boundaries.
+        let json = r#"
+        {
+            "structure": {
+                "type": "struct",
+                "fields": [
+                    { "name": "ts", "type": "u64be" },
+                    { "name": "seq_len", "type": "u16be" },
+                    {
+                        "name": "frames",
+                        "type": "sequence",
+                        "length_ref": "seq_len",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "can_id", "type": "u16be" },
+                                { "name": "dlen", "type": "u8" },
+                                { "name": "csum_len", "type": "u8" },
+                                { "name": "payload", "type": "bytes", "length_ref": "dlen", "format": { "id_ref": "can_id" } },
+                                { "name": "checksum", "type": "bytes", "length_ref": "csum_len" }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        "#;
+        let schema: GbfSchema = serde_json::from_str(json).expect("parse schema");
+        let parser = GbfParser::new(schema).expect("create parser");
+
+        let can_id: u16 = 0x0102;
+        let payload_data: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        let checksum_data: &[u8] = &[0xAB, 0xCD];
+        // frame size: can_id(2) + dlen(1) + csum_len(1) + payload(4) + checksum(2) = 10
+        let seq_len: u16 = 10;
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&42u64.to_be_bytes()); // ts
+        packet.extend_from_slice(&seq_len.to_be_bytes()); // seq_len
+        packet.extend_from_slice(&can_id.to_be_bytes()); // can_id
+        packet.push(payload_data.len() as u8); // dlen
+        packet.push(checksum_data.len() as u8); // csum_len
+        packet.extend_from_slice(payload_data); // payload
+        packet.extend_from_slice(checksum_data); // checksum (raw sibling)
+
+        let (timestamp, frames) = parser.parse_packet(&packet).expect("parse");
+        assert_eq!(timestamp, 42);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].can_id, u32::from(can_id));
+        assert_eq!(
+            frames[0].payload, payload_data,
+            "payload must not be overwritten by the raw checksum sibling bytes field"
         );
     }
 }

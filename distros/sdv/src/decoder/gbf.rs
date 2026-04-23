@@ -97,7 +97,7 @@ impl GbfDecoder {
         pattern: Option<String>,
     ) -> Result<Self, CodecError> {
         let can_decoder = CanDecoder::new(source_name, schema, dbc, pattern)?;
-        let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema);
+        let parser = crate::codec::gbf_parser::GbfParser::new(gbf_schema)?;
 
         Ok(Self {
             parser,
@@ -125,12 +125,20 @@ impl RecordDecoder for GbfDecoder {
             // Convert GbfFrame to CanFrame
             let can_frames: Vec<CanFrame> = gbf_frames
                 .iter()
-                .map(|gbf_frame| CanFrame {
-                    timestamp,
-                    can_id: gbf_frame.can_id,
-                    payload: &gbf_frame.payload,
+                .map(|gbf_frame| -> Result<CanFrame, CodecError> {
+                    let can_id = u16::try_from(gbf_frame.can_id).map_err(|_| {
+                        CodecError::Other(format!(
+                            "CAN ID {} exceeds u16 range (max 65535)",
+                            gbf_frame.can_id
+                        ))
+                    })?;
+                    Ok(CanFrame {
+                        timestamp,
+                        can_id,
+                        payload: &gbf_frame.payload,
+                    })
                 })
-                .collect();
+                .collect::<Result<Vec<_>, _>>()?;
 
             // If packet has no frames (e.g., heartbeat or all invalid), create a dummy frame
             let frames_to_decode = if can_frames.is_empty() {
@@ -166,30 +174,29 @@ mod tests {
     fn get_test_schema() -> GbfSchema {
         let json = r#"
         {
-            "types": {
-                "can_frame": {
-                    "fields": [
-                        { "name": "magic", "type": "u8", "const": 85 },
-                        { "name": "can_id", "type": "u16be" },
-                        { "name": "data_len", "type": "u8" },
-                        { 
-                            "name": "payload", 
-                            "type": "bytes",
-                            "length_ref": "data_len",
-                            "format": { "type": "dbc", "id_ref": "can_id" }
-                        }
-                    ]
-                }
-            },
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "ts", "type": "u64be" },
                     { "name": "total_len", "type": "u16be" },
                     { 
                         "name": "frames", 
-                        "type": "sequence", 
-                        "item": { "type": "can_frame" },
-                        "length_ref": "total_len",
+                        "type": "sequence",
+                        "length_ref": "total_len", 
+                        "structure": { 
+                            "type": "struct",
+                            "fields": [
+                                { "name": "magic", "type": "u8", "const": 85 },
+                                { "name": "can_id", "type": "u16be" },
+                                { "name": "data_len", "type": "u8" },
+                                { 
+                                    "name": "payload", 
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": { "type": "dbc", "id_ref": "can_id" }
+                                }
+                            ]
+                        },
                         "length_unit": "bytes"
                     }
                 ]

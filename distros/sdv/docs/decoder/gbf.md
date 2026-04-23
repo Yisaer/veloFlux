@@ -46,8 +46,8 @@ The GBF schema is a JSON file defining packet structure using primitive types an
 | `type` | String | One of the supported types |
 | `const` | u64 | Constant value constraint (e.g., magic bytes) |
 | `length_ref` | String | Reference to field containing length |
-| `length_unit` | String | `"bytes"` or `"count"` for sequences |
-| `item` | Object | Type reference for sequence items |
+| `length_unit` | String | `"bytes"` for sequences (only supported value) |
+| `structure` | Object | Inline struct definition for sequence items, using `type` and nested `fields` |
 | `format` | Object | Marks field as embedded payload (see below) |
 | `read_mask` | u64 | Bit mask applied after reading |
 | `read_shift` | u32 | Bit shift applied after masking |
@@ -67,7 +67,9 @@ Fields with a `format` object are treated as **embedded payloads**. The format t
 }
 ```
 
-- `id_ref`: Reference to the field containing the message ID (used for signal lookup)
+- `id_ref`: **Required.** The name of the sibling field that carries the message ID. The parser uses this — and only this — to identify the ID field; no field-naming conventions are applied.
+
+> **Constraint:** The frame item struct must contain **exactly one** `bytes` field with a `format` object, and that field must include `format.id_ref`. The parser rejects schemas that have zero or more than one such field at load time.
 
 ---
 
@@ -75,29 +77,28 @@ Fields with a `format` object are treated as **embedded payloads**. The format t
 
 ```json
 {
-  "types": {
-    "can_frame": {
-      "fields": [
-        { "name": "magic", "type": "u8", "const": 85 },
-        { "name": "can_id", "type": "u16be" },
-        { "name": "data_len", "type": "u8" },
-        {
-          "name": "payload",
-          "type": "bytes",
-          "length_ref": "data_len",
-          "format": { "id_ref": "can_id" }
-        }
-      ]
-    }
-  },
-  "packet": {
+  "structure": {
+    "type": "struct",
     "fields": [
       { "name": "ts", "type": "u64be" },
       { "name": "total_len", "type": "u16be" },
       {
         "name": "frames",
         "type": "sequence",
-        "item": { "type": "can_frame" },
+        "structure": {
+          "type": "struct",
+          "fields": [
+            { "name": "magic", "type": "u8", "const": 85 },
+            { "name": "can_id", "type": "u16be" },
+            { "name": "data_len", "type": "u8" },
+            {
+              "name": "payload",
+              "type": "bytes",
+              "length_ref": "data_len",
+              "format": { "id_ref": "can_id" }
+            }
+          ]
+        },
         "length_ref": "total_len",
         "length_unit": "bytes"
       }

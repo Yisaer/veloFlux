@@ -3,22 +3,24 @@
 //! This module defines the JSON schema format for describing binary packet structures.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-/// Root schema definition containing types and packet structure.
+/// Root schema definition. Contains a single inline `structure` that describes the packet layout.
+/// All sequence item types are defined inline via nested `structure` fields, not a named-type registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GbfSchema {
-    /// Named type definitions that can be referenced by packet fields.
-    #[serde(default)]
-    pub types: HashMap<String, TypeDef>,
-    /// The root packet structure definition.
-    pub packet: TypeDef,
+    /// Root packet structure definition. Required — serde will produce a clear
+    /// 'missing field `structure`' error at load time for malformed schemas.
+    pub structure: GbfStructure,
 }
 
-/// A type definition (struct with fields).
+/// A structure definition (struct with fields).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TypeDef {
-    /// List of fields in this struct.
+pub struct GbfStructure {
+    /// Type discriminator (usually "struct").
+    #[serde(rename = "type")]
+    pub type_name: String,
+    /// Fields of the structure.
+    #[serde(default)]
     pub fields: Vec<Field>,
 }
 
@@ -35,24 +37,16 @@ pub struct Field {
     pub const_value: Option<u64>,
     /// Reference to another field for length.
     pub length_ref: Option<String>,
-    /// Unit of length (bytes or count).
+    /// Unit of length. Only `"bytes"` is supported.
     pub length_unit: Option<String>,
-    /// For sequence types: the item type.
-    pub item: Option<ItemRef>,
+    /// For sequence types: the item structure.
+    pub structure: Option<GbfStructure>,
     /// Format specification for payload decoding.
     pub format: Option<FormatSpec>,
     /// Bit mask to apply after reading the value (for integers).
     pub read_mask: Option<u64>,
     /// Bit shift to apply after masking.
     pub read_shift: Option<u32>,
-}
-
-/// Reference to an item type (for sequences).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ItemRef {
-    /// Type name reference.
-    #[serde(rename = "type")]
-    pub type_name: String,
 }
 
 /// Format specification for payload decoding.
@@ -71,11 +65,6 @@ impl GbfSchema {
         let schema: GbfSchema = serde_json::from_str(&content)?;
         Ok(schema)
     }
-
-    /// Get a type definition by name.
-    pub fn get_type(&self, name: &str) -> Option<&TypeDef> {
-        self.types.get(name)
-    }
 }
 
 #[cfg(test)]
@@ -86,31 +75,30 @@ mod tests {
     fn test_parse_schema() {
         let json = r#"
         {
-            "types": {
-                "can_frame": {
-                    "fields": [
-                        { "name": "magic", "type": "u8", "const": 85 },
-                        { "name": "can_id", "type": "u16be" },
-                        { "name": "data_len", "type": "u8" },
-                        { 
-                            "name": "payload", 
-                            "type": "bytes",
-                            "length_ref": "data_len",
-                            "format": { "type": "dbc", "id_ref": "can_id" }
-                        }
-                    ]
-                }
-            },
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "ts", "type": "u64be" },
                     { "name": "total_len", "type": "u16be" },
                     { 
                         "name": "frames", 
                         "type": "sequence", 
-                        "item": { "type": "can_frame" },
                         "length_ref": "total_len",
-                        "length_unit": "bytes"
+                        "length_unit": "bytes",
+                        "structure": {
+                            "type": "struct",
+                            "fields": [
+                                { "name": "magic", "type": "u8", "const": 85 },
+                                { "name": "can_id", "type": "u16be" },
+                                { "name": "data_len", "type": "u8" },
+                                { 
+                                    "name": "payload", 
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": { "type": "dbc", "id_ref": "can_id" }
+                                }
+                            ]
+                        }
                     }
                 ]
             }
@@ -118,26 +106,25 @@ mod tests {
         "#;
 
         let schema: GbfSchema = serde_json::from_str(json).expect("parse schema");
+        let root = &schema.structure;
 
-        assert!(schema.types.contains_key("can_frame"));
-        assert_eq!(schema.packet.fields.len(), 3);
+        assert_eq!(root.fields.len(), 3);
 
-        let ts_field = &schema.packet.fields[0];
+        let ts_field = &root.fields[0];
         assert_eq!(ts_field.name, "ts");
         assert_eq!(ts_field.field_type, "u64be");
 
-        let frames_field = &schema.packet.fields[2];
+        let frames_field = &root.fields[2];
         assert_eq!(frames_field.name, "frames");
         assert_eq!(frames_field.field_type, "sequence");
-        assert_eq!(frames_field.item.as_ref().unwrap().type_name, "can_frame");
+        let can_frame_item = frames_field.structure.as_ref().expect("sequence structure"); // Field::structure stays Option
+        assert_eq!(can_frame_item.type_name, "struct");
+        assert_eq!(can_frame_item.fields.len(), 4);
 
-        let can_frame = schema.get_type("can_frame").unwrap();
-        assert_eq!(can_frame.fields.len(), 4);
-
-        let magic_field = &can_frame.fields[0];
+        let magic_field = &can_frame_item.fields[0];
         assert_eq!(magic_field.const_value, Some(85));
 
-        let payload_field = &can_frame.fields[3];
+        let payload_field = &can_frame_item.fields[3];
         assert_eq!(
             payload_field
                 .format
@@ -151,18 +138,18 @@ mod tests {
     }
 
     #[test]
-    fn test_get_type_returns_none_for_missing() {
-        let json = r#"{ "types": {}, "packet": { "fields": [] } }"#;
+    fn test_parse_minimal_schema() {
+        let json = r#"{ "structure": { "type": "struct", "fields": [] } }"#;
         let schema: GbfSchema = serde_json::from_str(json).expect("parse");
-        assert!(schema.get_type("nonexistent").is_none());
+        assert_eq!(schema.structure.fields.len(), 0);
     }
 
     #[test]
     fn test_schema_with_read_mask_and_shift() {
         let json = r#"
         {
-            "types": {},
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "flags", "type": "u8", "read_mask": 127, "read_shift": 1 }
                 ]
@@ -170,7 +157,8 @@ mod tests {
         }
         "#;
         let schema: GbfSchema = serde_json::from_str(json).expect("parse");
-        let field = &schema.packet.fields[0];
+        let root = &schema.structure;
+        let field = &root.fields[0];
         assert_eq!(field.read_mask, Some(127));
         assert_eq!(field.read_shift, Some(1));
     }
@@ -179,8 +167,8 @@ mod tests {
     fn test_schema_with_length_ref() {
         let json = r#"
         {
-            "types": {},
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "len", "type": "u16be" },
                     { "name": "data", "type": "bytes", "length_ref": "len" }
@@ -189,15 +177,8 @@ mod tests {
         }
         "#;
         let schema: GbfSchema = serde_json::from_str(json).expect("parse");
-        let data_field = &schema.packet.fields[1];
+        let root = &schema.structure;
+        let data_field = &root.fields[1];
         assert_eq!(data_field.length_ref.as_ref().unwrap(), "len");
-    }
-
-    #[test]
-    fn test_schema_empty_types() {
-        let json = r#"{ "types": {}, "packet": { "fields": [] } }"#;
-        let schema: GbfSchema = serde_json::from_str(json).expect("parse");
-        assert!(schema.types.is_empty());
-        assert!(schema.packet.fields.is_empty());
     }
 }

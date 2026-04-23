@@ -34,21 +34,22 @@ pub struct GbfMerger {
 
 impl GbfMerger {
     /// Create a new GBF Merger from a schema.
-    pub fn new(schema: GbfSchema) -> Self {
-        let parser = GbfParser::new(schema.clone());
-        Self {
+    pub fn new(schema: GbfSchema) -> Result<Self, CodecError> {
+        let parser = GbfParser::new(schema.clone())
+            .map_err(|e| CodecError::Other(format!("failed to create parser: {e}")))?;
+        Ok(Self {
             parser,
             encoder: GbfEncoder::new(schema),
             frame_set: HashMap::with_capacity(64),
             last_ts: 0,
-        }
+        })
     }
 
     /// Create a GBF Merger by loading schema from file.
     pub fn from_schema_file(schema_path: &str) -> Result<Self, CodecError> {
         let schema = GbfSchema::load(schema_path)
             .map_err(|e| CodecError::Other(format!("failed to load schema: {e}")))?;
-        Ok(Self::new(schema))
+        Self::new(schema)
     }
 
     /// Reset the merger state (useful for benchmarking)
@@ -66,7 +67,7 @@ impl Merger for GbfMerger {
 
         // Accumulate frames by CAN ID
         for frame in frames {
-            self.frame_set.insert(frame.can_id as u32, frame.payload);
+            self.frame_set.insert(frame.can_id, frame.payload);
         }
 
         Ok(())
@@ -124,29 +125,29 @@ mod tests {
     fn get_test_schema() -> GbfSchema {
         let json = r#"
         {
-            "types": {
-                "can_frame": {
-                    "fields": [
-                        { "name": "magic", "type": "u8", "const": 85 },
-                        { "name": "can_id", "type": "u16be" },
-                        { "name": "data_len", "type": "u8" },
-                        {
-                            "name": "payload",
-                            "type": "bytes",
-                            "length_ref": "data_len"
-                        }
-                    ]
-                }
-            },
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "ts", "type": "u64be" },
                     { "name": "total_len", "type": "u16be" },
                     {
                         "name": "frames",
                         "type": "sequence",
-                        "item": { "type": "can_frame" },
-                        "length_ref": "total_len",
+                        "length_ref": "total_len", 
+                        "structure": { 
+                            "type": "struct",
+                            "fields": [
+                                { "name": "magic", "type": "u8", "const": 85 },
+                                { "name": "can_id", "type": "u16be" },
+                                { "name": "data_len", "type": "u8" },
+                                {
+                                    "name": "payload",
+                                    "type": "bytes",
+                                    "length_ref": "data_len",
+                                    "format": { "id_ref": "can_id" }
+                                }
+                            ]
+                        },
                         "length_unit": "bytes"
                     }
                 ]
@@ -159,7 +160,7 @@ mod tests {
     #[test]
     fn test_gbf_merger_trigger_empty() {
         let schema = get_test_schema();
-        let mut merger = GbfMerger::new(schema);
+        let mut merger = GbfMerger::new(schema).expect("create merger");
 
         let result = merger.trigger().expect("trigger");
         assert!(result.is_none());
@@ -197,7 +198,7 @@ mod tests {
         data.extend_from_slice(b"EF");
 
         let schema = get_test_schema();
-        let mut merger = GbfMerger::new(schema);
+        let mut merger = GbfMerger::new(schema).expect("create merger");
 
         // Merge the packet
         merger.merge(&data).expect("merge");
@@ -228,34 +229,32 @@ mod tests {
         // Different: field names, types, sizes, and field order
         let schema_json = r#"
         {
-            "types": {
-                "message": {
-                    "fields": [
-                        { "name": "header", "type": "u8", "const": 170 },
-                        { "name": "length", "type": "u8" },
-                        { "name": "data", "type": "bytes", "length_ref": "length" },
-                        { "name": "msg_id", "type": "u32be" }
-                    ]
-                }
-            },
-            "packet": {
+            "structure": {
+                "type": "struct",
                 "fields": [
                     { "name": "timestamp", "type": "u32be" },
                     { "name": "count", "type": "u16be" },
                     {
                         "name": "messages",
                         "type": "sequence",
-                        "item": { "type": "message" },
-                        "length_ref": "count",
+                        "length_ref": "count", 
+                        "structure": { 
+                            "type": "struct",
+                            "fields": [
+                                { "name": "header", "type": "u8", "const": 170 },
+                                { "name": "length", "type": "u8" },
+                                { "name": "data", "type": "bytes", "length_ref": "length", "format": { "id_ref": "msg_id" } },
+                                { "name": "msg_id", "type": "u32be" }
+                            ]
+                        },
                         "length_unit": "bytes"
                     }
                 ]
             }
         }
         "#;
-
         let schema: GbfSchema = serde_json::from_str(schema_json).expect("parse schema");
-        let mut merger = GbfMerger::new(schema);
+        let mut merger = GbfMerger::new(schema).expect("create merger");
 
         // Create a packet with different structure:
         // - timestamp: u32be (4 bytes) instead of u64be

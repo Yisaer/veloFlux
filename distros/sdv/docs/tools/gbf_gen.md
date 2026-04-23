@@ -126,34 +126,33 @@ The tool requires a valid GBF schema JSON file. See [GBF Schema Documentation](.
 Key schema features used:
 - **`const` values**: Auto-filled during encoding (e.g., magic bytes)
 - **`length_ref`**: Automatically calculated from referenced data
-- **Type definitions**: Custom types are fully supported
+- **Inline struct fields**: Nested structures are defined inline under `structure.fields`
 
 ## Example Schema
 
 ```json
 {
-  "types": {
-    "can_frame": {
-      "fields": [
-        { "name": "magic", "type": "u8", "const": 85 },
-        { "name": "can_id", "type": "u16be" },
-        { "name": "data_len", "type": "u8" },
-        {
-          "name": "payload",
-          "type": "bytes",
-          "length_ref": "data_len"
-        }
-      ]
-    }
-  },
-  "packet": {
+  "structure": {
+    "type": "struct",
     "fields": [
       { "name": "ts", "type": "u64be" },
       { "name": "total_len", "type": "u16be" },
       {
         "name": "frames",
         "type": "sequence",
-        "item": { "type": "can_frame" },
+        "structure": {
+          "type": "struct",
+          "fields": [
+            { "name": "magic", "type": "u8", "const": 85 },
+            { "name": "can_id", "type": "u16be" },
+            { "name": "data_len", "type": "u8" },
+            {
+              "name": "payload",
+              "type": "bytes",
+              "length_ref": "data_len"
+            }
+          ]
+        },
         "length_ref": "total_len",
         "length_unit": "bytes"
       }
