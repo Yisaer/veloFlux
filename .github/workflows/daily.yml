@@ -141,46 +141,8 @@ jobs:
         if: ${{ always() && (env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily') }}
         run: |
           set +e
-          wait_for_process_exit() {
-            pid="$1"
-            for _ in $(seq 1 30); do
-              if ! kill -0 "$pid" 2>/dev/null; then
-                return 0
-              fi
-              sleep 1
-            done
-            return 1
-          }
-          wait_for_port_release() {
-            port="$1"
-            for _ in $(seq 1 30); do
-              listeners="$(ss -ltnH "( sport = :${port} )" 2>/dev/null)" || {
-                sleep 1
-                continue
-              }
-              if [ -z "$listeners" ]; then
-                return 0
-              fi
-              sleep 1
-            done
-            return 1
-          }
-          report_port_release_failure() {
-            echo "ports still listening after veloflux shutdown wait" >&2
-            ss -ltnp 2>/dev/null >&2 || true
-            ps -ef | grep '[v]eloflux' >&2 || true
-          }
-          if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
-            pid="$(cat tmp/perf_daily_ci/veloflux.pid)"
-            if kill -0 "$pid" 2>/dev/null; then
-              kill "$pid" 2>/dev/null || true
-              if ! wait_for_process_exit "$pid"; then
-                kill -9 "$pid" 2>/dev/null || true
-                wait_for_process_exit "$pid" || true
-              fi
-            fi
-            rm -f tmp/perf_daily_ci/veloflux.pid
-          fi
+          source scripts/ci/veloflux_process.sh
+          stop_veloflux_from_pidfile tmp/perf_daily_ci/veloflux.pid
           if ! wait_for_port_release 8080 \
             || ! wait_for_port_release 9898 \
             || ! wait_for_port_release 6060; then
@@ -265,24 +227,5 @@ jobs:
         if: ${{ always() && (env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily') }}
         run: |
           set +e
-          wait_for_process_exit() {
-            pid="$1"
-            for _ in $(seq 1 30); do
-              if ! kill -0 "$pid" 2>/dev/null; then
-                return 0
-              fi
-              sleep 1
-            done
-            return 1
-          }
-          if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
-            pid="$(cat tmp/perf_daily_ci/veloflux.pid)"
-            if kill -0 "$pid" 2>/dev/null; then
-              kill "$pid" 2>/dev/null || true
-              if ! wait_for_process_exit "$pid"; then
-                kill -9 "$pid" 2>/dev/null || true
-                wait_for_process_exit "$pid" || true
-              fi
-            fi
-            rm -f tmp/perf_daily_ci/veloflux.pid
-          fi
+          source scripts/ci/veloflux_process.sh
+          stop_veloflux_from_pidfile tmp/perf_daily_ci/veloflux.pid
