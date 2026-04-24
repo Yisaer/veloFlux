@@ -43,7 +43,7 @@
     omit-if-empty suppression, but the previous `covers` list omitted
     `sink.memory_collection.materialize` and `sink.output.row_diff`.
 
-## Tracked Interaction Pairings With Split Evidence
+## Cross-Module Interaction Pairings With Split Evidence
 
 ### 1. Eventtime hidden on-change tumbling pairing
 
@@ -59,7 +59,7 @@
     `explain_pipeline_with_eventtime_enabled_keeps_hidden_eventtime_column_alive`.
   - Runtime-side source-on-change plus eventtime late-drop behavior is now covered by
     `eventtime_tumbling_window_with_on_change_gate_drops_late_rows_after_watermark`.
-  - The interaction is still worth keeping as a tracked planner/runtime pairing,
+  - The interaction is still worth keeping as a cross-module planner/runtime pairing,
     even though no single testcase currently carries all required features in
     one coverage record.
 - Current evidence split:
@@ -71,7 +71,7 @@
   - The runtime assertion needs event delivery, watermark movement, and late-row
     drop behavior that belongs in the pipeline suite.
 - Promotion criteria:
-  - Promote this interaction from `tracked` to `active` only if a dedicated
+  - Promote this interaction from `cross_module` to `active` only if a dedicated
     same-record testcase becomes necessary and can justify all required features
     in one `covers` list.
 - Expected evidence:
@@ -89,7 +89,7 @@
   - Planner-side barrier insertion is already covered by the explain suite.
   - Runtime-side graceful-close alignment is now covered by
     `shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutdown`.
-  - The interaction is still worth keeping as a tracked planner/runtime pairing,
+  - The interaction is still worth keeping as a cross-module planner/runtime pairing,
     even though the current evidence remains split across specialized suites.
 - Current evidence split:
   - Keep planner insertion evidence in the explain suite and runtime alignment
@@ -99,7 +99,7 @@
   - The runtime assertion is about shutdown-time alignment and sibling flush
     ordering.
 - Promotion criteria:
-  - Promote this interaction from `tracked` to `active` only if one testcase can
+  - Promote this interaction from `cross_module` to `active` only if one testcase can
     justify both barrier insertion and runtime alignment in the same coverage
     record without distorting the current test harness split.
 - Expected evidence:

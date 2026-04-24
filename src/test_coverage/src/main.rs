@@ -132,8 +132,8 @@ fn print_summary(
         interaction_report.active_interactions
     );
     println!(
-        "  tracked_interactions: {}",
-        interaction_report.tracked_interactions
+        "  cross_module_interactions: {}",
+        interaction_report.cross_module_interactions
     );
     println!(
         "  covered_interactions: {}",

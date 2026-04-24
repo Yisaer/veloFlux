@@ -76,7 +76,7 @@ fn validate_interaction_registry(
         };
 
         if interaction.status != "active"
-            && interaction.status != "tracked"
+            && interaction.status != "cross_module"
             && interaction.status != "retired"
         {
             errors.push(ValidationError {
@@ -157,7 +157,7 @@ fn validate_interaction_features(
 }
 
 fn interaction_uses_active_features(interaction: &InteractionDefinition) -> bool {
-    interaction.status == "active" || interaction.status == "tracked"
+    interaction.status == "active" || interaction.status == "cross_module"
 }
 
 #[cfg(test)]
@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_tracked_status_but_still_requires_active_features() {
+    fn accepts_cross_module_status_but_still_requires_active_features() {
         let mut features = BTreeMap::new();
         features.insert(
             "pipeline.runtime.eventtime".to_string(),
@@ -360,17 +360,17 @@ mod tests {
 
         let mut interaction_entries = BTreeMap::new();
         interaction_entries.insert(
-            "runtime.tracked".to_string(),
+            "runtime.cross_module".to_string(),
             InteractionDefinition {
-                id: "runtime.tracked".to_string(),
+                id: "runtime.cross_module".to_string(),
                 domain: "runtime".to_string(),
-                title: "Tracked".to_string(),
+                title: "Cross-module".to_string(),
                 summary: "Summary".to_string(),
                 features: vec![
                     "pipeline.runtime.eventtime".to_string(),
                     "stream.watermark.propagation".to_string(),
                 ],
-                status: "tracked".to_string(),
+                status: "cross_module".to_string(),
                 source_file: PathBuf::from("runtime.yaml"),
             },
         );
@@ -381,8 +381,8 @@ mod tests {
 
         let result = validate(&registry, &interactions, &ScanResult::default());
         assert_eq!(result.errors.len(), 1);
-        assert!(result.errors[0]
-            .message
-            .contains("tracked interaction `runtime.tracked` references inactive feature id"));
+        assert!(result.errors[0].message.contains(
+            "cross_module interaction `runtime.cross_module` references inactive feature id"
+        ));
     }
 }

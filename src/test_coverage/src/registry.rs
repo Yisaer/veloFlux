@@ -250,10 +250,10 @@ impl InteractionRegistry {
             .collect()
     }
 
-    pub fn tracked_interaction_ids(&self) -> BTreeSet<String> {
+    pub fn cross_module_interaction_ids(&self) -> BTreeSet<String> {
         self.interactions
             .values()
-            .filter(|interaction| interaction.status == "tracked")
+            .filter(|interaction| interaction.status == "cross_module")
             .map(|interaction| interaction.id.clone())
             .collect()
     }
@@ -348,14 +348,14 @@ mod tests {
             },
         );
         registry.interactions.insert(
-            "runtime.tracked".to_string(),
+            "runtime.cross_module".to_string(),
             InteractionDefinition {
-                id: "runtime.tracked".to_string(),
+                id: "runtime.cross_module".to_string(),
                 domain: "runtime".to_string(),
-                title: "Tracked interaction".to_string(),
+                title: "Cross-module interaction".to_string(),
                 summary: "Summary".to_string(),
                 features: vec!["pipeline.a".to_string(), "stream.b".to_string()],
-                status: "tracked".to_string(),
+                status: "cross_module".to_string(),
                 source_file: PathBuf::from("runtime.yaml"),
             },
         );
@@ -363,11 +363,11 @@ mod tests {
         let active = registry.active_interaction_ids();
         assert!(active.contains("runtime.a_b"));
         assert!(!active.contains("runtime.retired"));
-        assert!(!active.contains("runtime.tracked"));
+        assert!(!active.contains("runtime.cross_module"));
 
-        let tracked = registry.tracked_interaction_ids();
-        assert!(tracked.contains("runtime.tracked"));
-        assert!(!tracked.contains("runtime.a_b"));
+        let cross_module = registry.cross_module_interaction_ids();
+        assert!(cross_module.contains("runtime.cross_module"));
+        assert!(!cross_module.contains("runtime.a_b"));
     }
 
     #[test]

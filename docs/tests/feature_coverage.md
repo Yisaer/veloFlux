@@ -191,9 +191,10 @@ An interaction entry uses this schema:
 - `status`: Current lifecycle state.
   - `active`: The interaction is a same-record coverage requirement and
     participates in coverage reporting.
-  - `tracked`: The interaction is intentionally kept in the registry, but the
-    current evidence may stay split across planner/runtime or similar layered
-    suites, so it does not participate in uncovered-interaction reporting.
+  - `cross_module`: The interaction is intentionally kept in the registry
+    because its required evidence is expected to stay split across planner and
+    pipeline/runtime or similar layered suites. It remains visible for review,
+    but it does not participate in uncovered-interaction reporting.
   - `retired`: The interaction is no longer part of the active coverage target
     set.
 
@@ -206,11 +207,11 @@ Interaction coverage does not introduce another test annotation. It is derived
 from function-level `coverage-covers` comments and testcase-level `covers`
 fields.
 
-Tracked interactions remain machine-readable design targets, but they document
-intentional split evidence instead of requiring one same-record coverage
-annotation. Use them when a cross-layer behavior should stay visible in the
-registry even though planner-side and runtime-side assertions are deliberately
-kept in different tests.
+Cross-module interactions remain machine-readable design targets, but they
+document intentional split evidence instead of requiring one same-record
+coverage annotation. Use them when a cross-layer behavior should stay visible
+in the registry even though planner-side and runtime-side assertions are
+deliberately kept in different test modules.
 
 ## Evaluator Requirements
 
@@ -237,14 +238,14 @@ The evaluator should report at least the following errors:
 - duplicate feature ID within one `coverage-covers` line
 - duplicate feature ID within one testcase `covers` field
 - malformed `coverage-covers` comment format
-- missing `covers` field in a tracked table-driven testcase
+- missing `covers` field in a cross-module table-driven testcase
 - duplicate testcase `name` values within one table-driven test group
 - invalid interaction status
 - interaction ID whose first segment does not match its registry domain
 - interaction with fewer than two features
 - duplicate feature ID within one interaction
 - unknown feature ID referenced by an interaction
-- active or tracked interaction referencing an inactive feature
+- active or cross_module interaction referencing an inactive feature
 
 ## Reporting Model
 
@@ -275,12 +276,12 @@ The following items are explicitly left for later versions:
 
 - Register an interaction as `active` only when the combination should be
   enforced as a same-record coverage target.
-- Register an interaction as `tracked` when the combination should remain
-  visible in the registry, but the current test strategy intentionally keeps its
-  evidence split across specialized suites such as planner explain tests and
-  pipeline runtime tests.
-- Promote a `tracked` interaction to `active` only after a single test unit or
-  testcase carries all required features in one `covers` record.
+- Register an interaction as `cross_module` when the combination should remain
+  visible in the registry, but the current test strategy intentionally keeps
+  its evidence split across specialized suites such as planner explain tests
+  and pipeline runtime tests.
+- Promote a `cross_module` interaction to `active` only after a single test
+  unit or testcase carries all required features in one `covers` record.
 - automatic mapping from SQL text or EXPLAIN JSON to feature IDs
 - REST response field-shape coverage for manager metadata APIs
 
@@ -289,7 +290,7 @@ The following items are explicitly left for later versions:
 - Update the YAML registry when a documented feature becomes part of supported
   behavior.
 - Update the interaction registry when a documented combination should be
-  tracked as a required same-record coverage target.
+  recorded as a required same-record coverage target.
 - Add or update `covers` annotations whenever a new test explicitly validates a
   feature.
 - Prefer adding new feature IDs over renaming existing IDs.

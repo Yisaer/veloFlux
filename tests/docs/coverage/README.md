@@ -80,9 +80,10 @@ Each interaction entry uses the following minimal schema:
 - `status`: Current lifecycle state.
   - `active`: The interaction must be covered by one same-record coverage
     annotation and participates in coverage reporting.
-  - `tracked`: The interaction remains in the registry as an intentional
-    cross-feature target, but its evidence may stay split across specialized
-    suites and it does not count as uncovered coverage debt.
+  - `cross_module`: The interaction remains in the registry as an intentional
+    cross-feature target because its evidence is expected to stay split across
+    planner and pipeline/runtime or similar specialized suites. It does not
+    count as uncovered same-record coverage debt.
   - `retired`: The interaction is no longer part of the active coverage target
     set.
 
@@ -96,7 +97,7 @@ record also covers additional features.
   the supported test coverage space.
 - Add or update an interaction when an important documented behavior depends on
   multiple features being validated by the same test unit or testcase.
-- Use `tracked` for interactions that should stay visible in the registry even
+- Use `cross_module` for interactions that should stay visible in the registry
   when planner-side and runtime-side evidence is intentionally split across
   different suites.
 - Keep pure manager/control-plane REST DTO contracts in API docs and manager API
