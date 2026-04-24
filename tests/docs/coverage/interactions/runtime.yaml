@@ -140,3 +140,89 @@ interactions:
       - parser.select.alias_computing
       - sink.memory_collection.materialize
     status: active
+
+  - id: runtime.eventtime_hidden_projection_tumbling_pairing
+    title: Eventtime hidden projection tumbling pairing
+    summary: Validate eventtime hidden-column preservation together with streaming aggregation and tumbling-window runtime output.
+    features:
+      - planner.eventtime.hidden_column_preservation
+      - planner.physical.streaming_aggregation_rewrite
+      - pipeline.runtime.eventtime
+      - stream.watermark.propagation
+      - stream.window.tumbling
+    status: active
+
+  - id: runtime.source_on_change_pruning_delta_omit_pairing
+    title: Source on-change pruning delta omit pairing
+    summary: Validate hidden source-on-change tracked columns together with projection pruning, row-diff output, and omit-if-empty suppression.
+    features:
+      - planner.logical.top_level_column_pruning
+      - source.on_change.gating
+      - sink.output.row_diff
+      - sink.output.omit_if_empty
+    status: active
+
+  - id: runtime.by_index_alias_memory_output_pairing
+    title: By-index alias memory output pairing
+    summary: Validate by-index encoder projection with SQL-visible aliases through memory output.
+    features:
+      - parser.select.alias_computing
+      - planner.physical.by_index_projection_into_encoder_rewrite
+      - sink.connector.memory_output
+    status: active
+
+  - id: runtime.mixed_consumers_by_index_memory_output_pairing
+    title: Mixed consumers by-index memory output pairing
+    summary: Validate shared by-index projection planning across encoder and row-diff memory-output consumers.
+    features:
+      - planner.physical.by_index_projection_across_mixed_consumers_rewrite
+      - planner.physical.by_index_projection_into_encoder_rewrite
+      - planner.physical.by_index_projection_into_row_diff_rewrite
+      - sink.connector.memory_output
+      - sink.output.row_diff
+    status: active
+
+  - id: runtime.partial_row_diff_late_materialization_pairing
+    title: Partial row-diff late materialization pairing
+    summary: Validate partial row-diff late materialization together with row-diff runtime output.
+    features:
+      - planner.physical.by_index_projection_into_row_diff_rewrite
+      - planner.physical.partial_by_index_row_diff_and_encoder_rewrite
+      - sink.output.row_diff
+    status: active
+
+  - id: runtime.row_diff_template_transform_pairing
+    title: Row-diff template transform pairing
+    summary: Validate row-diff output together with template-based encoder transform output.
+    features:
+      - sink.output.row_diff
+      - sink.encoder.transform
+    status: active
+
+  - id: runtime.row_diff_batch_streaming_encoder_pairing
+    title: Row-diff batch streaming encoder pairing
+    summary: Validate row-diff output with sink batching and streaming encoder planning.
+    features:
+      - sink.output.row_diff
+      - sink.output.batching
+      - planner.physical.streaming_encoder_rewrite
+      - planner.physical.by_index_projection_into_row_diff_rewrite
+    status: active
+
+  - id: runtime.stateful_cse_boundary_pairing
+    title: Stateful CSE boundary pairing
+    summary: Validate stateful function runtime semantics together with common subexpression elimination boundary handling.
+    features:
+      - planner.logical.common_subexpression_elimination
+      - parser.function.stateful_functions
+    status: active
+
+  - id: runtime.memory_collection_source_materialize_pairing
+    title: Memory collection source materialize pairing
+    summary: Validate memory collection input together with memory collection sink materialization and SQL-visible aliases.
+    features:
+      - source.memory.collection_input
+      - sink.memory_collection.materialize
+      - sink.connector.memory_output
+      - parser.select.alias_computing
+    status: active
