@@ -77,3 +77,18 @@ features:
     doc_refs:
       - docs/planner/optimize/physical/by_index_projection_into_row_diff_rewrite.md
     status: active
+
+  - id: planner.physical.sampler_placement
+    title: Sampler placement
+    summary: Place sampler operators ahead of decoder or shared-stream runtime ingestion paths when streams declare sampling.
+    doc_refs:
+      - docs/runtime/processors/sampler_strategy.md
+      - docs/runtime/sources/shared/dynamic_decode.md
+    status: active
+
+  - id: planner.physical.shared_tail_barrier_insertion
+    title: Shared tail barrier insertion
+    summary: Insert a barrier at the shared tail when multiple downstream consumers must be synchronized.
+    doc_refs:
+      - docs/runtime/processors/barrier_signal.md
+    status: active

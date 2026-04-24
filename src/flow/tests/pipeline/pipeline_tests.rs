@@ -753,6 +753,7 @@ async fn run_source_on_change_json_case(case: SourceOnChangeJsonCase) {
         .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", name));
 }
 
+// coverage-covers: parser.select.alias_computing, planner.physical.by_index_projection_into_encoder_rewrite, sink.connector.memory_output
 #[tokio::test]
 async fn pipeline_table_driven_queries() {
     let test_cases = vec![
@@ -1247,7 +1248,12 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "row_diff_with_batch_keeps_row_diff_and_rewrites_to_streaming_encoder",
             source_name: "stream_ab",
             sql: "SELECT a, b FROM stream_ab",
-            covers: &["sink.output.row_diff"],
+            covers: &[
+                "sink.output.row_diff",
+                "sink.output.batching",
+                "planner.physical.streaming_encoder_rewrite",
+                "planner.physical.by_index_projection_into_row_diff_rewrite",
+            ],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1274,7 +1280,11 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "splits_partial_late_materialization_between_row_diff_and_encoder",
             source_name: "stream",
             sql: "SELECT a, b, flag AS c FROM stream",
-            covers: &["sink.output.row_diff"],
+            covers: &[
+                "sink.output.row_diff",
+                "planner.physical.by_index_projection_into_row_diff_rewrite",
+                "planner.physical.partial_by_index_row_diff_and_encoder_rewrite",
+            ],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1302,7 +1312,12 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "splits_partial_late_materialization_between_row_diff_and_encoder_with_aliases",
             source_name: "stream",
             sql: "SELECT a AS x, b AS y, flag AS z FROM stream",
-            covers: &["sink.output.row_diff"],
+            covers: &[
+                "sink.output.row_diff",
+                "parser.select.alias_computing",
+                "planner.physical.by_index_projection_into_row_diff_rewrite",
+                "planner.physical.partial_by_index_row_diff_and_encoder_rewrite",
+            ],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1390,7 +1405,7 @@ async fn pipeline_row_diff_json_table_driven() {
             name: "template_transform_still_sees_dense_row_on_delta_branch",
             source_name: "stream",
             sql: "SELECT a, b FROM stream",
-            covers: &["sink.output.row_diff"],
+            covers: &["sink.output.row_diff", "sink.encoder.transform"],
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1749,6 +1764,7 @@ async fn pipeline_source_on_change_json_table_driven() {
             source_name: "stream",
             sql: "SELECT speed FROM stream",
             covers: &[
+                "planner.logical.top_level_column_pruning",
                 "source.on_change.gating",
                 "sink.output.row_diff",
                 "sink.output.omit_if_empty",
@@ -1895,6 +1911,93 @@ async fn memory_source_bytes_topic_with_json_decoder_emits_expected_rows() {
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for {}: {err}", case_name));
 }
 
+// coverage-covers: source.memory.bytes_input, sink.output.batching
+#[tokio::test]
+async fn memory_source_bytes_topic_batches_json_output() {
+    let case_name = "memory_source_bytes_topic_batches_json_output";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_memory_source_bytes", case_name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+    install_memory_json_stream_schema_with_name(
+        &instance,
+        &input_topic,
+        "stream",
+        &[
+            ("a".to_string(), vec![Value::Int64(1), Value::Int64(2)]),
+            ("b".to_string(), vec![Value::Int64(10), Value::Int64(20)]),
+        ],
+    )
+    .await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    )
+    .with_common_props(CommonSinkProps {
+        batch_count: Some(2),
+        batch_duration: None,
+    });
+    let pipeline = PipelineDefinition::new(pipeline_id.clone(), "SELECT a FROM stream", vec![sink]);
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .expect("start pipeline");
+
+    let timeout_duration = Duration::from_secs(5);
+    instance
+        .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
+        .await
+        .expect("wait for bytes source subscriber");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open input bytes publisher");
+
+    publisher
+        .publish_bytes(serde_json::to_vec(&serde_json::json!({"a": 1, "b": 10})).unwrap())
+        .expect("publish first bytes source row");
+    assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+
+    publisher
+        .publish_bytes(serde_json::to_vec(&serde_json::json!({"a": 2, "b": 20})).unwrap())
+        .expect("publish second bytes source row");
+    let actual = recv_next_json(&mut output, timeout_duration).await;
+    assert_eq!(actual, serde_json::json!([{"a": 1}, {"a": 2}]));
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .expect("stop pipeline");
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
+}
+
 // coverage-covers: source.memory.collection_input
 #[tokio::test]
 async fn memory_source_collection_topic_with_non_none_decoder_is_rejected() {
@@ -1942,6 +2045,117 @@ async fn memory_source_collection_topic_with_non_none_decoder_is_rejected() {
         case_name,
         err_message
     );
+}
+
+// coverage-covers: source.memory.collection_input, source.memory.layout_normalize, sink.memory_collection.materialize, sink.connector.memory_output, parser.select.alias_computing
+#[tokio::test]
+async fn memory_collection_source_layout_normalize_then_collection_sink_materialize_aliases() {
+    let case_name =
+        "memory_collection_source_layout_normalize_then_collection_sink_materialize_aliases";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_memory_collection", case_name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Collection,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input collection topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Collection,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output collection topic");
+    install_memory_stream_schema_with_name(
+        &instance,
+        &input_topic,
+        "stream",
+        &[
+            ("a".to_string(), vec![Value::Int64(1), Value::Null]),
+            ("b".to_string(), vec![Value::Int64(10), Value::Int64(20)]),
+        ],
+    )
+    .await;
+
+    let mut output = instance
+        .open_memory_subscribe_collection(&output_topic)
+        .expect("subscribe output collection");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    )
+    .with_encoder(SinkEncoderConfig::new("none", JsonMap::new()));
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT b AS second, a + 1 AS plus_one, a AS first FROM stream",
+        vec![sink],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .expect("start pipeline");
+
+    let topic_source: Arc<str> = Arc::<str>::from(input_topic.as_str());
+    let rows = vec![
+        Tuple::new(vec![Arc::new(Message::new_shared_keys(
+            Arc::clone(&topic_source),
+            Arc::from(vec![Arc::<str>::from("b"), Arc::<str>::from("a")]),
+            vec![Arc::new(Value::Int64(10)), Arc::new(Value::Int64(1))],
+        ))]),
+        Tuple::new(vec![Arc::new(Message::new_shared_keys(
+            Arc::clone(&topic_source),
+            Arc::from(vec![Arc::<str>::from("b"), Arc::<str>::from("a")]),
+            vec![Arc::new(Value::Int64(20)), Arc::new(Value::Null)],
+        ))]),
+    ];
+    let batch = RecordBatch::new(rows).expect("create input record batch");
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+
+    let collection = recv_next_collection(&mut output, timeout_duration).await;
+    assert_eq!(collection.num_rows(), 2);
+
+    let expected = [
+        vec![
+            ("second", Value::Int64(10)),
+            ("plus_one", Value::Int64(2)),
+            ("first", Value::Int64(1)),
+        ],
+        vec![
+            ("second", Value::Int64(20)),
+            ("plus_one", Value::Null),
+            ("first", Value::Null),
+        ],
+    ];
+
+    for (row_idx, tuple) in collection.rows().iter().enumerate() {
+        assert!(tuple.affiliate().is_none(), "affiliate should be empty");
+        assert_eq!(tuple.messages().len(), 1, "expected a single message");
+        let msg = &tuple.messages()[0];
+        assert_eq!(msg.source(), "");
+        let entries: Vec<(&str, Value)> = msg.entries().map(|(k, v)| (k, v.clone())).collect();
+        assert_eq!(entries, expected[row_idx], "collection row mismatch");
+    }
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .expect("stop pipeline");
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
 }
 
 #[tokio::test]
@@ -2161,6 +2375,7 @@ async fn run_mixed_consumers_json_case(case: MixedConsumersJsonCase) {
         .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
 }
 
+// coverage-covers: planner.physical.by_index_projection_across_mixed_consumers_rewrite, planner.physical.by_index_projection_into_encoder_rewrite, planner.physical.by_index_projection_into_row_diff_rewrite, sink.connector.memory_output, sink.output.row_diff, parser.select.alias_computing
 #[tokio::test]
 async fn pipeline_mixed_consumers_json_table_driven() {
     let cases = vec![
@@ -2463,6 +2678,7 @@ async fn pipeline_table_driven_memory_collection_sources_layout_normalize() {
     }
 }
 
+// coverage-covers: source.memory.collection_input, sink.memory_collection.materialize, sink.connector.memory_output, parser.select.alias_computing
 #[tokio::test]
 async fn pipeline_table_driven_collection_sinks() {
     let test_cases = vec![
