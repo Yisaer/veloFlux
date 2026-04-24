@@ -250,6 +250,14 @@ impl InteractionRegistry {
             .collect()
     }
 
+    pub fn tracked_interaction_ids(&self) -> BTreeSet<String> {
+        self.interactions
+            .values()
+            .filter(|interaction| interaction.status == "tracked")
+            .map(|interaction| interaction.id.clone())
+            .collect()
+    }
+
     pub fn interactions(&self) -> impl Iterator<Item = &InteractionDefinition> {
         self.interactions.values()
     }
@@ -339,10 +347,27 @@ mod tests {
                 source_file: PathBuf::from("runtime.yaml"),
             },
         );
+        registry.interactions.insert(
+            "runtime.tracked".to_string(),
+            InteractionDefinition {
+                id: "runtime.tracked".to_string(),
+                domain: "runtime".to_string(),
+                title: "Tracked interaction".to_string(),
+                summary: "Summary".to_string(),
+                features: vec!["pipeline.a".to_string(), "stream.b".to_string()],
+                status: "tracked".to_string(),
+                source_file: PathBuf::from("runtime.yaml"),
+            },
+        );
 
         let active = registry.active_interaction_ids();
         assert!(active.contains("runtime.a_b"));
         assert!(!active.contains("runtime.retired"));
+        assert!(!active.contains("runtime.tracked"));
+
+        let tracked = registry.tracked_interaction_ids();
+        assert!(tracked.contains("runtime.tracked"));
+        assert!(!tracked.contains("runtime.a_b"));
     }
 
     #[test]

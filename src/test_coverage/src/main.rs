@@ -77,7 +77,7 @@ fn print_summary(
     println!("feature_records: {}", registry.active_feature_ids().len());
     println!(
         "interaction_records: {}",
-        interactions.active_interaction_ids().len()
+        interactions.interactions().count()
     );
     println!("coverage_records: {}", scan.records.len());
     println!();
@@ -130,6 +130,10 @@ fn print_summary(
     println!(
         "  active_interactions: {}",
         interaction_report.active_interactions
+    );
+    println!(
+        "  tracked_interactions: {}",
+        interaction_report.tracked_interactions
     );
     println!(
         "  covered_interactions: {}",

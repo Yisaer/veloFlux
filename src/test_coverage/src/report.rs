@@ -23,6 +23,7 @@ pub struct CoverageReport {
 #[derive(Debug)]
 pub struct InteractionCoverageReport {
     pub active_interactions: usize,
+    pub tracked_interactions: usize,
     pub covered_interactions: usize,
     pub overall_coverage: f64,
     pub uncovered_interactions: Vec<String>,
@@ -85,6 +86,10 @@ impl InteractionCoverageReport {
             .interactions()
             .filter(|interaction| interaction.status == "active")
             .collect::<Vec<_>>();
+        let tracked_interactions = interactions
+            .interactions()
+            .filter(|interaction| interaction.status == "tracked")
+            .count();
 
         let coverage_sets = scan
             .records
@@ -146,6 +151,7 @@ impl InteractionCoverageReport {
 
         Self {
             active_interactions: active_interactions.len(),
+            tracked_interactions,
             covered_interactions: covered_interactions_set.len(),
             overall_coverage: ratio(covered_interactions_set.len(), active_interactions.len()),
             uncovered_interactions,
@@ -283,10 +289,40 @@ mod tests {
 
         let report = InteractionCoverageReport::build(&registry, &scan);
         assert_eq!(report.active_interactions, 2);
+        assert_eq!(report.tracked_interactions, 0);
         assert_eq!(report.covered_interactions, 1);
         assert_eq!(
             report.uncovered_interactions,
             vec!["planner.uncovered".to_string()]
         );
+    }
+
+    #[test]
+    fn excludes_tracked_interactions_from_uncovered_counts() {
+        let mut interactions = BTreeMap::new();
+        interactions.insert(
+            "runtime.tracked_split".to_string(),
+            InteractionDefinition {
+                id: "runtime.tracked_split".to_string(),
+                domain: "runtime".to_string(),
+                title: "Tracked split interaction".to_string(),
+                summary: "Summary".to_string(),
+                features: vec!["planner.a".to_string(), "processor.b".to_string()],
+                status: "tracked".to_string(),
+                source_file: PathBuf::from("runtime.yaml"),
+            },
+        );
+
+        let registry = InteractionRegistry {
+            interactions,
+            registry_files: Vec::new(),
+        };
+        let scan = ScanResult::default();
+
+        let report = InteractionCoverageReport::build(&registry, &scan);
+        assert_eq!(report.active_interactions, 0);
+        assert_eq!(report.tracked_interactions, 1);
+        assert_eq!(report.covered_interactions, 0);
+        assert!(report.uncovered_interactions.is_empty());
     }
 }

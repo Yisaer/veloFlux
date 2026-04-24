@@ -188,8 +188,14 @@ An interaction entry uses this schema:
 - `title`: Human-readable title.
 - `summary`: Short statement of the combined behavior being covered.
 - `features`: The single-feature IDs that must be covered together.
-- `status`: Current lifecycle state. Use `active` unless the interaction is
-  retired.
+- `status`: Current lifecycle state.
+  - `active`: The interaction is a same-record coverage requirement and
+    participates in coverage reporting.
+  - `tracked`: The interaction is intentionally kept in the registry, but the
+    current evidence may stay split across planner/runtime or similar layered
+    suites, so it does not participate in uncovered-interaction reporting.
+  - `retired`: The interaction is no longer part of the active coverage target
+    set.
 
 An active interaction is covered when at least one coverage record contains all
 of the interaction's features in the same `covers` list. Matching is a superset
@@ -199,6 +205,12 @@ match: a record that covers `[A, B, C]` also covers an interaction that requires
 Interaction coverage does not introduce another test annotation. It is derived
 from function-level `coverage-covers` comments and testcase-level `covers`
 fields.
+
+Tracked interactions remain machine-readable design targets, but they document
+intentional split evidence instead of requiring one same-record coverage
+annotation. Use them when a cross-layer behavior should stay visible in the
+registry even though planner-side and runtime-side assertions are deliberately
+kept in different tests.
 
 ## Evaluator Requirements
 
@@ -232,7 +244,7 @@ The evaluator should report at least the following errors:
 - interaction with fewer than two features
 - duplicate feature ID within one interaction
 - unknown feature ID referenced by an interaction
-- active interaction referencing an inactive feature
+- active or tracked interaction referencing an inactive feature
 
 ## Reporting Model
 
@@ -258,6 +270,17 @@ The following items are explicitly left for later versions:
 - testcase tags
 - automatic pairwise or higher-order interaction generation
 - risk-weighted coverage scoring
+
+## Registry Maintenance Notes
+
+- Register an interaction as `active` only when the combination should be
+  enforced as a same-record coverage target.
+- Register an interaction as `tracked` when the combination should remain
+  visible in the registry, but the current test strategy intentionally keeps its
+  evidence split across specialized suites such as planner explain tests and
+  pipeline runtime tests.
+- Promote a `tracked` interaction to `active` only after a single test unit or
+  testcase carries all required features in one `covers` record.
 - automatic mapping from SQL text or EXPLAIN JSON to feature IDs
 - REST response field-shape coverage for manager metadata APIs
 

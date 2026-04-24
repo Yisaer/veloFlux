@@ -209,7 +209,7 @@ interactions:
       - pipeline.runtime.eventtime
       - stream.watermark.propagation
       - stream.window.tumbling
-    status: active
+    status: tracked
 
   - id: runtime.source_on_change_pruning_delta_omit_pairing
     title: Source on-change pruning delta omit pairing
@@ -311,4 +311,4 @@ interactions:
     features:
       - planner.physical.shared_tail_barrier_insertion
       - processor.barrier.alignment
-    status: active
+    status: tracked

@@ -77,8 +77,14 @@ Each interaction entry uses the following minimal schema:
 - `summary`: Short statement of the combined behavior being covered.
 - `features`: The single-feature IDs that must be covered by one test unit or
   testcase for this interaction to count as covered.
-- `status`: Current lifecycle state. Use `active` unless the interaction is
-  retired.
+- `status`: Current lifecycle state.
+  - `active`: The interaction must be covered by one same-record coverage
+    annotation and participates in coverage reporting.
+  - `tracked`: The interaction remains in the registry as an intentional
+    cross-feature target, but its evidence may stay split across specialized
+    suites and it does not count as uncovered coverage debt.
+  - `retired`: The interaction is no longer part of the active coverage target
+    set.
 
 Interaction coverage uses superset matching. A test record whose `covers` list
 contains all interaction `features` covers that interaction, even if the test
@@ -90,6 +96,9 @@ record also covers additional features.
   the supported test coverage space.
 - Add or update an interaction when an important documented behavior depends on
   multiple features being validated by the same test unit or testcase.
+- Use `tracked` for interactions that should stay visible in the registry even
+  when planner-side and runtime-side evidence is intentionally split across
+  different suites.
 - Keep pure manager/control-plane REST DTO contracts in API docs and manager API
   tests, unless the endpoint itself is the documented surface for a runtime
   feature.
