@@ -2932,7 +2932,7 @@ async fn memory_collection_sink_delta_output_preserves_output_mask() {
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
 }
 
-// coverage-covers: sink.connector.memory_output, sink.output.omit_if_empty
+// coverage-covers: sink.connector.memory_output, sink.memory_collection.materialize, sink.output.row_diff, sink.output.omit_if_empty
 #[tokio::test]
 async fn memory_collection_sink_delta_omit_if_empty_suppresses_unchanged_collection() {
     let case_name = "memory_collection_sink_delta_omit_if_empty_suppresses_unchanged_collection";
