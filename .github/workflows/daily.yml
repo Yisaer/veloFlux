@@ -141,8 +141,13 @@ jobs:
         if: ${{ always() && (env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily') }}
         run: |
           set +e
-          if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/veloflux.pid)" 2>/dev/null || true
+          source scripts/ci/veloflux_process.sh
+          stop_veloflux_from_pidfile tmp/perf_daily_ci/veloflux.pid
+          if ! wait_for_port_release 8080 \
+            || ! wait_for_port_release 9898 \
+            || ! wait_for_port_release 6060; then
+            report_port_release_failure
+            exit 1
           fi
 
       - name: Start veloflux (for select *)
@@ -153,8 +158,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p tmp/perf_daily_ci
+          rm -f tmp/perf_daily_ci/veloflux.pid
           target/release/veloflux --config etc/config.example.yaml --data-dir tmp/perf_daily_ci/data > tmp/perf_daily_ci/veloflux.log 2>&1 &
-          echo $! > tmp/perf_daily_ci/veloflux.pid
+          pid="$!"
+          echo "$pid" > tmp/perf_daily_ci/veloflux.pid
+          sleep 2
+          if ! kill -0 "$pid" 2>/dev/null; then
+            echo "veloflux exited shortly after restart" >&2
+            tail -n 200 tmp/perf_daily_ci/veloflux.log >&2 || true
+            exit 1
+          fi
 
       - name: Run perf scenario (select *)
         if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily' }}
@@ -214,6 +227,5 @@ jobs:
         if: ${{ always() && (env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily') }}
         run: |
           set +e
-          if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
-            kill "$(cat tmp/perf_daily_ci/veloflux.pid)" 2>/dev/null || true
-          fi
+          source scripts/ci/veloflux_process.sh
+          stop_veloflux_from_pidfile tmp/perf_daily_ci/veloflux.pid
