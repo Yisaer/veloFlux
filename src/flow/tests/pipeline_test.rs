@@ -3,11 +3,14 @@
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::planner::sink::{
-    NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig, SinkEncoderConfig,
+    CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
+    SinkEncoderConfig,
 };
 use flow::processor::{SamplerConfig, StreamData};
 use flow::FlowInstance;
+use serde_json::Value as JsonValue;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
 
 async fn create_stream_with_sampler(
@@ -32,6 +35,68 @@ async fn create_stream_with_sampler(
         .create_stream(definition, false)
         .await
         .expect("create stream with sampler");
+}
+
+async fn create_mock_stream(instance: &FlowInstance, stream_name: &str, columns: &[&str]) {
+    let schema = Schema::new(
+        columns
+            .iter()
+            .map(|column| {
+                ColumnSchema::new(
+                    stream_name.to_string(),
+                    (*column).to_string(),
+                    ConcreteDatatype::Int64(Int64Type),
+                )
+            })
+            .collect(),
+    );
+    let definition = StreamDefinition::new(
+        stream_name.to_string(),
+        Arc::new(schema),
+        StreamProps::Mock(MockStreamProps::default()),
+        StreamDecoderConfig::json(),
+    );
+    instance
+        .create_stream(definition, false)
+        .await
+        .expect("create mock stream");
+}
+
+fn build_result_sink(
+    sink_id: &str,
+    connector_id: &str,
+    common_props: CommonSinkProps,
+) -> PipelineSink {
+    let connector = PipelineSinkConnector::new(
+        connector_id,
+        SinkConnectorConfig::Nop(NopSinkConfig::default()),
+        SinkEncoderConfig::json(),
+    );
+    PipelineSink::new(sink_id, connector)
+        .with_forward_to_result(true)
+        .with_common_props(common_props)
+}
+
+async fn recv_next_json(
+    output: &mut mpsc::Receiver<StreamData>,
+    timeout_duration: Duration,
+) -> JsonValue {
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let item = timeout(remaining, output.recv())
+            .await
+            .expect("timeout waiting for pipeline output")
+            .expect("pipeline output channel closed");
+        match item {
+            StreamData::EncodedBytes { payload, .. } => {
+                return serde_json::from_slice(&payload).expect("decode pipeline json output")
+            }
+            StreamData::Control(_) | StreamData::Watermark(_) => continue,
+            StreamData::Error(err) => panic!("pipeline returned error: {}", err.message),
+            other => panic!("unexpected pipeline output: {}", other.description()),
+        }
+    }
 }
 
 /// Test execution of the "latest" samler strategy.
@@ -121,4 +186,80 @@ async fn test_sampler_execution_latest_strategy() {
         pipeline.close(Duration::from_secs(1)),
     )
     .await;
+}
+
+// coverage-covers: processor.barrier.alignment
+#[tokio::test]
+async fn shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutdown() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    create_mock_stream(&instance, "barrier_stream", &["x"]).await;
+
+    let fast_sink = build_result_sink("fast_sink", "fast_conn", CommonSinkProps::default());
+    let batched_sink = build_result_sink(
+        "batched_sink",
+        "batched_conn",
+        CommonSinkProps {
+            batch_count: Some(8),
+            batch_duration: None,
+        },
+    );
+
+    let mut pipeline = instance
+        .build_pipeline(
+            "SELECT x FROM barrier_stream",
+            vec![fast_sink, batched_sink],
+        )
+        .expect("build pipeline with shared-tail barrier");
+    let mut output = pipeline.take_output().expect("take output receiver");
+
+    pipeline.start();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    for value in 1..=3 {
+        let payload = format!(r#"{{"x": {value}}}"#).into_bytes();
+        pipeline
+            .send_stream_data("barrier_stream", StreamData::bytes(payload))
+            .await
+            .expect("send mock stream data");
+    }
+
+    let timeout_duration = Duration::from_secs(5);
+    assert_eq!(
+        recv_next_json(&mut output, timeout_duration).await,
+        serde_json::json!([{"x": 1}]),
+        "fast sibling should keep forwarding rows before graceful close"
+    );
+    assert_eq!(
+        recv_next_json(&mut output, timeout_duration).await,
+        serde_json::json!([{"x": 2}]),
+        "fast sibling should preserve per-row forwarding order"
+    );
+    assert_eq!(
+        recv_next_json(&mut output, timeout_duration).await,
+        serde_json::json!([{"x": 3}]),
+        "fast sibling should emit every row before barrier alignment"
+    );
+    assert!(
+        timeout(Duration::from_millis(200), output.recv())
+            .await
+            .is_err(),
+        "batched sibling should not flush its partial batch before graceful close"
+    );
+
+    timeout(
+        Duration::from_secs(2),
+        pipeline.close(Duration::from_secs(1)),
+    )
+    .await
+    .expect("close pipeline should not hang")
+    .expect("close pipeline");
+
+    assert_eq!(
+        recv_next_json(&mut output, timeout_duration).await,
+        serde_json::json!([{"x": 1}, {"x": 2}, {"x": 3}]),
+        "shared-tail barrier should hold the graceful end until the batched sibling flushes"
+    );
 }

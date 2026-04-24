@@ -45,31 +45,7 @@
 
 ## New Interaction Testcases Still Needed
 
-### 1. Row-diff batching partial late materialization
-
-- Interaction ID: `runtime.row_diff_batching_partial_late_materialization`
-- Required features:
-  - `sink.output.row_diff`
-  - `sink.output.batching`
-  - `planner.physical.by_index_projection_into_row_diff_rewrite`
-  - `planner.physical.partial_by_index_row_diff_and_encoder_rewrite`
-- Why existing coverage is insufficient:
-  - `row_diff_with_batch_keeps_row_diff_and_rewrites_to_streaming_encoder` validates row-diff plus
-    batching, but not partial late materialization.
-  - `splits_partial_late_materialization_between_row_diff_and_encoder` validates partial late
-    materialization, but not batching.
-- Recommended testcase shape:
-  - Use a query such as `SELECT a, b, flag AS c FROM stream`.
-  - Configure `delta_with_columns(["b"])` and sink batching.
-  - Feed rows where `b` stays unchanged for one row while `flag` changes every row.
-- Expected assertions:
-  - The first row emits `a`, `b`, and `c`.
-  - The middle unchanged-`b` row is still emitted in the same batch but omits `b` while keeping
-    encoder-owned `c`.
-  - The later changed-`b` row emits `b` again.
-  - Batched output keeps row order and does not collapse encoder-owned pass-through columns.
-
-### 2. Eventtime hidden on-change tumbling pairing
+### 1. Eventtime hidden on-change tumbling pairing
 
 - Interaction ID: `runtime.eventtime.hidden_on_change_tumbling_pairing`
 - Required features:
@@ -79,38 +55,36 @@
   - `stream.watermark.propagation`
   - `stream.window.tumbling`
 - Why existing coverage is insufficient:
-  - `eventtime_tumbling_window_with_on_change_gate_suppresses_unchanged_rows` proves the runtime
-    composition, but it does not explicitly establish the hidden-column preservation claim strongly
-    enough for the planner/runtime pairing target.
+  - Planner-side hidden-column preservation is already covered by
+    `explain_pipeline_with_eventtime_enabled_keeps_hidden_eventtime_column_alive`.
+  - Runtime-side source-on-change plus eventtime late-drop behavior is now covered by
+    `eventtime_tumbling_window_with_on_change_gate_drops_late_rows_after_watermark`.
+  - The interaction still does not have a single testcase that proves both planner preservation and
+    runtime behavior in the same coverage record.
 - Recommended testcase shape:
-  - Use a stream schema with visible columns `speed`, `rpm` and hidden eventtime column
-    `event_ts`.
-  - Query only `speed`, configure `on_change_with_columns(["rpm"])`, and enable eventtime.
-  - Publish rows where `rpm` changes less frequently than `speed`, and advance watermark with a
-    later event.
+  - Keep planner and runtime assertions split across the existing planner explain suite and runtime
+    pipeline suite unless a dedicated same-record interaction testcase becomes necessary.
 - Expected assertions:
-  - Rows whose `rpm` does not change are suppressed before aggregation.
-  - Window output reflects only the rows admitted by the source gate.
-  - The eventtime window still flushes correctly even though `event_ts` is not projected.
-  - The testcase should also assert that late data older than the current watermark is ignored.
+  - Planner-side assertions should keep hidden `event_ts` alive in schema and decoder metadata.
+  - Runtime-side assertions should continue to prove source gating, watermark advancement, and
+    late-row dropping.
 
-### 3. Shared-tail barrier alignment
+### 2. Shared-tail barrier alignment
 
 - Interaction ID: `runtime.shared_tail.barrier_alignment`
 - Required features:
   - `planner.physical.shared_tail_barrier_insertion`
   - `processor.barrier.alignment`
 - Why existing coverage is insufficient:
-  - The planner explain suite validates barrier insertion.
-  - Processor unit tests validate barrier alignment semantics.
-  - There is still no end-to-end testcase proving that a multi-sink pipeline with a shared tail
-    keeps downstream consumers synchronized because of the inserted barrier.
+  - Planner-side barrier insertion is already covered by the explain suite.
+  - Runtime-side graceful-close alignment is now covered by
+    `shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutdown`.
+  - The interaction still remains split across planner and runtime records rather than one combined
+    same-record testcase.
 - Recommended testcase shape:
-  - Build a two-sink pipeline whose shared tail forwards to result collection on both branches.
-  - Introduce staggered downstream readiness or controlled branch delay so one branch would race
-    ahead without barrier coordination.
+  - Keep planner insertion and runtime barrier alignment in their current specialized suites unless
+    a single same-record interaction testcase becomes worth the extra harness complexity.
 - Expected assertions:
-  - The shared tail does not forward the barrier downstream until both branches reach the same
-    barrier.
-  - Downstream observation order remains synchronized across both consumers.
-  - No branch leaks post-barrier data before the matching barrier from the other branch arrives.
+  - Planner-side assertions should continue to prove `PhysicalBarrier` insertion.
+  - Runtime-side assertions should continue to prove that graceful shutdown does not terminate the
+    shared tail before the batched sibling flushes.
