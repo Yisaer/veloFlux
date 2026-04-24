@@ -154,12 +154,21 @@ jobs:
           wait_for_port_release() {
             port="$1"
             for _ in $(seq 1 30); do
-              if ! ss -ltn | awk '{print $4}' | grep -E "[:.]${port}$" -q; then
+              listeners="$(ss -ltnH "( sport = :${port} )" 2>/dev/null)" || {
+                sleep 1
+                continue
+              }
+              if [ -z "$listeners" ]; then
                 return 0
               fi
               sleep 1
             done
             return 1
+          }
+          report_port_release_failure() {
+            echo "ports still listening after veloflux shutdown wait" >&2
+            ss -ltnp 2>/dev/null >&2 || true
+            ps -ef | grep '[v]eloflux' >&2 || true
           }
           if [ -f tmp/perf_daily_ci/veloflux.pid ]; then
             pid="$(cat tmp/perf_daily_ci/veloflux.pid)"
@@ -172,9 +181,12 @@ jobs:
             fi
             rm -f tmp/perf_daily_ci/veloflux.pid
           fi
-          wait_for_port_release 8080 || true
-          wait_for_port_release 9898 || true
-          wait_for_port_release 6060 || true
+          if ! wait_for_port_release 8080 \
+            || ! wait_for_port_release 9898 \
+            || ! wait_for_port_release 6060; then
+            report_port_release_failure
+            exit 1
+          fi
 
       - name: Start veloflux (for select *)
         if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'perf-daily' }}
