@@ -75,7 +75,10 @@ fn validate_interaction_registry(
             line: 1,
         };
 
-        if interaction.status != "active" && interaction.status != "retired" {
+        if interaction.status != "active"
+            && interaction.status != "cross_module"
+            && interaction.status != "retired"
+        {
             errors.push(ValidationError {
                 location: location.clone(),
                 message: format!(
@@ -141,16 +144,20 @@ fn validate_interaction_features(
             continue;
         }
 
-        if interaction.status == "active" && !registry.is_active(feature_id) {
+        if interaction_uses_active_features(interaction) && !registry.is_active(feature_id) {
             errors.push(ValidationError {
                 location: location.clone(),
                 message: format!(
-                    "active interaction `{}` references inactive feature id `{}`",
-                    interaction.id, feature_id
+                    "{} interaction `{}` references inactive feature id `{}`",
+                    interaction.status, interaction.id, feature_id
                 ),
             });
         }
     }
+}
+
+fn interaction_uses_active_features(interaction: &InteractionDefinition) -> bool {
+    interaction.status == "active" || interaction.status == "cross_module"
 }
 
 #[cfg(test)]
@@ -319,5 +326,63 @@ mod tests {
         assert!(result.errors[0]
             .message
             .contains("must reference at least two features"));
+    }
+
+    #[test]
+    fn accepts_cross_module_status_but_still_requires_active_features() {
+        let mut features = BTreeMap::new();
+        features.insert(
+            "pipeline.runtime.eventtime".to_string(),
+            FeatureDefinition {
+                id: "pipeline.runtime.eventtime".to_string(),
+                title: "Eventtime".to_string(),
+                summary: "Summary".to_string(),
+                doc_refs: vec![],
+                status: "retired".to_string(),
+                source_file: PathBuf::from("pipeline.yaml"),
+            },
+        );
+        features.insert(
+            "stream.watermark.propagation".to_string(),
+            FeatureDefinition {
+                id: "stream.watermark.propagation".to_string(),
+                title: "Watermark".to_string(),
+                summary: "Summary".to_string(),
+                doc_refs: vec![],
+                status: "active".to_string(),
+                source_file: PathBuf::from("stream.yaml"),
+            },
+        );
+        let registry = FeatureRegistry {
+            features,
+            registry_files: Vec::new(),
+        };
+
+        let mut interaction_entries = BTreeMap::new();
+        interaction_entries.insert(
+            "runtime.cross_module".to_string(),
+            InteractionDefinition {
+                id: "runtime.cross_module".to_string(),
+                domain: "runtime".to_string(),
+                title: "Cross-module".to_string(),
+                summary: "Summary".to_string(),
+                features: vec![
+                    "pipeline.runtime.eventtime".to_string(),
+                    "stream.watermark.propagation".to_string(),
+                ],
+                status: "cross_module".to_string(),
+                source_file: PathBuf::from("runtime.yaml"),
+            },
+        );
+        let interactions = InteractionRegistry {
+            interactions: interaction_entries,
+            registry_files: Vec::new(),
+        };
+
+        let result = validate(&registry, &interactions, &ScanResult::default());
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].message.contains(
+            "cross_module interaction `runtime.cross_module` references inactive feature id"
+        ));
     }
 }

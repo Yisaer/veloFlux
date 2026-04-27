@@ -1309,6 +1309,42 @@ async fn pipeline_row_diff_json_table_driven() {
             ]),
         },
         RowDiffJsonCase {
+            name: "row_diff_batching_partial_late_materialization_keeps_encoder_owned_columns",
+            source_name: "stream",
+            sql: "SELECT a, b, flag AS c FROM stream",
+            covers: &[
+                "sink.output.row_diff",
+                "sink.output.batching",
+                "planner.physical.by_index_projection_into_row_diff_rewrite",
+                "planner.physical.partial_by_index_row_diff_and_encoder_rewrite",
+            ],
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(11)],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![Value::Int64(100), Value::Int64(101), Value::Int64(102)],
+                ),
+            ],
+            sink_common: CommonSinkProps {
+                batch_count: Some(16),
+                batch_duration: Some(Duration::from_millis(50)),
+            },
+            encoder: SinkEncoderConfig::json(),
+            output: SinkOutputConfig::delta_with_columns(["b"]),
+            expected: serde_json::json!([
+                {"a": 1, "b": 10, "c": 100},
+                {"a": 2, "c": 101},
+                {"a": 3, "b": 11, "c": 102}
+            ]),
+        },
+        RowDiffJsonCase {
             name: "splits_partial_late_materialization_between_row_diff_and_encoder_with_aliases",
             source_name: "stream",
             sql: "SELECT a AS x, b AS y, flag AS z FROM stream",
@@ -2932,7 +2968,7 @@ async fn memory_collection_sink_delta_output_preserves_output_mask() {
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
 }
 
-// coverage-covers: sink.connector.memory_output, sink.output.omit_if_empty
+// coverage-covers: sink.connector.memory_output, sink.memory_collection.materialize, sink.output.row_diff, sink.output.omit_if_empty
 #[tokio::test]
 async fn memory_collection_sink_delta_omit_if_empty_suppresses_unchanged_collection() {
     let case_name = "memory_collection_sink_delta_omit_if_empty_suppresses_unchanged_collection";

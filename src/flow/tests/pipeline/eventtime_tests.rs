@@ -433,6 +433,136 @@ async fn eventtime_tumbling_window_with_on_change_gate_suppresses_unchanged_rows
         .expect("delete eventtime pipeline");
 }
 
+// coverage-covers: pipeline.runtime.eventtime, source.on_change.gating, stream.watermark.propagation, stream.window.tumbling
+#[tokio::test]
+async fn eventtime_tumbling_window_with_on_change_gate_drops_late_rows_after_watermark() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics(
+        "pipeline_eventtime",
+        "eventtime_tumbling_window_with_on_change_gate_drops_late_rows_after_watermark",
+    );
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+    install_memory_json_eventtime_stream_with_schema(
+        &instance,
+        &input_topic,
+        "stream_eventtime",
+        &["speed", "rpm", "event_ts"],
+        "event_ts",
+    )
+    .await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    );
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT sum(speed) AS s FROM stream_eventtime GROUP BY tumblingwindow('ss', 10)",
+        vec![sink],
+    )
+    .with_sources(vec![SourceDefinition::new("stream_eventtime")
+        .with_input(SourceInputConfig::on_change_with_columns(["rpm"]))])
+    .with_options(eventtime_pipeline_options(7_000));
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create eventtime pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .expect("start eventtime pipeline");
+
+    publish_json_row(
+        &instance,
+        &input_topic,
+        serde_json::json!({"speed": 10, "rpm": 1000, "event_ts": 1000}),
+    )
+    .await;
+    publish_json_row(
+        &instance,
+        &input_topic,
+        serde_json::json!({"speed": 20, "rpm": 1000, "event_ts": 2000}),
+    )
+    .await;
+    publish_json_row(
+        &instance,
+        &input_topic,
+        serde_json::json!({"speed": 30, "rpm": 2000, "event_ts": 3000}),
+    )
+    .await;
+
+    assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+
+    publish_json_row(
+        &instance,
+        &input_topic,
+        serde_json::json!({"speed": 1, "rpm": 3000, "event_ts": 17000}),
+    )
+    .await;
+
+    let first_window = recv_next_json(&mut output, Duration::from_secs(5)).await;
+    assert_eq!(
+        first_window,
+        serde_json::json!([{"s": 40}]),
+        "on_change gating should suppress unchanged rows before the first eventtime window flush",
+    );
+
+    publish_json_row(
+        &instance,
+        &input_topic,
+        serde_json::json!({"speed": 100, "rpm": 4000, "event_ts": 2000}),
+    )
+    .await;
+    assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+
+    publish_json_row(
+        &instance,
+        &input_topic,
+        serde_json::json!({"speed": 2, "rpm": 5000, "event_ts": 27000}),
+    )
+    .await;
+
+    let second_window = recv_next_json(&mut output, Duration::from_secs(5)).await;
+    assert_eq!(
+        second_window,
+        serde_json::json!([{"s": 1}]),
+        "late rows older than the watermark must be dropped even when source on-change admits them",
+    );
+
+    instance
+        .stop_pipeline(
+            &pipeline_id,
+            PipelineStopMode::Quick,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("stop eventtime pipeline");
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete eventtime pipeline");
+}
+
 // coverage-covers: pipeline.runtime.eventtime, stream.watermark.propagation, stream.window.tumbling
 #[tokio::test]
 async fn eventtime_tumbling_window_graceful_stop_flushes_final_window() {

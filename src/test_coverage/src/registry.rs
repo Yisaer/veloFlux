@@ -250,6 +250,14 @@ impl InteractionRegistry {
             .collect()
     }
 
+    pub fn cross_module_interaction_ids(&self) -> BTreeSet<String> {
+        self.interactions
+            .values()
+            .filter(|interaction| interaction.status == "cross_module")
+            .map(|interaction| interaction.id.clone())
+            .collect()
+    }
+
     pub fn interactions(&self) -> impl Iterator<Item = &InteractionDefinition> {
         self.interactions.values()
     }
@@ -339,10 +347,27 @@ mod tests {
                 source_file: PathBuf::from("runtime.yaml"),
             },
         );
+        registry.interactions.insert(
+            "runtime.cross_module".to_string(),
+            InteractionDefinition {
+                id: "runtime.cross_module".to_string(),
+                domain: "runtime".to_string(),
+                title: "Cross-module interaction".to_string(),
+                summary: "Summary".to_string(),
+                features: vec!["pipeline.a".to_string(), "stream.b".to_string()],
+                status: "cross_module".to_string(),
+                source_file: PathBuf::from("runtime.yaml"),
+            },
+        );
 
         let active = registry.active_interaction_ids();
         assert!(active.contains("runtime.a_b"));
         assert!(!active.contains("runtime.retired"));
+        assert!(!active.contains("runtime.cross_module"));
+
+        let cross_module = registry.cross_module_interaction_ids();
+        assert!(cross_module.contains("runtime.cross_module"));
+        assert!(!cross_module.contains("runtime.a_b"));
     }
 
     #[test]
