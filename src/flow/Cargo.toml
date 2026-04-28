@@ -40,6 +40,7 @@ md5 = "0.7"
 sha1 = "0.10"
 sha2 = "0.10"
 chrono = "0.4"
+gmp-mpfr-sys = { version = "~1.6", default-features = false, optional = true }
 
 [dev-dependencies]
 rumqttd = "0.20.0"
@@ -47,3 +48,4 @@ tempfile = "3"
 
 [features]
 deadlock_detection = ["parking_lot/deadlock_detection"]
+gmp_force_cross = ["gmp-mpfr-sys/force-cross"]

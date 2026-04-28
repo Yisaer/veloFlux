@@ -4,11 +4,24 @@ on:
   release:
     types:
       - published
+  workflow_dispatch:
+    inputs:
+      package_group:
+        description: Package group to build for dry-run validation
+        required: true
+        default: cross-release
+        type: choice
+        options:
+          - cross-release
+          - native-release
+          - ffi
+          - all
 
 jobs:
   build-and-upload:
+    if: github.event_name == 'release' || github.event.inputs.package_group == 'native-release' || github.event.inputs.package_group == 'all'
     permissions:
-      contents: write
+      contents: read
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -38,15 +51,205 @@ jobs:
           cp "$BIN_PATH" "$ASSET_NAME"
           tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
           rm "$ASSET_NAME"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloflux-${{ matrix.asset_suffix }}
+          path: veloflux-${{ matrix.asset_suffix }}.tar.gz
+
+  upload-release-assets:
+    if: github.event_name == 'release'
+    needs: build-and-upload
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        asset_suffix:
+          - linux-x86_64-debug
+          - linux-x86_64
+          - linux-x86_64-thin
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: veloflux-${{ matrix.asset_suffix }}
+          path: .
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: veloflux-${{ matrix.asset_suffix }}.tar.gz
 
-  build-and-upload-ffi:
+  build-and-upload-cross-release:
+    if: github.event_name == 'release' || github.event.inputs.package_group == 'cross-release' || github.event.inputs.package_group == 'all'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset_suffix: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu
+            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu --features gmp_force_cross
+            bin_path: target/aarch64-unknown-linux-gnu/release/veloflux
+          - asset_suffix: android-arm64
+            rust_target: aarch64-linux-android
+            android_ndk_version: 26.3.11579264
+            android_api_level: 24
+            build_cmd: cargo build --release --target aarch64-linux-android --no-default-features --features "metrics,profiling,allocator-system,gmp_force_cross"
+            bin_path: target/aarch64-linux-android/release/veloflux
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux arm64 toolchain
+        if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p "$RUNNER_TEMP/cross-bin"
+          ln -sf "$(command -v aarch64-linux-gnu-gcc)" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-gnu-gcc"
+          ln -sf "$(command -v aarch64-linux-gnu-ar)" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-gnu-ar"
+          ln -sf "$(command -v aarch64-linux-gnu-ranlib)" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-gnu-ranlib"
+          ln -sf "$(command -v aarch64-linux-gnu-strip)" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-gnu-strip"
+          echo "$RUNNER_TEMP/cross-bin" >> "$GITHUB_PATH"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> "$GITHUB_ENV"
+      - uses: android-actions/setup-android@v3
+        if: matrix.rust_target == 'aarch64-linux-android'
+      - name: Install Android arm64 toolchain
+        if: matrix.rust_target == 'aarch64-linux-android'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+          sdkmanager --install "ndk;${{ matrix.android_ndk_version }}"
+          NDK="$ANDROID_HOME/ndk/${{ matrix.android_ndk_version }}"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          API="${{ matrix.android_api_level }}"
+          mkdir -p "$RUNNER_TEMP/cross-bin"
+          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-gcc"
+          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang++" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-g++"
+          ln -sf "$TOOLCHAIN/llvm-ar" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-ar"
+          ln -sf "$TOOLCHAIN/llvm-ranlib" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-ranlib"
+          ln -sf "$TOOLCHAIN/llvm-strip" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-strip"
+          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-gcc"
+          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang++" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-g++"
+          ln -sf "$TOOLCHAIN/llvm-ar" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-ar"
+          ln -sf "$TOOLCHAIN/llvm-ranlib" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-ranlib"
+          ln -sf "$TOOLCHAIN/llvm-strip" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-strip"
+          echo "$RUNNER_TEMP/cross-bin" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android${API}-clang" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android${API}-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes" >> "$GITHUB_ENV"
+      - name: Prebuild Android GMP cache
+        if: matrix.rust_target == 'aarch64-linux-android'
+        run: |
+          NDK="$ANDROID_HOME/ndk/${{ matrix.android_ndk_version }}"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          API="${{ matrix.android_api_level }}"
+          WRAPPER_DIR="$RUNNER_TEMP/android-gmp-wrapper"
+          PREBUILD_DIR="$RUNNER_TEMP/android-gmp-prebuild"
+
+          mkdir -p "$WRAPPER_DIR" "$PREBUILD_DIR/src"
+          export ANDROID_TARGET_CC="$TOOLCHAIN/aarch64-linux-android${API}-clang"
+          export ANDROID_TARGET_CXX="$TOOLCHAIN/aarch64-linux-android${API}-clang++"
+          export ANDROID_TARGET_AR="$TOOLCHAIN/llvm-ar"
+          export ANDROID_TARGET_RANLIB="$TOOLCHAIN/llvm-ranlib"
+          export GMP_MPFR_SYS_CACHE="$RUNNER_TEMP/gmp-mpfr-cache"
+          HOST_CC="$(command -v gcc || true)"
+          if [ -z "$HOST_CC" ]; then
+            echo "Host C compiler 'gcc' not found in PATH" >&2
+            exit 1
+          fi
+          export HOST_CC
+          echo "GMP_MPFR_SYS_CACHE=$GMP_MPFR_SYS_CACHE" >> "$GITHUB_ENV"
+
+          cat > "$WRAPPER_DIR/gcc" <<'EOF'
+          #!/usr/bin/env bash
+          for arg in "$@"; do
+            case "$arg" in
+              *gen-*.c) exec "$HOST_CC" "$@" ;;
+            esac
+          done
+          exec "$ANDROID_TARGET_CC" "$@"
+          EOF
+          cat > "$WRAPPER_DIR/g++" <<'EOF'
+          #!/usr/bin/env bash
+          exec "$ANDROID_TARGET_CXX" "$@"
+          EOF
+          cat > "$WRAPPER_DIR/ar" <<'EOF'
+          #!/usr/bin/env bash
+          exec "$ANDROID_TARGET_AR" "$@"
+          EOF
+          cat > "$WRAPPER_DIR/ranlib" <<'EOF'
+          #!/usr/bin/env bash
+          exec "$ANDROID_TARGET_RANLIB" "$@"
+          EOF
+          chmod +x "$WRAPPER_DIR/gcc" "$WRAPPER_DIR/g++" "$WRAPPER_DIR/ar" "$WRAPPER_DIR/ranlib"
+
+          cat > "$PREBUILD_DIR/Cargo.toml" <<'EOF'
+          [package]
+          name = "android-gmp-prebuild"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          gmp-mpfr-sys = { version = "=1.6.8", features = ["force-cross"] }
+          EOF
+          printf '' > "$PREBUILD_DIR/src/lib.rs"
+
+          PATH="$WRAPPER_DIR:$PATH" cargo build --manifest-path "$PREBUILD_DIR/Cargo.toml" --target ${{ matrix.rust_target }}
+      - name: Build cross release binary
+        run: ${{ matrix.build_cmd }}
+      - name: Prepare cross release asset
+        run: |
+          BIN_PATH="${{ matrix.bin_path }}"
+          ASSET_NAME="veloflux-${{ matrix.asset_suffix }}"
+          cp "$BIN_PATH" "$ASSET_NAME"
+          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
+          rm "$ASSET_NAME"
+      - name: Upload cross artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloflux-${{ matrix.asset_suffix }}
+          path: veloflux-${{ matrix.asset_suffix }}.tar.gz
+
+  upload-cross-release-assets:
+    if: github.event_name == 'release'
+    needs: build-and-upload-cross-release
     permissions:
       contents: write
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        asset_suffix:
+          - linux-arm64
+          - android-arm64
+    steps:
+      - name: Download cross artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: veloflux-${{ matrix.asset_suffix }}
+          path: .
+      - name: Upload cross release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: veloflux-${{ matrix.asset_suffix }}.tar.gz
+
+  build-and-upload-ffi:
+    if: github.event_name == 'release' || github.event.inputs.package_group == 'ffi' || github.event.inputs.package_group == 'all'
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,6 +265,24 @@ jobs:
           cp src/ffi/include/veloflux_ffi.h "$ASSET_NAME/"
           tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
           rm -rf "$ASSET_NAME"
+      - name: Upload FFI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloflux-ffi-linux-x86_64
+          path: veloflux-ffi-linux-x86_64.tar.gz
+
+  upload-ffi-release-assets:
+    if: github.event_name == 'release'
+    needs: build-and-upload-ffi
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download FFI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: veloflux-ffi-linux-x86_64
+          path: .
       - name: Upload FFI release asset
         uses: softprops/action-gh-release@v2
         with:
