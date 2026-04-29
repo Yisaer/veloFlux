@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       package_group:
-        description: Package group to build for dry-run validation
+        description: Package group to build
         required: true
         default: cross-release
         type: choice
@@ -49,8 +49,9 @@ jobs:
           BIN_PATH="${{ matrix.bin_path }}"
           ASSET_NAME="veloflux-${{ matrix.asset_suffix }}"
           cp "$BIN_PATH" "$ASSET_NAME"
-          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
-          rm "$ASSET_NAME"
+          cp etc/config.example.yaml "${ASSET_NAME}.config.example.yaml"
+          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME" "${ASSET_NAME}.config.example.yaml"
+          rm "$ASSET_NAME" "${ASSET_NAME}.config.example.yaml"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -86,45 +87,35 @@ jobs:
     if: github.event_name == 'release' || github.event.inputs.package_group == 'cross-release' || github.event.inputs.package_group == 'all'
     permissions:
       contents: read
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
           - asset_suffix: linux-arm64
+            runner: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
-            build_cmd: cargo build --release --target aarch64-unknown-linux-gnu --features gmp_force_cross
-            bin_path: target/aarch64-unknown-linux-gnu/release/veloflux
+            build_mode: linux-arm64-container
+            bin_path: target/release-artifacts/linux-arm64/veloflux
           - asset_suffix: android-arm64
+            runner: ubuntu-latest
             rust_target: aarch64-linux-android
+            build_mode: android-cross
             android_ndk_version: 26.3.11579264
             android_api_level: 24
-            build_cmd: cargo build --release --target aarch64-linux-android --no-default-features --features "metrics,profiling,allocator-system,gmp_force_cross"
-            bin_path: target/aarch64-linux-android/release/veloflux
+            bin_path: target/release-artifacts/android-arm64/veloflux
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        if: matrix.build_mode != 'linux-arm64-container'
         with:
           targets: ${{ matrix.rust_target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Install Linux arm64 toolchain
-        if: matrix.rust_target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p "$RUNNER_TEMP/cross-bin"
-          ln -sf "$(command -v aarch64-linux-gnu-gcc)" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-gnu-gcc"
-          ln -sf "$(command -v aarch64-linux-gnu-ar)" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-gnu-ar"
-          ln -sf "$(command -v aarch64-linux-gnu-ranlib)" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-gnu-ranlib"
-          ln -sf "$(command -v aarch64-linux-gnu-strip)" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-gnu-strip"
-          echo "$RUNNER_TEMP/cross-bin" >> "$GITHUB_PATH"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar" >> "$GITHUB_ENV"
+        if: matrix.build_mode != 'linux-arm64-container'
       - uses: android-actions/setup-android@v3
-        if: matrix.rust_target == 'aarch64-linux-android'
+        if: matrix.build_mode == 'android-cross'
       - name: Install Android arm64 toolchain
-        if: matrix.rust_target == 'aarch64-linux-android'
+        if: matrix.build_mode == 'android-cross'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential
@@ -150,7 +141,7 @@ jobs:
           echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
           echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes" >> "$GITHUB_ENV"
       - name: Prebuild Android GMP cache
-        if: matrix.rust_target == 'aarch64-linux-android'
+        if: matrix.build_mode == 'android-cross'
         run: |
           NDK="$ANDROID_HOME/ndk/${{ matrix.android_ndk_version }}"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -207,15 +198,56 @@ jobs:
           printf '' > "$PREBUILD_DIR/src/lib.rs"
 
           PATH="$WRAPPER_DIR:$PATH" cargo build --manifest-path "$PREBUILD_DIR/Cargo.toml" --target ${{ matrix.rust_target }}
+      - name: Build Linux arm64 compatibility binary
+        if: matrix.build_mode == 'linux-arm64-container'
+        run: |
+          docker run --rm \
+            --platform linux/arm64 \
+            -e HOST_UID="$(id -u)" \
+            -e HOST_GID="$(id -g)" \
+            -v "$PWD:/workspace" \
+            --workdir /workspace \
+            rust:1-bullseye \
+            bash -euc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                binutils \
+                build-essential \
+                ca-certificates \
+                git \
+                m4 \
+                pkg-config \
+                protobuf-compiler
+
+              cargo build --release
+
+              BIN="target/release/veloflux"
+              max_glibc="$(readelf --version-info "$BIN" | sed -n "s/.*Name: GLIBC_\([0-9.]*\).*/\1/p" | sort -V | tail -n1)"
+              echo "max GLIBC requirement: ${max_glibc:-none}"
+              if [ -n "$max_glibc" ] && [ "$(printf "%s\n" "2.31" "$max_glibc" | sort -V | tail -n1)" != "2.31" ]; then
+                echo "binary requires GLIBC_$max_glibc, expected GLIBC_2.31 or older" >&2
+                exit 1
+              fi
+
+              mkdir -p target/release-artifacts/linux-arm64
+              cp "$BIN" target/release-artifacts/linux-arm64/veloflux
+              chown -R "$HOST_UID:$HOST_GID" target/release-artifacts
+            '
       - name: Build cross release binary
-        run: ${{ matrix.build_cmd }}
+        if: matrix.build_mode != 'linux-arm64-container'
+        run: |
+          cargo build --release --target ${{ matrix.rust_target }} --no-default-features --features "metrics,profiling,allocator-system,gmp_force_cross"
+          mkdir -p target/release-artifacts/${{ matrix.asset_suffix }}
+          cp "target/${{ matrix.rust_target }}/release/veloflux" "target/release-artifacts/${{ matrix.asset_suffix }}/veloflux"
       - name: Prepare cross release asset
         run: |
           BIN_PATH="${{ matrix.bin_path }}"
           ASSET_NAME="veloflux-${{ matrix.asset_suffix }}"
           cp "$BIN_PATH" "$ASSET_NAME"
-          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
-          rm "$ASSET_NAME"
+          cp etc/config.example.yaml "${ASSET_NAME}.config.example.yaml"
+          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME" "${ASSET_NAME}.config.example.yaml"
+          rm "$ASSET_NAME" "${ASSET_NAME}.config.example.yaml"
       - name: Upload cross artifact
         uses: actions/upload-artifact@v4
         with:

@@ -16,9 +16,18 @@ Run the server (defaults to metrics + profiling features):
 ```bash
 cargo run --bin veloFlux -- --data-dir ./tmp/data
 ```
+
+Run a release binary directly:
+```bash
+./veloflux
+```
+
 Flags:
-- `--data-dir <path>` sets where metadata is stored (default `./tmp`).
+- `--data-dir <path>` sets where metadata is stored (default `./tmp` in the current working directory).
 - `--config <path>` loads a YAML config (defaults to optional `./config.yaml`).
+
+For production deployments, pass an explicit `--data-dir` so metadata is not tied
+to the process working directory.
 
 Config (`config.yaml`):
 ```yaml

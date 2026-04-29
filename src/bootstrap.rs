@@ -11,6 +11,8 @@ use crate::server::{self, ServerOptions};
 use crate::startup::StartupPhase;
 use flow::FlowInstance;
 
+const DEFAULT_CONFIG_PATH: &str = "config.yaml";
+
 /// Result of bootstrap initialization that does not include a FlowInstance.
 pub struct BootstrapOptionsResult {
     /// Server options derived from config and CLI.
@@ -69,7 +71,10 @@ fn load_config_with_path(
         let cfg = AppConfig::load_required(path)?;
         Ok((cfg, Some(path.to_string())))
     } else {
-        Ok((AppConfig::load_default_with_env()?, None))
+        match AppConfig::load_optional(DEFAULT_CONFIG_PATH)? {
+            Some(cfg) => Ok((cfg, Some(DEFAULT_CONFIG_PATH.to_string()))),
+            None => Ok((AppConfig::load_default_with_env()?, None)),
+        }
     }
 }
 
