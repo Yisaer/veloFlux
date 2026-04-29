@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       package_group:
-        description: Package group to build for dry-run validation
+        description: Package group to build
         required: true
         default: cross-release
         type: choice
@@ -220,15 +220,9 @@ jobs:
                 pkg-config \
                 protobuf-compiler
 
-              profile_args=""
-              profile_dir="debug"
-              if [ "${{ github.event_name }}" = "release" ]; then
-                profile_args="--release"
-                profile_dir="release"
-              fi
-              cargo build $profile_args
+              cargo build --release
 
-              BIN="target/$profile_dir/veloflux"
+              BIN="target/release/veloflux"
               max_glibc="$(readelf --version-info "$BIN" | sed -n "s/.*Name: GLIBC_\([0-9.]*\).*/\1/p" | sort -V | tail -n1)"
               echo "max GLIBC requirement: ${max_glibc:-none}"
               if [ -n "$max_glibc" ] && [ "$(printf "%s\n" "2.31" "$max_glibc" | sort -V | tail -n1)" != "2.31" ]; then
@@ -243,16 +237,9 @@ jobs:
       - name: Build cross release binary
         if: matrix.build_mode != 'linux-arm64-container'
         run: |
-          profile_args=""
-          profile_dir="debug"
-          if [ "${{ github.event_name }}" = "release" ]; then
-            profile_args="--release"
-            profile_dir="release"
-          fi
-
-          cargo build $profile_args --target ${{ matrix.rust_target }} --no-default-features --features "metrics,profiling,allocator-system,gmp_force_cross"
+          cargo build --release --target ${{ matrix.rust_target }} --no-default-features --features "metrics,profiling,allocator-system,gmp_force_cross"
           mkdir -p target/release-artifacts/${{ matrix.asset_suffix }}
-          cp "target/${{ matrix.rust_target }}/${profile_dir}/veloflux" "target/release-artifacts/${{ matrix.asset_suffix }}/veloflux"
+          cp "target/${{ matrix.rust_target }}/release/veloflux" "target/release-artifacts/${{ matrix.asset_suffix }}/veloflux"
       - name: Prepare cross release asset
         run: |
           BIN_PATH="${{ matrix.bin_path }}"
