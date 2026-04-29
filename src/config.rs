@@ -163,15 +163,23 @@ impl Default for MetricsConfig {
 #[serde(default)]
 pub struct ServerConfig {
     pub manager_addr: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_flow_instances")]
     pub flow_instances: Vec<FlowInstanceSpec>,
+}
+
+fn default_flow_instances() -> Vec<FlowInstanceSpec> {
+    vec![FlowInstanceSpec {
+        id: manager::DEFAULT_FLOW_INSTANCE_ID.to_string(),
+        backend: manager::FlowInstanceBackendKind::InProcess,
+        ..FlowInstanceSpec::default()
+    }]
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             manager_addr: Some(crate::server::DEFAULT_MANAGER_ADDR.to_string()),
-            flow_instances: Vec::new(),
+            flow_instances: default_flow_instances(),
         }
     }
 }
@@ -220,9 +228,7 @@ impl AppConfig {
         if let Some(addr) = self.server.manager_addr.as_ref() {
             opts.manager_addr = Some(addr.clone());
         }
-        if !self.server.flow_instances.is_empty() {
-            opts.flow_instances = self.server.flow_instances.clone();
-        }
+        opts.flow_instances = self.server.flow_instances.clone();
     }
 
     pub fn to_server_options(&self) -> ServerOptions {
@@ -422,6 +428,63 @@ server:
             cfg.server.manager_addr.as_deref(),
             Some(crate::server::DEFAULT_MANAGER_ADDR)
         );
+    }
+
+    #[test]
+    fn default_flow_instance_is_set() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.server.flow_instances.len(), 1);
+        let spec = &cfg.server.flow_instances[0];
+        assert_eq!(spec.id, manager::DEFAULT_FLOW_INSTANCE_ID);
+        assert!(matches!(
+            spec.backend,
+            manager::FlowInstanceBackendKind::InProcess
+        ));
+    }
+
+    #[test]
+    fn partial_server_config_keeps_default_flow_instance() {
+        let _env = EnvTestGuard::new();
+        let yaml = r#"
+server:
+  manager_addr: "127.0.0.1:9999"
+"#;
+        let path = unique_temp_path("partial_server");
+        std::fs::write(&path, yaml).unwrap();
+
+        let cfg = AppConfig::load_required(&path).unwrap();
+
+        assert_eq!(cfg.server.manager_addr.as_deref(), Some("127.0.0.1:9999"));
+        assert_eq!(cfg.server.flow_instances.len(), 1);
+        assert_eq!(
+            cfg.server.flow_instances[0].id,
+            manager::DEFAULT_FLOW_INSTANCE_ID
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn explicit_empty_flow_instances_are_preserved() {
+        let _env = EnvTestGuard::new();
+        let yaml = r#"
+server:
+  flow_instances: []
+"#;
+        let path = unique_temp_path("empty_flow_instances");
+        std::fs::write(&path, yaml).unwrap();
+
+        let cfg = AppConfig::load_required(&path).unwrap();
+        let opts = cfg.to_server_options();
+
+        assert!(opts.flow_instances.is_empty());
+        let err = match crate::server::prepare_registry(&opts.flow_instances) {
+            Ok(_) => panic!("expected empty flow_instances to fail registry preparation"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("default in_process flow instance"));
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
