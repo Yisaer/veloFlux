@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)] // prometheus metric registration — Lazy::new closures run once at startup
+
 use once_cell::sync::Lazy;
 use prometheus::{exponential_buckets, HistogramVec, IntCounterVec, IntGaugeVec};
 

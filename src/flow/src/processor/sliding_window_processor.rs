@@ -418,14 +418,11 @@ impl ProcessingWithLookaheadState {
     }
 
     async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
-        while let Some(front) = self.pending.front() {
-            if front.end > watermark {
+        while let Some(request) = self.pending.pop_front() {
+            if request.end > watermark {
+                self.pending.push_front(request);
                 break;
             }
-            let request = self
-                .pending
-                .pop_front()
-                .expect("front() returned Some; pop_front must succeed");
             self.emit_window(request.start, request.end).await?;
         }
         self.trim(watermark);

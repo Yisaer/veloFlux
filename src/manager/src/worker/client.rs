@@ -19,6 +19,8 @@ pub struct FlowWorkerClient {
 
 impl FlowWorkerClient {
     pub fn new(base_url: String) -> Self {
+        // SAFETY: fail only if TLS system init is broken; abort at startup is appropriate
+        #[allow(clippy::expect_used)]
         let http = reqwest::Client::builder()
             .no_proxy()
             .build()

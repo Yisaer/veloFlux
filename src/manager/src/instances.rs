@@ -150,6 +150,8 @@ pub fn build_in_process_flow_instance(
     .map_err(|e| e.to_string())
 }
 
+// SAFETY: the default in-process spec is always valid; error here is a programming bug
+#[allow(clippy::expect_used)]
 pub fn new_default_flow_instance() -> FlowInstance {
     build_in_process_flow_instance(
         &FlowInstanceSpec {
@@ -184,6 +186,7 @@ impl FlowInstances {
         }
     }
 
+    #[allow(clippy::expect_used)] // default instance always present; inserted unconditionally in new()
     pub fn default_instance(&self) -> Arc<FlowInstance> {
         self.get(DEFAULT_FLOW_INSTANCE_ID)
             .expect("default flow instance missing")

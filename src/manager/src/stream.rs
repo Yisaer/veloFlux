@@ -428,10 +428,16 @@ pub async fn create_stream_handler(
         }
     }
 
+    let Some(info) = default_info.or(first_info) else {
+        // logically dead: stream was created in at least one instance above
+        tracing::error!("no stream info returned after stream creation — audit mismatch");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no stream info returned after creation",
+        )
+            .into_response();
+    };
     audit.log_success();
-    let info = default_info
-        .or(first_info)
-        .expect("stream created in at least one instance");
     (StatusCode::CREATED, Json(build_stream_info(info))).into_response()
 }
 

@@ -38,7 +38,6 @@ pub(crate) struct HistorySourceConnector {
     id: String,
     config: HistorySourceConfig,
     channel_capacity: usize,
-    receiver: Option<mpsc::Receiver<Result<ConnectorEvent, ConnectorError>>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     spawner: TaskSpawner,
 }
@@ -49,7 +48,6 @@ impl HistorySourceConnector {
             id: id.into(),
             config,
             channel_capacity: crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY,
-            receiver: None,
             shutdown_tx: None,
             spawner,
         }
@@ -163,19 +161,13 @@ impl SourceConnector for HistorySourceConnector {
             let _ = sender.send(Ok(ConnectorEvent::EndOfStream)).await;
         });
 
-        self.receiver = Some(receiver);
-        Ok(Box::pin(ReceiverStream::new(
-            self.receiver
-                .take()
-                .expect("receiver assigned unconditionally above"),
-        )))
+        Ok(Box::pin(ReceiverStream::new(receiver)))
     }
 
     fn close(&mut self) -> Result<(), ConnectorError> {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        self.receiver = None;
         info!(connector_id = %self.id, "history source closed");
         Ok(())
     }

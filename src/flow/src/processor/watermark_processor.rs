@@ -447,9 +447,10 @@ impl SlidingWatermarkProcessor {
                 ..
             } => (*lookahead, strategy),
             _ => {
-                return Err(ProcessorError::InvalidConfiguration(
-                    "SlidingWatermarkProcessor requires WatermarkConfig::Sliding".to_string(),
-                ))
+                return Err(ProcessorError::InvalidConfiguration(format!(
+                    "SlidingWatermarkProcessor requires WatermarkConfig::Sliding for processor '{}'",
+                    id
+                )));
             }
         };
         let lookahead = lookahead.map(Duration::from_secs);
@@ -1071,11 +1072,11 @@ impl EventtimeWatermarkState {
             if head.ts_nanos > target {
                 break;
             }
-            let Reverse(item) = self
-                .buffer
-                .pop()
-                .expect("peek returned Some, pop must succeed");
-            out_rows.push(item.tuple);
+            if let Some(Reverse(item)) = self.buffer.pop() {
+                out_rows.push(item.tuple);
+            } else {
+                break;
+            }
         }
 
         let mut out = Vec::new();

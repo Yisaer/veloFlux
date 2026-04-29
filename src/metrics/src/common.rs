@@ -1,3 +1,5 @@
+#![allow(clippy::expect_used)] // prometheus metric registration — Lazy::new closures run once at startup
+
 use prometheus::core::Collector;
 use prometheus::{HistogramOpts, Opts};
 

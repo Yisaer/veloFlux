@@ -8,6 +8,8 @@ pub struct ClientConfig {
 }
 
 impl Default for ClientConfig {
+    // SAFETY: parsing a known-good string literal constant; can never fail
+    #[allow(clippy::expect_used)]
     fn default() -> Self {
         Self {
             base_url: "http://127.0.0.1:8080"

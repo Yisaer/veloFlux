@@ -163,14 +163,10 @@ impl Tuple {
     }
 
     pub(crate) fn affiliate_mut(&mut self) -> &mut AffiliateRow {
-        if self.affiliate.is_none() {
-            self.affiliate = Some(Arc::new(AffiliateRow::new(Vec::new())));
-        }
-        Arc::make_mut(
-            self.affiliate
-                .as_mut()
-                .expect("affiliate initialized above"),
-        )
+        let affiliate = self
+            .affiliate
+            .get_or_insert_with(|| Arc::new(AffiliateRow::new(Vec::new())));
+        Arc::make_mut(affiliate)
     }
 
     pub fn add_affiliate_column(&mut self, column: Arc<String>, value: Value) {

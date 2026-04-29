@@ -73,6 +73,8 @@ impl LoggingContext {
     }
 }
 
+// SAFETY: lock on a OnceLock-backed static Mutex — never poisoned
+#[allow(clippy::expect_used)]
 fn retain_worker_guard<T>(guard: T)
 where
     T: Send + 'static,

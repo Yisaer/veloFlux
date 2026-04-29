@@ -11,7 +11,7 @@ use flow::codec::encoder::{CollectionEncoder, CollectionEncoderStream, EncodeErr
 use flow::model::{Collection, Tuple};
 use flow::planner::physical::ByIndexProjection;
 use flow::planner::physical::output_schema::OutputSchema;
-use std::fmt::Write;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 /// Columnar CSV JSON Encoder that accumulates records incrementally.
@@ -286,10 +286,12 @@ fn write_value_to_buffer(value: &Value, buffer: &mut String) {
             buffer.push_str(s);
         }
         Value::Float32(v) => {
-            write!(buffer, "{}", v).expect("write! to String is infallible");
+            // write! to String is infallible
+            let _ = write!(buffer, "{v}");
         }
         Value::Float64(v) => {
-            write!(buffer, "{}", v).expect("write! to String is infallible");
+            // write! to String is infallible
+            let _ = write!(buffer, "{v}");
         }
         Value::Int8(v) => {
             let mut b = itoa::Buffer::new();

@@ -900,9 +900,11 @@ impl CustomFunc for CastFunc {
             return Ok(Value::Null);
         }
 
-        let target = nth_string_or_null(args, 1)?
-            .expect("target type already checked to be non-null")
-            .to_ascii_lowercase();
+        let target = match nth_string_or_null(args, 1)? {
+            Some(s) => s.to_ascii_lowercase(),
+            // args[1].is_null() was checked above; this branch is unreachable
+            None => return Ok(Value::Null),
+        };
 
         match target.as_str() {
             "bigint" => cast_to_bigint(&args[0]),

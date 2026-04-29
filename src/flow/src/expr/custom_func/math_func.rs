@@ -690,6 +690,11 @@ impl CustomFunc for RoundFunc {
         };
         let precision = precision_arg_or_default(args, 1, 0)?;
 
+        // Non-finite inputs are passed through unchanged — Inf/NaN round to themselves.
+        if !x.is_finite() {
+            return Ok(Value::Float64(x));
+        }
+
         let factor = 10_f64.powi(precision);
         let scaled = x * factor;
 
@@ -760,9 +765,11 @@ fn trunc_toward_zero(x: &Float, prec: u32) -> Integer {
         Float::with_val(prec, x).ceil()
     };
 
-    truncated
-        .to_integer()
-        .expect("floor/ceil of finite Float should be integral")
+    // `to_integer()` returns None only for non-finite Floats.
+    // `round_with_big_float` is only reachable when `x` is finite (see the
+    // non-finite guard in `eval_row`), so `truncated` is always finite and
+    // `to_integer()` is always `Some`.
+    truncated.to_integer().unwrap_or_default()
 }
 
 #[derive(Debug, Clone)]
@@ -1356,6 +1363,31 @@ mod tests {
         }
 
         match eval(&ExpFunc, &[Value::Float64(1000.0)]) {
+            Value::Float64(v) => assert!(v.is_infinite() && v.is_sign_positive()),
+            other => panic!("expected +Inf, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_round_non_finite() {
+        // round(Inf) should preserve Inf, not return 0
+        match eval(&RoundFunc, &[Value::Float64(f64::INFINITY)]) {
+            Value::Float64(v) => assert!(v.is_infinite() && v.is_sign_positive()),
+            other => panic!("expected +Inf, got {:?}", other),
+        }
+        match eval(&RoundFunc, &[Value::Float64(f64::NEG_INFINITY)]) {
+            Value::Float64(v) => assert!(v.is_infinite() && v.is_sign_negative()),
+            other => panic!("expected -Inf, got {:?}", other),
+        }
+        match eval(&RoundFunc, &[Value::Float64(f64::NAN)]) {
+            Value::Float64(v) => assert!(v.is_nan()),
+            other => panic!("expected NaN, got {:?}", other),
+        }
+        // round(Inf, 2) via the big-float path
+        match eval(
+            &RoundFunc,
+            &[Value::Float64(f64::INFINITY), Value::Int64(2)],
+        ) {
             Value::Float64(v) => assert!(v.is_infinite() && v.is_sign_positive()),
             other => panic!("expected +Inf, got {:?}", other),
         }

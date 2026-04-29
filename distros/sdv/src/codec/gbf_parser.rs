@@ -471,11 +471,12 @@ impl GbfParser {
                     if cursor + 4 > packet.len() {
                         break;
                     }
-                    let value = u32::from_be_bytes(
-                        packet[cursor..cursor + 4]
-                            .try_into()
-                            .expect("4-byte slice; bounds checked above"),
-                    ) as u64;
+                    let value = u32::from_be_bytes([
+                        packet[cursor],
+                        packet[cursor + 1],
+                        packet[cursor + 2],
+                        packet[cursor + 3],
+                    ]) as u64;
                     if let Some(idx) = field.store_index {
                         context[idx] = value;
                     }
@@ -488,11 +489,12 @@ impl GbfParser {
                     if cursor + 4 > packet.len() {
                         break;
                     }
-                    let value = u32::from_le_bytes(
-                        packet[cursor..cursor + 4]
-                            .try_into()
-                            .expect("4-byte slice; bounds checked above"),
-                    ) as u64;
+                    let value = u32::from_le_bytes([
+                        packet[cursor],
+                        packet[cursor + 1],
+                        packet[cursor + 2],
+                        packet[cursor + 3],
+                    ]) as u64;
                     if let Some(idx) = field.store_index {
                         context[idx] = value;
                     }
@@ -505,11 +507,16 @@ impl GbfParser {
                     if cursor + 8 > packet.len() {
                         break;
                     }
-                    let value = u64::from_be_bytes(
-                        packet[cursor..cursor + 8]
-                            .try_into()
-                            .expect("8-byte slice; bounds checked above"),
-                    );
+                    let value = u64::from_be_bytes([
+                        packet[cursor],
+                        packet[cursor + 1],
+                        packet[cursor + 2],
+                        packet[cursor + 3],
+                        packet[cursor + 4],
+                        packet[cursor + 5],
+                        packet[cursor + 6],
+                        packet[cursor + 7],
+                    ]);
                     if let Some(idx) = field.store_index {
                         context[idx] = value;
                     }
@@ -522,11 +529,16 @@ impl GbfParser {
                     if cursor + 8 > packet.len() {
                         break;
                     }
-                    let value = u64::from_le_bytes(
-                        packet[cursor..cursor + 8]
-                            .try_into()
-                            .expect("8-byte slice; bounds checked above"),
-                    );
+                    let value = u64::from_le_bytes([
+                        packet[cursor],
+                        packet[cursor + 1],
+                        packet[cursor + 2],
+                        packet[cursor + 3],
+                        packet[cursor + 4],
+                        packet[cursor + 5],
+                        packet[cursor + 6],
+                        packet[cursor + 7],
+                    ]);
                     if let Some(idx) = field.store_index {
                         context[idx] = value;
                     }
@@ -639,11 +651,12 @@ impl GbfParser {
                         if frame_cursor + 4 > buffer.len() {
                             break;
                         }
-                        let value = u32::from_be_bytes(
-                            buffer[frame_cursor..frame_cursor + 4]
-                                .try_into()
-                                .expect("4-byte slice; bounds checked above"),
-                        ) as u64;
+                        let value = u32::from_be_bytes([
+                            buffer[frame_cursor],
+                            buffer[frame_cursor + 1],
+                            buffer[frame_cursor + 2],
+                            buffer[frame_cursor + 3],
+                        ]) as u64;
                         if let Some(idx) = field.store_index {
                             context[idx] = value;
                         }
@@ -671,11 +684,12 @@ impl GbfParser {
                         if frame_cursor + 4 > buffer.len() {
                             break;
                         }
-                        let value = u32::from_le_bytes(
-                            buffer[frame_cursor..frame_cursor + 4]
-                                .try_into()
-                                .expect("4-byte slice; bounds checked above"),
-                        ) as u64;
+                        let value = u32::from_le_bytes([
+                            buffer[frame_cursor],
+                            buffer[frame_cursor + 1],
+                            buffer[frame_cursor + 2],
+                            buffer[frame_cursor + 3],
+                        ]) as u64;
                         if let Some(idx) = field.store_index {
                             context[idx] = value;
                         }
@@ -688,11 +702,16 @@ impl GbfParser {
                         if frame_cursor + 8 > buffer.len() {
                             break;
                         }
-                        let value = u64::from_be_bytes(
-                            buffer[frame_cursor..frame_cursor + 8]
-                                .try_into()
-                                .expect("8-byte slice; bounds checked above"),
-                        );
+                        let value = u64::from_be_bytes([
+                            buffer[frame_cursor],
+                            buffer[frame_cursor + 1],
+                            buffer[frame_cursor + 2],
+                            buffer[frame_cursor + 3],
+                            buffer[frame_cursor + 4],
+                            buffer[frame_cursor + 5],
+                            buffer[frame_cursor + 6],
+                            buffer[frame_cursor + 7],
+                        ]);
                         if let Some(idx) = field.store_index {
                             context[idx] = value;
                         }
@@ -702,11 +721,16 @@ impl GbfParser {
                         if frame_cursor + 8 > buffer.len() {
                             break;
                         }
-                        let value = u64::from_le_bytes(
-                            buffer[frame_cursor..frame_cursor + 8]
-                                .try_into()
-                                .expect("8-byte slice; bounds checked above"),
-                        );
+                        let value = u64::from_le_bytes([
+                            buffer[frame_cursor],
+                            buffer[frame_cursor + 1],
+                            buffer[frame_cursor + 2],
+                            buffer[frame_cursor + 3],
+                            buffer[frame_cursor + 4],
+                            buffer[frame_cursor + 5],
+                            buffer[frame_cursor + 6],
+                            buffer[frame_cursor + 7],
+                        ]);
                         if let Some(idx) = field.store_index {
                             context[idx] = value;
                         }
@@ -811,16 +835,10 @@ impl GbfParser {
         match size {
             1 => bytes[0] as u64,
             2 => u16::from_be_bytes([bytes[0], bytes[1]]) as u64,
-            4 => u32::from_be_bytes(
-                bytes[0..4]
-                    .try_into()
-                    .expect("4-byte match arm guarantees exact length"),
-            ) as u64,
-            8 => u64::from_be_bytes(
-                bytes[0..8]
-                    .try_into()
-                    .expect("8-byte match arm guarantees exact length"),
-            ),
+            4 => u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as u64,
+            8 => u64::from_be_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]),
             _ => 0,
         }
     }

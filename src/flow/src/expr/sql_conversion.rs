@@ -690,7 +690,13 @@ fn convert_in_list_expression(
         };
     }
 
-    let final_expr = result_expr.expect("list is non-empty; early return guarantees Some");
+    let Some(final_expr) = result_expr else {
+        // structurally dead: list is guaranteed non-empty by the early return above
+        return Ok(ScalarExpr::Literal(
+            Value::Bool(false),
+            ConcreteDatatype::Bool(BooleanType),
+        ));
+    };
 
     if negated {
         Ok(ScalarExpr::CallUnary {

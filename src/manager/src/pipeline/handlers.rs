@@ -40,12 +40,12 @@ fn busy_response(id: &str) -> axum::response::Response {
 }
 
 fn shared_mqtt_busy_response(keys: &BTreeSet<String>) -> axum::response::Response {
-    if keys.len() == 1 {
+    if let Some(key) = keys.iter().next().filter(|_| keys.len() == 1) {
         return (
             StatusCode::CONFLICT,
             format!(
                 "shared mqtt client {} is busy processing another command",
-                keys.iter().next().expect("single key")
+                key
             ),
         )
             .into_response();

@@ -60,22 +60,6 @@ pub enum ProjectionNode {
     },
 }
 
-impl ProjectionNode {
-    fn as_struct_mut(&mut self) -> Option<&mut BTreeMap<String, ProjectionNode>> {
-        match self {
-            ProjectionNode::Struct(fields) => Some(fields),
-            _ => None,
-        }
-    }
-
-    fn as_list_mut(&mut self) -> Option<(&mut ListIndexSelection, &mut ProjectionNode)> {
-        match self {
-            ProjectionNode::List { indexes, element } => Some((indexes, element.as_mut())),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeProjection {
     version: u64,
@@ -147,15 +131,16 @@ impl DecodeProjection {
                 if !matches!(node, ProjectionNode::Struct(_)) {
                     *node = ProjectionNode::Struct(BTreeMap::new());
                 }
-                let fields = node.as_struct_mut().expect("set above");
-                let child = fields
-                    .entry(field.to_string())
-                    .or_insert_with(|| ProjectionNode::Struct(BTreeMap::new()));
-                if rest.is_empty() {
-                    *child = ProjectionNode::All;
-                    return;
+                if let ProjectionNode::Struct(fields) = node {
+                    let child = fields
+                        .entry(field.to_string())
+                        .or_insert_with(|| ProjectionNode::Struct(BTreeMap::new()));
+                    if rest.is_empty() {
+                        *child = ProjectionNode::All;
+                        return;
+                    }
+                    Self::mark_segments_used_in_node(child, rest);
                 }
-                Self::mark_segments_used_in_node(child, rest);
             }
             FieldPathSegment::ListIndex(index) => {
                 if !matches!(node, ProjectionNode::List { .. }) {
@@ -164,17 +149,18 @@ impl DecodeProjection {
                         element: Box::new(ProjectionNode::Struct(BTreeMap::new())),
                     };
                 }
-                let (indexes, element) = node.as_list_mut().expect("set above");
-                match index {
-                    ListIndex::Const(value) => indexes.add_index(*value),
-                    ListIndex::Dynamic => indexes.mark_all(),
-                }
+                if let ProjectionNode::List { indexes, element } = node {
+                    match index {
+                        ListIndex::Const(value) => indexes.add_index(*value),
+                        ListIndex::Dynamic => indexes.mark_all(),
+                    }
 
-                if rest.is_empty() {
-                    *element = ProjectionNode::All;
-                    return;
+                    if rest.is_empty() {
+                        **element = ProjectionNode::All;
+                        return;
+                    }
+                    Self::mark_segments_used_in_node(element.as_mut(), rest);
                 }
-                Self::mark_segments_used_in_node(element, rest);
             }
         }
     }

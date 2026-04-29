@@ -429,14 +429,14 @@ fn apply_cse_at_project(
     // Recognize the common shape:
     //   <child> -> Filter -> Project
     // and enable rewriting both the Filter predicate and Project expressions.
-    let (maybe_filter, filter_child) = match child.as_ref() {
+    let filter_with_child = match child.as_ref() {
         LogicalPlan::Filter(filter) if filter.base.children.len() == 1 => {
-            (Some(filter.clone()), Some(filter.base.children[0].clone()))
+            Some((filter.clone(), filter.base.children[0].clone()))
         }
-        _ => (None, None),
+        _ => None,
     };
 
-    let filter_predicate = maybe_filter.as_ref().map(|f| f.predicate.clone());
+    let filter_predicate = filter_with_child.as_ref().map(|(f, _)| f.predicate.clone());
 
     let (new_project_fields, new_filter_predicate, compute_fields) =
         cse_rewrite_expressions(&project.fields, filter_predicate.as_ref(), ctx);
@@ -459,14 +459,14 @@ fn apply_cse_at_project(
 
     let compute_idx = ctx.alloc_compute_index();
 
-    let (new_child, new_filter_plan) = if let Some(mut filter) = maybe_filter {
+    let (new_child, new_filter_plan) = if let Some((mut filter, filter_child)) = filter_with_child {
         if let Some(pred) = new_filter_predicate {
             filter.predicate = pred;
         }
 
         if filter_uses_temps {
             // Place Compute below Filter so Filter can reference computed temps.
-            let input = filter_child.expect("checked above");
+            let input = filter_child;
             let compute = Arc::new(LogicalPlan::Compute(Compute::new(
                 compute_fields,
                 vec![input],
@@ -1173,10 +1173,9 @@ fn mark_field_path_used_in_tree(
                     }
                     return;
                 }
-                if !map.contains_key(segment.as_str()) {
-                    map.insert(segment.clone(), ColumnUse::Fields(HashMap::new()));
-                }
-                current = map.get_mut(segment.as_str()).expect("inserted above");
+                current = map
+                    .entry(segment.clone())
+                    .or_insert_with(|| ColumnUse::Fields(HashMap::new()));
             }
         }
     }

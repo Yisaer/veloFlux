@@ -13,6 +13,9 @@ impl ManagedRuntimeInner {
     fn handle(&self) -> &Handle {
         match self {
             ManagedRuntimeInner::Owned(runtime) => {
+                // SAFETY: Option<Runtime> is Some for the entire lifetime of the Owned variant;
+                // it becomes None only inside Drop::drop after the runtime is already consumed
+                #[allow(clippy::expect_used)]
                 runtime.as_ref().expect("managed runtime missing").handle()
             }
             ManagedRuntimeInner::Shared(handle) => handle,

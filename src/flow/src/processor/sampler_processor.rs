@@ -170,7 +170,7 @@ impl Processor for SamplerProcessor {
             let mut ticker = interval(emit_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-            let mut strategy_state = StrategyState::new(strategy, merger_registry);
+            let mut strategy_state = StrategyState::new(strategy, merger_registry)?;
             let mut control_active = control_active;
 
             loop {
@@ -287,17 +287,24 @@ enum StrategyState {
 }
 
 impl StrategyState {
-    fn new(strategy: SamplingStrategy, registry: Option<Arc<MergerRegistry>>) -> Self {
+    fn new(
+        strategy: SamplingStrategy,
+        registry: Option<Arc<MergerRegistry>>,
+    ) -> Result<Self, ProcessorError> {
         match strategy {
-            SamplingStrategy::Latest => StrategyState::Latest { latest: None },
+            SamplingStrategy::Latest => Ok(StrategyState::Latest { latest: None }),
             SamplingStrategy::Packer { props } => {
-                let registry = registry.expect("Packer strategy requires MergerRegistry");
+                let registry = registry.ok_or_else(|| {
+                    ProcessorError::InvalidConfiguration(
+                        "Packer strategy requires MergerRegistry".to_string(),
+                    )
+                })?;
                 let merger_instance = registry
                     .instantiate(&props.merger.merger_type, &props.merger.props)
-                    .expect("Failed to instantiate merger");
-                StrategyState::Packer {
+                    .map_err(|e| ProcessorError::InvalidConfiguration(e.to_string()))?;
+                Ok(StrategyState::Packer {
                     merger: merger_instance,
-                }
+                })
             }
         }
     }

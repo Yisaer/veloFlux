@@ -309,9 +309,11 @@ impl ProcessingWindowState {
             self.group_by_meta.clone(),
         );
         self.windows.push_back(new_state);
+        // SAFETY: push_back just succeeded; back_mut() is guaranteed Some
+        #[allow(clippy::expect_used)]
         self.windows
             .back_mut()
-            .expect("just pushed")
+            .expect("window deque must contain the just-pushed window state")
             .worker
             .update_groups(row)
     }
@@ -324,11 +326,11 @@ impl ProcessingWindowState {
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         let watermark_secs = to_secs(watermark, "watermark")?;
-        while let Some(front) = self.windows.front() {
-            if front.end_secs > watermark_secs {
+        while let Some(mut state) = self.windows.pop_front() {
+            if state.end_secs > watermark_secs {
+                self.windows.push_front(state);
                 break;
             }
-            let mut state = self.windows.pop_front().expect("front exists");
             if let Some(batch) = state
                 .worker
                 .finalize_current_window()

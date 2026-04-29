@@ -60,15 +60,17 @@ pub fn transform_stateful_functions(
     select_stmt.stateful_mappings = ordered_columns
         .iter()
         .map(|output_column| {
-            let spec = mappings
+            mappings
                 .get(output_column)
-                .expect("ordered stateful mapping must exist");
-            StatefulMappingEntry {
-                output_column: output_column.clone(),
-                spec: spec.clone(),
-            }
+                .ok_or_else(|| {
+                    format!("stateful mapping missing for output column '{output_column}'")
+                })
+                .map(|spec| StatefulMappingEntry {
+                    output_column: output_column.clone(),
+                    spec: spec.clone(),
+                })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
     Ok((select_stmt, mappings))
 }
 
