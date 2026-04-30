@@ -1,11 +1,11 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-
 use storage::{StorageManager, StoredInitApplyMeta};
 
 use crate::export::{ExportBundleV1, ExportResources};
-use crate::import::validate_and_build_snapshot;
+use crate::import::validate_and_build_snapshot_with_existing_streams;
 use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::startup::StartupPhase;
 
@@ -101,7 +101,17 @@ where
     let bundle: ExportBundleV1 = serde_json::from_slice(&raw)
         .map_err(|err| format!("parse init.json {}: {err}", init_path.display()))?;
     let summary = ApplySummary::from_resources(&bundle.resources);
-    let snapshot = validate_and_build_snapshot(&bundle, is_declared_instance)?;
+    let existing_stream_names: BTreeSet<String> = storage
+        .list_streams()
+        .map_err(|err| format!("list existing streams from storage: {err}"))?
+        .into_iter()
+        .map(|stream| stream.id)
+        .collect();
+    let snapshot = validate_and_build_snapshot_with_existing_streams(
+        &bundle,
+        &existing_stream_names,
+        is_declared_instance,
+    )?;
     let meta = StoredInitApplyMeta {
         last_applied_at_ms: unix_time_ms(SystemTime::now())?,
         last_init_json_modified_at_ms: init_modified_at_ms,
@@ -155,6 +165,7 @@ impl ApplySummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage_bridge;
     use tempfile::tempdir;
 
     use crate::pipeline::CreatePipelineRequest;
@@ -297,6 +308,62 @@ mod tests {
             apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap_err();
 
         assert_eq!(err, "flow instance worker_a is not declared by config");
+        assert!(storage.list_streams().unwrap().is_empty());
+        assert!(storage.list_pipelines().unwrap().is_empty());
+        assert_eq!(storage.get_init_apply_meta().unwrap(), None);
+    }
+
+    #[test]
+    fn apply_init_json_allows_pipeline_referencing_existing_stream() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        storage
+            .create_stream(
+                storage_bridge::stored_stream_from_request(&sample_stream_request("stream_1"))
+                    .unwrap(),
+            )
+            .unwrap();
+
+        let mut bundle = sample_bundle("stream_2");
+        bundle.resources.streams.clear();
+        bundle.resources.pipelines.push(sample_pipeline_request(
+            "pipe_1",
+            "stream_1",
+            DEFAULT_FLOW_INSTANCE_ID,
+        ));
+
+        write_init_json(dir.path(), &bundle);
+
+        apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap();
+
+        assert_eq!(storage.list_streams().unwrap().len(), 1);
+        assert_eq!(storage.list_pipelines().unwrap().len(), 1);
+        assert!(storage.get_pipeline("pipe_1").unwrap().is_some());
+    }
+
+    #[test]
+    fn apply_init_json_rejects_pipeline_referencing_missing_stream() {
+        let dir = tempdir().unwrap();
+        let storage = StorageManager::new(dir.path()).unwrap();
+
+        let mut bundle = sample_bundle("stream_unused");
+        bundle.resources.streams.clear();
+        bundle.resources.pipelines.push(sample_pipeline_request(
+            "pipe_1",
+            "missing_stream",
+            DEFAULT_FLOW_INSTANCE_ID,
+        ));
+
+        write_init_json(dir.path(), &bundle);
+
+        let err =
+            apply_init_json_if_needed(&storage, &|id| id == DEFAULT_FLOW_INSTANCE_ID).unwrap_err();
+
+        assert!(
+            err.contains("references missing stream"),
+            "unexpected error: {err}"
+        );
         assert!(storage.list_streams().unwrap().is_empty());
         assert!(storage.list_pipelines().unwrap().is_empty());
         assert_eq!(storage.get_init_apply_meta().unwrap(), None);

@@ -89,8 +89,32 @@ pub async fn import_storage_handler(
         .into_response()
 }
 
-pub(crate) fn validate_and_build_snapshot<F>(
+fn validate_pipeline_stream_references(
+    req: &CreatePipelineRequest,
+    stream_names: &BTreeSet<String>,
+) -> Result<(), String> {
+    let select_stmt = parser::parse_sql(&req.sql).map_err(|err| {
+        format!(
+            "pipeline {} sql parse failed during import validation: {}",
+            req.id, err
+        )
+    })?;
+
+    for source in &select_stmt.source_infos {
+        if !stream_names.contains(&source.name) {
+            return Err(format!(
+                "pipeline {} references missing stream: {}",
+                req.id, source.name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_and_build_snapshot_inner<F>(
     bundle: &ExportBundleV1,
+    existing_stream_names: &BTreeSet<String>,
     is_declared_instance: &F,
 ) -> Result<MetadataExportSnapshot, String>
 where
@@ -126,9 +150,14 @@ where
     }
 
     let mut streams = Vec::with_capacity(bundle.resources.streams.len());
-    let mut stream_names = BTreeSet::new();
+
+    let mut bundle_stream_names = BTreeSet::new();
+
+    let mut available_stream_names = existing_stream_names.clone();
+
     for req in &bundle.resources.streams {
-        validate_stream_request(req, &mut stream_names)?;
+        validate_stream_request(req, &mut bundle_stream_names)?;
+        available_stream_names.insert(req.name.clone());
         streams.push(storage_bridge::stored_stream_from_request(req)?);
     }
 
@@ -136,15 +165,20 @@ where
     let mut pipeline_ids = BTreeSet::new();
     for req in &bundle.resources.pipelines {
         let normalized = normalize_pipeline_request(req)?;
+        validate_pipeline_stream_references(&normalized, &available_stream_names)?;
+
         let flow_instance_id = normalized
             .flow_instance_id
             .as_deref()
             .ok_or_else(|| "flow_instance_id must not be empty".to_string())?;
+
         validate_declared_flow_instance(flow_instance_id, is_declared_instance)?;
+
         let id = normalized.id.clone();
         if !pipeline_ids.insert(id.clone()) {
             return Err(format!("duplicate pipeline id in bundle: {id}"));
         }
+
         pipelines.push(storage_bridge::stored_pipeline_from_request(&normalized)?);
     }
 
@@ -165,6 +199,27 @@ where
         mqtt_configs,
         memory_topics,
     })
+}
+
+pub(crate) fn validate_and_build_snapshot<F>(
+    bundle: &ExportBundleV1,
+    is_declared_instance: &F,
+) -> Result<MetadataExportSnapshot, String>
+where
+    F: Fn(&str) -> bool,
+{
+    validate_and_build_snapshot_inner(bundle, &BTreeSet::new(), is_declared_instance)
+}
+
+pub(crate) fn validate_and_build_snapshot_with_existing_streams<F>(
+    bundle: &ExportBundleV1,
+    existing_stream_names: &BTreeSet<String>,
+    is_declared_instance: &F,
+) -> Result<MetadataExportSnapshot, String>
+where
+    F: Fn(&str) -> bool,
+{
+    validate_and_build_snapshot_inner(bundle, existing_stream_names, is_declared_instance)
 }
 
 fn validate_memory_topic(
@@ -639,5 +694,62 @@ mod tests {
                 .list_pipelines()
                 .is_empty()
         );
+    }
+    #[test]
+    fn validate_snapshot_rejects_pipeline_referencing_missing_stream() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+
+        bundle.resources.pipelines[0] = sample_pipeline_request("pipe_a", "missing_stream");
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+
+        assert_eq!(
+            err,
+            "pipeline pipe_a references missing stream: missing_stream"
+        );
+    }
+    #[test]
+    fn validate_snapshot_accepts_pipeline_referencing_existing_stream() {
+        let bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+
+        let snapshot =
+            validate_and_build_snapshot(&bundle, &is_default_instance).expect("build snapshot");
+
+        assert_eq!(snapshot.streams.len(), 1);
+        assert_eq!(snapshot.pipelines.len(), 1);
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_pipeline_with_invalid_sql() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+
+        bundle.resources.pipelines[0].sql = "SELECT value FROM".to_string();
+
+        let err = validate_and_build_snapshot(&bundle, &is_default_instance).unwrap_err();
+
+        assert!(
+            err.contains("pipeline pipe_a sql parse failed during import validation"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_and_build_snapshot_with_existing_streams_allows_existing_stream_reference() {
+        let mut bundle = sample_bundle("stream_a", "pipe_a", "mqtt_a", "topic_a");
+
+        bundle.resources.streams.clear();
+        bundle.resources.pipelines[0].sql = "SELECT * FROM stream_a".to_string();
+
+        let existing_stream_names = BTreeSet::from(["stream_a".to_string()]);
+
+        let snapshot = validate_and_build_snapshot_with_existing_streams(
+            &bundle,
+            &existing_stream_names,
+            &is_default_instance,
+        )
+        .expect("pipeline should be allowed to reference an existing stream");
+
+        assert!(snapshot.streams.is_empty());
+        assert_eq!(snapshot.pipelines.len(), 1);
     }
 }
