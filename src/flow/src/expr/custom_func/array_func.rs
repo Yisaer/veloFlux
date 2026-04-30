@@ -5,11 +5,13 @@ use crate::expr::func::EvalError;
 use crate::expr::value_compare::compare_values;
 use datatypes::{ConcreteDatatype, ListValue, Value};
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const MAX_ARRAY_OUTPUT_LEN: usize = 100_000;
+const MAX_CONTAINS_ANY_FALLBACK_COMPARISONS: usize = 1_000_000;
 
-type ArrayItemsAndDatatype = (Vec<Value>, Arc<ConcreteDatatype>);
+type ArrayRefAndDatatype<'a> = (&'a [Value], &'a ConcreteDatatype);
 
 #[derive(Debug, Clone)]
 pub struct ArrayPositionFunc;
@@ -255,16 +257,28 @@ fn empty_array_for_value(value: &Value) -> Value {
     array_value_with_datatype(Vec::new(), Arc::new(value.datatype()))
 }
 
-fn array_items_and_datatype(
-    args: &[Value],
-    idx: usize,
-) -> Result<Option<ArrayItemsAndDatatype>, EvalError> {
+fn array_ref_or_null(args: &[Value], idx: usize) -> Result<Option<&[Value]>, EvalError> {
     match args.get(idx) {
         Some(Value::Null) => Ok(None),
-        Some(Value::List(list)) => Ok(Some((
-            list.items().to_vec(),
-            Arc::new(list.datatype().clone()),
-        ))),
+        Some(Value::List(list)) => Ok(Some(list.items())),
+        Some(other) => Err(EvalError::TypeMismatch {
+            expected: format!("array argument {}", idx),
+            actual: format!("{:?}", other),
+        }),
+        None => Err(EvalError::TypeMismatch {
+            expected: format!("argument {}", idx),
+            actual: format!("missing argument {}", idx),
+        }),
+    }
+}
+
+fn array_ref_and_datatype(
+    args: &[Value],
+    idx: usize,
+) -> Result<Option<ArrayRefAndDatatype<'_>>, EvalError> {
+    match args.get(idx) {
+        Some(Value::Null) => Ok(None),
+        Some(Value::List(list)) => Ok(Some((list.items(), list.datatype()))),
         Some(other) => Err(EvalError::TypeMismatch {
             expected: format!("array argument {}", idx),
             actual: format!("{:?}", other),
@@ -326,19 +340,56 @@ fn last_position(values: &[Value], needle: &Value) -> i64 {
         .unwrap_or(-1)
 }
 
+fn contains_any_same_type(left: &[Value], right: &[Value]) -> bool {
+    let (smaller, larger) = if left.len() <= right.len() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+    let lookup: HashSet<&Value> = smaller.iter().collect();
+    larger.iter().any(|value| lookup.contains(value))
+}
+
+fn contains_any_relaxed(left: &[Value], right: &[Value]) -> Result<bool, EvalError> {
+    let comparisons =
+        left.len()
+            .checked_mul(right.len())
+            .ok_or_else(|| EvalError::TypeMismatch {
+                expected: format!(
+                    "array_contains_any fallback comparisons <= {MAX_CONTAINS_ANY_FALLBACK_COMPARISONS}"
+                ),
+                actual: "overflow".to_string(),
+            })?;
+
+    if comparisons > MAX_CONTAINS_ANY_FALLBACK_COMPARISONS {
+        return Err(EvalError::TypeMismatch {
+            expected: format!(
+                "array_contains_any fallback comparisons <= {MAX_CONTAINS_ANY_FALLBACK_COMPARISONS}"
+            ),
+            actual: comparisons.to_string(),
+        });
+    }
+
+    Ok(left.iter().any(|left_value| {
+        right
+            .iter()
+            .any(|right_value| values_equal(left_value, right_value))
+    }))
+}
+
 impl CustomFunc for ArrayPositionFunc {
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
-        nth_array_or_null(args, 0)?;
+        array_ref_or_null(args, 0)?;
         Ok(())
     }
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        self.validate_row(args)?;
-        let Some(values) = nth_array_or_null(args, 0)? else {
+        validate_arity(args, &[2])?;
+        let Some(values) = array_ref_or_null(args, 0)? else {
             return Ok(Value::Int64(-1));
         };
-        Ok(Value::Int64(position(&values, &args[1])))
+        Ok(Value::Int64(position(values, &args[1])))
     }
 
     fn name(&self) -> &str {
@@ -349,16 +400,16 @@ impl CustomFunc for ArrayPositionFunc {
 impl CustomFunc for ArrayLastPositionFunc {
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
-        nth_array_or_null(args, 0)?;
+        array_ref_or_null(args, 0)?;
         Ok(())
     }
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        self.validate_row(args)?;
-        let Some(values) = nth_array_or_null(args, 0)? else {
+        validate_arity(args, &[2])?;
+        let Some(values) = array_ref_or_null(args, 0)? else {
             return Ok(Value::Int64(-1));
         };
-        Ok(Value::Int64(last_position(&values, &args[1])))
+        Ok(Value::Int64(last_position(values, &args[1])))
     }
 
     fn name(&self) -> &str {
@@ -369,14 +420,14 @@ impl CustomFunc for ArrayLastPositionFunc {
 impl CustomFunc for ElementAtFunc {
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
-        nth_array_or_null(args, 0)?;
+        array_ref_or_null(args, 0)?;
         value_to_index(&args[1])?;
         Ok(())
     }
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        self.validate_row(args)?;
-        let Some(values) = nth_array_or_null(args, 0)? else {
+        validate_arity(args, &[2])?;
+        let Some(values) = array_ref_or_null(args, 0)? else {
             return Ok(Value::Null);
         };
 
@@ -399,16 +450,16 @@ impl CustomFunc for ElementAtFunc {
 impl CustomFunc for ArrayContainsFunc {
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
-        nth_array_or_null(args, 0)?;
+        array_ref_or_null(args, 0)?;
         Ok(())
     }
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        self.validate_row(args)?;
-        let Some(values) = nth_array_or_null(args, 0)? else {
+        validate_arity(args, &[2])?;
+        let Some(values) = array_ref_or_null(args, 0)? else {
             return Ok(Value::Bool(false));
         };
-        Ok(Value::Bool(position(&values, &args[1]) >= 0))
+        Ok(Value::Bool(position(values, &args[1]) >= 0))
     }
 
     fn name(&self) -> &str {
@@ -418,23 +469,26 @@ impl CustomFunc for ArrayContainsFunc {
 
 impl CustomFunc for ArrayContainsAnyFunc {
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
-        validate_two_arrays_or_null(args)
+        validate_arity(args, &[2])?;
+        array_ref_and_datatype(args, 0)?;
+        array_ref_and_datatype(args, 1)?;
+        Ok(())
     }
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        self.validate_row(args)?;
-        let Some(left) = nth_array_or_null(args, 0)? else {
+        validate_arity(args, &[2])?;
+        let Some((left, left_type)) = array_ref_and_datatype(args, 0)? else {
             return Ok(Value::Bool(false));
         };
-        let Some(right) = nth_array_or_null(args, 1)? else {
+        let Some((right, right_type)) = array_ref_and_datatype(args, 1)? else {
             return Ok(Value::Bool(false));
         };
 
-        Ok(Value::Bool(left.iter().any(|left_value| {
-            right
-                .iter()
-                .any(|right_value| values_equal(left_value, right_value))
-        })))
+        if left_type == right_type {
+            return Ok(Value::Bool(contains_any_same_type(left, right)));
+        }
+
+        Ok(Value::Bool(contains_any_relaxed(left, right)?))
     }
 
     fn name(&self) -> &str {
@@ -445,13 +499,14 @@ impl CustomFunc for ArrayContainsAnyFunc {
 impl CustomFunc for ArrayCreateFunc {
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         ensure_array_output_len(args.len())?;
-        array_to_value(args.to_vec())?;
+        infer_list_datatype(args)?;
         Ok(())
     }
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        self.validate_row(args)?;
-        array_to_value(args.to_vec())
+        ensure_array_output_len(args.len())?;
+        let datatype = infer_list_datatype(args)?;
+        Ok(array_value_with_datatype(args.to_vec(), datatype))
     }
 
     fn name(&self) -> &str {
@@ -462,22 +517,23 @@ impl CustomFunc for ArrayCreateFunc {
 impl CustomFunc for ArrayRemoveFunc {
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
-        array_items_and_datatype(args, 0)?;
+        array_ref_and_datatype(args, 0)?;
         Ok(())
     }
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        self.validate_row(args)?;
-        let Some((values, datatype)) = array_items_and_datatype(args, 0)? else {
+        validate_arity(args, &[2])?;
+        let Some((values, datatype)) = array_ref_and_datatype(args, 0)? else {
             return Ok(Value::Null);
         };
 
         let out: Vec<Value> = values
-            .into_iter()
+            .iter()
             .filter(|value| !values_equal(value, &args[1]))
+            .cloned()
             .collect();
 
-        Ok(array_value_with_datatype(out, datatype))
+        Ok(array_value_with_datatype(out, Arc::new(datatype.clone())))
     }
 
     fn name(&self) -> &str {
@@ -582,19 +638,19 @@ impl CustomFunc for ArrayConcatFunc {
         let mut datatype: Option<Arc<ConcreteDatatype>> = None;
         let mut len = 0usize;
         for (idx, _) in args.iter().enumerate() {
-            let Some((values, current_type)) = array_items_and_datatype(args, idx)? else {
+            let Some((values, current_type)) = array_ref_and_datatype(args, idx)? else {
                 continue;
             };
 
             if let Some(expected_type) = &datatype {
-                if expected_type.as_ref() != current_type.as_ref() {
+                if expected_type.as_ref() != current_type {
                     return Err(EvalError::TypeMismatch {
                         expected: format!("array element datatype {:?}", expected_type),
                         actual: format!("{:?}", current_type),
                     });
                 }
             } else {
-                datatype = Some(current_type);
+                datatype = Some(Arc::new(current_type.clone()));
             }
 
             len = len
@@ -610,18 +666,40 @@ impl CustomFunc for ArrayConcatFunc {
     }
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        self.validate_row(args)?;
+        if args.is_empty() {
+            return Err(EvalError::TypeMismatch {
+                expected: "at least 1 argument".to_string(),
+                actual: "0 arguments".to_string(),
+            });
+        }
 
         let mut datatype: Option<Arc<ConcreteDatatype>> = None;
         let mut out = Vec::new();
         for (idx, _) in args.iter().enumerate() {
-            let Some((values, current_type)) = array_items_and_datatype(args, idx)? else {
+            let Some((values, current_type)) = array_ref_and_datatype(args, idx)? else {
                 continue;
             };
-            if datatype.is_none() {
-                datatype = Some(current_type);
+
+            if let Some(expected_type) = &datatype {
+                if expected_type.as_ref() != current_type {
+                    return Err(EvalError::TypeMismatch {
+                        expected: format!("array element datatype {:?}", expected_type),
+                        actual: format!("{:?}", current_type),
+                    });
+                }
+            } else {
+                datatype = Some(Arc::new(current_type.clone()));
             }
-            out.extend(values);
+
+            let new_len =
+                out.len()
+                    .checked_add(values.len())
+                    .ok_or_else(|| EvalError::TypeMismatch {
+                        expected: format!("array output length <= {MAX_ARRAY_OUTPUT_LEN}"),
+                        actual: "overflow".to_string(),
+                    })?;
+            ensure_array_output_len(new_len)?;
+            out.extend(values.iter().cloned());
         }
 
         let Some(datatype) = datatype else {
