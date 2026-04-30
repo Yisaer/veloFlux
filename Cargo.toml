@@ -60,6 +60,7 @@ bytes = "1"
 criterion = "0.5"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tempfile = "3"
+proptest = "1"
 
 [[bench]]
 name = "pipeline_e2e"
