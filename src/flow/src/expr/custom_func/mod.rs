@@ -1,3 +1,4 @@
+pub mod array_func;
 pub mod helpers;
 pub mod math_func;
 pub mod misc_func;
@@ -48,6 +49,7 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
 pub fn builtin_custom_function_defs() -> Vec<FunctionDef> {
     let mut defs = Vec::new();
 
+    defs.extend(array_func::builtin_function_defs());
     defs.extend(math_func::builtin_function_defs());
     defs.extend(null_func::builtin_function_defs());
     defs.extend(string_func::builtin_function_defs());

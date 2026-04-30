@@ -1,3 +1,8 @@
+use super::array_func::{
+    ArrayConcatFunc, ArrayContainsAnyFunc, ArrayContainsFunc, ArrayCreateFunc,
+    ArrayLastPositionFunc, ArrayPositionFunc, ArrayRemoveFunc, ElementAtFunc, RepeatFunc,
+    SequenceFunc,
+};
 use super::math_func::{
     AbsFunc, AcosFunc, AsinFunc, Atan2Func, AtanFunc, BitAndFunc, BitNotFunc, BitOrFunc,
     BitXorFunc, CeilFunc, CeilingFunc, ConvFunc, CosFunc, CoshFunc, CotFunc, DegreesFunc, ExpFunc,
@@ -56,6 +61,7 @@ impl CustomFuncRegistry {
         let mut functions: HashMap<String, Arc<dyn CustomFunc>> = HashMap::new();
 
         register_math_functions(&mut functions);
+        register_array_functions(&mut functions);
         register_null_functions(&mut functions);
         register_string_functions(&mut functions);
         register_object_functions(&mut functions);
@@ -69,6 +75,23 @@ fn register(functions: &mut HashMap<String, Arc<dyn CustomFunc>>, func: Arc<dyn 
     functions.insert(func.name().to_lowercase(), Arc::clone(&func));
     for alias in func.aliases() {
         functions.insert(alias.to_lowercase(), Arc::clone(&func));
+    }
+}
+
+fn register_array_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>) {
+    for func in [
+        Arc::new(ArrayPositionFunc) as Arc<dyn CustomFunc>,
+        Arc::new(ArrayLastPositionFunc),
+        Arc::new(ElementAtFunc),
+        Arc::new(ArrayContainsFunc),
+        Arc::new(ArrayContainsAnyFunc),
+        Arc::new(ArrayCreateFunc),
+        Arc::new(ArrayRemoveFunc),
+        Arc::new(RepeatFunc),
+        Arc::new(SequenceFunc),
+        Arc::new(ArrayConcatFunc),
+    ] {
+        register(functions, func);
     }
 }
 
@@ -244,6 +267,22 @@ mod tests {
         assert!(registry.is_registered("split_value"));
         assert!(registry.is_registered("trim"));
         assert!(registry.is_registered("upper"));
+    }
+
+    #[test]
+    fn builtins_include_array_functions() {
+        let registry = CustomFuncRegistry::default();
+
+        assert!(registry.is_registered("array_position"));
+        assert!(registry.is_registered("array_last_position"));
+        assert!(registry.is_registered("element_at"));
+        assert!(registry.is_registered("array_contains"));
+        assert!(registry.is_registered("array_contains_any"));
+        assert!(registry.is_registered("array_create"));
+        assert!(registry.is_registered("array_remove"));
+        assert!(registry.is_registered("repeat"));
+        assert!(registry.is_registered("sequence"));
+        assert!(registry.is_registered("array_concat"));
     }
 
     #[test]
