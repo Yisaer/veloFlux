@@ -131,6 +131,7 @@ pub fn array_contains_any_function_def() -> FunctionDef {
             "Requires exactly 2 array arguments.",
             "Returns false if either array is NULL.",
             "Numeric values compare by numeric value across numeric datatypes.",
+            "Mixed-datatype fallback scanning returns true on the first match and errors only after more than 1000000 comparisons without a match.",
         ],
         vec!["SELECT array_contains_any(a, b)"],
     )
@@ -351,30 +352,35 @@ fn contains_any_same_type(left: &[Value], right: &[Value]) -> bool {
 }
 
 fn contains_any_relaxed(left: &[Value], right: &[Value]) -> Result<bool, EvalError> {
-    let comparisons =
-        left.len()
-            .checked_mul(right.len())
-            .ok_or_else(|| EvalError::TypeMismatch {
-                expected: format!(
-                    "array_contains_any fallback comparisons <= {MAX_CONTAINS_ANY_FALLBACK_COMPARISONS}"
-                ),
-                actual: "overflow".to_string(),
+    let mut comparisons = 0usize;
+
+    for left_value in left {
+        for right_value in right {
+            if values_equal(left_value, right_value) {
+                return Ok(true);
+            }
+
+            comparisons = comparisons.checked_add(1).ok_or_else(|| {
+                EvalError::TypeMismatch {
+                    expected: format!(
+                        "array_contains_any fallback comparisons <= {MAX_CONTAINS_ANY_FALLBACK_COMPARISONS}"
+                    ),
+                    actual: "overflow".to_string(),
+                }
             })?;
 
-    if comparisons > MAX_CONTAINS_ANY_FALLBACK_COMPARISONS {
-        return Err(EvalError::TypeMismatch {
-            expected: format!(
-                "array_contains_any fallback comparisons <= {MAX_CONTAINS_ANY_FALLBACK_COMPARISONS}"
-            ),
-            actual: comparisons.to_string(),
-        });
+            if comparisons > MAX_CONTAINS_ANY_FALLBACK_COMPARISONS {
+                return Err(EvalError::TypeMismatch {
+                    expected: format!(
+                        "array_contains_any fallback comparisons <= {MAX_CONTAINS_ANY_FALLBACK_COMPARISONS}"
+                    ),
+                    actual: comparisons.to_string(),
+                });
+            }
+        }
     }
 
-    Ok(left.iter().any(|left_value| {
-        right
-            .iter()
-            .any(|right_value| values_equal(left_value, right_value))
-    }))
+    Ok(false)
 }
 
 impl CustomFunc for ArrayPositionFunc {
@@ -835,6 +841,44 @@ mod tests {
         assert_bool(
             func.eval_row(&[int8_array(&[1]), Value::Null]).unwrap(),
             false,
+        );
+    }
+
+    #[test]
+    fn array_contains_any_relaxed_fallback_preserves_early_match() {
+        let func = ArrayContainsAnyFunc;
+        let mut left = vec![Value::Int8(7)];
+        left.extend(std::iter::repeat_n(Value::Int8(1), 1000));
+        let mut right = vec![Value::Int64(7)];
+        right.extend(std::iter::repeat_n(Value::Int64(2), 999));
+
+        assert_bool(
+            func.eval_row(&[
+                array_to_value(left).unwrap(),
+                array_to_value(right).unwrap(),
+            ])
+            .unwrap(),
+            true,
+        );
+    }
+
+    #[test]
+    fn array_contains_any_relaxed_fallback_errors_after_comparison_cap_without_match() {
+        let func = ArrayContainsAnyFunc;
+        let left = vec![Value::Int8(1); 1001];
+        let right = vec![Value::Int64(2); 1000];
+
+        let err = func
+            .eval_row(&[
+                array_to_value(left).unwrap(),
+                array_to_value(right).unwrap(),
+            ])
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("array_contains_any fallback comparisons"),
+            "unexpected error: {err}"
         );
     }
 
