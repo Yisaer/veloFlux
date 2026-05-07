@@ -695,8 +695,8 @@ fn create_logical_plan_stateful_table_driven() {
         },
         Case {
             name: "test_create_logical_plan_with_acc_projection",
-            sql: "SELECT acc_sum(a, b) FROM stream",
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[acc_sum(a, b) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as acc_sum(a, b)]"],"operator":"Project"}"##,
+            sql: "SELECT acc_sum(a) FROM stream",
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[acc_sum(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as acc_sum(a)]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_acc_filter",

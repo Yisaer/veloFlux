@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn test_parse_acc_rewrite() {
         let parser = StreamSqlParser::new();
-        let result = parser.parse("SELECT acc_sum(a, b) + 1 FROM t");
+        let result = parser.parse("SELECT acc_sum(a) + 1 FROM t");
         assert!(result.is_ok());
         let select_stmt = result.unwrap();
 
@@ -381,7 +381,7 @@ mod tests {
         assert_eq!(select_stmt.select_fields[0].expr.to_string(), "col_1 + 1");
         assert_eq!(
             select_stmt.select_fields[0].alias,
-            Some("acc_sum(a, b) + 1".to_string())
+            Some("acc_sum(a) + 1".to_string())
         );
         assert_eq!(select_stmt.acc_mappings.len(), 1);
 
@@ -395,9 +395,9 @@ mod tests {
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
-            vec!["a", "b"]
+            vec!["a"]
         );
-        assert_eq!(mapping.spec.original_expr.to_string(), "acc_sum(a, b)");
+        assert_eq!(mapping.spec.original_expr.to_string(), "acc_sum(a)");
     }
 
     #[test]
@@ -445,6 +445,18 @@ mod tests {
         let result = parser.parse("SELECT acc_sum(a) OVER (PARTITION BY k) FROM t");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("does not support OVER"));
+    }
+
+    #[test]
+    fn test_parse_acc_rejects_invalid_arity() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT acc_sum(a, b) FROM t");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("acc function 'acc_sum' expects 1 argument(s), got 2")
+        );
     }
 }
 

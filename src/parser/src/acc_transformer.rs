@@ -462,6 +462,8 @@ fn parse_acc_call(
         ));
     }
 
+    validate_acc_arity(&func_name, func.args.len())?;
+
     let mut args = Vec::with_capacity(func.args.len());
     for arg in &func.args {
         match arg {
@@ -483,6 +485,22 @@ fn parse_acc_call(
         args,
         original_expr: original_expr.clone(),
     })
+}
+
+fn validate_acc_arity(func_name: &str, actual: usize) -> Result<(), String> {
+    let expected = match func_name {
+        "acc_sum" | "acc_max" | "acc_min" | "acc_count" | "acc_avg" => 1,
+        _ => return Err(format!("unknown acc function '{}'", func_name)),
+    };
+
+    if actual != expected {
+        return Err(format!(
+            "acc function '{}' expects {} argument(s), got {}",
+            func_name, expected, actual
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_acc_arg_expr(
