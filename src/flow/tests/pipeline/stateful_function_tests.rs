@@ -248,6 +248,146 @@ async fn stateful_function_table_driven() {
             close_before_read: false,
         },
         StatefulCase {
+            name: "acc_sum_running_total",
+            sql: "SELECT acc_sum(a) AS total FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Float64(1.0),
+                    Value::Float64(2.5),
+                    Value::Null,
+                    Value::Float64(3.0),
+                ],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "total".to_string(),
+                    expected_values: vec![
+                        Value::Float64(1.0),
+                        Value::Float64(3.5),
+                        Value::Float64(3.5),
+                        Value::Float64(6.5),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "acc_max_running_max",
+            sql: "SELECT acc_max(a) AS max_a FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Float64(2.0),
+                    Value::Float64(1.0),
+                    Value::Null,
+                    Value::Float64(3.0),
+                ],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "max_a".to_string(),
+                    expected_values: vec![
+                        Value::Float64(2.0),
+                        Value::Float64(2.0),
+                        Value::Float64(2.0),
+                        Value::Float64(3.0),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "acc_min_running_min",
+            sql: "SELECT acc_min(a) AS min_a FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Float64(2.0),
+                    Value::Float64(1.0),
+                    Value::Null,
+                    Value::Float64(3.0),
+                ],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "min_a".to_string(),
+                    expected_values: vec![
+                        Value::Float64(2.0),
+                        Value::Float64(1.0),
+                        Value::Float64(1.0),
+                        Value::Float64(1.0),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "acc_count_running_non_null_count",
+            sql: "SELECT acc_count(a) AS n FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::String("x".to_string()),
+                    Value::Null,
+                    Value::String("y".to_string()),
+                    Value::String("z".to_string()),
+                ],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "n".to_string(),
+                    expected_values: vec![
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Int64(3),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "acc_avg_running_average",
+            sql: "SELECT acc_avg(a) AS avg_a FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![
+                    Value::Float64(1.0),
+                    Value::Float64(2.0),
+                    Value::Null,
+                    Value::Float64(3.0),
+                ],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "avg_a".to_string(),
+                    expected_values: vec![
+                        Value::Float64(1.0),
+                        Value::Float64(1.5),
+                        Value::Float64(1.5),
+                        Value::Float64(2.0),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
             name: "lag_dedup_two_columns",
             sql: "SELECT lag(a) AS p1, lag(a) AS p2 FROM stream",
             input_data: vec![(

@@ -1,3 +1,4 @@
+pub mod acc;
 pub mod changed_col;
 pub mod had_changed;
 pub mod lag;
@@ -5,6 +6,11 @@ pub mod latest;
 pub mod registry;
 pub(crate) mod util;
 
+pub use acc::{
+    acc_avg_function_def, acc_count_function_def, acc_max_function_def, acc_min_function_def,
+    acc_sum_function_def, AccAvgFunction, AccCountFunction, AccMaxFunction, AccMinFunction,
+    AccSumFunction,
+};
 pub use changed_col::changed_col_function_def;
 pub use changed_col::ChangedColFunction;
 pub use had_changed::had_changed_function_def;
@@ -22,6 +28,11 @@ use crate::catalog::FunctionDef;
 
 pub fn builtin_stateful_function_defs() -> Vec<FunctionDef> {
     vec![
+        acc_avg_function_def(),
+        acc_count_function_def(),
+        acc_max_function_def(),
+        acc_min_function_def(),
+        acc_sum_function_def(),
         changed_col_function_def(),
         had_changed_function_def(),
         lag_function_def(),
