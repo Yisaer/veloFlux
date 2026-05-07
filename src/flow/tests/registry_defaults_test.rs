@@ -21,6 +21,7 @@ fn individual_registry_defaults_include_builtins() {
 
     let stateful_registry = StatefulFunctionRegistry::default();
     assert!(stateful_registry.is_registered("lag"));
+    assert!(stateful_registry.is_registered("acc_sum"));
 
     let custom_func_registry = CustomFuncRegistry::default();
     assert!(custom_func_registry.is_registered("concat"));
@@ -39,6 +40,7 @@ fn pipeline_registries_default_uses_builtins() {
     assert!(registries.decoder_registry().is_registered("json"));
     assert!(registries.aggregate_registry().is_registered("sum"));
     assert!(registries.stateful_registry().is_registered("lag"));
+    assert!(registries.stateful_registry().is_registered("acc_sum"));
     assert!(registries.custom_func_registry().is_registered("concat"));
     assert!(registries
         .eventtime_type_registry()

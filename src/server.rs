@@ -572,9 +572,13 @@ async fn spawn_flow_workers(
             "spawning flow worker"
         );
 
-        let mut cmd = if let Some(path) = spec.cgroup_path.as_deref() {
+        let mut cmd = if spec.cgroup_path.is_some() {
             #[cfg(target_os = "linux")]
             {
+                let path = spec
+                    .cgroup_path
+                    .as_deref()
+                    .expect("checked cgroup_path presence");
                 tracing::info!(
                     flow_instance_id = %spec.id,
                     cgroup_path = %path,

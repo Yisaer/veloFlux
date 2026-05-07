@@ -3,7 +3,10 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{ChangedColFunction, HadChangedFunction, LagFunction, LatestFunction};
+use super::{
+    AccAvgFunction, AccCountFunction, AccMaxFunction, AccMinFunction, AccSumFunction,
+    ChangedColFunction, HadChangedFunction, LagFunction, LatestFunction,
+};
 
 pub struct StatefulEvalInput<'a> {
     pub args: &'a [Value],
@@ -64,6 +67,11 @@ impl StatefulFunctionRegistry {
     }
 
     fn register_builtin_functions(&self) {
+        let _ = self.register_function(Arc::new(AccAvgFunction::new()));
+        let _ = self.register_function(Arc::new(AccCountFunction::new()));
+        let _ = self.register_function(Arc::new(AccMaxFunction::new()));
+        let _ = self.register_function(Arc::new(AccMinFunction::new()));
+        let _ = self.register_function(Arc::new(AccSumFunction::new()));
         let _ = self.register_function(Arc::new(ChangedColFunction::new()));
         let _ = self.register_function(Arc::new(HadChangedFunction::new()));
         let _ = self.register_function(Arc::new(LagFunction::new()));
@@ -151,6 +159,12 @@ mod tests {
             assert!(
                 registry.is_registered(name),
                 "runtime registry missing parser builtin stateful function '{name}'"
+            );
+        }
+        for name in parser::builtin_acc_function_names() {
+            assert!(
+                registry.is_registered(name),
+                "runtime registry missing parser builtin acc function '{name}'"
             );
         }
     }

@@ -4,6 +4,8 @@
 )]
 #![forbid(unsafe_code)]
 
+pub mod acc_call;
+pub mod acc_transformer;
 pub mod aggregate_registry;
 pub mod aggregate_transformer;
 pub mod capabilities;
@@ -19,6 +21,10 @@ pub mod stateful_validation;
 pub mod visitor;
 pub mod window;
 
+pub use acc_call::{
+    AccCallSpec, AccMappingEntry, builtin_acc_function_names, is_acc_function_name,
+};
+pub use acc_transformer::transform_acc_functions;
 pub use aggregate_registry::{
     AggregateRegistry, StaticAggregateRegistry, default_aggregate_registry,
 };

@@ -1,6 +1,7 @@
 use sqlparser::ast::{Expr, Ident, Query, Select, SelectItem, SetExpr, Statement, Visit};
 use sqlparser::parser::Parser;
 
+use crate::acc_transformer::transform_acc_functions;
 use crate::aggregate_registry::{AggregateRegistry, default_aggregate_registry};
 use crate::aggregate_transformer::transform_aggregate_functions;
 use crate::col_placeholder_allocator::ColPlaceholderAllocator;
@@ -65,6 +66,15 @@ impl StreamSqlParser {
 
         let mut allocator = ColPlaceholderAllocator::new();
 
+        // Transform acc functions first. They are parsed as ordinary functions, then extracted
+        // into parser mappings and replaced by placeholder columns for later planning.
+        let (select_stmt, _acc_mappings) = transform_acc_functions(
+            select_stmt,
+            Arc::clone(&self.aggregate_registry),
+            Arc::clone(&self.stateful_registry),
+            &mut allocator,
+        )?;
+
         // Transform stateful functions first (search + replace, with dedup).
         // This enables cases like last_row(lag(a)) where a stateful call appears inside an aggregate.
         let (select_stmt, _stateful_mappings) = transform_stateful_functions(
@@ -80,6 +90,16 @@ impl StreamSqlParser {
             Arc::clone(&self.aggregate_registry),
             &mut allocator,
         )?;
+
+        if !transformed_stmt.acc_mappings.is_empty()
+            && (!transformed_stmt.stateful_mappings.is_empty()
+                || !transformed_stmt.aggregate_mappings.is_empty())
+        {
+            return Err(
+                "acc functions cannot be mixed with stateful or aggregate functions yet"
+                    .to_string(),
+            );
+        }
 
         Ok(transformed_stmt)
     }
@@ -347,6 +367,95 @@ mod tests {
                 .original_expr
                 .to_string(),
             "lag(a)"
+        );
+    }
+
+    #[test]
+    fn test_parse_acc_rewrite() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT acc_sum(a) + 1 FROM t");
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+
+        assert_eq!(select_stmt.select_fields.len(), 1);
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "col_1 + 1");
+        assert_eq!(
+            select_stmt.select_fields[0].alias,
+            Some("acc_sum(a) + 1".to_string())
+        );
+        assert_eq!(select_stmt.acc_mappings.len(), 1);
+
+        let mapping = &select_stmt.acc_mappings[0];
+        assert_eq!(mapping.output_column, "col_1");
+        assert_eq!(mapping.spec.func_name, "acc_sum");
+        assert_eq!(
+            mapping
+                .spec
+                .args
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert_eq!(mapping.spec.original_expr.to_string(), "acc_sum(a)");
+    }
+
+    #[test]
+    fn test_parse_acc_reuses_same_expression() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT acc_count(a), acc_count(a) FROM t");
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "col_1");
+        assert_eq!(select_stmt.select_fields[1].expr.to_string(), "col_1");
+        assert_eq!(select_stmt.acc_mappings.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_acc_does_not_alias_unrelated_fields() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT acc_count(a), b FROM t");
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+
+        assert_eq!(
+            select_stmt.select_fields[0].alias,
+            Some("acc_count(a)".to_string())
+        );
+        assert_eq!(select_stmt.select_fields[1].alias, None);
+        assert_eq!(select_stmt.select_fields[1].field_name, "b");
+    }
+
+    #[test]
+    fn test_parse_acc_rejects_multiple_distinct_calls() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT acc_count(a), acc_sum(b) FROM t");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("only one acc function is supported per statement")
+        );
+    }
+
+    #[test]
+    fn test_parse_acc_rejects_over() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT acc_sum(a) OVER (PARTITION BY k) FROM t");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not support OVER"));
+    }
+
+    #[test]
+    fn test_parse_acc_rejects_invalid_arity() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT acc_sum(a, b) FROM t");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("acc function 'acc_sum' expects 1 argument(s), got 2")
         );
     }
 }

@@ -55,6 +55,11 @@ Built-in stateful functions currently include:
 - `latest`
 - `changed_col`
 - `had_changed`
+- `acc_sum`
+- `acc_max`
+- `acc_min`
+- `acc_count`
+- `acc_avg`
 
 ## Built-in Functions
 
@@ -154,6 +159,41 @@ Example:
 SELECT had_changed(true, status, code) AS changed FROM stream
 ```
 
+### `acc_sum`, `acc_max`, `acc_min`, `acc_count`, `acc_avg`
+
+Signatures:
+
+```sql
+acc_sum(x)
+acc_max(x)
+acc_min(x)
+acc_count(x)
+acc_avg(x)
+```
+
+Semantics:
+
+- `acc_sum` returns the cumulative sum of accepted non-`NULL` numeric values.
+- `acc_max` returns the cumulative maximum of accepted non-`NULL` numeric values.
+- `acc_min` returns the cumulative minimum of accepted non-`NULL` numeric values.
+- `acc_count` returns the cumulative count of accepted non-`NULL` values.
+- `acc_avg` returns the cumulative average of accepted non-`NULL` numeric values.
+- `acc_sum`, `acc_max`, `acc_min`, and `acc_avg` return `0.0` before any non-`NULL`
+  numeric value has been accepted.
+- `acc_count` returns `0` before any non-`NULL` value has been accepted.
+- Numeric acc functions reject non-numeric values at runtime.
+- The current implementation keeps global state for each acc call.
+
+Examples:
+
+```sql
+SELECT acc_sum(a) AS running_total FROM stream
+```
+
+```sql
+SELECT acc_count(status) AS seen_status_count FROM stream
+```
+
 ## Restrictions
 
 For stateful functions, the current implementation supports only:
@@ -161,6 +201,18 @@ For stateful functions, the current implementation supports only:
 - Positional expression arguments.
 - `FILTER (WHERE <expr>)`.
 - `OVER (PARTITION BY <expr> [, <expr> ...])`.
+
+For acc functions, the current implementation supports only:
+
+- One positional expression argument. Arity is validated by acc function name.
+- Global state for each acc call.
+
+The following acc shapes are rejected:
+
+- `FILTER (WHERE <expr>)`.
+- `OVER (...)`, including `OVER (PARTITION BY ...)`.
+- Multiple acc calls in one statement.
+- Multiple positional arguments in the currently supported built-in acc functions.
 
 The following are rejected:
 
