@@ -135,7 +135,7 @@ impl LogicalPlan {
 ///
 /// The plan structure will be:
 /// - DataSource(s) (from SelectStmt::source_infos, one per source)
-/// - StatefulFunction (from SelectStmt::stateful_mappings, if present) - takes DataSources as children
+/// - StatefulFunction (from SelectStmt::stateful_mappings/acc_mappings, if present) - takes DataSources as children
 /// - Window (from SelectStmt::window, if present) - takes DataSources as children
 /// - Aggregation (from SelectStmt::aggregate_mappings, if present) - takes Window or DataSources as children
 /// - Filter (from SelectStmt::having, if present) - takes Aggregation as children
@@ -209,20 +209,32 @@ pub fn create_logical_plan_with_source_inputs(
         current_index += 1;
     }
 
-    // 2. Create StatefulFunctionPlan if stateful mappings exist
-    if !select_stmt.stateful_mappings.is_empty() {
-        let stateful = stateful_function::StatefulFunctionPlan::new(
-            select_stmt
-                .stateful_mappings
-                .iter()
-                .map(|entry| stateful_function::LogicalStatefulCall {
-                    output_column: entry.output_column.clone(),
-                    spec: entry.spec.clone(),
-                })
-                .collect(),
-            current_plans,
-            current_index,
-        );
+    // 2. Create StatefulFunctionPlan if stateful or acc mappings exist.
+    // Acc functions are parsed into their own mapping, then planned through the stateful
+    // execution node with no WHEN predicate and no partition keys for the initial scope.
+    if !select_stmt.stateful_mappings.is_empty() || !select_stmt.acc_mappings.is_empty() {
+        let mut calls = select_stmt
+            .stateful_mappings
+            .iter()
+            .map(|entry| stateful_function::LogicalStatefulCall {
+                output_column: entry.output_column.clone(),
+                spec: entry.spec.clone(),
+            })
+            .collect::<Vec<_>>();
+        calls.extend(select_stmt.acc_mappings.iter().map(|entry| {
+            stateful_function::LogicalStatefulCall {
+                output_column: entry.output_column.clone(),
+                spec: parser::StatefulCallSpec {
+                    func_name: entry.spec.func_name.clone(),
+                    args: entry.spec.args.clone(),
+                    when: None,
+                    partition_by: Vec::new(),
+                    original_expr: entry.spec.original_expr.clone(),
+                },
+            }
+        }));
+        let stateful =
+            stateful_function::StatefulFunctionPlan::new(calls, current_plans, current_index);
         current_plans = vec![Arc::new(LogicalPlan::StatefulFunction(stateful))];
         current_index += 1;
     }

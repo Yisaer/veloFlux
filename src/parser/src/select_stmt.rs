@@ -1,6 +1,7 @@
 use sqlparser::ast::Expr;
 use std::collections::HashMap;
 
+use crate::acc_call::AccMappingEntry;
 use crate::stateful_call::StatefulMappingEntry;
 use crate::window::Window;
 
@@ -41,6 +42,8 @@ pub struct SelectStmt {
     pub aggregate_mappings: HashMap<String, Expr>,
     /// Stateful function mappings in parser rewrite order
     pub stateful_mappings: Vec<StatefulMappingEntry>,
+    /// Accumulate function mappings in parser rewrite order
+    pub acc_mappings: Vec<AccMappingEntry>,
     /// Information about the data sources (tables) accessed
     pub source_infos: Vec<SourceInfo>,
 }
@@ -68,6 +71,7 @@ impl SelectStmt {
             window: None,
             aggregate_mappings: HashMap::new(),
             stateful_mappings: Vec::new(),
+            acc_mappings: Vec::new(),
             source_infos: Vec::new(),
         }
     }
@@ -83,6 +87,7 @@ impl SelectStmt {
             window: None,
             aggregate_mappings: HashMap::new(),
             stateful_mappings: Vec::new(),
+            acc_mappings: Vec::new(),
             source_infos: Vec::new(),
         }
     }
@@ -102,6 +107,7 @@ impl SelectStmt {
             window: None,
             aggregate_mappings: HashMap::new(),
             stateful_mappings: Vec::new(),
+            acc_mappings: Vec::new(),
             source_infos: Vec::new(),
         }
     }

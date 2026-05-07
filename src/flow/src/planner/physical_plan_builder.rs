@@ -23,6 +23,7 @@ use crate::planner::physical::{
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
 use crate::PipelineRegistries;
+use parser::is_acc_function_name;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -394,10 +395,12 @@ fn create_physical_stateful_function_with_builder(
         let output_column = &entry.output_column;
         let spec = &entry.spec;
         let func_name = spec.func_name.clone();
-        registries
-            .stateful_registry()
-            .get(&func_name)
-            .ok_or_else(|| format!("unknown stateful function '{}'", func_name))?;
+        if !is_acc_function_name(&func_name) {
+            registries
+                .stateful_registry()
+                .get(&func_name)
+                .ok_or_else(|| format!("unknown stateful function '{}'", func_name))?;
+        }
 
         let mut arg_scalars = Vec::with_capacity(spec.args.len());
         for arg_expr in &spec.args {
