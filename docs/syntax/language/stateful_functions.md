@@ -182,7 +182,11 @@ Semantics:
   numeric value has been accepted.
 - `acc_count` returns `0` before any non-`NULL` value has been accepted.
 - Numeric acc functions reject non-numeric values at runtime.
-- The current implementation keeps global state for each acc call.
+- When `OVER (PARTITION BY ...)` is absent, each acc call keeps one global state.
+- When `OVER (PARTITION BY ...)` is present, each acc call keeps independent state per partition.
+- `FILTER (WHERE ...)` controls whether the current row updates the acc state. When the filter is
+  false, the function returns the current visible state without advancing it.
+- Multiple acc calls can appear in the same statement. Each distinct call keeps independent state.
 
 Examples:
 
@@ -192,6 +196,15 @@ SELECT acc_sum(a) AS running_total FROM stream
 
 ```sql
 SELECT acc_count(status) AS seen_status_count FROM stream
+```
+
+```sql
+SELECT acc_sum(a) FILTER (WHERE flag = 1) AS filtered_total FROM stream
+```
+
+```sql
+SELECT acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY device_id) AS device_total
+FROM stream
 ```
 
 ## Restrictions
@@ -204,14 +217,13 @@ For stateful functions, the current implementation supports only:
 
 For acc functions, the current implementation supports only:
 
-- One positional expression argument. Arity is validated by acc function name.
-- Global state for each acc call.
+- One positional expression argument in the currently supported built-in acc functions.
+- Optional `FILTER (WHERE <expr>)`.
+- Optional `OVER (PARTITION BY <expr> [, <expr> ...])`.
+- Multiple acc calls in one statement.
 
 The following acc shapes are rejected:
 
-- `FILTER (WHERE <expr>)`.
-- `OVER (...)`, including `OVER (PARTITION BY ...)`.
-- Multiple acc calls in one statement.
 - Multiple positional arguments in the currently supported built-in acc functions.
 
 The following are rejected:
