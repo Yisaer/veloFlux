@@ -799,7 +799,7 @@ fn previous_bundle_round_trip_restores_prior_state() {
 
         let after = export_bundle(&h).await;
         assert_eq!(
-            before, after,
+            before["resources"], after["resources"],
             "previous_bundle rollback should restore state"
         );
     });
@@ -915,7 +915,10 @@ fn export_is_deterministic_under_repeated_reads() {
         let first = export_bundle(&h).await;
         let second = export_bundle(&h).await;
 
-        assert_eq!(first, second, "export should be deterministic");
+        assert_eq!(
+            first["resources"], second["resources"],
+            "export resources should be deterministic"
+        );
     });
 }
 

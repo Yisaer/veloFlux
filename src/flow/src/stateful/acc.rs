@@ -11,11 +11,13 @@ pub struct AccMinFunction;
 pub struct AccCountFunction;
 pub struct AccAvgFunction;
 
+const ACC_PARTITION_STATE_SEMANTICS: &str =
+    "Maintains cumulative state globally when unpartitioned, or independently per partition when OVER (PARTITION BY ...) is used.";
+
 pub fn acc_sum_function_def() -> FunctionDef {
     acc_numeric_function_def(
         "acc_sum",
         "Return the cumulative sum of non-NULL numeric input values.",
-        "Maintains global cumulative numeric sum state for each acc call in the current implementation.",
     )
 }
 
@@ -23,7 +25,6 @@ pub fn acc_max_function_def() -> FunctionDef {
     acc_numeric_function_def(
         "acc_max",
         "Return the cumulative maximum of non-NULL numeric input values.",
-        "Maintains global cumulative numeric maximum state for each acc call in the current implementation.",
     )
 }
 
@@ -31,7 +32,6 @@ pub fn acc_min_function_def() -> FunctionDef {
     acc_numeric_function_def(
         "acc_min",
         "Return the cumulative minimum of non-NULL numeric input values.",
-        "Maintains global cumulative numeric minimum state for each acc call in the current implementation.",
     )
 }
 
@@ -39,7 +39,6 @@ pub fn acc_avg_function_def() -> FunctionDef {
     acc_numeric_function_def(
         "acc_avg",
         "Return the cumulative average of non-NULL numeric input values.",
-        "Maintains global cumulative numeric sum and count state for each acc call in the current implementation.",
     )
 }
 
@@ -67,17 +66,19 @@ pub fn acc_count_function_def() -> FunctionDef {
             "Ignores NULL input values.".to_string(),
             "Returns 0 before any non-NULL value has been accepted.".to_string(),
         ],
-        examples: vec!["SELECT acc_count(a) AS n FROM stream".to_string()],
+        examples: vec![
+            "SELECT acc_count(a) AS n FROM stream".to_string(),
+            "SELECT acc_count(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k) AS n FROM stream"
+                .to_string(),
+        ],
         aggregate: None,
         stateful: Some(StatefulFunctionSpec {
-            state_semantics:
-                "Maintains global cumulative non-NULL count state for each acc call in the current implementation."
-                    .to_string(),
+            state_semantics: ACC_PARTITION_STATE_SEMANTICS.to_string(),
         }),
     }
 }
 
-fn acc_numeric_function_def(name: &str, description: &str, state_semantics: &str) -> FunctionDef {
+fn acc_numeric_function_def(name: &str, description: &str) -> FunctionDef {
     FunctionDef {
         kind: FunctionKind::Stateful,
         name: name.to_string(),
@@ -104,10 +105,13 @@ fn acc_numeric_function_def(name: &str, description: &str, state_semantics: &str
             "Ignores NULL input values.".to_string(),
             "Returns 0.0 before any non-NULL value has been accepted.".to_string(),
         ],
-        examples: vec![format!("SELECT {name}(a) FROM stream")],
+        examples: vec![
+            format!("SELECT {name}(a) FROM stream"),
+            format!("SELECT {name}(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k) FROM stream"),
+        ],
         aggregate: None,
         stateful: Some(StatefulFunctionSpec {
-            state_semantics: state_semantics.to_string(),
+            state_semantics: ACC_PARTITION_STATE_SEMANTICS.to_string(),
         }),
     }
 }

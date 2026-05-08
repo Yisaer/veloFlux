@@ -4,7 +4,17 @@ pub trait StatefulRegistry: Send + Sync {
     fn is_stateful_function(&self, name: &str) -> bool;
 }
 
-pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 4] = ["changed_col", "had_changed", "lag", "latest"];
+pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 9] = [
+    "acc_avg",
+    "acc_count",
+    "acc_max",
+    "acc_min",
+    "acc_sum",
+    "changed_col",
+    "had_changed",
+    "lag",
+    "latest",
+];
 
 pub fn builtin_stateful_function_names() -> &'static [&'static str] {
     &BUILTIN_STATEFUL_FUNCTIONS
@@ -46,6 +56,7 @@ mod tests {
         assert!(registry.is_stateful_function("had_changed"));
         assert!(registry.is_stateful_function("lag"));
         assert!(registry.is_stateful_function("latest"));
+        assert!(registry.is_stateful_function("acc_sum"));
         assert!(registry.is_stateful_function("LAG"));
         assert!(!registry.is_stateful_function("missing"));
     }
