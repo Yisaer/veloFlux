@@ -45,6 +45,9 @@ build_info = { path = "src/build_info" }
 sdk = { path = "src/sdk" }
 veloflux_metrics = { path = "src/metrics" }
 veloflux_sdv = { package = "veloflux-sdv", path = "distros/sdv" }
+# Explicit indexmap dependency with 'std' feature is required to resolve 
+# ABI/generic-mismatch errors in 'tower 0.4' during '-Zbuild-std' sanitizer runs.
+indexmap = { version = "1.9.3", features = ["std"] }
 
 [features]
 default = ["metrics", "profiling", "allocator-jemalloc"]
@@ -84,10 +87,10 @@ panic = "abort"
 strip = "symbols"
 
 [profile.dev]
-debug = false # Fully disable debug info to fix CI linker OOM (SIGBUS) issues
+debug = 1 # Minimal debug info (line tables) for better diagnostics without SIGBUS/OOM linker pressure
 
 [profile.test]
-debug = false
+debug = 1
 
 # Optimize heavy dependencies even in dev/test to reduce linker pressure
 [profile.dev.package.arrow]

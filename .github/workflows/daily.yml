@@ -1,4 +1,4 @@
-name: Daily (SQL Assert + Perf)
+name: Daily (SQL Assert + Perf + Sanitizers)
 
 on:
   schedule:
@@ -13,6 +13,7 @@ on:
           - all
           - sql-assert
           - perf-daily
+          - sanitizers
         default: all
 
 concurrency:
@@ -21,11 +22,18 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_HOME: ${{ github.workspace }}/.cargo
+  RUSTUP_HOME: ${{ github.workspace }}/.rustup
 
 jobs:
   daily:
     name: Daily
     runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'schedule' ||
+      github.event.inputs.task == 'all' ||
+      github.event.inputs.task == 'sql-assert' ||
+      github.event.inputs.task == 'perf-daily'
     env:
       # schedule: always run "all"; workflow_dispatch: run selected task.
       DAILY_TASK: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.task || 'all' }}
@@ -38,6 +46,18 @@ jobs:
           EMQX_ALLOW_ANONYMOUS: "true"
           EMQX_LISTENER__TCP__DEFAULT__BIND: "0.0.0.0:1883"
     steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 4096
+          swap-size-mb: 8192
+          temp-reserve-mb: 1024
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
       - uses: actions/checkout@v4
 
       - name: Setup Go
@@ -71,6 +91,7 @@ jobs:
 
       # Build once, then reuse the release binaries for both daily tasks.
       - name: Build (release)
+        if: ${{ env.DAILY_TASK == 'all' || env.DAILY_TASK == 'sql-assert' || env.DAILY_TASK == 'perf-daily' }}
         run: make release
 
       - name: Run Flow SQL Assert (release binary)
@@ -229,3 +250,61 @@ jobs:
           set +e
           source scripts/ci/veloflux_process.sh
           stop_veloflux_from_pidfile tmp/perf_daily_ci/veloflux.pid
+
+  sanitizers:
+    name: Sanitizer Audit (${{ matrix.sanitizer }})
+    runs-on: ubuntu-latest
+    env:
+      DAILY_TASK: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.task || 'all' }}
+    # schedule: always run; workflow_dispatch: run if "all" or "sanitizers" selected.
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.task == 'all' || github.event.inputs.task == 'sanitizers')) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, tsan, stack]
+    services:
+      emqx:
+        image: emqx/emqx:5.6.1
+        ports:
+          - 1883:1883
+        env:
+          EMQX_ALLOW_ANONYMOUS: "true"
+          EMQX_LISTENER__TCP__DEFAULT__BIND: "0.0.0.0:1883"
+    steps:
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@v10
+        with:
+          root-reserve-mb: 6144
+          swap-size-mb: 8192
+          temp-reserve-mb: 1024
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: ${{ matrix.sanitizer == 'stack' && 'stable' || 'nightly-2026-04-29' }}
+          components: rust-src
+
+      - name: Install lld
+        run: sudo apt-get update && sudo apt-get install -y lld
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ runner.os }}-sanitizer-${{ matrix.sanitizer }}-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Run Audit
+        run: |
+          if [ "${{ matrix.sanitizer }}" = "asan" ]; then
+            make test-asan TARGET=x86_64-unknown-linux-gnu CARGO="cargo +nightly-2026-04-29"
+          elif [ "${{ matrix.sanitizer }}" = "tsan" ]; then
+            make test-tsan TARGET=x86_64-unknown-linux-gnu CARGO="cargo +nightly-2026-04-29"
+          elif [ "${{ matrix.sanitizer }}" = "stack" ]; then
+            make test-stack CARGO="cargo +stable"
+          fi

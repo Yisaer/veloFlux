@@ -1,9 +1,11 @@
 use sdk::{ManagerClient, PipelineCreateRequest, SdkError, StreamCreateRequest};
 use serde_json::json;
 use std::net::SocketAddr;
-use std::time::Duration;
 
-use super::{bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix};
+use super::{
+    bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix,
+    wait_for_server,
+};
 
 struct TestHarness {
     _temp_dir: tempfile::TempDir,
@@ -49,7 +51,7 @@ impl TestHarness {
             .build()
             .expect("build reqwest client");
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        wait_for_server(&client).await;
 
         Some(Self {
             _temp_dir: temp_dir,

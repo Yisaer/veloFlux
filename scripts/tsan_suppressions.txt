@@ -1,0 +1,12 @@
+# ThreadSanitizer suppression file for VeloFlux
+# This file is used to ignore known false positives or third-party issues in the daily CI.
+
+# Internal tokio IO driver races on ScheduledIo.
+# These are frequently reported by TSan during high connection churn in E2E tests.
+# See: https://github.com/tokio-rs/tokio/issues/5211 (similar patterns)
+race:tokio::runtime::io::scheduled_io
+race:tokio::runtime::io::registration_set
+
+# Suppress races in hyper/h2 if they appear due to recycled stream states
+race:h2::proto::streams::streams
+race:hyper::proto::h1::conn

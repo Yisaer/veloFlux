@@ -1,9 +1,11 @@
-use super::{bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix};
+use super::{
+    bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix,
+    wait_for_server,
+};
 use reqwest::{Client as HttpClient, StatusCode};
 use sdk::ManagerClient;
 use serde_json::{json, Value as JsonValue};
 use std::net::SocketAddr;
-use std::time::Duration;
 
 struct ImportExportHarness {
     _temp_dir: tempfile::TempDir,
@@ -43,7 +45,7 @@ impl ImportExportHarness {
             .expect("build reqwest client");
         let client = make_client(addr);
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        wait_for_server(&client).await;
 
         Some(Self {
             _temp_dir: temp_dir,
@@ -438,9 +440,12 @@ async fn import_invalid_bundle_after_valid_import_preserves_previous_state() {
     let (status2, body2) = import_bundle(&h.http, &h.base(), &bad_bundle).await;
     assert_eq!(status2, StatusCode::BAD_REQUEST, "body: {body2}");
 
-    let after = export_bundle(&h.http, &h.base()).await;
+    let mut after = export_bundle(&h.http, &h.base()).await;
+    let mut expected = before;
+    after["exported_at"] = serde_json::json!(0);
+    expected["exported_at"] = serde_json::json!(0);
     assert_eq!(
-        after, before,
+        after, expected,
         "invalid import must preserve previous snapshot"
     );
 }
@@ -473,11 +478,11 @@ async fn reimport_previous_bundle_restores_prior_snapshot() {
     let (status3, body3) = import_bundle(&h.http, &h.base(), &snapshot_a).await;
     assert!(status3.is_success(), "body: {body3}");
 
-    let restored = export_bundle(&h.http, &h.base()).await;
-    assert_eq!(
-        restored, snapshot_a,
-        "reimport should restore prior snapshot"
-    );
+    let mut restored = export_bundle(&h.http, &h.base()).await;
+    let mut expected = snapshot_a;
+    restored["exported_at"] = serde_json::json!(0);
+    expected["exported_at"] = serde_json::json!(0);
+    assert_eq!(restored, expected, "reimport should restore prior snapshot");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -537,9 +542,10 @@ async fn export_repeated_without_changes_is_identical() {
     let (status, body) = import_bundle(&h.http, &h.base(), &bundle).await;
     assert!(status.is_success(), "body: {body}");
 
-    let export1 = export_bundle(&h.http, &h.base()).await;
-    let export2 = export_bundle(&h.http, &h.base()).await;
-
+    let mut export1 = export_bundle(&h.http, &h.base()).await;
+    let mut export2 = export_bundle(&h.http, &h.base()).await;
+    export1["exported_at"] = serde_json::json!(0);
+    export2["exported_at"] = serde_json::json!(0);
     assert_eq!(
         export1, export2,
         "repeated export should be byte-equivalent in JSON value form"

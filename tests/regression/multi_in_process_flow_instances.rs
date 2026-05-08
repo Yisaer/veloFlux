@@ -1,4 +1,4 @@
-use super::{bind_manager_listener_or_skip, make_client, random_suffix};
+use super::{bind_manager_listener_or_skip, make_client, random_suffix, wait_for_server};
 
 use sdk::{PipelineCreateRequest, StopOptions, StreamCreateRequest};
 use serde_json::Value as JsonValue;
@@ -70,6 +70,7 @@ async fn multi_in_process_flow_instances_pipeline_lifecycle_via_rest() {
     });
 
     let client = make_client(addr);
+    wait_for_server(&client).await;
 
     let stream_name = format!("multi_inst_stream_{}", random_suffix());
     let stream_req = StreamCreateRequest {

@@ -126,7 +126,7 @@ impl TestEnvironment {
         // Wait for server to be ready
         let client = reqwest::blocking::Client::new();
         let health_url = format!("{}/ping", base_url);
-        for _ in 0..30 {
+        for _ in 0..300 {
             thread::sleep(Duration::from_millis(100));
             if client.get(&health_url).send().is_ok() {
                 return Self {
@@ -137,7 +137,7 @@ impl TestEnvironment {
             }
         }
 
-        panic!("server did not become ready within 3s — check binary path or port conflict");
+        panic!("server did not become ready within 30s — check binary path or port conflict");
     }
 
     /// Get the MQTT broker address

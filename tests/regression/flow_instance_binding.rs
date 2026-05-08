@@ -1,4 +1,7 @@
-use super::{bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix};
+use super::{
+    bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix,
+    wait_for_server,
+};
 use sdk::types::{PipelineCreateRequest, StreamCreateRequest};
 use sdk::SdkError;
 use serde_json::Value as JsonValue;
@@ -30,6 +33,7 @@ async fn flow_instance_pipeline_binding_lifecycle() {
     });
 
     let client = make_client(addr);
+    wait_for_server(&client).await;
 
     let stream_name = format!("bind_stream_{}", random_suffix());
     let stream_req = StreamCreateRequest {

@@ -42,3 +42,16 @@ pub fn default_flow_instances() -> Vec<manager::FlowInstanceSpec> {
         ..manager::FlowInstanceSpec::default()
     }]
 }
+
+pub async fn wait_for_server(client: &sdk::ManagerClient) {
+    use std::time::Duration;
+    let mut last_err = None;
+    for _ in 0..300 {
+        match client.list_pipelines().await {
+            Ok(_) => return,
+            Err(e) => last_err = Some(e),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("server did not start within 30s: {:?}", last_err.unwrap());
+}
