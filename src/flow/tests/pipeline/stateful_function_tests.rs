@@ -388,6 +388,218 @@ async fn stateful_function_table_driven() {
             close_before_read: false,
         },
         StatefulCase {
+            name: "acc_sum_filter_where_updates_only_matching_rows",
+            sql: "SELECT acc_sum(a) FILTER (WHERE flag = 1) AS total FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Float64(1.0),
+                        Value::Float64(2.0),
+                        Value::Float64(3.0),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![Value::Int64(1), Value::Int64(0), Value::Int64(1)],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 3,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "total".to_string(),
+                    expected_values: vec![
+                        Value::Float64(1.0),
+                        Value::Float64(1.0),
+                        Value::Float64(4.0),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "acc_count_over_partition_by_keeps_independent_counts",
+            sql: "SELECT k, acc_count(a) OVER (PARTITION BY k) AS n FROM stream",
+            input_data: vec![
+                (
+                    "k".to_string(),
+                    vec![
+                        Value::String("A".to_string()),
+                        Value::String("B".to_string()),
+                        Value::String("A".to_string()),
+                        Value::String("B".to_string()),
+                    ],
+                ),
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(10),
+                        Value::Int64(2),
+                        Value::Int64(20),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "k".to_string(),
+                        expected_values: vec![
+                            Value::String("A".to_string()),
+                            Value::String("B".to_string()),
+                            Value::String("A".to_string()),
+                            Value::String("B".to_string()),
+                        ],
+                    },
+                    ColumnCheck {
+                        expected_name: "n".to_string(),
+                        expected_values: vec![
+                            Value::Int64(1),
+                            Value::Int64(1),
+                            Value::Int64(2),
+                            Value::Int64(2),
+                        ],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "acc_sum_filter_where_over_partition_by_combines_clauses",
+            sql:
+                "SELECT k, acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k) AS total FROM stream",
+            input_data: vec![
+                (
+                    "k".to_string(),
+                    vec![
+                        Value::String("A".to_string()),
+                        Value::String("A".to_string()),
+                        Value::String("B".to_string()),
+                        Value::String("A".to_string()),
+                        Value::String("B".to_string()),
+                    ],
+                ),
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Float64(1.0),
+                        Value::Float64(2.0),
+                        Value::Float64(10.0),
+                        Value::Float64(3.0),
+                        Value::Float64(20.0),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(0),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 5,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "k".to_string(),
+                        expected_values: vec![
+                            Value::String("A".to_string()),
+                            Value::String("A".to_string()),
+                            Value::String("B".to_string()),
+                            Value::String("A".to_string()),
+                            Value::String("B".to_string()),
+                        ],
+                    },
+                    ColumnCheck {
+                        expected_name: "total".to_string(),
+                        expected_values: vec![
+                            Value::Float64(1.0),
+                            Value::Float64(1.0),
+                            Value::Float64(10.0),
+                            Value::Float64(4.0),
+                            Value::Float64(10.0),
+                        ],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "multiple_acc_filter_where_over_partition_by_calls_share_partition_key",
+            sql:
+                "SELECT acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k) AS total, acc_count(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k) AS n FROM stream",
+            input_data: vec![
+                (
+                    "k".to_string(),
+                    vec![
+                        Value::String("A".to_string()),
+                        Value::String("A".to_string()),
+                        Value::String("B".to_string()),
+                        Value::String("A".to_string()),
+                        Value::String("B".to_string()),
+                    ],
+                ),
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Float64(1.0),
+                        Value::Float64(2.0),
+                        Value::Float64(10.0),
+                        Value::Float64(3.0),
+                        Value::Float64(20.0),
+                    ],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(0),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(0),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 5,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "total".to_string(),
+                        expected_values: vec![
+                            Value::Float64(1.0),
+                            Value::Float64(1.0),
+                            Value::Float64(10.0),
+                            Value::Float64(4.0),
+                            Value::Float64(10.0),
+                        ],
+                    },
+                    ColumnCheck {
+                        expected_name: "n".to_string(),
+                        expected_values: vec![
+                            Value::Int64(1),
+                            Value::Int64(1),
+                            Value::Int64(1),
+                            Value::Int64(2),
+                            Value::Int64(1),
+                        ],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
             name: "lag_dedup_two_columns",
             sql: "SELECT lag(a) AS p1, lag(a) AS p2 FROM stream",
             input_data: vec![(

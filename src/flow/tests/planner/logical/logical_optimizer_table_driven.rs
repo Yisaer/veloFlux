@@ -12,7 +12,8 @@ use flow::{
     SinkConnectorConfig, SinkEncoderConfig, StreamDecoderConfig, StreamDefinition, StreamProps,
 };
 use parser::{
-    parse_sql, parse_sql_with_registries, StaticAggregateRegistry, StaticStatefulRegistry,
+    builtin_stateful_function_names, parse_sql, parse_sql_with_registries, StaticAggregateRegistry,
+    StaticStatefulRegistry,
 };
 use serde_json::json;
 use serde_json::Map as JsonMap;
@@ -278,7 +279,9 @@ fn optimized_logical_json_with_shared_sources(sql: &str, shared_sources: &[&str]
         Arc::new(StaticAggregateRegistry::new([
             "sum", "count", "last_row", "ndv",
         ])),
-        Arc::new(StaticStatefulRegistry::new(["lag"])),
+        Arc::new(StaticStatefulRegistry::new(
+            builtin_stateful_function_names().iter().copied(),
+        )),
         vec![],
     )
 }
@@ -313,7 +316,9 @@ fn optimized_logical_plan_with_shared_sources(
         Arc::new(StaticAggregateRegistry::new([
             "sum", "count", "last_row", "ndv",
         ])),
-        Arc::new(StaticStatefulRegistry::new(["lag"])),
+        Arc::new(StaticStatefulRegistry::new(
+            builtin_stateful_function_names().iter().copied(),
+        )),
         vec![],
     )
 }
@@ -342,7 +347,9 @@ fn optimized_logical_json_with_sinks(sql: &str, sinks: Vec<PipelineSink>) -> Str
         Arc::new(StaticAggregateRegistry::new([
             "sum", "count", "last_row", "ndv",
         ])),
-        Arc::new(StaticStatefulRegistry::new(["lag"])),
+        Arc::new(StaticStatefulRegistry::new(
+            builtin_stateful_function_names().iter().copied(),
+        )),
         sinks,
     )
 }
@@ -702,6 +709,30 @@ fn create_logical_plan_stateful_table_driven() {
             name: "test_create_logical_plan_with_acc_filter",
             sql: "SELECT a FROM stream WHERE acc_count(a) > 0",
             expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[acc_count(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Filter_2","info":["predicate=col_1 > 0"],"operator":"Filter"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "test_create_logical_plan_with_acc_filter_over_partition",
+            sql:
+                "SELECT acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) FROM stream",
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, flag, k1]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1)]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "test_create_logical_plan_with_multiple_acc_filter_over_partition_calls",
+            sql:
+                "SELECT acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1), acc_count(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) FROM stream",
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, flag, k1]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) -> col_1; acc_count(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1); col_2 as acc_count(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1)]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "test_create_logical_plan_with_acc_clause_in_where",
+            sql:
+                "SELECT a FROM stream WHERE acc_count(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) > 1",
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, flag, k1]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[acc_count(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) -> col_1]"],"operator":"StatefulFunction"}],"id":"Filter_2","info":["predicate=col_1 > 1"],"operator":"Filter"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "test_create_logical_plan_with_acc_clause_and_window_aggregate",
+            sql:
+                "SELECT sum(a), acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) FROM stream GROUP BY countwindow(4)",
+            expected: r##"{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, flag, k1]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1) -> col_1]"],"operator":"StatefulFunction"}],"id":"Window_2","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_3","info":["aggregates=[sum(a) -> col_2]"],"operator":"Aggregation"}],"id":"Project_4","info":["fields=[col_2 as sum(a); col_1 as acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1)]"],"operator":"Project"}"##,
         },
         Case {
             name: "test_create_logical_plan_with_nested_stateful_filter_dependency",
