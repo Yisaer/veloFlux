@@ -273,6 +273,10 @@ fn datatype_value_to_json(value: &Value) -> JsonValue {
         Value::Uint16(v) => JsonValue::Number(serde_json::Number::from(*v)),
         Value::Uint32(v) => JsonValue::Number(serde_json::Number::from(*v)),
         Value::Uint64(v) => JsonValue::Number(serde_json::Number::from(*v)),
+        Value::Timestamp(v) => v
+            .to_rfc3339_utc()
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
         Value::Struct(struct_value) => {
             let fields = struct_value.fields().fields();
             let mut map = serde_json::Map::with_capacity(fields.len());

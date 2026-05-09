@@ -3,7 +3,8 @@
 use crate::model::{CollectionError, Message, RecordBatch, Tuple};
 use crate::planner::decode_projection::{DecodeProjection, ProjectionNode};
 use datatypes::{
-    ConcreteDatatype, ListType, ListValue, Schema, StructField, StructType, StructValue, Value,
+    ConcreteDatatype, ListType, ListValue, Schema, StructField, StructType, StructValue,
+    TimestampValue, Value,
 };
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::sync::Arc;
@@ -255,6 +256,7 @@ fn json_to_value_with_datatype(value: &JsonValue, datatype: &ConcreteDatatype) -
             JsonValue::Number(n) => n.as_u64().map(Value::Uint64).unwrap_or(Value::Null),
             _ => Value::Null,
         },
+        ConcreteDatatype::Timestamp(_) => json_to_timestamp_value(value),
         ConcreteDatatype::Int8(_)
         | ConcreteDatatype::Int16(_)
         | ConcreteDatatype::Int32(_)
@@ -290,6 +292,7 @@ fn json_to_value_with_datatype_and_projection(
             JsonValue::Number(n) => n.as_u64().map(Value::Uint64).unwrap_or(Value::Null),
             _ => Value::Null,
         },
+        ConcreteDatatype::Timestamp(_) => json_to_timestamp_value(value),
         ConcreteDatatype::Int8(_)
         | ConcreteDatatype::Int16(_)
         | ConcreteDatatype::Int32(_)
@@ -305,6 +308,15 @@ fn json_to_value_with_datatype_and_projection(
         ConcreteDatatype::Struct(struct_type) => {
             json_to_struct_value_with_datatype_and_projection(value, struct_type, projection)
         }
+    }
+}
+
+fn json_to_timestamp_value(value: &JsonValue) -> Value {
+    match value {
+        JsonValue::String(s) => TimestampValue::parse_rfc3339(s)
+            .map(Value::Timestamp)
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
     }
 }
 
@@ -419,7 +431,7 @@ mod tests {
     use super::*;
     use datatypes::{
         ColumnSchema, ConcreteDatatype, Int64Type, Schema, StringType, StructField, StructType,
-        Value,
+        TimestampType, TimestampValue, Value,
     };
     use serde_json::Map as JsonMap;
 
@@ -508,6 +520,48 @@ mod tests {
 
         assert_eq!(tuple.value_by_name("orders", "extra"), None);
         assert_eq!(tuple.value_by_name("orders", "extra2"), None);
+    }
+
+    #[test]
+    fn json_decoder_decodes_timestamp_rfc3339_strings() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "events".to_string(),
+            "event_time".to_string(),
+            ConcreteDatatype::Timestamp(TimestampType),
+        )]));
+        let decoder = JsonDecoder::new("events", schema, JsonMap::new());
+        let tuple = decode_one(
+            &decoder,
+            br#"{"event_time":"2026-05-08T18:20:30+08:00"}"#.as_ref(),
+        );
+
+        assert_eq!(
+            tuple.value_by_name("events", "event_time"),
+            Some(&Value::Timestamp(
+                TimestampValue::parse_rfc3339("2026-05-08T10:20:30Z").expect("valid timestamp")
+            ))
+        );
+    }
+
+    #[test]
+    fn json_decoder_rejects_unsupported_timestamp_inputs_as_null() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "events".to_string(),
+            "event_time".to_string(),
+            ConcreteDatatype::Timestamp(TimestampType),
+        )]));
+        let decoder = JsonDecoder::new("events", schema, JsonMap::new());
+
+        for payload in [
+            br#"{"event_time":1715150000000}"#.as_ref(),
+            br#"{"event_time":"2026-05-08 10:20:30"}"#.as_ref(),
+        ] {
+            let tuple = decode_one(&decoder, payload);
+            assert_eq!(
+                tuple.value_by_name("events", "event_time"),
+                Some(&Value::Null)
+            );
+        }
     }
 
     #[test]

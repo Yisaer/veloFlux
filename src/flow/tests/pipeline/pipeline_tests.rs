@@ -2,7 +2,7 @@
 
 use datatypes::{
     ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
-    StructType, Value,
+    StructType, TimestampValue, Value,
 };
 use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::connector::MemoryTopicKind;
@@ -1934,6 +1934,127 @@ async fn memory_source_bytes_topic_with_json_decoder_emits_expected_rows() {
         normalize_json(actual),
         normalize_json(expected),
         "Wrong JSON output for test: {}",
+        case_name
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to stop pipeline for {}: {err}", case_name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for {}: {err}", case_name));
+}
+
+// coverage-covers: stream.datatype.timestamp, source.memory.bytes_input, sink.connector.memory_output
+#[tokio::test]
+async fn memory_source_json_timestamp_decodes_filters_and_encodes_utc() {
+    let case_name = "memory_source_json_timestamp_decodes_filters_and_encodes_utc";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_timestamp", case_name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+
+    let matching_ts =
+        TimestampValue::parse_rfc3339("2026-05-08T10:20:30Z").expect("valid timestamp");
+    install_memory_json_stream_schema_with_name(
+        &instance,
+        &input_topic,
+        "stream_ts",
+        &[
+            (
+                "event_time".to_string(),
+                vec![Value::Timestamp(matching_ts)],
+            ),
+            (
+                "expected_time".to_string(),
+                vec![Value::Timestamp(matching_ts)],
+            ),
+            ("name".to_string(), vec![Value::String("match".to_string())]),
+        ],
+    )
+    .await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT event_time, name FROM stream_ts WHERE event_time = expected_time",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    instance
+        .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
+        .await
+        .expect("wait for bytes source subscriber");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open input bytes publisher");
+    publisher
+        .publish_bytes(
+            serde_json::to_vec(&serde_json::json!([
+                {
+                    "event_time": "2026-05-08T18:20:30+08:00",
+                    "expected_time": "2026-05-08T10:20:30Z",
+                    "name": "match"
+                },
+                {
+                    "event_time": "2026-05-08T10:20:31Z",
+                    "expected_time": "2026-05-08T10:20:30Z",
+                    "name": "skip"
+                },
+                {
+                    "event_time": "bad-timestamp",
+                    "expected_time": "2026-05-08T10:20:30Z",
+                    "name": "bad"
+                }
+            ]))
+            .expect("encode timestamp source input rows"),
+        )
+        .expect("publish timestamp source input rows");
+
+    let actual = recv_next_json(&mut output, timeout_duration).await;
+    let expected = serde_json::json!([
+        {
+            "event_time": "2026-05-08T10:20:30.000000Z",
+            "name": "match"
+        }
+    ]);
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected),
+        "Wrong timestamp JSON output for test: {}",
         case_name
     );
 

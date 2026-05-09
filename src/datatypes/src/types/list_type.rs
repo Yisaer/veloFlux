@@ -63,6 +63,7 @@ fn get_type_name(dt: &ConcreteDatatype) -> String {
         ConcreteDatatype::Uint64(_) => "Uint64",
         ConcreteDatatype::String(_) => "String",
         ConcreteDatatype::Bool(_) => "Boolean",
+        ConcreteDatatype::Timestamp(_) => "Timestamp",
         ConcreteDatatype::Struct(_) => "Struct",
         ConcreteDatatype::List(_) => "List",
     }

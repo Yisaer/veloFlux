@@ -242,6 +242,10 @@ fn value_to_json(value: &Value, null_policy: NullColumnPolicy) -> JsonValue {
         Value::Uint16(v) => JsonValue::Number(JsonNumber::from(*v)),
         Value::Uint32(v) => JsonValue::Number(JsonNumber::from(*v)),
         Value::Uint64(v) => JsonValue::Number(JsonNumber::from(*v)),
+        Value::Timestamp(v) => v
+            .to_rfc3339_utc()
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
         Value::Struct(struct_value) => {
             let mut map = JsonMap::new();
             let fields = struct_value.fields().fields();
@@ -508,7 +512,7 @@ mod tests {
     use crate::planner::sink::SinkEncoderConfig;
     use datatypes::{
         ConcreteDatatype, Int64Type, ListType, ListValue, StringType, StructField, StructType,
-        StructValue,
+        StructValue, TimestampValue,
     };
     use std::sync::Arc;
 
@@ -540,6 +544,30 @@ mod tests {
             serde_json::json!([
                 {"amount":10, "status":"ok"},
                 {"amount":20, "status":"fail"}
+            ])
+        );
+    }
+
+    #[test]
+    fn json_encoder_formats_timestamp_as_rfc3339_utc() {
+        let batch = batch_from_columns_simple(vec![(
+            "events".to_string(),
+            "event_time".to_string(),
+            vec![Value::Timestamp(
+                TimestampValue::parse_rfc3339("2026-05-08T10:20:30.123456Z")
+                    .expect("valid timestamp"),
+            )],
+        )])
+        .expect("valid batch");
+
+        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
+        let payload = encoder.encode(&batch).expect("encode collection");
+
+        let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([
+                {"event_time": "2026-05-08T10:20:30.123456Z"}
             ])
         );
     }

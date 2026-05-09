@@ -1,6 +1,6 @@
 use crate::types::{
     BooleanType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, ListType,
-    StringType, StructType, Uint16Type, Uint32Type, Uint64Type, Uint8Type,
+    StringType, StructType, TimestampType, Uint16Type, Uint32Type, Uint64Type, Uint8Type,
 };
 use crate::value::Value;
 
@@ -50,4 +50,6 @@ pub enum ConcreteDatatype {
     List(ListType),
     /// Boolean type
     Bool(BooleanType),
+    /// UTC timestamp type stored as Unix epoch microseconds
+    Timestamp(TimestampType),
 }

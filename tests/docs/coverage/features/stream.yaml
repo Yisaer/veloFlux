@@ -49,3 +49,11 @@ features:
       - docs/syntax/windows/watermarks.md
       - docs/runtime/time/pipeline_eventtime.md
     status: active
+
+  - id: stream.datatype.timestamp
+    title: Timestamp data type
+    summary: Decode, compare, and encode timestamp-typed stream values according to the documented UTC RFC3339 contract.
+    doc_refs:
+      - docs/syntax/datatypes/timestamp.md
+      - docs/syntax/datatypes/json_decode.md
+    status: active

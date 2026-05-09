@@ -28,8 +28,8 @@ use parking_lot::RwLock;
 
 use flow::{
     BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int8Type, Int16Type,
-    Int32Type, Int64Type, ListType, StringType, StructField, StructType, Uint8Type, Uint16Type,
-    Uint32Type, Uint64Type,
+    Int32Type, Int64Type, ListType, StringType, StructField, StructType, TimestampType, Uint8Type,
+    Uint16Type, Uint32Type, Uint64Type,
 };
 use storage::{StorageError, StorageManager, StoredMemoryTopicKind};
 
@@ -1118,6 +1118,7 @@ fn parse_datatype(column: &StreamColumnRequest) -> Result<ConcreteDatatype, Stri
         "float32" => Ok(ConcreteDatatype::Float32(Float32Type)),
         "float64" => Ok(ConcreteDatatype::Float64(Float64Type)),
         "string" => Ok(ConcreteDatatype::String(StringType)),
+        "timestamp" => Ok(ConcreteDatatype::Timestamp(TimestampType)),
         "list" => {
             let element = column.element.as_deref().ok_or_else(|| {
                 format!("list column {} requires element definition", column.name)
@@ -1160,6 +1161,7 @@ fn datatype_name(datatype: &ConcreteDatatype) -> String {
         ConcreteDatatype::Uint32(_) => "uint32",
         ConcreteDatatype::Uint64(_) => "uint64",
         ConcreteDatatype::String(_) => "string",
+        ConcreteDatatype::Timestamp(_) => "timestamp",
         ConcreteDatatype::Struct(_) => "struct",
         ConcreteDatatype::List(_) => "list",
         ConcreteDatatype::Bool(_) => "bool",
@@ -1475,6 +1477,20 @@ mod tests {
         ])));
 
         assert_eq!(datatype, expected);
+    }
+
+    #[test]
+    fn parse_datatype_timestamp() {
+        let column = StreamColumnRequest {
+            name: "event_time".to_string(),
+            data_type: "timestamp".to_string(),
+            fields: None,
+            element: None,
+        };
+        let datatype = parse_datatype(&column).expect("should parse timestamp");
+
+        assert!(matches!(datatype, ConcreteDatatype::Timestamp(_)));
+        assert_eq!(datatype_name(&datatype), "timestamp");
     }
 
     #[test]

@@ -57,6 +57,7 @@ pub fn compare_values(left: &Value, right: &Value) -> Option<Ordering> {
         (Value::Uint64(a), Value::Uint64(b)) => Some(a.cmp(b)),
         (Value::String(a), Value::String(b)) => Some(a.cmp(b)),
         (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
+        (Value::Timestamp(a), Value::Timestamp(b)) => Some(a.cmp(b)),
         _ => {
             if let (Some(a), Some(b)) = (try_cast_to_int64(left), try_cast_to_int64(right)) {
                 return Some(a.cmp(&b));

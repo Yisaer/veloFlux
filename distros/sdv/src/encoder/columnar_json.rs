@@ -143,6 +143,10 @@ fn to_json_value(val: &datatypes::Value) -> JsonValue {
             .map(JsonValue::Number)
             .unwrap_or(JsonValue::Null),
         String(s) => JsonValue::String(s.clone()),
+        Timestamp(ts) => ts
+            .to_rfc3339_utc()
+            .map(JsonValue::String)
+            .unwrap_or(JsonValue::Null),
         List(list) => {
             let items = list.items().iter().map(to_json_value).collect::<Vec<_>>();
             JsonValue::Array(items)

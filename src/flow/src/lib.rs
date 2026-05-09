@@ -35,8 +35,8 @@ pub use codec::{
 };
 pub use datatypes::{
     BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type, Int32Type,
-    Int64Type, Int8Type, ListType, Schema, StringType, StructField, StructType, Uint16Type,
-    Uint32Type, Uint64Type, Uint8Type,
+    Int64Type, Int8Type, ListType, Schema, StringType, StructField, StructType, TimestampType,
+    TimestampValue, Uint16Type, Uint32Type, Uint64Type, Uint8Type,
 };
 pub use eventtime::{
     BuiltinEventtimeType, EventtimeParseError, EventtimeTypeParser, EventtimeTypeRegistry,

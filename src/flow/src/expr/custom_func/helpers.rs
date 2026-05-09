@@ -2,7 +2,9 @@ use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionSignatureSpec, TypeSpec,
 };
 use crate::expr::func::EvalError;
-use datatypes::{ConcreteDatatype, ListValue, StructField, StructType, StructValue, Value};
+use datatypes::{
+    ConcreteDatatype, ListValue, StructField, StructType, StructValue, TimestampValue, Value,
+};
 use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -1157,6 +1159,14 @@ pub fn value_to_json_value(v: &Value) -> Result<serde_json::Value, EvalError> {
 
         Value::String(s) => Ok(serde_json::Value::String(s.clone())),
 
+        Value::Timestamp(ts) => ts
+            .to_rfc3339_utc()
+            .map(serde_json::Value::String)
+            .ok_or_else(|| EvalError::TypeMismatch {
+                expected: "timestamp representable as RFC3339".to_string(),
+                actual: format!("{:?}", ts),
+            }),
+
         Value::List(list) => {
             let mut out = Vec::with_capacity(list.items().len());
             for item in list.items() {
@@ -1296,6 +1306,14 @@ pub fn cast_to_string(v: &Value) -> Result<Value, EvalError> {
         Value::Uint64(x) => Ok(Value::String(x.to_string())),
         Value::Float32(x) => Ok(Value::String(x.to_string())),
         Value::Float64(x) => Ok(Value::String(x.to_string())),
+        Value::Timestamp(x) => {
+            x.to_rfc3339_utc()
+                .map(Value::String)
+                .ok_or_else(|| EvalError::TypeMismatch {
+                    expected: "timestamp representable as RFC3339".to_string(),
+                    actual: format!("{:?}", x),
+                })
+        }
         other => Err(EvalError::TypeMismatch {
             expected: "castable to string".to_string(),
             actual: format!("{:?}", other),
@@ -1330,6 +1348,23 @@ pub fn cast_to_boolean(v: &Value) -> Result<Value, EvalError> {
         }
         other => Err(EvalError::TypeMismatch {
             expected: "castable to boolean".to_string(),
+            actual: format!("{:?}", other),
+        }),
+    }
+}
+
+pub fn cast_to_timestamp(v: &Value) -> Result<Value, EvalError> {
+    match v {
+        Value::Null => Ok(Value::Null),
+        Value::Timestamp(x) => Ok(Value::Timestamp(*x)),
+        Value::String(s) => TimestampValue::parse_rfc3339(s)
+            .map(Value::Timestamp)
+            .ok_or_else(|| EvalError::TypeMismatch {
+                expected: "string parseable as RFC3339 timestamp".to_string(),
+                actual: s.clone(),
+            }),
+        other => Err(EvalError::TypeMismatch {
+            expected: "castable to timestamp".to_string(),
             actual: format!("{:?}", other),
         }),
     }

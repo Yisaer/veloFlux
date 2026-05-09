@@ -18,6 +18,7 @@ impl DataType for StringType {
         match from {
             Value::Null => Some(Value::Null),
             Value::String(s) => Some(Value::String(s)),
+            Value::Timestamp(ts) => ts.to_rfc3339_utc().map(Value::String),
             _ => None,
         }
     }

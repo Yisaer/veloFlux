@@ -156,6 +156,13 @@ impl UnaryFunc {
                                 to: format!("{:?}", to),
                             })
                     }
+                    ConcreteDatatype::Timestamp(t) => {
+                        t.try_cast(arg.clone())
+                            .ok_or_else(|| EvalError::CastFailed {
+                                from: format!("{:?}", arg),
+                                to: format!("{:?}", to),
+                            })
+                    }
                     _ => {
                         // For unsupported types like Struct and List, fall back to basic casting
                         let arg_clone = arg.clone();

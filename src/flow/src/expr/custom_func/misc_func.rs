@@ -387,10 +387,14 @@ pub fn cast_function_def() -> FunctionDef {
         vec![
             "Requires exactly 2 arguments.",
             "The second argument must be a string or NULL.",
-            "Currently supports bigint, float, string, and boolean.",
+            "Currently supports bigint, float, string, boolean, and timestamp.",
             "Returns NULL if any argument is NULL.",
         ],
-        vec!["SELECT cast('123', 'bigint')", "SELECT cast(1, 'string')"],
+        vec![
+            "SELECT cast('123', 'bigint')",
+            "SELECT cast(1, 'string')",
+            "SELECT cast('2026-05-08T10:20:30Z', 'timestamp')",
+        ],
     )
 }
 
@@ -911,8 +915,9 @@ impl CustomFunc for CastFunc {
             "float" => cast_to_float(&args[0]),
             "string" => cast_to_string(&args[0]),
             "boolean" => cast_to_boolean(&args[0]),
+            "timestamp" => cast_to_timestamp(&args[0]),
             other => Err(EvalError::TypeMismatch {
-                expected: "one of bigint, float, string, boolean".to_string(),
+                expected: "one of bigint, float, string, boolean, timestamp".to_string(),
                 actual: other.to_string(),
             }),
         }
@@ -1485,6 +1490,22 @@ mod tests {
         assert_float(func.eval_row(&[s("12.5"), s("float")]).unwrap(), 12.5);
         assert_string(func.eval_row(&[i(1), s("string")]).unwrap(), "1");
         assert_bool(func.eval_row(&[s("true"), s("boolean")]).unwrap(), true);
+    }
+
+    #[test]
+    fn test_cast_timestamp() {
+        let func = CastFunc;
+
+        let result = func
+            .eval_row(&[s("2026-05-08T18:20:30+08:00"), s("timestamp")])
+            .unwrap();
+        let Value::Timestamp(timestamp) = result else {
+            panic!("expected timestamp cast result");
+        };
+        assert_eq!(
+            timestamp.to_rfc3339_utc().as_deref(),
+            Some("2026-05-08T10:20:30.000000Z")
+        );
     }
 
     #[test]

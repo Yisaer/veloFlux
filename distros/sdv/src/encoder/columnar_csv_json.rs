@@ -285,6 +285,11 @@ fn write_value_to_buffer(value: &Value, buffer: &mut String) {
         Value::String(s) => {
             buffer.push_str(s);
         }
+        Value::Timestamp(ts) => {
+            if let Some(value) = ts.to_rfc3339_utc() {
+                buffer.push_str(&value);
+            }
+        }
         Value::Float32(v) => {
             // write! to String is infallible
             let _ = write!(buffer, "{v}");

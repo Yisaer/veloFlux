@@ -103,6 +103,7 @@ fn get_type_name(dt: &ConcreteDatatype) -> String {
         ConcreteDatatype::Uint64(_) => "Uint64",
         ConcreteDatatype::String(_) => "String",
         ConcreteDatatype::Bool(_) => "Boolean",
+        ConcreteDatatype::Timestamp(_) => "Timestamp",
         ConcreteDatatype::Struct(_) => "Struct",
         ConcreteDatatype::List(_) => "List",
     }
@@ -124,6 +125,9 @@ fn get_default_value(dt: &ConcreteDatatype) -> Value {
         ConcreteDatatype::Uint64(_) => Value::Uint64(0),
         ConcreteDatatype::String(_) => Value::String(String::new()),
         ConcreteDatatype::Bool(_) => Value::Bool(false),
+        ConcreteDatatype::Timestamp(_) => {
+            Value::Timestamp(crate::TimestampValue::from_epoch_micros(0))
+        }
         ConcreteDatatype::Struct(_) => {
             // For nested struct, return empty struct value
             // This is a simplified implementation

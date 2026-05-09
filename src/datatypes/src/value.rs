@@ -1,7 +1,37 @@
 use crate::datatypes::ConcreteDatatype;
 use crate::types::StructType;
+use chrono::{DateTime, SecondsFormat, Utc};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+/// UTC timestamp value stored as signed Unix epoch microseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TimestampValue {
+    epoch_micros: i64,
+}
+
+impl TimestampValue {
+    pub fn from_epoch_micros(epoch_micros: i64) -> Self {
+        Self { epoch_micros }
+    }
+
+    pub fn epoch_micros(&self) -> i64 {
+        self.epoch_micros
+    }
+
+    pub fn parse_rfc3339(value: &str) -> Option<Self> {
+        DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|dt| Self::from_epoch_micros(dt.with_timezone(&Utc).timestamp_micros()))
+    }
+
+    pub fn to_rfc3339_utc(&self) -> Option<String> {
+        let secs = self.epoch_micros.div_euclid(1_000_000);
+        let micros = self.epoch_micros.rem_euclid(1_000_000) as u32;
+        DateTime::<Utc>::from_timestamp(secs, micros * 1_000)
+            .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Micros, true))
+    }
+}
 
 /// List value containing items and their datatype
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -100,6 +130,8 @@ pub enum Value {
     String(String),
     /// Boolean type
     Bool(bool),
+    /// UTC timestamp type
+    Timestamp(TimestampValue),
     /// Struct value
     Struct(StructValue),
     /// List value
@@ -128,6 +160,7 @@ impl Value {
             Value::Uint64(_) => ConcreteDatatype::Uint64(crate::types::Uint64Type),
             Value::String(_) => ConcreteDatatype::String(crate::types::StringType),
             Value::Bool(_) => ConcreteDatatype::Bool(crate::types::BooleanType),
+            Value::Timestamp(_) => ConcreteDatatype::Timestamp(crate::types::TimestampType),
             Value::Struct(s) => ConcreteDatatype::Struct(s.fields().clone()),
             Value::List(l) => {
                 ConcreteDatatype::List(crate::types::ListType::new(Arc::new(l.datatype().clone())))
@@ -152,6 +185,7 @@ impl PartialEq for Value {
             (Value::Uint64(a), Value::Uint64(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
             (Value::Struct(a), Value::Struct(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             _ => false,
@@ -225,6 +259,10 @@ impl Hash for Value {
             }
             Value::Bool(v) => {
                 12_u8.hash(state);
+                v.hash(state);
+            }
+            Value::Timestamp(v) => {
+                13_u8.hash(state);
                 v.hash(state);
             }
             Value::Struct(v) => {
