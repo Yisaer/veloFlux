@@ -7,6 +7,22 @@ This document describes the built-in SQL-visible functions in veloFlux.
 ### Scalar functions
 
 - `concat(a: string, b: string) -> string`: concatenate two strings.
+- `now() -> timestamp`: current UTC timestamp. Alias: `current_timestamp`.
+- `cur_date() -> string`: current UTC date as `YYYY-MM-DD`. Alias: `current_date`.
+- `cur_time() -> string`: current UTC time as `HH:MM:SS.ffffff`. Alias: `current_time`.
+- `format_time(ts: timestamp, fmt: string) -> string`: format a UTC timestamp.
+- `day_name(ts: timestamp) -> string`: English weekday name.
+- `day_of_month(ts: timestamp) -> int64`: day of month. Alias: `day`.
+- `day_of_week(ts: timestamp) -> int64`: weekday number, Sunday=1 through Saturday=7.
+- `day_of_year(ts: timestamp) -> int64`: day of year.
+- `from_unix_time(seconds: int64) -> timestamp`: convert Unix epoch seconds to UTC timestamp.
+- `hour(ts: timestamp) -> int64`: hour component.
+- `last_day(ts: timestamp) -> string`: last day of the UTC month as `YYYY-MM-DD`.
+- `microsecond(ts: timestamp) -> int64`: microsecond component.
+- `minute(ts: timestamp) -> int64`: minute component.
+- `month(ts: timestamp) -> int64`: month number.
+- `month_name(ts: timestamp) -> string`: English month name.
+- `second(ts: timestamp) -> int64`: second component.
 
 ### Aggregate functions
 
@@ -45,6 +61,32 @@ Examples:
 ```sql
 SELECT concat('hello', 'world') AS s FROM s
 SELECT concat(first_name, last_name) AS full_name FROM s
+```
+
+### Date and time scalar functions
+
+- Kind: scalar
+- Allowed clauses: `SELECT`, `WHERE`, `GROUP BY`
+- Semantics:
+  - Timestamp inputs are interpreted in UTC.
+  - Date-only results use `YYYY-MM-DD`.
+  - Time-only results use `HH:MM:SS.ffffff`.
+  - `now()` and `current_timestamp()` are evaluated when each row is processed.
+- Constraints:
+  - Timestamp extractors require exactly 1 timestamp argument.
+  - `format_time(ts, fmt)` requires a timestamp and a chrono strftime format string.
+  - `from_unix_time(seconds)` accepts integer Unix epoch seconds.
+  - Functions with input arguments return `NULL` if any required argument is `NULL`.
+
+Examples:
+
+```sql
+SELECT now() AS processed_at FROM s
+SELECT current_date() AS utc_date FROM s
+SELECT format_time(event_time, '%Y-%m-%d %H:%M:%S') AS event_time_text FROM s
+SELECT day_name(event_time), hour(event_time), minute(event_time) FROM s
+SELECT last_day(event_time) AS month_end FROM s
+SELECT from_unix_time(epoch_seconds) AS event_time FROM s
 ```
 
 ### `avg(x)`

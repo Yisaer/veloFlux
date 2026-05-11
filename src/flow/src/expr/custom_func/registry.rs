@@ -17,6 +17,12 @@ use super::string_func::{
     ReverseFunc, SplitValueFunc, StartsWithFunc, SubstringFunc, TrimFunc, UpperFunc,
 };
 
+use super::time_func::{
+    CurDateFunc, CurTimeFunc, DayNameFunc, DayOfMonthFunc, DayOfWeekFunc, DayOfYearFunc,
+    FormatTimeFunc, FromUnixTimeFunc, HourFunc, LastDayFunc, MicrosecondFunc, MinuteFunc,
+    MonthFunc, MonthNameFunc, NowFunc, SecondFunc,
+};
+
 use super::obj_func::{
     EraseFunc, ItemsFunc, KeysFunc, ObjToKvPairArrayFunc, ObjectConcatFunc, ObjectConstructFunc,
     ObjectFunc, ObjectPickFunc, ObjectSizeFunc, ValuesFunc, ZipFunc,
@@ -64,6 +70,7 @@ impl CustomFuncRegistry {
         register_array_functions(&mut functions);
         register_null_functions(&mut functions);
         register_string_functions(&mut functions);
+        register_time_functions(&mut functions);
         register_object_functions(&mut functions);
         register_misc_functions(&mut functions);
 
@@ -161,6 +168,29 @@ fn register_string_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>
         Arc::new(SplitValueFunc),
         Arc::new(TrimFunc),
         Arc::new(UpperFunc),
+    ] {
+        register(functions, func);
+    }
+}
+
+fn register_time_functions(functions: &mut HashMap<String, Arc<dyn CustomFunc>>) {
+    for func in [
+        Arc::new(NowFunc) as Arc<dyn CustomFunc>,
+        Arc::new(CurDateFunc),
+        Arc::new(CurTimeFunc),
+        Arc::new(FormatTimeFunc),
+        Arc::new(DayNameFunc),
+        Arc::new(DayOfMonthFunc),
+        Arc::new(DayOfWeekFunc),
+        Arc::new(DayOfYearFunc),
+        Arc::new(FromUnixTimeFunc),
+        Arc::new(HourFunc),
+        Arc::new(LastDayFunc),
+        Arc::new(MicrosecondFunc),
+        Arc::new(MinuteFunc),
+        Arc::new(MonthFunc),
+        Arc::new(MonthNameFunc),
+        Arc::new(SecondFunc),
     ] {
         register(functions, func);
     }
@@ -267,6 +297,32 @@ mod tests {
         assert!(registry.is_registered("split_value"));
         assert!(registry.is_registered("trim"));
         assert!(registry.is_registered("upper"));
+    }
+
+    #[test]
+    fn builtins_include_time_functions() {
+        let registry = CustomFuncRegistry::default();
+
+        assert!(registry.is_registered("now"));
+        assert!(registry.is_registered("current_timestamp"));
+        assert!(registry.is_registered("cur_date"));
+        assert!(registry.is_registered("current_date"));
+        assert!(registry.is_registered("cur_time"));
+        assert!(registry.is_registered("current_time"));
+        assert!(registry.is_registered("format_time"));
+        assert!(registry.is_registered("day_name"));
+        assert!(registry.is_registered("day_of_month"));
+        assert!(registry.is_registered("day"));
+        assert!(registry.is_registered("day_of_week"));
+        assert!(registry.is_registered("day_of_year"));
+        assert!(registry.is_registered("from_unix_time"));
+        assert!(registry.is_registered("hour"));
+        assert!(registry.is_registered("last_day"));
+        assert!(registry.is_registered("microsecond"));
+        assert!(registry.is_registered("minute"));
+        assert!(registry.is_registered("month"));
+        assert!(registry.is_registered("month_name"));
+        assert!(registry.is_registered("second"));
     }
 
     #[test]

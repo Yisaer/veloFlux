@@ -57,3 +57,11 @@ features:
       - docs/syntax/datatypes/timestamp.md
       - docs/syntax/datatypes/json_decode.md
     status: active
+
+  - id: stream.function.date_time_scalars
+    title: Date and time scalar functions
+    summary: Evaluate UTC timestamp-based scalar date/time functions, aliases, formatting, extraction, and null behavior according to the SQL-visible contract.
+    doc_refs:
+      - docs/syntax/functions/date_time_functions.md
+      - docs/syntax/functions/function_semantics.md
+    status: active

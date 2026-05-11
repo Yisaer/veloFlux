@@ -34,6 +34,12 @@ pub fn bool_type() -> TypeSpec {
     }
 }
 
+pub fn timestamp_type() -> TypeSpec {
+    TypeSpec::Named {
+        name: "timestamp".to_string(),
+    }
+}
+
 pub fn any_type() -> TypeSpec {
     TypeSpec::Named {
         name: "any".to_string(),

@@ -6,6 +6,7 @@ pub mod null_func;
 pub mod obj_func;
 pub mod registry;
 pub mod string_func;
+pub mod time_func;
 use crate::catalog::FunctionDef;
 use crate::expr::func::EvalError;
 use datatypes::Value;
@@ -53,6 +54,7 @@ pub fn builtin_custom_function_defs() -> Vec<FunctionDef> {
     defs.extend(math_func::builtin_function_defs());
     defs.extend(null_func::builtin_function_defs());
     defs.extend(string_func::builtin_function_defs());
+    defs.extend(time_func::builtin_function_defs());
     defs.extend(obj_func::builtin_function_defs());
     defs.extend(misc_func::builtin_function_defs());
     defs
