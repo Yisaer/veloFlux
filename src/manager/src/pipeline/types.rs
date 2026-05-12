@@ -1,4 +1,3 @@
-use crate::worker::WorkerMemoryTopicSpec;
 use flow::connector::SharedMqttClientConfig;
 use flow::pipeline::{SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig};
 use flow::planner::sink::{
@@ -95,7 +94,14 @@ pub struct BuildPipelineContextResponse {
     pub pipeline: CreatePipelineRequest,
     pub streams: BTreeMap<String, crate::stream::CreateStreamRequest>,
     pub shared_mqtt_clients: Vec<SharedMqttClientConfig>,
-    pub memory_topics: Vec<WorkerMemoryTopicSpec>,
+    pub memory_topics: Vec<MemoryTopicSpec>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MemoryTopicSpec {
+    pub topic: String,
+    pub kind: storage::StoredMemoryTopicKind,
+    pub capacity: usize,
 }
 
 #[derive(Deserialize)]

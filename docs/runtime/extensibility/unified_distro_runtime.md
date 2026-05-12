@@ -9,8 +9,7 @@ mergers, schema parsers, and related capabilities. That extension boundary is
 the correct place for distro-specific behavior.
 
 The remaining design question is not whether distros should exist, but how they
-should integrate with startup, worker-process mode, testing, and release
-selection.
+should integrate with startup, testing, and release selection.
 
 This document defines the target architecture for distro support in the
 runtime. It is written from the perspective of the desired steady-state design,
@@ -33,22 +32,19 @@ copy of the core startup sequence.
 The core problem is boundary placement:
 
 - Customer differences should be expressed through registry registration.
-- Runtime role switching between manager mode and worker mode should remain a
-  core runtime concern.
+- Startup behavior should remain a core runtime concern.
 - Product identity should be chosen once per branch and reflected through the
   root runtime configuration, not by introducing multiple service boot paths
   that each reimplement startup logic.
 
 If distro-specific service binaries own their own `main()` and normal startup
 flow, the repository accumulates duplicated boot logic, duplicated signal
-handling, duplicated worker integration, and a higher risk that normal mode and
-worker mode diverge in behavior.
+handling, and a higher risk that startup behavior diverges across distros.
 
 ## Design Goals
 
 - Keep a single service entrypoint in the root crate.
 - Keep distro-specific behavior outside the core startup sequence.
-- Use the same distro registration path in both normal mode and worker mode.
 - Keep exactly one active product registration path per branch.
 - Allow distro-specific code, tests, docs, benchmarks, and utility tools to
   live in distro-owned crates.
@@ -73,14 +69,7 @@ worker mode diverge in behavior.
 A distro adds runtime capabilities such as decoders, encoders, mergers, schema
 parsers, or similar registry-based integrations. Those capabilities modify what
 the runtime can resolve and instantiate. They should not redefine how the
-runtime enters manager mode or worker mode.
-
-### Runtime role selection is not distro selection
-
-The `--worker` path exists because the runtime supports multiple execution
-roles. That is orthogonal to customer differentiation. A distro must not need a
-different worker boot sequence from the core runtime. It only needs its
-registrations to be present inside both the manager process and worker process.
+runtime starts up.
 
 ### Product registration must be explicit
 
@@ -93,10 +82,10 @@ shared feature matrix. In the common case, a branch simply builds one product.
 
 ### Startup logic must stay centralized
 
-Bootstrap, signal handling, manager startup, worker startup, shared-registry
-construction, metrics initialization, and profiling initialization are runtime
-infrastructure. They should remain in the root runtime crate so changes to
-startup semantics are implemented and reviewed in one place.
+Bootstrap, signal handling, manager startup, shared-registry construction,
+metrics initialization, and profiling initialization are runtime infrastructure.
+They should remain in the root runtime crate so changes to startup semantics are
+implemented and reviewed in one place.
 
 ## Architecture Overview
 
@@ -106,8 +95,6 @@ The target layout is:
 root package: veloflux
 ├── src/main.rs
 │   └── the only service entrypoint
-├── src/worker.rs
-│   └── shared worker-process runtime
 ├── src/distro.rs
 │   └── branch-local product registration dispatch
 ├── src/bootstrap.rs
@@ -144,26 +131,6 @@ The root `src/main.rs` is the only service entrypoint. In normal mode it:
 
 This keeps service startup semantics identical across distros.
 
-### Worker mode
-
-When the same service binary is invoked with `--worker`, the root runtime
-enters worker mode through the shared worker path. In worker mode it:
-
-1. Parses worker-specific arguments such as instance id and config path.
-2. Loads config and validates the worker process spec.
-3. Constructs the default instance used to source shared registries.
-4. Applies the same active product registration to that default instance.
-5. Clones the resulting shared registries into the dedicated worker instance.
-6. Starts the worker server.
-
-The requirement is strict: the same product registration function must be used
-in both normal mode and worker mode. This is a correctness requirement, not an
-implementation detail.
-
-If normal mode and worker mode do not share the exact same registration path,
-the manager process may accept a pipeline definition that the worker process
-cannot instantiate.
-
 ## Distro Contract
 
 Each distro crate is a library-first runtime extension crate.
@@ -188,8 +155,7 @@ It should:
 It should not:
 
 - own the service `main()` entrypoint;
-- duplicate bootstrap, signal handling, manager startup, or worker startup;
-- redefine manager and worker semantics;
+- duplicate bootstrap, signal handling, or manager startup;
 - require a separate service startup path to activate its capabilities.
 
 This contract keeps distro code focused on capability registration and allows
@@ -260,7 +226,7 @@ Under this model, branches may differ in:
 - packaging, tests, and branch-local release workflow details.
 
 They should not differ in service boot code. The root `src/main.rs` and shared
-worker startup path remain the same shape across branches.
+startup path remain the same shape across branches.
 
 ## Testing and CI Model
 
@@ -272,9 +238,9 @@ The testing model follows the same separation of concerns:
 - distro-specific e2e tests remain colocated with distro code;
 - startup behavior is validated once through the shared root runtime path.
 
-The CI advantage is that startup and worker behavior are no longer duplicated
-across distros. Changes to runtime startup code affect all branches uniformly
-because they all build the same root service entrypoint shape.
+The CI advantage is that startup behavior is no longer duplicated across
+distros. Changes to runtime startup code affect all branches uniformly because
+they all build the same root service entrypoint shape.
 
 ## Tradeoffs
 
@@ -282,7 +248,7 @@ This design has clear advantages:
 
 - one service startup path;
 - less duplicated runtime glue code;
-- stronger consistency between manager mode and worker mode;
+- stronger consistency in startup behavior;
 - clearer separation between runtime roles and customer capabilities;
 - easier review of startup changes and safer long-term maintenance.
 
@@ -306,7 +272,6 @@ runtime core:
 - SDV registration code remains under `distros/sdv/`;
 - customer-specific registration code remains under `distros/custom_<n>/`;
 - root `src/main.rs` remains the only service entrypoint;
-- worker mode remains part of the shared runtime implementation;
 - distro crates may still ship helper tools when needed.
 
 This shape achieves the original monorepo and CI-sharing goals without turning
@@ -321,16 +286,13 @@ the target design above.
 The migration direction is:
 
 1. Restore the root `src/main.rs` as the only service entrypoint.
-2. Keep the shared worker runtime in the root crate.
-3. Keep `distros/sdv` as a library-first base product crate.
-4. Remove distro-owned service binaries such as `distros/<name>/src/bin/veloflux.rs`.
-5. Keep distro-owned tooling binaries when they serve non-service workflows.
-6. Introduce a root-level product registration layer in `src/distro.rs`.
-7. On `main`, let that layer dispatch to the SDV base registration.
-8. On customer branches, let that layer dispatch to the customer crate, which
+2. Keep `distros/sdv` as a library-first base product crate.
+3. Remove distro-owned service binaries such as `distros/<name>/src/bin/veloflux.rs`.
+4. Keep distro-owned tooling binaries when they serve non-service workflows.
+5. Introduce a root-level product registration layer in `src/distro.rs`.
+6. On `main`, let that layer dispatch to the SDV base registration.
+7. On customer branches, let that layer dispatch to the customer crate, which
    itself reuses SDV registration and appends customer-specific registration.
-9. Ensure both normal mode and worker mode call that same product registration
-   path.
 
 This migration preserves the monorepo and registry-extension goals while
 re-centering startup behavior in the shared runtime.

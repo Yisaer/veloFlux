@@ -3,7 +3,7 @@
 This directory defines the process-global logging model used by veloFlux.
 
 The logging subsystem is deployment-facing infrastructure. It is configured once
-during process startup and then shared by manager, worker, and embedded runtime
+during process startup and then shared by manager and embedded runtime
 paths.
 
 ## Background
@@ -26,7 +26,7 @@ existing `tracing` call sites and shared startup initialization flow.
 - Keep `tracing` as the single in-process logging API.
 - Keep logging initialization centralized in shared bootstrap code.
 - Allow deployment-time selection of `stdout`, rotating file, or syslog output.
-- Preserve consistent behavior across manager, worker, and embedded runtime
+- Preserve consistent behavior across manager and embedded runtime
   paths.
 - Keep runtime logging non-blocking on hot paths.
 - Document clear startup and runtime failure semantics for syslog.
@@ -57,7 +57,6 @@ Logging is initialized once per process through shared startup code. The same
 process-global configuration is used by:
 
 - the manager startup path;
-- worker-process startup path;
 - embedded runtime startup path.
 
 The global subscriber must not be reconfigured at runtime with a different
@@ -179,7 +178,7 @@ Compared with remote transport support, local syslog:
 - keeps the configuration surface small;
 - matches common Linux deployment patterns;
 - avoids transport policy complexity in the first rollout;
-- is easier to validate in manager and worker deployments.
+- is easier to validate in manager deployments.
 
 ### Message Identity
 
@@ -190,7 +189,6 @@ make multi-process deployments easier to inspect.
 Recommended effective idents are:
 
 - manager: `veloflux-manager`
-- worker: `veloflux-worker-<instance_id>`
 - embedded: `veloflux-embedded`
 
 The exact derivation should remain deterministic and documented so that
@@ -268,11 +266,8 @@ its own process-global logging backend.
 
 ### Worker
 
-Each worker process initializes its own logging backend after loading the same
-config file. The worker should use an ident derived from both the configured
 base tag and the flow instance id.
 
-This is required because multiple workers may emit into the same host syslog
 service.
 
 ### Embedded Runtime

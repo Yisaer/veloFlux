@@ -337,7 +337,7 @@
   - `proptest_import_export_sequence_composition_preserves_contract_invariants`
 
 - Validates:
-  - backend-specific lifecycle behavior
+  - lifecycle behavior
   - correct state transitions
   - stability across operation sequences
 

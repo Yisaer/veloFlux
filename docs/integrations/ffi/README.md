@@ -14,7 +14,6 @@ it is not the right direct boundary for FFI embedding:
 
 - the binary entrypoint owns CLI parsing;
 - the standalone startup path owns signal handling;
-- worker-process mode relies on re-executing the current executable;
 - embedding must not assume that the host process command line belongs to
   veloFlux.
 
@@ -33,7 +32,6 @@ This document defines the initial embedded runtime design for veloFlux FFI.
 
 - This design does not expose manager APIs directly through FFI.
 - This design does not replace HTTP/REST with a native C API.
-- This design does not support `worker_process` flow instances in the initial
   version.
 - This design does not support CLI-driven startup when used through FFI.
 - This design does not define dynamic plugin loading.
@@ -82,10 +80,8 @@ HTTP/REST endpoints unchanged.
 
 The initial version supports only `in_process` flow instances.
 
-If the loaded configuration declares any `worker_process` flow instance, FFI
 startup must fail before the manager begins serving traffic.
 
-This restriction is intentional. The current worker-process path depends on
 re-executing the current executable, which is not a valid assumption when
 veloFlux is embedded into an arbitrary host process.
 
@@ -181,7 +177,6 @@ languages that can consume a C ABI.
 
 1. validate input pointers and the config path;
 2. load the specified configuration file;
-3. reject configurations that declare `worker_process` instances;
 4. initialize logging and manager runtime state;
 5. start the manager HTTP server in the background;
 6. return a handle only after the runtime is ready to serve.
@@ -227,7 +222,6 @@ Typical startup failures include:
 - null or invalid config path input;
 - configuration file load failure;
 - invalid listen address;
-- unsupported `worker_process` flow instance configuration;
 - port bind failure;
 - runtime initialization failure.
 
@@ -246,7 +240,6 @@ The FFI contract should make the ownership rules explicit:
 - the caller must eventually release it through `stop`;
 - the caller must not copy or free the opaque handle directly;
 - concurrent `stop` calls on the same handle are not supported unless the
-  implementation explicitly documents otherwise.
 
 ## Configuration Model
 
@@ -283,7 +276,6 @@ The implementation must account for the following existing runtime assumptions:
 
 - standalone bootstrap currently reads CLI flags directly;
 - standalone startup currently owns signal-based shutdown handling;
-- worker-process mode currently depends on re-executing the current executable.
 
 The embedded API should factor around those assumptions instead of duplicating
 startup logic.

@@ -35,9 +35,7 @@ The resource is global manager metadata, but the runtime pub/sub channel is inst
 - declaring the same topic name in multiple instances creates separate in-process channels
 - payloads are never shared across instances by the memory transport itself
 
-The manager installs declared topics into in-process flow instances. Worker instances receive
-referenced topics through worker apply context so the worker can declare them before installing
-dependent streams or pipelines.
+The manager installs declared topics into all in-process flow instances.
 
 ## Topic Kind
 
@@ -132,10 +130,9 @@ They are included in:
 - storage import
 - startup-time `init.json`
 - startup hydration from storage
-- worker apply context when a pipeline depends on memory topics
 
 Hydration declares memory topics before streams and pipelines that may reference them. This order
-keeps memory source and memory sink validation deterministic during startup and worker apply.
+keeps memory source and memory sink validation deterministic during startup.
 
 ## Import / Export Semantics
 
@@ -158,7 +155,6 @@ Import treats memory topics as part of the full metadata snapshot:
 - Verify kind mismatches are rejected before dependent streams or pipelines are installed.
 - Verify capacity mismatches on existing runtime topics are rejected.
 - Verify memory topics are restored before dependent streams and pipelines during startup.
-- Verify worker apply context includes referenced memory topics.
 - Verify import/export preserves memory topic kind and capacity.
 - Verify publishing without subscribers succeeds with zero deliveries.
 

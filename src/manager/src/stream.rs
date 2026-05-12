@@ -1,6 +1,6 @@
 use crate::MQTT_QOS;
 use crate::audit::ResourceMutationLog;
-use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend};
+use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::pipeline::AppState;
 use crate::storage_bridge;
 use axum::{
@@ -608,60 +608,24 @@ pub async fn shared_stream_stats_handler(
         Err(resp) => return *resp,
     };
 
-    let response = match state.backend(&flow_instance_id) {
-        Some(FlowInstanceBackend::InProcess) => {
-            let Some(instance) = state.local_instance(&flow_instance_id) else {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!(
-                        "in_process flow instance {flow_instance_id} is not available in runtime"
-                    ),
-                )
-                    .into_response();
-            };
-            let stats = match instance.get_shared_stream_processor_stats(&name).await {
-                Ok(stats) => stats,
-                Err(FlowInstanceError::Catalog(CatalogError::NotFound(_))) => {
-                    return (StatusCode::NOT_FOUND, format!("stream {name} not found"))
-                        .into_response();
-                }
-                Err(err) => return map_flow_instance_error(err),
-            };
-            into_shared_stream_stats_response(&flow_instance_id, stats)
-        }
-        Some(FlowInstanceBackend::WorkerProcess) => {
-            let Some(worker) = state.worker(&flow_instance_id) else {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("worker_process flow instance {flow_instance_id} is not available"),
-                )
-                    .into_response();
-            };
-            match worker.shared_stream_stats(&name).await {
-                Ok(stats) => stats,
-                Err(err) if err == "not_found" => {
-                    return (StatusCode::NOT_FOUND, format!("stream {name} not found"))
-                        .into_response();
-                }
-                Err(err) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!(
-                            "failed to collect shared stream stats for {name} from worker {flow_instance_id}: {err}"
-                        ),
-                    )
-                        .into_response();
-                }
-            }
-        }
+    let instance = match state.local_instance(&flow_instance_id) {
+        Some(instance) => instance,
         None => {
             return (
-                StatusCode::BAD_REQUEST,
-                format!("flow instance {flow_instance_id} is not declared by config"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("flow instance {flow_instance_id} is not available in runtime"),
             )
                 .into_response();
         }
     };
+    let stats = match instance.get_shared_stream_processor_stats(&name).await {
+        Ok(stats) => stats,
+        Err(FlowInstanceError::Catalog(CatalogError::NotFound(_))) => {
+            return (StatusCode::NOT_FOUND, format!("stream {name} not found")).into_response();
+        }
+        Err(err) => return map_flow_instance_error(err),
+    };
+    let response = into_shared_stream_stats_response(&flow_instance_id, stats);
 
     (StatusCode::OK, Json(response)).into_response()
 }
@@ -1327,7 +1291,6 @@ mod tests {
     fn sample_default_instance_spec() -> crate::FlowInstanceSpec {
         crate::FlowInstanceSpec {
             id: "default".to_string(),
-            backend: crate::FlowInstanceBackendKind::InProcess,
             ..crate::FlowInstanceSpec::default()
         }
     }
@@ -1335,20 +1298,14 @@ mod tests {
     fn local_flow_instance_spec(id: &str) -> crate::FlowInstanceSpec {
         crate::FlowInstanceSpec {
             id: id.to_string(),
-            backend: crate::FlowInstanceBackendKind::InProcess,
             ..crate::FlowInstanceSpec::default()
         }
     }
 
     fn build_state(temp_dir: &TempDir, flow_instances: Vec<crate::FlowInstanceSpec>) -> AppState {
         let storage = StorageManager::new(temp_dir.path()).expect("create storage");
-        AppState::new(
-            crate::new_default_flow_instance(),
-            storage,
-            flow_instances,
-            Vec::new(),
-        )
-        .expect("build app state")
+        AppState::new(crate::new_default_flow_instance(), storage, flow_instances)
+            .expect("build app state")
     }
 
     fn stream_definition_from_request(

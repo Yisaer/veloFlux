@@ -6,15 +6,12 @@ use flow::FlowInstance;
 ))]
 use parking_lot::Mutex;
 use std::future::Future;
-use std::io::{BufRead, BufReader};
 #[cfg(feature = "profiling")]
 use std::io::{Read, Write};
 #[cfg(any(feature = "metrics", feature = "profiling"))]
 use std::net::SocketAddr;
 #[cfg(feature = "profiling")]
 use std::net::{TcpListener, TcpStream};
-#[cfg(target_os = "linux")]
-use std::os::unix::process::CommandExt;
 #[cfg(any(feature = "metrics", feature = "profiling"))]
 use std::process;
 #[cfg(feature = "profiling")]
@@ -62,16 +59,6 @@ pub const DEFAULT_DATA_DIR: &str = "./tmp";
 pub const DEFAULT_MANAGER_ADDR: &str = "0.0.0.0:8080";
 #[cfg(feature = "metrics")]
 const DEFAULT_METRICS_POLL_INTERVAL_SECS: u64 = 5;
-#[cfg(target_os = "linux")]
-const PR_SET_PDEATHSIG: i32 = 1;
-#[cfg(target_os = "linux")]
-const SIGTERM_RAW: i32 = 15;
-
-#[cfg(target_os = "linux")]
-#[allow(unsafe_code)] // approved: prctl FFI for PDEATHSIG child-process signal
-unsafe extern "C" {
-    fn prctl(option: i32, arg2: usize, arg3: usize, arg4: usize, arg5: usize) -> i32;
-}
 
 #[cfg(all(
     feature = "profiling",
@@ -142,17 +129,15 @@ pub struct ServerOptions {
     pub metrics_poll_interval_secs: Option<u64>,
     /// Declared flow instances loaded from config.
     pub flow_instances: Vec<manager::FlowInstanceSpec>,
-    /// Loaded config path (passed to worker subprocesses).
-    pub config_path: Option<String>,
 }
 
 /// Runtime context returned by [`init`] and consumed by [`start`].
+#[allow(dead_code)]
 pub struct ServerContext {
     instance: FlowInstance,
     storage: StorageManager,
     manager_addr: String,
     flow_instances: Vec<manager::FlowInstanceSpec>,
-    config_path: Option<String>,
     runtime_guards: ServerRuntimeGuards,
 }
 
@@ -171,23 +156,6 @@ impl ServerContext {
     pub fn manager_addr(&self) -> &str {
         &self.manager_addr
     }
-
-    fn into_parts(self) -> (FlowInstance, StorageManager, String, ServerRuntimeGuards) {
-        (
-            self.instance,
-            self.storage,
-            self.manager_addr,
-            self.runtime_guards,
-        )
-    }
-
-    fn flow_instances(&self) -> &[manager::FlowInstanceSpec] {
-        &self.flow_instances
-    }
-
-    fn config_path(&self) -> Option<&str> {
-        self.config_path.as_deref()
-    }
 }
 
 /// Initialize the Flow server: metrics/profiling, storage, FlowInstance, and catalog load.
@@ -195,12 +163,7 @@ pub async fn init(
     opts: ServerOptions,
     instance: FlowInstance,
 ) -> Result<ServerContext, Box<dyn std::error::Error + Send + Sync>> {
-    let init_phase = StartupPhase::new(
-        "manager",
-        "default",
-        "server_init",
-        opts.config_path.as_deref(),
-    );
+    let init_phase = StartupPhase::new("manager", "default", "server_init", None);
     flow::init_process_once();
     veloflux_metrics::set_default_flow_instance_id("default");
     log_allocator();
@@ -258,7 +221,6 @@ pub async fn init(
         storage,
         manager_addr,
         flow_instances: opts.flow_instances,
-        config_path: opts.config_path,
         runtime_guards: ServerRuntimeGuards {
             #[cfg(feature = "metrics")]
             _metrics_exporter: metrics_exporter,
@@ -291,39 +253,11 @@ pub async fn start_with_shutdown_and_signal<F>(
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let flow_instances = ctx.flow_instances().to_vec();
-    let config_path = ctx.config_path().map(|s| s.to_string());
-    let (instance, storage, manager_addr, _runtime_guards) = ctx.into_parts();
-    let worker_spawn_phase =
-        StartupPhase::new("manager", "default", "worker_spawn", config_path.as_deref());
-    let worker_process_count = flow_instances
-        .iter()
-        .filter(|spec| {
-            matches!(
-                spec.backend,
-                manager::FlowInstanceBackendKind::WorkerProcess
-            )
-        })
-        .count();
-    let (worker_endpoints, mut worker_children) =
-        match spawn_flow_workers(&flow_instances, config_path.as_deref()).await {
-            Ok(result) => result,
-            Err(err) => {
-                worker_spawn_phase.log_failure(err.as_ref());
-                return Err(err);
-            }
-        };
-    tracing::info!(
-        mode = worker_spawn_phase.mode(),
-        flow_instance_id = %worker_spawn_phase.flow_instance_id(),
-        phase = worker_spawn_phase.phase(),
-        config_path = worker_spawn_phase.config_path(),
-        result = "succeeded",
-        elapsed_ms = worker_spawn_phase.elapsed_ms(),
-        requested_worker_process_count = worker_process_count,
-        spawned_worker_process_count = worker_endpoints.len(),
-        "startup phase"
-    );
+    let flow_instances = ctx.flow_instances;
+    let instance = ctx.instance;
+    let storage = ctx.storage;
+    let manager_addr = ctx.manager_addr;
+
     tracing::info!(manager_addr = %manager_addr, "starting manager");
     let (manager_shutdown_tx, manager_shutdown_rx) = tokio::sync::oneshot::channel();
     let manager_future = manager::start_server_with_shutdown(
@@ -331,7 +265,6 @@ where
         instance,
         storage,
         flow_instances,
-        worker_endpoints,
         async move {
             let _ = manager_shutdown_rx.await;
         },
@@ -340,7 +273,7 @@ where
     tokio::pin!(manager_future);
     tokio::pin!(shutdown);
 
-    let result = tokio::select! {
+    tokio::select! {
         result = &mut manager_future => {
             if let Err(err) = result {
                 tracing::error!(error = %err, "manager server exited with error");
@@ -359,16 +292,7 @@ where
                 }
             }
         }
-    };
-
-    for child in &mut worker_children {
-        let _ = child.kill();
     }
-    for child in &mut worker_children {
-        let _ = child.wait();
-    }
-
-    result
 }
 
 #[cfg(unix)]
@@ -401,284 +325,6 @@ async fn shutdown_signal() {
 #[cfg(not(unix))]
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
-}
-
-type FlowWorkerEndpoints = Vec<(String, String)>;
-type FlowWorkerChildren = Vec<std::process::Child>;
-
-#[cfg(target_os = "linux")]
-#[allow(unsafe_code)] // approved: pre_exec closure calls prctl (safe FFI guarded by linux cfg)
-fn configure_worker_pre_exec(cmd: &mut std::process::Command) {
-    unsafe {
-        cmd.pre_exec(|| {
-            let rc = prctl(PR_SET_PDEATHSIG, SIGTERM_RAW as usize, 0, 0, 0);
-            if rc != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn configure_worker_pre_exec(_cmd: &mut std::process::Command) {}
-
-fn forward_worker_output(
-    instance_id: String,
-    reader: impl std::io::Read + Send + 'static,
-    to_stderr: bool,
-) {
-    std::thread::spawn(move || {
-        let prefix = format!("[worker:{instance_id}] ");
-        let mut reader = BufReader::new(reader);
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let mut s = line.as_str();
-                    if let Some(stripped) = s.strip_suffix('\n') {
-                        s = stripped;
-                    }
-                    if let Some(stripped) = s.strip_suffix('\r') {
-                        s = stripped;
-                    }
-                    if to_stderr {
-                        eprintln!("{prefix}{s}");
-                    } else {
-                        println!("{prefix}{s}");
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-}
-
-async fn spawn_flow_workers(
-    flow_instances: &[manager::FlowInstanceSpec],
-    config_path: Option<&str>,
-) -> Result<(FlowWorkerEndpoints, FlowWorkerChildren), Box<dyn std::error::Error + Send + Sync>> {
-    let has_worker_process = flow_instances.iter().any(|spec| {
-        matches!(
-            spec.backend,
-            manager::FlowInstanceBackendKind::WorkerProcess
-        )
-    });
-    if !has_worker_process {
-        return Ok((Vec::new(), Vec::new()));
-    }
-    let config_path =
-        config_path.ok_or("worker_process flow_instances configured but --config not provided")?;
-
-    let exe = std::env::current_exe()?;
-    #[derive(Debug, Clone)]
-    struct ParsedSpec {
-        id: String,
-        worker_addr: std::net::SocketAddr,
-        metrics_addr: std::net::SocketAddr,
-        profile_addr: std::net::SocketAddr,
-        cgroup_path: Option<String>,
-    }
-
-    let mut seen_ids = std::collections::HashSet::new();
-    let mut seen_worker_addrs = std::collections::HashSet::new();
-    let mut parsed = Vec::with_capacity(flow_instances.len());
-    for spec in flow_instances {
-        let id = spec.id.trim();
-        if id.is_empty() {
-            return Err("flow_instances contains an empty id".into());
-        }
-        if !seen_ids.insert(id.to_string()) {
-            return Err(format!("duplicate flow instance id in config: {id}").into());
-        }
-
-        if !matches!(
-            spec.backend,
-            manager::FlowInstanceBackendKind::WorkerProcess
-        ) {
-            continue;
-        }
-        if spec.thread_cgroup_path().is_some() {
-            return Err(
-                format!("worker_process flow instance {id} cannot set cgroup.thread_path").into(),
-            );
-        }
-
-        let worker_addr_raw = spec
-            .worker_addr()
-            .ok_or_else(|| format!("worker_process flow instance {id} requires worker_addr"))?;
-        let worker_addr: std::net::SocketAddr = worker_addr_raw
-            .parse()
-            .map_err(|e| format!("invalid worker_addr for {id}: {e}"))?;
-        if !worker_addr.ip().is_loopback() {
-            return Err(format!(
-                "worker_addr for {id} must be loopback, got {}",
-                worker_addr_raw
-            )
-            .into());
-        }
-        if !seen_worker_addrs.insert(worker_addr) {
-            return Err(format!("duplicate worker_addr in config: {worker_addr}").into());
-        }
-
-        let metrics_addr_raw = spec
-            .metrics_addr()
-            .ok_or_else(|| format!("worker_process flow instance {id} requires metrics_addr"))?;
-        let metrics_addr: std::net::SocketAddr = metrics_addr_raw
-            .parse()
-            .map_err(|e| format!("invalid metrics_addr for {id}: {e}"))?;
-        if !metrics_addr.ip().is_loopback() {
-            return Err(format!(
-                "metrics_addr for {id} must be loopback, got {}",
-                metrics_addr_raw
-            )
-            .into());
-        }
-
-        let profile_addr_raw = spec
-            .profile_addr()
-            .ok_or_else(|| format!("worker_process flow instance {id} requires profile_addr"))?;
-        let profile_addr: std::net::SocketAddr = profile_addr_raw
-            .parse()
-            .map_err(|e| format!("invalid profile_addr for {id}: {e}"))?;
-        if !profile_addr.ip().is_loopback() {
-            return Err(format!(
-                "profile_addr for {id} must be loopback, got {}",
-                profile_addr_raw
-            )
-            .into());
-        }
-
-        parsed.push(ParsedSpec {
-            id: id.to_string(),
-            worker_addr,
-            metrics_addr,
-            profile_addr,
-            cgroup_path: spec.process_cgroup_path().map(|path| path.to_string()),
-        });
-    }
-
-    let mut endpoints: FlowWorkerEndpoints = Vec::with_capacity(parsed.len());
-    let mut children: FlowWorkerChildren = Vec::with_capacity(parsed.len());
-    for spec in parsed {
-        tracing::info!(
-            flow_instance_id = %spec.id,
-            worker_addr = %spec.worker_addr,
-            metrics_addr = %spec.metrics_addr,
-            profile_addr = %spec.profile_addr,
-            cgroup_path = ?spec.cgroup_path,
-            "spawning flow worker"
-        );
-
-        let mut cmd = if spec.cgroup_path.is_some() {
-            #[cfg(target_os = "linux")]
-            {
-                let path = spec
-                    .cgroup_path
-                    .as_deref()
-                    .expect("checked cgroup_path presence");
-                tracing::info!(
-                    flow_instance_id = %spec.id,
-                    cgroup_path = %path,
-                    reason = "worker process will join target cgroup before exec",
-                    "worker pre-exec cgroup binding enabled"
-                );
-                let cgroup_procs = format!("/sys/fs/cgroup{path}/cgroup.procs");
-                let mut shell_cmd = std::process::Command::new("sh");
-                shell_cmd
-                    .arg("-c")
-                    .arg("set -eu; echo $$ > \"$1\"; shift; exec \"$@\"")
-                    .arg("veloflux-worker-launch")
-                    .arg(cgroup_procs)
-                    .arg(&exe)
-                    .arg("--worker")
-                    .arg("--flow-instance-id")
-                    .arg(&spec.id)
-                    .arg("--config")
-                    .arg(config_path);
-                shell_cmd
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                return Err(format!(
-                    "worker {} sets cgroup_path but cgroup binding is only supported on Linux",
-                    spec.id
-                )
-                .into());
-            }
-        } else {
-            let mut direct_cmd = std::process::Command::new(&exe);
-            direct_cmd
-                .arg("--worker")
-                .arg("--flow-instance-id")
-                .arg(&spec.id)
-                .arg("--config")
-                .arg(config_path);
-            direct_cmd
-        };
-        configure_worker_pre_exec(&mut cmd);
-        cmd.stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let mut child = cmd.spawn()?;
-        let pid = child.id();
-
-        endpoints.push((spec.id.to_string(), format!("http://{}", spec.worker_addr)));
-
-        if let Some(stdout) = child.stdout.take() {
-            forward_worker_output(spec.id.clone(), stdout, false);
-        }
-        if let Some(stderr) = child.stderr.take() {
-            forward_worker_output(spec.id.clone(), stderr, true);
-        }
-
-        let mut ready = false;
-        for _ in 1..=60 {
-            match tokio::net::TcpStream::connect(spec.worker_addr).await {
-                Ok(_) => {
-                    ready = true;
-                    break;
-                }
-                Err(_) => {
-                    if let Ok(Some(status)) = child.try_wait() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        for mut prior in children {
-                            let _ = prior.kill();
-                            let _ = prior.wait();
-                        }
-                        return Err(format!("worker {} exited early: {status}", spec.id).into());
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-            }
-        }
-        if !ready {
-            let _ = child.kill();
-            let _ = child.wait();
-            for mut prior in children {
-                let _ = prior.kill();
-                let _ = prior.wait();
-            }
-            return Err(format!(
-                "worker {} did not become ready on {}",
-                spec.id, spec.worker_addr
-            )
-            .into());
-        }
-
-        tracing::info!(
-            flow_instance_id = %spec.id,
-            pid = ?pid,
-            worker_addr = %spec.worker_addr,
-            "flow worker ready"
-        );
-        children.push(child);
-    }
-
-    Ok((endpoints, children))
 }
 
 #[cfg(all(feature = "allocator-jemalloc", not(target_env = "msvc")))]

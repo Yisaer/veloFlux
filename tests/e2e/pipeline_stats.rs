@@ -22,15 +22,9 @@ async fn pipeline_stats_returns_400_for_stopped_pipeline_via_rest() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(
-            listener,
-            instance,
-            storage,
-            default_flow_instances(),
-            Vec::new(),
-        )
-        .await
-        .expect("start manager server");
+        manager::start_server_with_listener(listener, instance, storage, default_flow_instances())
+            .await
+            .expect("start manager server");
     });
 
     let http = reqwest::Client::builder()
@@ -135,15 +129,9 @@ async fn pipeline_stats_excludes_internal_and_shared_ingest_processors_via_rest(
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(
-            listener,
-            instance,
-            storage,
-            default_flow_instances(),
-            Vec::new(),
-        )
-        .await
-        .expect("start manager server");
+        manager::start_server_with_listener(listener, instance, storage, default_flow_instances())
+            .await
+            .expect("start manager server");
     });
 
     let http = reqwest::Client::builder()

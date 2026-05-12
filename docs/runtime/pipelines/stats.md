@@ -73,7 +73,7 @@ Important implications:
 - stats reset when a runtime pipeline is rebuilt
 - the response reflects the currently installed runtime graph, not historical executions
 
-For in-process and worker backends, manager returns the same logical snapshot shape even though the
+Manager returns the same logical snapshot shape.
 collection path differs.
 
 ## Timeout And Snapshot Semantics
@@ -83,11 +83,10 @@ The current collection query accepts `timeout_ms` and defaults to 5000 milliseco
 Current behavior:
 
 - in-process collection forwards the timeout to flow runtime collection
-- worker collection forwards the timeout to the worker HTTP API
 - timeout is surfaced as HTTP `504 Gateway Timeout`
 
 Today, the in-process flow runtime only collects stats from already-running pipelines, so timeouts
-mainly protect the manager/worker request path and future-proof the API contract rather than
+protect the request path and future-proof the API contract rather than
 wrapping a long historical aggregation job.
 
 ## Relationship To Shared Stream Stats
@@ -138,7 +137,7 @@ reported through each entry's `error_count` and `last_error`.
 - Verify filtered processors (`control_source`, `PhysicalResultCollect_*`) are absent from the
   returned list.
 - Verify collecting stats for a stopped pipeline returns an error rather than stale counters.
-- Verify timeout handling maps to `504` consistently for both in-process and worker-backed
+- Verify timeout handling maps to `504` consistently.
   pipelines.
 - Verify shared-stream ingest metrics are not mixed into normal pipeline stats.
 

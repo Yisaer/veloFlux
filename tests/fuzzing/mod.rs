@@ -38,7 +38,6 @@ pub async fn bind_manager_listener_or_skip() -> Option<TcpListener> {
 pub fn default_flow_instances() -> Vec<manager::FlowInstanceSpec> {
     vec![manager::FlowInstanceSpec {
         id: "default".to_string(),
-        backend: manager::FlowInstanceBackendKind::InProcess,
         ..manager::FlowInstanceSpec::default()
     }]
 }

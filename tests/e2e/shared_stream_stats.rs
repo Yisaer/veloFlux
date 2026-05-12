@@ -35,15 +35,9 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(
-            listener,
-            instance,
-            storage,
-            default_flow_instances(),
-            Vec::new(),
-        )
-        .await
-        .expect("start manager server");
+        manager::start_server_with_listener(listener, instance, storage, default_flow_instances())
+            .await
+            .expect("start manager server");
     });
 
     let http = reqwest::Client::builder()
@@ -211,15 +205,9 @@ async fn shared_stream_stats_rejects_non_shared_stream_via_rest() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(
-            listener,
-            instance,
-            storage,
-            default_flow_instances(),
-            Vec::new(),
-        )
-        .await
-        .expect("start manager server");
+        manager::start_server_with_listener(listener, instance, storage, default_flow_instances())
+            .await
+            .expect("start manager server");
     });
 
     let http = reqwest::Client::builder()
@@ -288,15 +276,9 @@ async fn shared_stream_stats_returns_404_for_unknown_stream() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(
-            listener,
-            instance,
-            storage,
-            default_flow_instances(),
-            Vec::new(),
-        )
-        .await
-        .expect("start manager server");
+        manager::start_server_with_listener(listener, instance, storage, default_flow_instances())
+            .await
+            .expect("start manager server");
     });
 
     let http = reqwest::Client::builder()
@@ -330,15 +312,9 @@ async fn shared_stream_stats_reports_stopped_status_after_last_consumer_stops() 
     let addr = listener.local_addr().expect("read listener addr");
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(
-            listener,
-            instance,
-            storage,
-            default_flow_instances(),
-            Vec::new(),
-        )
-        .await
-        .expect("start manager server");
+        manager::start_server_with_listener(listener, instance, storage, default_flow_instances())
+            .await
+            .expect("start manager server");
     });
 
     let http = reqwest::Client::builder()

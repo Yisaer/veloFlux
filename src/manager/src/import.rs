@@ -323,7 +323,7 @@ fn import_export_busy_response() -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackendKind, FlowInstanceSpec};
+    use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceSpec};
     use axum::body::to_bytes;
     use axum::http::StatusCode;
     use serde_json::{Value as JsonValue, json};
@@ -333,7 +333,6 @@ mod tests {
     fn sample_default_instance_spec() -> FlowInstanceSpec {
         FlowInstanceSpec {
             id: DEFAULT_FLOW_INSTANCE_ID.to_string(),
-            backend: FlowInstanceBackendKind::InProcess,
             ..FlowInstanceSpec::default()
         }
     }
@@ -550,7 +549,6 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![sample_default_instance_spec()],
-            Vec::new(),
         )
         .expect("create app state");
 
@@ -657,7 +655,6 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![sample_default_instance_spec()],
-            Vec::new(),
         )
         .expect("create app state");
 

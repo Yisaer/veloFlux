@@ -8,17 +8,14 @@ fn multi_in_process_flow_instances() -> Vec<manager::FlowInstanceSpec> {
     vec![
         manager::FlowInstanceSpec {
             id: "default".to_string(),
-            backend: manager::FlowInstanceBackendKind::InProcess,
             ..manager::FlowInstanceSpec::default()
         },
         manager::FlowInstanceSpec {
             id: "extra_a".to_string(),
-            backend: manager::FlowInstanceBackendKind::InProcess,
             ..manager::FlowInstanceSpec::default()
         },
         manager::FlowInstanceSpec {
             id: "extra_b".to_string(),
-            backend: manager::FlowInstanceBackendKind::InProcess,
             ..manager::FlowInstanceSpec::default()
         },
     ]
@@ -63,7 +60,6 @@ async fn multi_in_process_flow_instances_pipeline_lifecycle_via_rest() {
             instance,
             storage,
             multi_in_process_flow_instances(),
-            Vec::new(),
         )
         .await
         .expect("start manager server");

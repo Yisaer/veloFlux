@@ -5,7 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   ./scripts/perf_pr_host/start_veloflux.sh \
-    --main-cgroup /veloflux-ci/perf-pr-host-001/veloflux/manager \
+    --main-cgroup /veloflux-ci/perf-pr-host-001/veloflux/main \
     [--veloflux-bin ./veloflux-linux-x86_64] \
     [--config ./scripts/perf_pr_host/config.yaml] \
     [--data-dir ./data] \
@@ -13,15 +13,9 @@ Usage:
 
 Starts the main veloflux process after joining the specified main-process cgroup.
 
-Examples:
-  worker-process mode:
-    --main-cgroup /veloflux-ci/perf-pr-host-001/veloflux/manager
-
-  thread-level mode:
+Example:
     --main-cgroup /veloflux-ci/perf-pr-host-001/veloflux/main
 
-Worker-process instances are still bound by
-server.flow_instances[].cgroup.process_path.
 In-process instances with dedicated runtimes are bound by
 server.flow_instances[].cgroup.thread_path.
 USAGE

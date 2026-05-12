@@ -111,15 +111,6 @@ fn validate_embedded_flow_instances(
     flow_instances: &[manager::FlowInstanceSpec],
 ) -> Result<(), String> {
     manager::find_default_flow_instance_spec(flow_instances)?;
-    for spec in flow_instances {
-        if !matches!(spec.backend, manager::FlowInstanceBackendKind::InProcess) {
-            return Err(format!(
-                "embedded startup only supports backend=in_process, but flow instance {} uses {:?}",
-                spec.id.trim(),
-                spec.backend
-            ));
-        }
-    }
     Ok(())
 }
 

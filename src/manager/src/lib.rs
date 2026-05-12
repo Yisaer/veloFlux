@@ -17,8 +17,6 @@ mod pipeline;
 mod startup;
 pub mod storage_bridge;
 mod stream;
-mod worker;
-
 use axum::Router;
 use axum::routing::{delete, get, post};
 use pipeline::AppState;
@@ -31,16 +29,10 @@ use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
 pub use instances::{
-    DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend, FlowInstanceBackendKind, FlowInstanceSpec,
-    build_in_process_flow_instance, find_default_flow_instance_spec, new_default_flow_instance,
+    DEFAULT_FLOW_INSTANCE_ID, FlowInstanceSpec, build_in_process_flow_instance,
+    find_default_flow_instance_spec, new_default_flow_instance,
 };
 pub use stream::{SchemaParser, register_schema, schema_registry};
-pub use worker::FlowWorkerClient;
-pub use worker::{FlowWorkerState, build_worker_app};
-pub use worker::{
-    WorkerApplyPipelineRequest, WorkerApplyPipelineResponse, WorkerDesiredState,
-    WorkerMemoryTopicSpec, WorkerPipelineListItem,
-};
 
 pub(crate) static MQTT_QOS: u8 = 0;
 
@@ -124,20 +116,13 @@ async fn serve_manager_with_listener<F>(
     instance: flow::FlowInstance,
     storage: StorageManager,
     flow_instances: Vec<FlowInstanceSpec>,
-    extra_flow_worker_endpoints: Vec<(String, String)>,
     shutdown: F,
     startup_tx: Option<SyncSender<Result<(), String>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    let state = AppState::new(
-        instance,
-        storage,
-        flow_instances,
-        extra_flow_worker_endpoints,
-    )
-    .map_err(|err| {
+    let state = AppState::new(instance, storage, flow_instances).map_err(|err| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("invalid config: {err}"),
@@ -165,13 +150,11 @@ pub async fn start_server_with_listener(
     instance: flow::FlowInstance,
     storage: StorageManager,
     flow_instances: Vec<FlowInstanceSpec>,
-    extra_flow_worker_endpoints: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     start_server_with_listener_and_shutdown(
         instance,
         storage,
         flow_instances,
-        extra_flow_worker_endpoints,
         pending(),
         None,
         listener,
@@ -183,7 +166,6 @@ pub async fn start_server_with_listener_and_shutdown<F>(
     instance: flow::FlowInstance,
     storage: StorageManager,
     flow_instances: Vec<FlowInstanceSpec>,
-    extra_flow_worker_endpoints: Vec<(String, String)>,
     shutdown: F,
     startup_tx: Option<SyncSender<Result<(), String>>>,
     listener: TcpListener,
@@ -196,7 +178,6 @@ where
         instance,
         storage,
         flow_instances,
-        extra_flow_worker_endpoints,
         shutdown,
         startup_tx,
     )
@@ -208,7 +189,6 @@ pub async fn start_server(
     instance: flow::FlowInstance,
     storage: StorageManager,
     flow_instances: Vec<FlowInstanceSpec>,
-    extra_flow_worker_endpoints: Vec<(String, String)>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = addr.parse()?;
     let bind_phase = StartupPhase::new("manager", "default", "server_bind");
@@ -228,14 +208,7 @@ pub async fn start_server(
         manager_addr = %addr,
         "manager listening"
     );
-    start_server_with_listener(
-        listener,
-        instance,
-        storage,
-        flow_instances,
-        extra_flow_worker_endpoints,
-    )
-    .await
+    start_server_with_listener(listener, instance, storage, flow_instances).await
 }
 
 pub async fn start_server_with_shutdown<F>(
@@ -243,7 +216,6 @@ pub async fn start_server_with_shutdown<F>(
     instance: flow::FlowInstance,
     storage: StorageManager,
     flow_instances: Vec<FlowInstanceSpec>,
-    extra_flow_worker_endpoints: Vec<(String, String)>,
     shutdown: F,
     startup_tx: Option<SyncSender<Result<(), String>>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
@@ -275,20 +247,9 @@ where
         instance,
         storage,
         flow_instances,
-        extra_flow_worker_endpoints,
         shutdown,
         startup_tx,
         listener,
     )
     .await
-}
-
-pub async fn start_flow_worker_with_listener(
-    listener: TcpListener,
-    instance: flow::FlowInstance,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let state = FlowWorkerState::new(instance);
-    let app = build_worker_app(state);
-    axum::serve(listener, app.into_make_service()).await?;
-    Ok(())
 }

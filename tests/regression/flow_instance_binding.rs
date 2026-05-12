@@ -18,18 +18,11 @@ async fn flow_instance_pipeline_binding_lifecycle() {
     let addr = listener.local_addr().expect("read listener addr");
 
     let flow_instances = default_flow_instances();
-    let worker_endpoints = Vec::new();
 
     let server = tokio::spawn(async move {
-        manager::start_server_with_listener(
-            listener,
-            instance,
-            storage,
-            flow_instances,
-            worker_endpoints,
-        )
-        .await
-        .expect("start manager server");
+        manager::start_server_with_listener(listener, instance, storage, flow_instances)
+            .await
+            .expect("start manager server");
     });
 
     let client = make_client(addr);
