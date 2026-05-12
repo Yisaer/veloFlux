@@ -175,7 +175,7 @@ pub(crate) fn build_export_bundle(storage: &StorageManager) -> Result<ExportBund
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackendKind, FlowInstanceSpec};
+    use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceSpec};
     use crate::pipeline::AppState;
     use crate::storage_bridge::{
         stored_mqtt_from_config, stored_pipeline_from_request, stored_stream_from_request,
@@ -252,7 +252,6 @@ mod tests {
     fn sample_default_instance_spec() -> FlowInstanceSpec {
         FlowInstanceSpec {
             id: DEFAULT_FLOW_INSTANCE_ID.to_string(),
-            backend: FlowInstanceBackendKind::InProcess,
             ..FlowInstanceSpec::default()
         }
     }
@@ -298,7 +297,6 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![sample_default_instance_spec()],
-            Vec::new(),
         )
         .unwrap();
 

@@ -37,7 +37,7 @@ struct InitializedLogging {
 }
 
 static LOGGING_STATE: OnceLock<InitializedLogging> = OnceLock::new();
-static LOGGING_WORKER_GUARDS: OnceLock<Mutex<Vec<Box<dyn Send>>>> = OnceLock::new();
+static LOGGING_GUARDS: OnceLock<Mutex<Vec<Box<dyn Send>>>> = OnceLock::new();
 
 #[derive(Debug, Default)]
 pub struct LoggingGuard;
@@ -45,19 +45,12 @@ pub struct LoggingGuard;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoggingContext {
     Manager,
-    Worker { instance_id: String },
     Embedded,
 }
 
 impl LoggingContext {
     pub fn manager() -> Self {
         Self::Manager
-    }
-
-    pub fn worker(instance_id: impl Into<String>) -> Self {
-        Self::Worker {
-            instance_id: instance_id.into(),
-        }
     }
 
     pub fn embedded() -> Self {
@@ -67,7 +60,6 @@ impl LoggingContext {
     fn effective_tag(&self, base_tag: &str) -> String {
         match self {
             Self::Manager => format!("{base_tag}-manager"),
-            Self::Worker { instance_id } => format!("{base_tag}-worker-{instance_id}"),
             Self::Embedded => format!("{base_tag}-embedded"),
         }
     }
@@ -75,14 +67,14 @@ impl LoggingContext {
 
 // SAFETY: lock on a OnceLock-backed static Mutex — never poisoned
 #[allow(clippy::expect_used)]
-fn retain_worker_guard<T>(guard: T)
+fn retain_guard<T>(guard: T)
 where
     T: Send + 'static,
 {
-    let guards = LOGGING_WORKER_GUARDS.get_or_init(|| Mutex::new(Vec::new()));
+    let guards = LOGGING_GUARDS.get_or_init(|| Mutex::new(Vec::new()));
     guards
         .lock()
-        .expect("logging worker guard mutex poisoned")
+        .expect("logging guard mutex poisoned")
         .push(Box::new(guard));
 }
 
@@ -163,7 +155,7 @@ pub fn init_logging_with_context(
                     .finish();
                 tracing::subscriber::set_global_default(subscriber)?;
             }
-            retain_worker_guard(guard);
+            retain_guard(guard);
         }
         crate::config::LoggingOutput::Syslog => {
             if !cfg.syslog.enable {
@@ -195,7 +187,7 @@ pub fn init_logging_with_context(
                     .finish();
                 tracing::subscriber::set_global_default(subscriber)?;
             }
-            retain_worker_guard(guard);
+            retain_guard(guard);
         }
     }
 

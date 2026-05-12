@@ -11,7 +11,6 @@ pub const DEFAULT_FLOW_INSTANCE_ID: &str = "default";
 pub enum FlowInstanceBackendKind {
     #[default]
     InProcess,
-    WorkerProcess,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -24,7 +23,6 @@ pub struct FlowInstanceRuntimeSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct FlowInstanceCgroupSpec {
-    pub process_path: Option<String>,
     pub thread_path: Option<String>,
 }
 
@@ -33,21 +31,19 @@ pub struct FlowInstanceCgroupSpec {
 pub struct FlowInstanceSpec {
     pub id: String,
     pub backend: FlowInstanceBackendKind,
-    pub worker_addr: Option<String>,
-    pub metrics_addr: Option<String>,
-    pub profile_addr: Option<String>,
     pub runtime: FlowInstanceRuntimeSpec,
     pub cgroup: FlowInstanceCgroupSpec,
 }
 
+// Manually implemented instead of derived to avoid interaction between
+// #[serde(default)] (struct-level) and #[derive(Default)]. Deriving Default
+// changes how serde resolves defaults for container-level #[serde(default)].
+#[allow(clippy::derivable_impls)]
 impl Default for FlowInstanceSpec {
     fn default() -> Self {
         Self {
             id: String::new(),
             backend: FlowInstanceBackendKind::InProcess,
-            worker_addr: None,
-            metrics_addr: None,
-            profile_addr: None,
             runtime: FlowInstanceRuntimeSpec::default(),
             cgroup: FlowInstanceCgroupSpec::default(),
         }
@@ -55,39 +51,8 @@ impl Default for FlowInstanceSpec {
 }
 
 impl FlowInstanceSpec {
-    pub fn process_cgroup_path(&self) -> Option<&str> {
-        self.cgroup.process_path.as_deref()
-    }
-
     pub fn thread_cgroup_path(&self) -> Option<&str> {
         self.cgroup.thread_path.as_deref()
-    }
-
-    pub fn worker_addr(&self) -> Option<&str> {
-        self.worker_addr.as_deref()
-    }
-
-    pub fn metrics_addr(&self) -> Option<&str> {
-        self.metrics_addr.as_deref()
-    }
-
-    pub fn profile_addr(&self) -> Option<&str> {
-        self.profile_addr.as_deref()
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlowInstanceBackend {
-    InProcess,
-    WorkerProcess,
-}
-
-impl From<FlowInstanceBackendKind> for FlowInstanceBackend {
-    fn from(value: FlowInstanceBackendKind) -> Self {
-        match value {
-            FlowInstanceBackendKind::InProcess => Self::InProcess,
-            FlowInstanceBackendKind::WorkerProcess => Self::WorkerProcess,
-        }
     }
 }
 
@@ -121,21 +86,9 @@ pub fn build_in_process_flow_instance(
     spec: &FlowInstanceSpec,
     shared_registries: Option<FlowInstanceSharedRegistries>,
 ) -> Result<FlowInstance, String> {
-    if !matches!(spec.backend, FlowInstanceBackendKind::InProcess) {
-        return Err(format!(
-            "flow instance {} is not configured as in_process",
-            spec.id.trim()
-        ));
-    }
-
     let id = spec.id.trim();
     if id.is_empty() {
         return Err("flow instance id must not be empty".to_string());
-    }
-    if spec.process_cgroup_path().is_some() {
-        return Err(format!(
-            "in_process flow instance {id} cannot set cgroup.process_path"
-        ));
     }
 
     FlowInstance::new(flow::instance::FlowInstanceOptions::dedicated_runtime(
@@ -156,12 +109,11 @@ pub fn new_default_flow_instance() -> FlowInstance {
     build_in_process_flow_instance(
         &FlowInstanceSpec {
             id: DEFAULT_FLOW_INSTANCE_ID.to_string(),
-            backend: FlowInstanceBackendKind::InProcess,
             ..FlowInstanceSpec::default()
         },
         None,
     )
-    .expect("build default in-process flow instance")
+    .expect("build default flow instance")
 }
 
 #[derive(Clone)]

@@ -7,7 +7,6 @@ use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::instances::FlowInstances;
-use crate::worker::WorkerMemoryTopicSpec;
 use storage::StorageManager;
 
 use super::types::{
@@ -69,7 +68,7 @@ fn connector_key_from_stream(
 pub(super) type PipelineContextPayload = (
     BTreeMap<String, crate::stream::CreateStreamRequest>,
     Vec<SharedMqttClientConfig>,
-    Vec<WorkerMemoryTopicSpec>,
+    Vec<super::types::MemoryTopicSpec>,
 );
 pub(super) type PipelineContextError = Box<axum::response::Response>;
 
@@ -320,7 +319,7 @@ pub(super) fn build_pipeline_context_payload(
                 ));
             }
         };
-        memory_topic_specs.push(WorkerMemoryTopicSpec {
+        memory_topic_specs.push(super::types::MemoryTopicSpec {
             topic: stored.topic,
             kind: stored.kind,
             capacity: stored.capacity,

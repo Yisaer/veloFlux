@@ -170,7 +170,6 @@ pub struct ServerConfig {
 fn default_flow_instances() -> Vec<FlowInstanceSpec> {
     vec![FlowInstanceSpec {
         id: manager::DEFAULT_FLOW_INSTANCE_ID.to_string(),
-        backend: manager::FlowInstanceBackendKind::InProcess,
         ..FlowInstanceSpec::default()
     }]
 }
@@ -436,10 +435,6 @@ server:
         assert_eq!(cfg.server.flow_instances.len(), 1);
         let spec = &cfg.server.flow_instances[0];
         assert_eq!(spec.id, manager::DEFAULT_FLOW_INSTANCE_ID);
-        assert!(matches!(
-            spec.backend,
-            manager::FlowInstanceBackendKind::InProcess
-        ));
     }
 
     #[test]

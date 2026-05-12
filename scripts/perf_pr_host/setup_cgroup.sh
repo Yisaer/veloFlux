@@ -6,17 +6,10 @@ usage() {
 Usage:
   sudo ./scripts/perf_pr_host/setup_cgroup.sh \
     --base-cg /veloflux-ci/perf-pr-host-<id>/veloflux \
-    [--mode worker_process|thread_level]
 
-Creates a cgroup v2 tree for perf validation.
+Creates a cgroup v2 tree for perf validation with thread-level cgroups.
 
-worker_process mode topology:
-  <base>            (total veloflux CPU budget group)
-  <base>/manager
-  <base>/fi_critical
-  <base>/fi_best
-
-thread_level mode topology:
+Topology:
   <base>            (process-level parent)
   <base>/main       (threaded-domain root for main veloflux process)
   <base>/main/fi_critical
@@ -34,7 +27,7 @@ Outputs env lines to stdout (CG_MODE/CG_BASE/CG_MAIN/CG_FI_CRITICAL/CG_FI_BEST).
 USAGE
 }
 
-MODE="worker_process"
+MODE="thread_level"
 BASE_CG=""
 BASE_MAX_QUOTA_US="100000"
 BASE_MAX_PERIOD_US="100000"
@@ -90,10 +83,6 @@ if [ "${BASE_CG:0:1}" != "/" ]; then
   echo "--base-cg must be an absolute cgroup path like /veloflux-ci/..." >&2
   exit 2
 fi
-if [ "${MODE}" != "worker_process" ] && [ "${MODE}" != "thread_level" ]; then
-  echo "--mode must be worker_process or thread_level" >&2
-  exit 2
-fi
 if [ "$(id -u)" -ne 0 ]; then
   echo "this script must be run as root (use sudo)" >&2
   exit 1
@@ -108,15 +97,9 @@ if ! grep -qw cpu /sys/fs/cgroup/cgroup.controllers; then
 fi
 
 CG_BASE="${BASE_CG}"
-if [ "${MODE}" = "worker_process" ]; then
-  CG_MAIN="${CG_BASE}/manager"
-  CG_FI_CRITICAL="${CG_BASE}/fi_critical"
-  CG_FI_BEST="${CG_BASE}/fi_best"
-else
-  CG_MAIN="${CG_BASE}/main"
-  CG_FI_CRITICAL="${CG_MAIN}/fi_critical"
-  CG_FI_BEST="${CG_MAIN}/fi_best"
-fi
+CG_MAIN="${CG_BASE}/main"
+CG_FI_CRITICAL="${CG_MAIN}/fi_critical"
+CG_FI_BEST="${CG_MAIN}/fi_best"
 
 read_cgroup_type() {
   local cgfs="$1"
@@ -325,7 +308,6 @@ prepare_threaded_domain_root() {
 prepare_threaded_leaf_cgroup() {
   local cg="$1"
   local cgfs="/sys/fs/cgroup${cg}"
-  prepare_leaf_cgroup "${cg}"
   local current_type
   current_type="$(read_cgroup_type "${cgfs}" || true)"
   case "${current_type}" in
@@ -442,16 +424,10 @@ done
 echo "${BASE_MAX_QUOTA_US} ${BASE_MAX_PERIOD_US}" > "/sys/fs/cgroup${CG_BASE}/cpu.max"
 echo "[setup] set ${CG_BASE}/cpu.max = $(cat "/sys/fs/cgroup${CG_BASE}/cpu.max")"
 
-if [ "${MODE}" = "worker_process" ]; then
-  prepare_leaf_cgroup "${CG_MAIN}"
-  prepare_leaf_cgroup "${CG_FI_CRITICAL}"
-  prepare_leaf_cgroup "${CG_FI_BEST}"
-else
   prepare_threaded_domain_root "${CG_MAIN}"
   prepare_threaded_leaf_cgroup "${CG_FI_CRITICAL}"
   prepare_threaded_leaf_cgroup "${CG_FI_BEST}"
   verify_thread_level_tree
-fi
 
 echo "${CRITICAL_MAX_QUOTA_US} ${CRITICAL_MAX_PERIOD_US}" > "/sys/fs/cgroup${CG_FI_CRITICAL}/cpu.max"
 echo "${BEST_MAX_QUOTA_US} ${BEST_MAX_PERIOD_US}" > "/sys/fs/cgroup${CG_FI_BEST}/cpu.max"

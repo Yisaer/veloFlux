@@ -7,7 +7,7 @@ Usage:
   sudo ./scripts/perf_pr_host/cleanup_cgroup.sh --base-cg /veloflux-ci/perf-pr-host-<id>/veloflux
 
 Moves remaining pids/tids back toward the parent cgroup and removes the cgroup tree.
-This works for both worker_process and thread_level perf topologies.
+This works for thread_level perf topologies.
 USAGE
 }
 

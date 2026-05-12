@@ -105,7 +105,6 @@ fn init_options_from_loaded_config(
     if let Some(dir) = data_dir {
         options.data_dir = Some(dir.to_string());
     }
-    options.config_path = loaded_config_path;
     tracing::info!(
         mode = bootstrap_phase.mode(),
         flow_instance_id = %bootstrap_phase.flow_instance_id(),
@@ -160,12 +159,7 @@ pub fn default_init_options(
 /// on `result.instance` before calling `server::init()` and `server::start()`.
 pub fn default_init() -> Result<BootstrapResult, Box<dyn std::error::Error + Send + Sync>> {
     let bootstrap = default_init_options()?;
-    let prepare_phase = StartupPhase::new(
-        "manager",
-        "default",
-        "prepare_registry",
-        bootstrap.options.config_path.as_deref(),
-    );
+    let prepare_phase = StartupPhase::new("manager", "default", "prepare_registry", None);
     let instance = match server::prepare_registry(&bootstrap.options.flow_instances) {
         Ok(instance) => instance,
         Err(err) => {

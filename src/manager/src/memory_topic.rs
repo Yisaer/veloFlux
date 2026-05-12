@@ -178,7 +178,6 @@ mod tests {
     fn sample_default_instance_spec() -> crate::FlowInstanceSpec {
         crate::FlowInstanceSpec {
             id: "default".to_string(),
-            backend: crate::FlowInstanceBackendKind::InProcess,
             ..crate::FlowInstanceSpec::default()
         }
     }
@@ -189,7 +188,6 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![sample_default_instance_spec()],
-            Vec::new(),
         )
         .expect("build app state")
     }

@@ -10,8 +10,6 @@ use tokio::sync::TryAcquireError;
 
 use crate::pipeline::AppState;
 use crate::storage_bridge::{mqtt_config_from_stored, stored_mqtt_from_config};
-use crate::worker::client::DeleteSharedMqttClientError;
-
 fn validate_shared_mqtt_config(cfg: &SharedMqttClientConfig) -> Result<(), String> {
     if cfg.key.trim().is_empty() {
         return Err("shared mqtt client key must not be empty".to_string());
@@ -272,29 +270,6 @@ pub async fn delete_shared_mqtt_client_handler(
         }
     }
 
-    for (instance_id, worker) in state.workers.iter() {
-        if let Err(err) = worker.delete_shared_mqtt_client(&key).await {
-            match err {
-                DeleteSharedMqttClientError::NotFound => {}
-                DeleteSharedMqttClientError::Conflict(_) => {
-                    tracing::warn!(
-                        shared_mqtt_key = %key,
-                        flow_instance_id = %instance_id,
-                        "best-effort delete of shared mqtt client in worker runtime reported conflict"
-                    );
-                }
-                DeleteSharedMqttClientError::Other(other) => {
-                    tracing::warn!(
-                        shared_mqtt_key = %key,
-                        flow_instance_id = %instance_id,
-                        error = %other,
-                        "best-effort delete of shared mqtt client in worker runtime failed"
-                    );
-                }
-            }
-        }
-    }
-
     StatusCode::NO_CONTENT.into_response()
 }
 
@@ -311,21 +286,14 @@ mod tests {
         extract::{Path, State},
         http::StatusCode,
         response::IntoResponse,
-        routing::delete,
     };
     use flow::connector::SharedMqttClientConfig;
     use serde_json::Value as JsonValue;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
     use tempfile::TempDir;
-    use tokio::net::TcpListener;
 
     fn default_flow_instance_spec() -> crate::FlowInstanceSpec {
         crate::FlowInstanceSpec {
             id: "default".to_string(),
-            backend: crate::FlowInstanceBackendKind::InProcess,
             ..crate::FlowInstanceSpec::default()
         }
     }
@@ -333,18 +301,6 @@ mod tests {
     fn local_flow_instance_spec(id: &str) -> crate::FlowInstanceSpec {
         crate::FlowInstanceSpec {
             id: id.to_string(),
-            backend: crate::FlowInstanceBackendKind::InProcess,
-            ..crate::FlowInstanceSpec::default()
-        }
-    }
-
-    fn worker_flow_instance_spec(id: &str) -> crate::FlowInstanceSpec {
-        crate::FlowInstanceSpec {
-            id: id.to_string(),
-            backend: crate::FlowInstanceBackendKind::WorkerProcess,
-            worker_addr: Some("http://127.0.0.1:1".to_string()),
-            metrics_addr: Some("http://127.0.0.1:2".to_string()),
-            profile_addr: Some("http://127.0.0.1:3".to_string()),
             ..crate::FlowInstanceSpec::default()
         }
     }
@@ -360,51 +316,16 @@ mod tests {
         }
     }
 
-    fn build_state(
-        temp_dir: &TempDir,
-        flow_instances: Vec<crate::FlowInstanceSpec>,
-        worker_endpoints: Vec<(String, String)>,
-    ) -> AppState {
+    fn build_state(temp_dir: &TempDir, flow_instances: Vec<crate::FlowInstanceSpec>) -> AppState {
         let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
-        AppState::new(
-            crate::new_default_flow_instance(),
-            storage,
-            flow_instances,
-            worker_endpoints,
-        )
-        .expect("build app state")
-    }
-
-    async fn conflict_worker_server(
-        delete_called: Arc<AtomicBool>,
-    ) -> (String, tokio::task::JoinHandle<()>) {
-        async fn delete_handler(State(called): State<Arc<AtomicBool>>) -> impl IntoResponse {
-            called.store(true, Ordering::Release);
-            (
-                StatusCode::CONFLICT,
-                "shared mqtt client shared is still in use",
-            )
-        }
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind fake worker listener");
-        let addr = listener.local_addr().expect("fake worker addr");
-        let app = axum::Router::new()
-            .route("/internal/v1/mqtt/clients/:key", delete(delete_handler))
-            .with_state(delete_called);
-        let handle = tokio::spawn(async move {
-            axum::serve(listener, app.into_make_service())
-                .await
-                .expect("serve fake worker");
-        });
-        (format!("http://{addr}"), handle)
+        AppState::new(crate::new_default_flow_instance(), storage, flow_instances)
+            .expect("build app state")
     }
 
     #[tokio::test]
     async fn create_shared_mqtt_client_rejects_blank_required_fields() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let state = build_state(&temp_dir, vec![default_flow_instance_spec()], Vec::new());
+        let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
 
         let cases = [
             (
@@ -466,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn create_shared_mqtt_client_is_idempotent_for_identical_config() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let state = build_state(&temp_dir, vec![default_flow_instance_spec()], Vec::new());
+        let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
         let cfg = shared_mqtt_cfg("shared");
 
         let first = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg.clone()))
@@ -496,7 +417,7 @@ mod tests {
     #[tokio::test]
     async fn create_shared_mqtt_client_conflicts_for_different_config() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let state = build_state(&temp_dir, vec![default_flow_instance_spec()], Vec::new());
+        let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
         let cfg = shared_mqtt_cfg("shared");
 
         let first = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg.clone()))
@@ -526,7 +447,7 @@ mod tests {
     #[tokio::test]
     async fn create_shared_mqtt_client_rolls_back_storage_on_runtime_install_failure() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let state = build_state(&temp_dir, vec![default_flow_instance_spec()], Vec::new());
+        let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
         let cfg = SharedMqttClientConfig {
             broker_url: "://invalid-url".to_string(),
             ..shared_mqtt_cfg("shared")
@@ -571,7 +492,6 @@ mod tests {
                 default_flow_instance_spec(),
                 local_flow_instance_spec("local_b"),
             ],
-            Vec::new(),
         );
 
         let conflicting_cfg = shared_mqtt_cfg("shared");
@@ -623,7 +543,7 @@ mod tests {
     #[tokio::test]
     async fn get_shared_mqtt_client_returns_not_found_for_unknown_key() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let state = build_state(&temp_dir, vec![default_flow_instance_spec()], Vec::new());
+        let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
 
         let response = get_shared_mqtt_client_handler(State(state), Path("missing".to_string()))
             .await
@@ -642,7 +562,7 @@ mod tests {
     #[tokio::test]
     async fn list_shared_mqtt_clients_returns_sorted_keys() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let state = build_state(&temp_dir, vec![default_flow_instance_spec()], Vec::new());
+        let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
 
         for cfg in [shared_mqtt_cfg("shared_b"), shared_mqtt_cfg("shared_a")] {
             state
@@ -672,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn delete_shared_mqtt_client_returns_not_found_when_missing() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let state = build_state(&temp_dir, vec![default_flow_instance_spec()], Vec::new());
+        let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
 
         let response = delete_shared_mqtt_client_handler(State(state), Path("missing".to_string()))
             .await
@@ -691,7 +611,7 @@ mod tests {
     #[tokio::test]
     async fn create_shared_mqtt_client_returns_conflict_when_key_operation_is_busy() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let state = build_state(&temp_dir, vec![default_flow_instance_spec()], Vec::new());
+        let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
         let _permit = state
             .try_acquire_shared_mqtt_ops(std::iter::once("shared".to_string()))
             .await
@@ -723,61 +643,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_shared_mqtt_client_is_best_effort_when_worker_delete_conflicts() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let delete_called = Arc::new(AtomicBool::new(false));
-        let (worker_url, worker_handle) = conflict_worker_server(delete_called.clone()).await;
-
-        let state = build_state(
-            &temp_dir,
-            vec![
-                default_flow_instance_spec(),
-                worker_flow_instance_spec("worker_a"),
-            ],
-            vec![("worker_a".to_string(), worker_url)],
-        );
-
-        let cfg = shared_mqtt_cfg("shared");
-        let create_resp = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg))
-            .await
-            .into_response();
-        assert_eq!(create_resp.status(), StatusCode::CREATED);
-
-        let local_instance = state
-            .local_instance("default")
-            .expect("default local runtime instance");
-
-        let delete_resp =
-            delete_shared_mqtt_client_handler(State(state.clone()), Path("shared".to_string()))
-                .await
-                .into_response();
-        assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
-
-        assert!(
-            local_instance.get_shared_mqtt_client("shared").is_none(),
-            "local runtime should drop shared mqtt client even if worker delete conflicts"
-        );
-        assert!(
-            delete_called.load(Ordering::Acquire),
-            "manager should still issue worker delete notification"
-        );
-        assert!(
-            state
-                .storage
-                .get_mqtt_config("shared")
-                .expect("read shared mqtt config")
-                .is_none(),
-            "storage should be authoritative after delete succeeds"
-        );
-
-        worker_handle.abort();
-        let _ = worker_handle.await;
-    }
-
-    #[tokio::test]
     async fn delete_shared_mqtt_client_returns_conflict_when_key_operation_is_busy() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let state = build_state(&temp_dir, vec![default_flow_instance_spec()], Vec::new());
+        let state = build_state(&temp_dir, vec![default_flow_instance_spec()]);
 
         let cfg = shared_mqtt_cfg("shared");
         let create_resp = create_shared_mqtt_client_handler(State(state.clone()), Json(cfg))

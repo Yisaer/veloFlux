@@ -28,19 +28,16 @@ server:
   # - runtime worker thread cgroup binding uses cgroup.thread_path
   flow_instances:
     - id: "default"
-      backend: "in_process"
       runtime:
         thread_name_prefix: "vf-default"
 
     - id: "fi_critical"
-      backend: "in_process"
       runtime:
         thread_name_prefix: "vf-fi-critical"
       cgroup:
         thread_path: "/veloflux-ci/perf-pr-host-001/veloflux/main/fi_critical"
 
     - id: "fi_best"
-      backend: "in_process"
       runtime:
         thread_name_prefix: "vf-fi-best"
       cgroup:

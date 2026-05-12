@@ -10,7 +10,6 @@ It is a cross-cutting runtime feature because:
 
 - streams may reference it from source definitions
 - sinks may reference it from pipeline definitions
-- worker apply and startup hydration must reconcile it before pipelines can run
 
 ## Problem Statement
 
@@ -19,7 +18,6 @@ connection lifecycle. That makes it difficult to:
 
 - reuse one managed connection across multiple source/sink bindings
 - serialize config mutation against pipelines that depend on the same key
-- rehydrate worker runtimes from storage consistently
 
 The shared client model therefore needs clear answers for ownership, mutation, deletion, and
 cross-instance consistency.
@@ -140,7 +138,7 @@ Create is idempotent when the existing config matches exactly. A mismatched conf
 both in storage and in any already-installed runtime instance.
 
 Worker runtimes do not hydrate shared clients independently from manager metadata. Instead, manager
-includes the required shared MQTT configs in worker apply context, and worker reconcile logic
+includes the required shared MQTT configs in the apply context.
 ensures the runtime has matching entries before stream/pipeline installation proceeds.
 
 ## Management Surface
@@ -157,7 +155,6 @@ Manager-side control-plane operations currently provide:
 This management surface exists to keep `connector_key` bindings stable across:
 
 - startup hydration
-- worker apply context building
 - import/export bundles
 - concurrent pipeline create, update, and start operations
 
@@ -187,7 +184,7 @@ Current manager behavior:
 
 1. acquire the per-key shared MQTT mutation lock
 2. delete the config from storage
-3. best-effort drop the runtime copy from local instances and workers
+3. best-effort drop the runtime copy from local instances
 4. return success even if some runtime notifications fail
 
 Within a flow instance, dropping the client removes the key from the acquisition registry
@@ -213,9 +210,7 @@ In-process instances:
 
 Worker-process instances:
 
-- receive referenced shared MQTT configs through worker apply payloads
 - reconcile those configs before installing streams or pipelines
-- may replace an existing worker-side shared client when the config changed
 
 There is no cross-instance shared network client. The same key may exist in multiple instances, but
 each instance owns its own runtime connection.
@@ -241,10 +236,8 @@ Important failure behaviors:
 - Verify create is idempotent when the same config is submitted twice.
 - Verify create conflicts when the same key is reused with a different config.
 - Verify local create rollback when one runtime instance fails after earlier instances succeeded.
-- Verify delete removes storage even when worker cleanup reports conflict or failure.
 - Verify a dropped-but-still-held client disappears from new acquisitions immediately and only
   shuts down after the last handle is released.
-- Verify worker apply reconciles shared clients before building streams/pipelines.
 - Verify busy-key conflicts reject pipeline start before desired state is mutated.
 - Verify one key can be referenced by both a source and a sink in the same pipeline/runtime.
 - Verify a slow subscriber backpressures the shared client fan-out instead of losing messages.

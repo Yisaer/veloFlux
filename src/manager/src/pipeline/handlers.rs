@@ -1,7 +1,6 @@
 use crate::audit::ResourceMutationLog;
-use crate::instances::{DEFAULT_FLOW_INSTANCE_ID, FlowInstanceBackend};
+use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::storage_bridge;
-use crate::worker::WorkerDesiredState;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
@@ -15,7 +14,6 @@ use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 use super::context::{
     build_pipeline_context_payload, shared_mqtt_connector_keys_from_pipeline_request,
 };
-use super::remote::apply_pipeline_in_worker;
 use super::spec::{build_pipeline_definition, status_label, validate_create_request};
 use super::state::AppState;
 use super::types::{
@@ -84,22 +82,7 @@ fn local_instance_response(
         Box::new(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("in_process flow instance {flow_instance_id} is not available in runtime"),
-            )
-                .into_response(),
-        )
-    })
-}
-
-fn worker_response(
-    state: &AppState,
-    flow_instance_id: &str,
-) -> Result<crate::worker::FlowWorkerClient, Box<axum::response::Response>> {
-    state.worker(flow_instance_id).ok_or_else(|| {
-        Box::new(
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("worker_process flow instance {flow_instance_id} is not available"),
+                format!("flow instance {flow_instance_id} is not available in runtime"),
             )
                 .into_response(),
         )
@@ -253,47 +236,6 @@ pub async fn create_pipeline_handler(
         }
     }
 
-    if matches!(
-        state.backend(&flow_instance_id),
-        Some(FlowInstanceBackend::WorkerProcess)
-    ) {
-        let worker = match worker_response(&state, &flow_instance_id) {
-            Ok(worker) => worker,
-            Err(resp) => return *resp,
-        };
-        let apply_result = match apply_pipeline_in_worker(
-            &worker,
-            &state.instances,
-            state.storage.as_ref(),
-            &req.id,
-            &req,
-            &stored.raw_json,
-            WorkerDesiredState::Stopped,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(resp) => {
-                tracing::error!(
-                    pipeline_id = %req.id,
-                    flow_instance_id = %flow_instance_id,
-                    "pipeline persisted but failed to apply to worker"
-                );
-                return resp;
-            }
-        };
-
-        audit.log_success();
-        return (
-            StatusCode::CREATED,
-            Json(CreatePipelineResponse {
-                id: stored.id,
-                status: apply_result.status,
-            }),
-        )
-            .into_response();
-    }
-
     let instance = match local_instance_response(&state, &flow_instance_id) {
         Ok(instance) => instance,
         Err(resp) => return *resp,
@@ -422,103 +364,17 @@ pub async fn upsert_pipeline_handler(
         .unwrap_or_else(|| DEFAULT_FLOW_INSTANCE_ID.to_string());
     let audit =
         ResourceMutationLog::new("pipeline", "update", id.as_str(), Some(&flow_instance_id));
-    let backend = match state.backend(&flow_instance_id) {
-        Some(backend) => backend,
-        None => {
-            let err = format!("flow instance {flow_instance_id} is not declared by config");
-            audit.log_failure(&err);
-            return (StatusCode::BAD_REQUEST, err).into_response();
-        }
-    };
+    if !state.is_declared_instance(&flow_instance_id) {
+        let err = format!("flow instance {flow_instance_id} is not declared by config");
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
 
     let _shared_mqtt_permits =
         match try_acquire_shared_mqtt_pipeline_ops(&state, &id, &create_req).await {
             Ok(permits) => permits,
             Err(resp) => return resp,
         };
-
-    if matches!(backend, FlowInstanceBackend::WorkerProcess) {
-        if old_pipeline.is_some() {
-            let _ = state.storage.delete_pipeline(&id);
-        }
-
-        let stored = match storage_bridge::stored_pipeline_from_request(&create_req) {
-            Ok(stored) => stored,
-            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-        };
-        match state.storage.create_pipeline(stored.clone()) {
-            Ok(()) => {}
-            Err(StorageError::AlreadyExists(_)) => {
-                return (
-                    StatusCode::CONFLICT,
-                    format!("pipeline {id} already exists"),
-                )
-                    .into_response();
-            }
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("failed to persist pipeline {id}: {err}"),
-                )
-                    .into_response();
-            }
-        }
-
-        let desired_state = match old_desired_state {
-            StoredPipelineDesiredState::Running => WorkerDesiredState::Running,
-            StoredPipelineDesiredState::Stopped => WorkerDesiredState::Stopped,
-        };
-
-        let _ = matches!(old_desired_state, StoredPipelineDesiredState::Running)
-            && state
-                .storage
-                .put_pipeline_run_state(StoredPipelineRunState {
-                    pipeline_id: id.clone(),
-                    desired_state: StoredPipelineDesiredState::Running,
-                })
-                .is_err();
-
-        let worker = match worker_response(&state, &flow_instance_id) {
-            Ok(worker) => worker,
-            Err(resp) => return *resp,
-        };
-        let apply_result = match apply_pipeline_in_worker(
-            &worker,
-            &state.instances,
-            state.storage.as_ref(),
-            &id,
-            &create_req,
-            &stored.raw_json,
-            desired_state,
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(resp) => {
-                if matches!(old_desired_state, StoredPipelineDesiredState::Running) {
-                    let _ = state
-                        .storage
-                        .put_pipeline_run_state(StoredPipelineRunState {
-                            pipeline_id: id.clone(),
-                            desired_state: StoredPipelineDesiredState::Stopped,
-                        });
-                }
-                tracing::error!(
-                    pipeline_id = %id,
-                    flow_instance_id = %flow_instance_id,
-                    "pipeline persisted but failed to apply to worker"
-                );
-                return resp;
-            }
-        };
-
-        audit.log_success();
-        return Json(CreatePipelineResponse {
-            id,
-            status: apply_result.status,
-        })
-        .into_response();
-    }
 
     let instance = match local_instance_response(&state, &flow_instance_id) {
         Ok(instance) => instance,
@@ -736,54 +592,30 @@ pub async fn explain_pipeline_handler(
         Err(resp) => return resp,
     };
 
-    if matches!(
-        state.backend(&flow_instance_id),
-        Some(FlowInstanceBackend::InProcess)
-    ) {
-        let instance = match local_instance_response(&state, &flow_instance_id) {
-            Ok(instance) => instance,
-            Err(resp) => return *resp,
-        };
-        let explain = match instance.explain_pipeline(flow::ExplainPipelineTarget::Id(&id)) {
-            Ok(explain) => explain,
-            Err(PipelineError::NotFound(_)) => {
-                return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
-            }
-            Err(err) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("failed to explain pipeline {id}: {err}"),
-                )
-                    .into_response();
-            }
-        };
-
-        let mut response = explain.to_pretty_string().into_response();
-        response.headers_mut().insert(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("text/plain; charset=utf-8"),
-        );
-        return response;
-    }
-
-    let worker = match worker_response(&state, &flow_instance_id) {
-        Ok(worker) => worker,
+    let instance = match local_instance_response(&state, &flow_instance_id) {
+        Ok(instance) => instance,
         Err(resp) => return *resp,
     };
-    match worker.explain_pipeline(&id).await {
-        Ok(text) => {
-            let mut response = text.into_response();
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            );
-            response
+    let explain = match instance.explain_pipeline(flow::ExplainPipelineTarget::Id(&id)) {
+        Ok(explain) => explain,
+        Err(PipelineError::NotFound(_)) => {
+            return (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response();
         }
-        Err(err) if err == "not_found" => {
-            (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("failed to explain pipeline {id}: {err}"),
+            )
+                .into_response();
         }
-        Err(err) => (StatusCode::BAD_REQUEST, err).into_response(),
-    }
+    };
+
+    let mut response = explain.to_pretty_string().into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    response
 }
 
 pub async fn collect_pipeline_stats_handler(
@@ -809,60 +641,34 @@ pub async fn collect_pipeline_stats_handler(
     };
 
     let timeout = Duration::from_millis(query.timeout_ms);
-    if matches!(
-        state.backend(&flow_instance_id),
-        Some(FlowInstanceBackend::InProcess)
-    ) {
-        let instance = match local_instance_response(&state, &flow_instance_id) {
-            Ok(instance) => instance,
-            Err(resp) => return *resp,
-        };
-        return match instance.collect_pipeline_stats(&id, timeout).await {
-            Ok(stats) => {
-                let stats = stats
-                    .into_iter()
-                    .filter(|entry| {
-                        entry.processor_id != "control_source"
-                            && !entry.processor_id.starts_with("PhysicalResultCollect_")
-                    })
-                    .collect::<Vec<_>>();
-                (StatusCode::OK, Json(stats)).into_response()
-            }
-            Err(PipelineError::NotFound(_)) => {
-                (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
-            }
-            Err(PipelineError::Runtime(err))
-                if err == flow::ProcessorError::Timeout.to_string() =>
-            {
-                (
-                    StatusCode::GATEWAY_TIMEOUT,
-                    format!("collect stats timeout for pipeline {id}"),
-                )
-                    .into_response()
-            }
-            Err(err) => (
-                StatusCode::BAD_REQUEST,
-                format!("failed to collect pipeline {id} stats: {err}"),
-            )
-                .into_response(),
-        };
-    }
-
-    let worker = match worker_response(&state, &flow_instance_id) {
-        Ok(worker) => worker,
+    let instance = match local_instance_response(&state, &flow_instance_id) {
+        Ok(instance) => instance,
         Err(resp) => return *resp,
     };
-    match worker.collect_stats(&id, query.timeout_ms).await {
-        Ok(stats) => (StatusCode::OK, Json(stats)).into_response(),
-        Err(err) if err == "not_found" => {
+    match instance.collect_pipeline_stats(&id, timeout).await {
+        Ok(stats) => {
+            let stats = stats
+                .into_iter()
+                .filter(|entry| {
+                    entry.processor_id != "control_source"
+                        && !entry.processor_id.starts_with("PhysicalResultCollect_")
+                })
+                .collect::<Vec<_>>();
+            (StatusCode::OK, Json(stats)).into_response()
+        }
+        Err(PipelineError::NotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
         }
-        Err(err) if err == "timeout" => (
+        Err(PipelineError::Runtime(err)) if err == flow::ProcessorError::Timeout.to_string() => (
             StatusCode::GATEWAY_TIMEOUT,
             format!("collect stats timeout for pipeline {id}"),
         )
             .into_response(),
-        Err(err) => (StatusCode::BAD_REQUEST, err).into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            format!("failed to collect pipeline {id} stats: {err}"),
+        )
+            .into_response(),
     }
 }
 
@@ -907,111 +713,23 @@ pub async fn start_pipeline_handler(
             .into_response();
     }
 
-    if matches!(
-        state.backend(&flow_instance_id),
-        Some(FlowInstanceBackend::InProcess)
-    ) {
-        let instance = match local_instance_response(&state, &flow_instance_id) {
-            Ok(instance) => instance,
-            Err(resp) => return *resp,
-        };
-        return match instance.start_pipeline(&id) {
-            Ok(_) => {
-                audit.log_success();
-                (StatusCode::OK, format!("pipeline {id} started")).into_response()
-            }
-            Err(PipelineError::NotFound(_)) => {
-                let _ = state
-                    .storage
-                    .put_pipeline_run_state(StoredPipelineRunState {
-                        pipeline_id: id.clone(),
-                        desired_state: StoredPipelineDesiredState::Stopped,
-                    });
-                (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
-            }
-            Err(err) => {
-                let _ = state
-                    .storage
-                    .put_pipeline_run_state(StoredPipelineRunState {
-                        pipeline_id: id.clone(),
-                        desired_state: StoredPipelineDesiredState::Stopped,
-                    });
-                (
-                    StatusCode::BAD_REQUEST,
-                    format!("failed to start pipeline {id}: {err}"),
-                )
-                    .into_response()
-            }
-        };
-    }
-
-    let worker = match worker_response(&state, &flow_instance_id) {
-        Ok(worker) => worker,
-        Err(resp) => {
+    let instance = match local_instance_response(&state, &flow_instance_id) {
+        Ok(instance) => instance,
+        Err(resp) => return *resp,
+    };
+    match instance.start_pipeline(&id) {
+        Ok(_) => {
+            audit.log_success();
+            (StatusCode::OK, format!("pipeline {id} started")).into_response()
+        }
+        Err(PipelineError::NotFound(_)) => {
             let _ = state
                 .storage
                 .put_pipeline_run_state(StoredPipelineRunState {
                     pipeline_id: id.clone(),
                     desired_state: StoredPipelineDesiredState::Stopped,
                 });
-            return *resp;
-        }
-    };
-
-    match worker.start_pipeline(&id).await {
-        Ok(()) => {
-            audit.log_success();
-            (StatusCode::OK, format!("pipeline {id} started")).into_response()
-        }
-        Err(err) if err == "not_found" => {
-            // Best-effort: apply pipeline before retrying start.
-            let stored = match state.storage.get_pipeline(&id) {
-                Ok(Some(p)) => p,
-                Ok(None) => {
-                    let _ = state
-                        .storage
-                        .put_pipeline_run_state(StoredPipelineRunState {
-                            pipeline_id: id.clone(),
-                            desired_state: StoredPipelineDesiredState::Stopped,
-                        });
-                    return (StatusCode::NOT_FOUND, format!("pipeline {id} not found"))
-                        .into_response();
-                }
-                Err(err) => {
-                    let _ = state
-                        .storage
-                        .put_pipeline_run_state(StoredPipelineRunState {
-                            pipeline_id: id.clone(),
-                            desired_state: StoredPipelineDesiredState::Stopped,
-                        });
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("failed to read pipeline {id} from storage: {err}"),
-                    )
-                        .into_response();
-                }
-            };
-            if let Err(resp) = apply_pipeline_in_worker(
-                &worker,
-                &state.instances,
-                state.storage.as_ref(),
-                &id,
-                &pipeline_req,
-                &stored.raw_json,
-                WorkerDesiredState::Running,
-            )
-            .await
-            {
-                let _ = state
-                    .storage
-                    .put_pipeline_run_state(StoredPipelineRunState {
-                        pipeline_id: id.clone(),
-                        desired_state: StoredPipelineDesiredState::Stopped,
-                    });
-                return resp;
-            }
-            audit.log_success();
-            (StatusCode::OK, format!("pipeline {id} started")).into_response()
+            (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
         }
         Err(err) => {
             let _ = state
@@ -1074,40 +792,16 @@ pub async fn stop_pipeline_handler(
             .into_response();
     }
 
-    if matches!(
-        state.backend(&flow_instance_id),
-        Some(FlowInstanceBackend::InProcess)
-    ) {
-        let instance = match local_instance_response(&state, &flow_instance_id) {
-            Ok(instance) => instance,
-            Err(resp) => return *resp,
-        };
-        return match instance.stop_pipeline(&id, mode, timeout).await {
-            Ok(_) => {
-                audit.log_success();
-                (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
-            }
-            Err(PipelineError::NotFound(_)) => {
-                (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
-            }
-            Err(err) => (
-                StatusCode::BAD_REQUEST,
-                format!("failed to stop pipeline {id}: {err}"),
-            )
-                .into_response(),
-        };
-    }
-
-    let worker = match worker_response(&state, &flow_instance_id) {
-        Ok(worker) => worker,
+    let instance = match local_instance_response(&state, &flow_instance_id) {
+        Ok(instance) => instance,
         Err(resp) => return *resp,
     };
-    match worker.stop_pipeline(&id).await {
-        Ok(()) => {
+    match instance.stop_pipeline(&id, mode, timeout).await {
+        Ok(_) => {
             audit.log_success();
             (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
         }
-        Err(err) if err == "not_found" => {
+        Err(PipelineError::NotFound(_)) => {
             (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
         }
         Err(err) => (
@@ -1163,53 +857,24 @@ pub async fn delete_pipeline_handler(
     audit.set_flow_instance_id(flow_instance_id.as_deref());
 
     if let Some(flow_instance_id) = flow_instance_id.as_deref() {
-        match state.backend(flow_instance_id) {
-            Some(FlowInstanceBackend::InProcess) => {
-                if let Some(instance) = state.local_instance(flow_instance_id) {
-                    match instance.delete_pipeline(&id).await {
-                        Ok(_) | Err(PipelineError::NotFound(_)) => {}
-                        Err(err) => {
-                            tracing::warn!(
-                                pipeline_id = %id,
-                                flow_instance_id = %flow_instance_id,
-                                error = %err,
-                                "failed to delete pipeline from in-process runtime"
-                            );
-                        }
-                    }
-                } else {
+        if let Some(instance) = state.local_instance(flow_instance_id) {
+            match instance.delete_pipeline(&id).await {
+                Ok(_) | Err(PipelineError::NotFound(_)) => {}
+                Err(err) => {
                     tracing::warn!(
                         pipeline_id = %id,
                         flow_instance_id = %flow_instance_id,
-                        "local flow instance unavailable while deleting pipeline"
+                        error = %err,
+                        "failed to delete pipeline from in-process runtime"
                     );
                 }
             }
-            Some(FlowInstanceBackend::WorkerProcess) => {
-                if let Some(worker) = state.worker(flow_instance_id) {
-                    if let Err(err) = worker.delete_pipeline(&id).await {
-                        tracing::warn!(
-                            pipeline_id = %id,
-                            flow_instance_id = %flow_instance_id,
-                            error = %err,
-                            "failed to delete pipeline from worker runtime"
-                        );
-                    }
-                } else {
-                    tracing::warn!(
-                        pipeline_id = %id,
-                        flow_instance_id = %flow_instance_id,
-                        "worker client unavailable while deleting pipeline"
-                    );
-                }
-            }
-            None => {
-                tracing::warn!(
-                    pipeline_id = %id,
-                    flow_instance_id = %flow_instance_id,
-                    "flow instance not declared while deleting pipeline"
-                );
-            }
+        } else {
+            tracing::warn!(
+                pipeline_id = %id,
+                flow_instance_id = %flow_instance_id,
+                "local flow instance unavailable while deleting pipeline"
+            );
         }
     }
 
@@ -1230,22 +895,6 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
                 snapshot.definition.id().to_string(),
                 status_label(snapshot.status),
             );
-        }
-    }
-    for (id, worker) in state.workers.iter() {
-        match worker.list_pipelines().await {
-            Ok(items) => {
-                for item in items {
-                    runtime_status.insert(item.id, item.status);
-                }
-            }
-            Err(err) => {
-                tracing::error!(
-                    flow_instance_id = %id,
-                    error = %err,
-                    "failed to list pipelines from worker"
-                );
-            }
         }
     }
 
@@ -1322,7 +971,6 @@ mod tests {
     fn default_flow_instance_spec() -> crate::FlowInstanceSpec {
         crate::FlowInstanceSpec {
             id: "default".to_string(),
-            backend: crate::FlowInstanceBackendKind::InProcess,
             ..crate::FlowInstanceSpec::default()
         }
     }
@@ -1400,7 +1048,6 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![default_flow_instance_spec()],
-            Vec::new(),
         )
         .expect("build app state");
 
@@ -1470,7 +1117,6 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![default_flow_instance_spec()],
-            Vec::new(),
         )
         .expect("build app state");
 
@@ -1540,7 +1186,6 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![default_flow_instance_spec()],
-            Vec::new(),
         )
         .expect("build app state");
 
@@ -1592,7 +1237,6 @@ mod tests {
             crate::new_default_flow_instance(),
             storage,
             vec![default_flow_instance_spec()],
-            Vec::new(),
         )
         .expect("build app state");
 

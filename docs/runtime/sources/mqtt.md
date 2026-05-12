@@ -185,7 +185,7 @@ The source also keeps per-connector ingress/egress counters for payload throughp
 
 - source stream metadata still names the logical source
 - shared client metadata owns the live network subscription contract
-- pipeline context building must include the referenced shared client config before a worker can
+- pipeline context building must include the referenced shared client config before a
   rebuild the source
 
 Because of this, missing shared-client metadata is a pipeline/context error, not merely a source

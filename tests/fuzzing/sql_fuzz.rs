@@ -45,7 +45,6 @@ impl TestHarness {
                 instance,
                 storage,
                 default_flow_instances(),
-                Vec::new(),
             )
             .await
             .expect("start manager server");

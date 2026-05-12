@@ -19,7 +19,7 @@ migration.
 - Keep process-global logging initialization centralized.
 - Preserve structured logging context in the rendered syslog message body.
 - Keep syslog I/O off the main runtime execution path.
-- Support manager, worker, and embedded startup paths consistently.
+- Support manager and embedded startup paths consistently.
 
 ## Non-Goals
 
@@ -116,7 +116,6 @@ To keep logs attributable in multi-process deployments, the effective syslog
 ident should be derived by startup path:
 
 - manager: `<tag>-manager`
-- worker: `<tag>-worker-<instance_id>`
 - embedded: `<tag>-embedded`
 
 This keeps operator-side filtering stable even when multiple veloFlux runtime
@@ -180,14 +179,6 @@ If syslog writes fail after startup:
 - attempt background recovery where practical;
 - tolerate bounded record loss;
 - emit rate-limited diagnostics for persistent backend failure.
-
-## Worker-Process Considerations
-
-Worker processes are independent OS processes and therefore own independent
-syslog connections.
-
-Because workers may emit to the same host syslog service concurrently, the
-derived worker ident is required and should include the flow instance id.
 
 ## Deployment Notes
 
