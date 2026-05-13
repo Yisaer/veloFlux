@@ -63,6 +63,41 @@ impl CustomFuncRegistry {
         names
     }
 
+    /// Build a registry containing all built-in functions plus the given
+    /// WASM UDFs. Panics if any UDF name collides with a built-in.
+    pub fn with_builtins_and_wasm(wasm_udfs: Vec<Arc<dyn CustomFunc>>) -> Arc<Self> {
+        let mut registry = Self::builtins();
+        for udf in wasm_udfs {
+            let name = udf.name().to_lowercase();
+            assert!(
+                !registry.functions.contains_key(&name),
+                "WASM UDF '{name}' conflicts with an existing built-in function"
+            );
+            register(&mut registry.functions, udf);
+        }
+        Arc::new(registry)
+    }
+
+    /// Clone this registry and add a single UDF.
+    ///
+    /// Returns an error if the UDF name collides with an existing entry.
+    /// Callers should replace the current registry with the returned value
+    /// to make the UDF available to new pipelines.
+    pub fn clone_and_add(
+        self: &Arc<Self>,
+        udf: Arc<dyn CustomFunc>,
+    ) -> Result<Arc<Self>, String> {
+        let name = udf.name().to_lowercase();
+        if self.functions.contains_key(&name) {
+            return Err(format!("UDF '{name}' already exists"));
+        }
+        let mut new_functions = self.functions.clone();
+        register(&mut new_functions, udf);
+        Ok(Arc::new(Self {
+            functions: new_functions,
+        }))
+    }
+
     fn builtins() -> Self {
         let mut functions: HashMap<String, Arc<dyn CustomFunc>> = HashMap::new();
 

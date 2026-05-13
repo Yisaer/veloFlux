@@ -17,6 +17,7 @@ mod pipeline;
 mod startup;
 pub mod storage_bridge;
 mod stream;
+mod udf_handler;
 use axum::Router;
 use axum::routing::{delete, get, post};
 use pipeline::AppState;
@@ -96,6 +97,12 @@ fn build_app(state: AppState) -> Router {
             "/memory/topics",
             post(memory_topic::create_memory_topic_handler)
                 .get(memory_topic::list_memory_topics_handler),
+        )
+        .route("/udfs/upload", post(udf_handler::upload_udf_handler))
+        .route("/udfs", get(udf_handler::list_udfs_handler))
+        .route(
+            "/udfs/:name",
+            get(udf_handler::get_udf_handler).delete(udf_handler::delete_udf_handler),
         )
         .route(
             "/mqtt/clients",

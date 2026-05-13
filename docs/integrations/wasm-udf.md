@@ -19,6 +19,11 @@ bootstrap, before any pipeline is created. Uploading a UDF via the API persists 
 storage but does not take effect until the next restart. This avoids synchronization
 overhead on the expression evaluation hot path.
 
+  Note: hot-load is also supported — the upload handler also registers the UDF
+  immediately into the running instance's registry after persistence. This uses
+  `clone_and_add` which atomically replaces the `Arc<CustomFuncRegistry>` via an
+  `RwLock`, incurring a one-time write-lock cost on upload (not on the hot path).
+
 ## Architecture
 
 ```
@@ -189,9 +194,52 @@ Returns the full metadata for a single UDF.
 
 ### Integration with import/export
 
-The `ExportBundleV1` gets a new `udfs` field. On import, uploaded UDFs include their
-WASM binary inline (base64-encoded in JSON). On export, all stored UDFs are bundled
-with their binaries. This follows the same pattern that streams and pipelines already use.
+Export is delivered as a **tar.gz archive** containing:
+
+```
+veloflux-export-<timestamp>.tar.gz
+├── metadata.json          # ExportBundleV1 (streams, pipelines, mqtt, memory_topics)
+└── wasm_files/            # WASM UDF binaries (one .wasm per function)
+    ├── <sha256_1>.wasm
+    └── <sha256_2>.wasm
+```
+
+**Why tar.gz instead of base64-inline JSON?**
+
+- Large WASM binaries don't bloat the JSON payload.
+- The archive is a single file, easy to transfer and archive.
+- Each `.wasm` file can be independently SHA-256 verified against the stored hash.
+- Users can unpack, inspect, and selectively modify before re-importing.
+
+**Export flow**
+
+1. Serialize `ExportBundleV1` (streams, pipelines, mqtt, memory_topics, udf metadata)
+   to `metadata.json`. The `udfs` field in `ExportResources` contains `ExportUdf`
+   records with `name` and `wasm_sha256` (but NOT the binary).
+2. Copy all referenced `.wasm` files from `<base_dir>/wasm_files/` into the archive's
+   `wasm_files/` directory.
+3. Create tar.gz and stream as downloadable response.
+
+**Import flow**
+
+1. Receive and unpack the tar.gz.
+2. Parse `metadata.json` and validate all resources (streams, pipelines, etc.).
+3. For each UDF in the `udfs` list:
+   - Verify that `<sha256>.wasm` exists in the archive.
+   - Validate it is a well-formed WASM module (via `WasmEngine::validate`).
+   - Confirm the metadata name matches the declared name.
+4. Write `.wasm` files to `<base_dir>/wasm_files/`.
+5. Apply the `MetadataExportSnapshot` to redb (the existing `replace_metadata_snapshot` flow).
+
+**API**
+
+| Method | Path              | Description                          |
+|--------|-------------------|--------------------------------------|
+| `GET`  | `/storage/export` | Download tar.gz (replaces JSON-only) |
+| `POST` | `/import`         | Upload tar.gz (replaces JSON-only)   |
+
+Backwards compatibility: old JSON-only `ExportBundleV1` is still accepted on import
+(udfs default to empty). New exports always use tar.gz.
 
 ## WASM Runtime Integration (wasmtime)
 

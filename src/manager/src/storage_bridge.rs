@@ -8,12 +8,14 @@ use crate::stream::{
 use flow::catalog::EventtimeDefinition;
 use flow::catalog::StreamDefinition;
 use flow::connector::SharedMqttClientConfig;
+use flow::expr::custom_func::CustomFuncRegistry;
 use flow::pipeline::PipelineDefinition;
 use flow::{DecoderRegistry, EncoderRegistry};
 use std::sync::Arc;
 use storage::{
     StorageManager, StoredMemoryTopicKind, StoredMqttClientConfig, StoredPipeline, StoredStream,
 };
+use udf::WasmEngine;
 
 /// Serialize a create-stream request for storage.
 pub fn stored_stream_from_request(req: &CreateStreamRequest) -> Result<StoredStream, String> {
@@ -237,6 +239,37 @@ async fn restore_pipeline(
     Ok(())
 }
 
+fn load_wasm_udfs(
+    storage: &StorageManager,
+    instance: &flow::FlowInstance,
+) -> Result<usize, String> {
+    let udfs = storage.list_udfs().map_err(|e| e.to_string())?;
+    if udfs.is_empty() {
+        return Ok(0);
+    }
+
+    let engine = WasmEngine::new().map_err(|e| format!("failed to create WASM engine: {e}"))?;
+    let wasm_dir = storage.wasm_files_dir();
+    let mut loaded: Vec<Arc<dyn flow::CustomFunc>> = Vec::with_capacity(udfs.len());
+
+    for udf in &udfs {
+        let wasm_path = wasm_dir.join(format!("{}.wasm", udf.wasm_sha256));
+        let wasm_bytes =
+            std::fs::read(&wasm_path).map_err(|e| format!("read {}: {e}", wasm_path.display()))?;
+
+        let wasm_udf = engine
+            .instantiate(&udf.name, &wasm_bytes)
+            .map_err(|e| format!("instantiate UDF '{}': {e}", udf.name))?;
+
+        loaded.push(Arc::new(wasm_udf));
+    }
+
+    let registry = CustomFuncRegistry::with_builtins_and_wasm(loaded);
+    instance.set_custom_func_registry(registry);
+
+    Ok(udfs.len())
+}
+
 pub(crate) async fn hydrate_runtime_from_storage(
     storage: &StorageManager,
     instances: &FlowInstances,
@@ -264,12 +297,38 @@ pub(crate) async fn hydrate_runtime_from_storage(
     let mut memory_topic_restore_failures = 0usize;
     let mut shared_mqtt_restore_failures = 0usize;
     let mut stream_restore_failures = 0usize;
+    let udf_count = storage.list_udfs().map_err(|e| e.to_string())?.len();
 
     for (_, instance) in instances_snapshot {
         let summary = hydrate_instance_globals_from_storage(storage, instance.as_ref()).await?;
         memory_topic_restore_failures += summary.memory_topic_failures;
         shared_mqtt_restore_failures += summary.shared_mqtt_failures;
         stream_restore_failures += summary.stream_failures;
+    }
+
+    // Load WASM UDFs before restoring pipelines (pipelines may reference UDFs in SQL).
+    let mut udf_failures = 0usize;
+
+    for (_, instance) in instances.instances_snapshot() {
+        match load_wasm_udfs(storage, instance.as_ref()) {
+            Ok(loaded) => {
+                if loaded > 0 {
+                    tracing::info!(
+                        flow_instance_id = %instance.id(),
+                        wasm_udf_count = loaded,
+                        "loaded WASM UDFs"
+                    );
+                }
+            }
+            Err(err) => {
+                udf_failures += 1;
+                tracing::error!(
+                    flow_instance_id = %instance.id(),
+                    error = %err,
+                    "failed to load WASM UDFs"
+                );
+            }
+        }
     }
 
     let pipeline_restore_failures =
@@ -288,6 +347,8 @@ pub(crate) async fn hydrate_runtime_from_storage(
         shared_mqtt_restore_failures,
         stream_restore_failures,
         pipeline_restore_failures,
+        wasm_udf_restore_failures = udf_failures,
+        persisted_udf_count = udf_count,
         "storage hydrate completed"
     );
     Ok(())

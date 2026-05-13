@@ -5,6 +5,7 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::codec::{DecoderRegistry, EncoderRegistry};
 use crate::connector::ConnectorRegistry;
 use crate::eventtime::EventtimeTypeRegistry;
+use crate::expr::custom_func::CustomFuncRegistry;
 use crate::stateful::{StatefulFunction, StatefulFunctionRegistry, StatefulRegistryError};
 use crate::PipelineRegistries;
 
@@ -46,6 +47,18 @@ impl FlowInstance {
         Arc::clone(&self.aggregate_registry)
     }
 
+    /// Get the current custom function registry.
+    pub fn custom_func_registry(&self) -> Arc<CustomFuncRegistry> {
+        Arc::clone(&self.custom_func_registry.read())
+    }
+
+    /// Replace the custom function registry (e.g. to inject WASM UDFs at startup).
+    ///
+    /// This must be called before any pipeline is created.
+    pub fn set_custom_func_registry(&self, registry: Arc<CustomFuncRegistry>) {
+        *self.custom_func_registry.write() = registry;
+    }
+
     pub(super) fn pipeline_registries(&self) -> PipelineRegistries {
         PipelineRegistries::new(
             Arc::clone(&self.connector_registry),
@@ -53,7 +66,7 @@ impl FlowInstance {
             Arc::clone(&self.decoder_registry),
             Arc::clone(&self.aggregate_registry),
             Arc::clone(&self.stateful_registry),
-            Arc::clone(&self.custom_func_registry),
+            Arc::clone(&self.custom_func_registry.read()),
             Arc::clone(&self.eventtime_type_registry),
             Arc::clone(&self.merger_registry),
         )

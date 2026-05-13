@@ -107,7 +107,7 @@ pub struct FlowInstance {
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     stateful_registry: Arc<StatefulFunctionRegistry>,
-    custom_func_registry: Arc<CustomFuncRegistry>,
+    custom_func_registry: Arc<parking_lot::RwLock<Arc<CustomFuncRegistry>>>,
     eventtime_type_registry: Arc<EventtimeTypeRegistry>,
     merger_registry: Arc<MergerRegistry>,
     cpu_metrics_state: Option<FlowInstanceCpuMetricsState>,
@@ -256,7 +256,9 @@ impl FlowInstance {
             decoder_registry: registries.decoder_registry,
             aggregate_registry: registries.aggregate_registry,
             stateful_registry: registries.stateful_registry,
-            custom_func_registry: registries.custom_func_registry,
+            custom_func_registry: Arc::new(parking_lot::RwLock::new(
+                registries.custom_func_registry,
+            )),
             eventtime_type_registry: registries.eventtime_type_registry,
             merger_registry: registries.merger_registry,
             cpu_metrics_state: None,
@@ -273,7 +275,7 @@ impl FlowInstance {
             decoder_registry: Arc::clone(&self.decoder_registry),
             aggregate_registry: Arc::clone(&self.aggregate_registry),
             stateful_registry: Arc::clone(&self.stateful_registry),
-            custom_func_registry: Arc::clone(&self.custom_func_registry),
+            custom_func_registry: Arc::clone(&self.custom_func_registry.read()),
             eventtime_type_registry: Arc::clone(&self.eventtime_type_registry),
             merger_registry: Arc::clone(&self.merger_registry),
         }

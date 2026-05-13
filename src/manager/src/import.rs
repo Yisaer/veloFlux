@@ -198,6 +198,7 @@ where
         pipeline_run_states,
         mqtt_configs,
         memory_topics,
+        udfs: vec![],
     })
 }
 
