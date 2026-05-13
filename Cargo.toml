@@ -9,6 +9,8 @@ members = [
     "src/build_info",
     "src/sdk",
     "src/ffi",
+    "src/udf",
+    "src/veloflux-udf-sdk",
     "distros/sdv",
 ]
 resolver = "2"

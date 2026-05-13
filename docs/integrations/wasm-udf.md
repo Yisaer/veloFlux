@@ -439,37 +439,37 @@ The `udf_metadata` JSON blob:
 Supported types: `"int"`, `"float"`, `"string"`, `"bool"`, `"timestamp"`,
 `"object"`, `"array"`, `"any"`.
 
-### Example: Rust UDF
+### Example: Rust UDF (with `veloflux-udf-sdk`)
 
-Users compile a Rust function to WASM:
+We provide `veloflux-udf-sdk`, a helper crate that hides the entire WASM ABI
+behind a `define_udf!` macro. Users write plain Rust functions with zero
+boilerplate:
 
 ```rust
-// my_udf.rs
-use serde_json::{json, Value};
+use veloflux_udf_sdk::define_udf;
 
-#[no_mangle]
-pub extern "C" fn udf_metadata_ptr() -> *const u8 { ... }
-
-#[no_mangle]
-pub extern "C" fn udf_metadata_len() -> i32 { ... }
-
-#[no_mangle]
-pub extern "C" fn udf_row(input_ptr: *const u8, input_len: usize) -> *const u8 {
-    let input: Vec<Value> = serde_json::from_slice(
-        unsafe { std::slice::from_raw_parts(input_ptr, input_len) }
-    ).unwrap();
-    let result = json!(input[0].as_f64().unwrap() * 2.0);
-    // ... return pointer to serialized result
+define_udf! {
+    name = "my_udf",
+    description = "Multiplies sensor value by threshold",
+    return_type = "float",
+    fn my_udf(sensor_value: f64, threshold: f64) -> f64 {
+        sensor_value * threshold
+    }
 }
 ```
 
-The user compiles with:
+The macro automatically generates:
+- `udf_row(input_ptr, input_len)` — JSON args deserialization → call user fn → serialize result
+- `udf_metadata_ptr()` / `udf_metadata_len()` — metadata JSON blob
+- `memory` — WASM linear memory for the bump allocator
+
+Compile with:
 ```
 cargo build --target wasm32-unknown-unknown --release
 ```
 
-We provide a `veloflux-udf` helper crate that abstracts away the ABI details,
-similar to how `extism` and `wasm-bindgen` simplify WASM development.
+The JSON ABI (`Value` ↔ JSON ↔ WASM bytes) is a transparent implementation detail;
+users of `veloflux-udf-sdk` never interact with it directly.
 
 ## Security
 
