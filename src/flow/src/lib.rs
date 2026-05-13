@@ -107,6 +107,7 @@ type SchemaBindingResult = (
 );
 
 /// Bundle of registries required for building pipelines.
+#[derive(Clone)]
 pub struct PipelineRegistries {
     connector_registry: Arc<ConnectorRegistry>,
     encoder_registry: Arc<EncoderRegistry>,

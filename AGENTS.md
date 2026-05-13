@@ -28,6 +28,7 @@
   - 格式：`<type>(<scope>): <subject>`（`(<scope>)` 可选；breaking change 可用 `!`，例如：`<type>(<scope>)!: <subject>` 或 `<type>!: <subject>`）。
   - `type`/`scope` 使用小写；常用 `type`：`feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`。
   - 示例：`feat(flow): add ...`、`fix(parser): handle ...`、`docs: update ...`。
+  - PR title 和 PR description 必须使用英文撰写。
 - 当使用 `gh` 处理 PR review comment 后，如产生本地改动，需要主动提交 commit；提交必须使用 `git commit -s` 保持签名一致，并在 commit message body 中说明处理方式与取舍思路。
 
 ## 测试守则

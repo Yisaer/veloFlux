@@ -83,10 +83,7 @@ impl CustomFuncRegistry {
     /// Returns an error if the UDF name collides with an existing entry.
     /// Callers should replace the current registry with the returned value
     /// to make the UDF available to new pipelines.
-    pub fn clone_and_add(
-        self: &Arc<Self>,
-        udf: Arc<dyn CustomFunc>,
-    ) -> Result<Arc<Self>, String> {
+    pub fn clone_and_add(self: &Arc<Self>, udf: Arc<dyn CustomFunc>) -> Result<Arc<Self>, String> {
         let name = udf.name().to_lowercase();
         if self.functions.contains_key(&name) {
             return Err(format!("UDF '{name}' already exists"));

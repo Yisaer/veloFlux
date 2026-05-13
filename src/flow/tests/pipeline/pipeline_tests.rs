@@ -3246,3 +3246,120 @@ async fn memory_collection_sink_delta_omit_if_empty_suppresses_unchanged_collect
         .await
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
 }
+
+// ── UDF pipeline test ──────────────────────────────────────────────
+
+/// A test-only UDF that doubles its integer argument.
+#[derive(Debug, Clone)]
+struct DoubleUdf;
+
+impl flow::CustomFunc for DoubleUdf {
+    fn validate_row(&self, args: &[Value]) -> Result<(), flow::expr::func::EvalError> {
+        if args.len() != 1 {
+            return Err(flow::expr::func::EvalError::TypeMismatch {
+                expected: "1 argument".to_string(),
+                actual: format!("{} arguments", args.len()),
+            });
+        }
+        Ok(())
+    }
+
+    fn eval_row(&self, args: &[Value]) -> Result<Value, flow::expr::func::EvalError> {
+        match &args[0] {
+            Value::Int64(v) => Ok(Value::Int64(v * 2)),
+            other => Err(flow::expr::func::EvalError::TypeMismatch {
+                expected: "int64".to_string(),
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "double"
+    }
+}
+
+#[tokio::test]
+async fn udf() {
+    let test_name = "udf";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+
+    // Register the mock UDF
+    let registry = instance.custom_func_registry();
+    let new_registry = registry
+        .clone_and_add(Arc::new(DoubleUdf))
+        .expect("register double UDF");
+    instance.set_custom_func_registry(new_registry);
+
+    let (input_topic, output_topic) =
+        make_memory_topics("pipeline_table_driven_queries", test_name);
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+
+    let input_data = vec![(
+        "a".to_string(),
+        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+    )];
+    install_memory_stream_schema(&instance, &input_topic, &input_data).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let sql = "SELECT double(a) AS doubled FROM stream";
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        sql,
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .expect("start pipeline");
+
+    let columns: Vec<(String, String, Vec<Value>)> = input_data
+        .into_iter()
+        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .collect();
+    let batch = batch_from_columns_simple(columns).expect("build input batch");
+    let timeout_duration = Duration::from_secs(10);
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+
+    let first_output = recv_next_json(&mut output, timeout_duration).await;
+    println!("first_output: {first_output:?}");
+    let rows = first_output
+        .as_array()
+        .expect("output should be a JSON array");
+    assert_eq!(rows.len(), 3, "should have 3 rows");
+    assert_eq!(
+        rows[0]["doubled"].as_i64(),
+        Some(2),
+        "1 doubled should be 2"
+    );
+    assert_eq!(
+        rows[1]["doubled"].as_i64(),
+        Some(4),
+        "2 doubled should be 4"
+    );
+    assert_eq!(
+        rows[2]["doubled"].as_i64(),
+        Some(6),
+        "3 doubled should be 6"
+    );
+
+    let _ = instance.stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration);
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
+}

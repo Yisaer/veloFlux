@@ -1,10 +1,11 @@
 use datatypes::{
     ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
-    StructType,
+    StructType, Value,
 };
 use flow::catalog::MemoryStreamProps;
 use flow::catalog::MockStreamProps;
 use flow::connector::{KuksaSinkConfig, MemorySinkConfig, MemoryTopicKind};
+use flow::expr::func::EvalError;
 use flow::planner::logical::{create_logical_plan, create_logical_plan_with_source_inputs};
 use flow::planner::sink::CustomSinkConnectorConfig;
 use flow::planner::{
@@ -16,9 +17,10 @@ use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind}
 use flow::Catalog;
 use flow::EventtimeDefinition;
 use flow::{
-    CommonSinkProps, MqttStreamProps, NopSinkConfig, PipelineExplain, PipelineExplainConfig,
-    PipelineRegistries, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
-    SinkEncoderConfig, SinkOutputConfig, StreamDecoderConfig, StreamDefinition, StreamProps,
+    CommonSinkProps, CustomFunc, MqttStreamProps, NopSinkConfig, PipelineExplain,
+    PipelineExplainConfig, PipelineRegistries, PipelineSink, PipelineSinkConnector,
+    SinkConnectorConfig, SinkEncoderConfig, SinkOutputConfig, StreamDecoderConfig,
+    StreamDefinition, StreamProps,
 };
 use parser::parse_sql;
 use serde_json::json;
@@ -1692,5 +1694,88 @@ fn explain_pipeline_with_eventtime_enabled_keeps_hidden_eventtime_column_alive()
     assert!(
         explain_json.contains("\"input.columns=[a]\""),
         "source-input tracking should remain limited to the requested on-change columns: {explain_json}"
+    );
+}
+
+/// A test-only UDF that doubles its integer argument.
+#[derive(Debug, Clone)]
+struct DoubleUdf;
+
+impl CustomFunc for DoubleUdf {
+    fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
+        if args.len() != 1 {
+            return Err(EvalError::TypeMismatch {
+                expected: "1 argument".to_string(),
+                actual: format!("{} arguments", args.len()),
+            });
+        }
+        Ok(())
+    }
+
+    fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
+        match &args[0] {
+            Value::Int64(v) => Ok(Value::Int64(v * 2)),
+            other => Err(EvalError::TypeMismatch {
+                expected: "int64".to_string(),
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "double"
+    }
+}
+
+#[test]
+fn plan_explain_custom_udf_call() {
+    let custom_registry =
+        flow::CustomFuncRegistry::with_builtins_and_wasm(vec![Arc::new(DoubleUdf)]);
+    let registries = PipelineRegistries::new(
+        flow::connector::ConnectorRegistry::with_builtin_sinks(
+            flow::connector::MemoryPubSubRegistry::new(),
+        ),
+        flow::EncoderRegistry::with_builtin_encoders(),
+        flow::DecoderRegistry::with_builtin_decoders(),
+        flow::AggregateFunctionRegistry::with_builtins(),
+        flow::StatefulFunctionRegistry::with_builtins(),
+        custom_registry,
+        flow::EventtimeTypeRegistry::with_builtin_types(),
+        Arc::new(flow::MergerRegistry::new()),
+    );
+    let stream_defs = setup_streams();
+
+    let sql = "SELECT double(a) FROM stream";
+    let select_stmt = parse_sql(sql).expect("parse sql");
+
+    let bindings = bindings_for_select(&select_stmt, &stream_defs);
+    let logical_plan = create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical");
+
+    let (logical_plan, bindings) = flow::optimize_logical_plan(logical_plan, &bindings);
+
+    let physical_plan =
+        flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
+            .expect("physical");
+
+    let physical_plan = flow::optimize_physical_plan(
+        physical_plan,
+        registries.encoder_registry().as_ref(),
+        registries.aggregate_registry(),
+    );
+    let explain = PipelineExplain::new(
+        logical_plan,
+        physical_plan,
+        PipelineExplainConfig::default(),
+    );
+    println!("{sql}");
+    println!("{}", explain.to_pretty_string());
+    let explain_json = explain.to_json().to_string();
+    assert!(
+        explain_json.contains("double"),
+        "EXPLAIN should reference the UDF name 'double': {explain_json}"
+    );
+    assert!(
+        explain_json.contains("double(a)"),
+        "EXPLAIN should show the UDF call expression: {explain_json}"
     );
 }

@@ -189,8 +189,12 @@ impl PipelineManager {
             pipelines: RwLock::new(HashMap::new()),
             catalog,
             context,
-            registries,
+            registries: RwLock::new(registries),
         }
+    }
+
+    pub(crate) fn replace_registries(&self, registries: PipelineRegistries) {
+        *self.registries.write() = registries;
     }
 
     pub(crate) fn create_pipeline(
@@ -216,8 +220,9 @@ impl PipelineManager {
         definition: PipelineDefinition,
     ) -> Result<PipelineSnapshot, PipelineError> {
         let pipeline_id = definition.id().to_string();
+        let registries = self.registries.read();
         let (pipeline, streams) =
-            build_pipeline_runtime(&definition, &self.catalog, &self.context, &self.registries)
+            build_pipeline_runtime(&definition, &self.catalog, &self.context, &registries)
                 .map_err(PipelineError::BuildFailure)?;
         let mut guard = self.pipelines.write();
         if guard.contains_key(&pipeline_id) {
@@ -258,12 +263,13 @@ impl PipelineManager {
         let sinks = build_sinks_from_definition(definition.as_ref())
             .map_err(PipelineError::BuildFailure)?;
 
+        let registries_snapshot = self.registries.read();
         explain_pipeline_definition_with_options(
             definition.as_ref(),
             sinks,
             &self.catalog,
             Some(self.context.shared_stream_registry().as_ref()),
-            &self.registries,
+            &registries_snapshot,
             definition.options(),
         )
         .map_err(|err| PipelineError::BuildFailure(err.to_string()))
@@ -281,8 +287,10 @@ impl PipelineManager {
 
         if entry.pipeline.is_none() {
             let definition = Arc::clone(&entry.definition);
+            // Clone registries outside the write lock to avoid borrowing conflicts
+            let registries = self.registries.read().clone();
             let (pipeline, streams) =
-                build_pipeline_runtime(&definition, &self.catalog, &self.context, &self.registries)
+                build_pipeline_runtime(&definition, &self.catalog, &self.context, &registries)
                     .map_err(PipelineError::BuildFailure)?;
             entry.pipeline = Some(pipeline);
             entry.streams = streams;

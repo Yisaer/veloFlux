@@ -52,11 +52,23 @@ impl FlowInstance {
         Arc::clone(&self.custom_func_registry.read())
     }
 
-    /// Replace the custom function registry (e.g. to inject WASM UDFs at startup).
+    /// Replace the custom function registry and update the PipelineManager
+    /// so new pipelines see the updated functions.
     ///
-    /// This must be called before any pipeline is created.
+    /// Must be called before any pipeline is created.
     pub fn set_custom_func_registry(&self, registry: Arc<CustomFuncRegistry>) {
-        *self.custom_func_registry.write() = registry;
+        *self.custom_func_registry.write() = Arc::clone(&registry);
+        let new_registries = PipelineRegistries::new(
+            Arc::clone(&self.connector_registry),
+            Arc::clone(&self.encoder_registry),
+            Arc::clone(&self.decoder_registry),
+            Arc::clone(&self.aggregate_registry),
+            Arc::clone(&self.stateful_registry),
+            registry,
+            Arc::clone(&self.eventtime_type_registry),
+            Arc::clone(&self.merger_registry),
+        );
+        self.pipeline_manager.replace_registries(new_registries);
     }
 
     pub(super) fn pipeline_registries(&self) -> PipelineRegistries {

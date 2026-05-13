@@ -377,5 +377,5 @@ pub(crate) struct PipelineManager {
     pub(super) pipelines: RwLock<HashMap<String, super::internal::ManagedPipeline>>,
     pub(super) catalog: Arc<Catalog>,
     pub(super) context: super::PipelineContext,
-    pub(super) registries: PipelineRegistries,
+    pub(super) registries: RwLock<PipelineRegistries>,
 }
