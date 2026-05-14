@@ -15,6 +15,37 @@
 - 代码、注释与标识符统一使用英文;使用 `snake_case` 命名条目、`CamelCase` 命名类型、SCREAMING_SNAKE_CASE 命名常量。
 - 遵守模块边界：parser 不依赖 flow；flow 只消费 `SelectStmt` 的输出（不直接消费原始 `sqlparser::Expr`）。
 
+## 提交前自检守则
+
+每次代码修改完成后、提交前，必须完成以下自检步骤。这些步骤来自历史 PR review 中反复出现的返工模式（遗漏调用点、文档漂移、修复不治本等），目的是在 reviewer 看到代码之前先由自己消灭低级问题。
+
+### 变更影响面分析
+- 当删除或重命名一个 public API（函数、类型、trait、enum variant、struct 字段、config 字段）时，必须用 `rg`（ripgrep）全局搜索该名称，确保没有残留的调用点、配置引用或文档引用。
+- 对于「删除型」变更（如移除某个模块/功能），必须额外检查：
+  - 所有 `tests/` 目录下的集成测试、e2e 测试、regression 测试、fuzzing 测试
+  - 所有 `scripts/` 目录下的脚本（包括 shell 脚本中的变量引用和使用说明）
+  - `config.yaml`、`etc/config.example.yaml`、`distros/` 下的所有配置文件
+  - `docs/` 下所有 Markdown 文档
+- 搜索时不要只搜精确匹配——考虑变体：snake_case / kebab-case / CamelCase、路径分隔符差异、YAML 缩进层级差异。
+
+### 编译与测试验证
+- 修改 public API 后，必须运行受影响的测试目标的编译检查：`cargo check --test <target>`（如 `cargo check --test regression_tests`、`cargo check --test fuzzing_tests`），确认没有编译错误后再提交。
+- 如果使用了 sed 或脚本批量修改，必须在修改后运行编译检查——sed 不生效是真实发生过的教训。
+- 修改 shell 脚本后，必须运行 `bash -n <script>` 做语法检查。
+- 修改 config YAML 示例后，确认字段路径与相关脚本/文档中的引用一致（例如 cgroup 路径在 setup 脚本、config.yaml、README 中三处一致）。
+
+### 文档同步
+- 当修改了某个功能的运行时行为（API 返回值、错误处理策略、生命周期语义等），必须同步检查并更新 `docs/` 下相关文档中对该行为的描述。代码实现是最终的真相来源，文档必须跟随代码，不得出现「文档说 X，代码做 Y」的情况。
+- 新增功能时，文档中描述的行为必须是当前 PR 实际实现的行为。不得在文档中描述尚未实现的设计规划（如"未来支持 tar.gz 导出"），除非明确标注为 deferred/future work。
+- 删除功能时，必须删除或重写文档中对该功能的所有描述，不得留下孤立的章节或残缺的句子。
+
+### 修复方式
+- 面对 reviewer 指出的问题，要从根因层面修复，而不是在具体指出的路径上打补丁。
+  - 示例（反面）：reviewer 指出内存上限未设置，只给 `host_alloc` 加了 growth guard，不思考初始内存和 guest `memory.grow` 是否也能绕过。
+  - 示例（正面）：直接配置 wasmtime 的 `StoreLimits` / `ResourceLimiter`，一次性覆盖所有内存分配路径。
+- 对于安全/资源限制类问题（sandbox、caps、bounds），不得使用正则匹配、substring 扫描等脆弱手段。优先使用结构化/语义化方法（如解析 AST、使用引擎原生限制 API）。
+- 如果正确的修复方案工作量较大，需要在 commit message 中说明当前方案的局限性，并在 `docs/` 中明确标注为 deferred/future work，不得假装问题已解决。
+
 ## 沟通原则
 - 与维护者沟通时统一使用中文（需求澄清、方案确认、评审反馈、变更说明等）。
 
