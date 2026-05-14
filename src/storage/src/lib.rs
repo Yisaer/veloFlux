@@ -21,6 +21,7 @@ const SHARED_MQTT_CONFIGS_TABLE: TableDefinition<&str, &[u8]> =
 const MEMORY_TOPICS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("memory_topics");
 const INIT_APPLY_META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("init_apply_meta");
 const INIT_APPLY_META_KEY: &str = "init.json";
+const UDFS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("udfs");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageNamespace {
@@ -110,6 +111,17 @@ pub struct StoredInitApplyMeta {
     pub last_init_json_modified_at_ms: u64,
 }
 
+/// Persisted record for a WASM UDF.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredUdf {
+    /// Canonical function name (case-insensitive in SQL, stored lowercase).
+    pub name: String,
+    /// SHA-256 hex digest of the uploaded WASM file contents.
+    pub wasm_sha256: String,
+    /// Original upload metadata serialized as JSON for export portability.
+    pub raw_json: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataExportSnapshot {
     pub streams: Vec<StoredStream>,
@@ -117,6 +129,7 @@ pub struct MetadataExportSnapshot {
     pub pipeline_run_states: Vec<StoredPipelineRunState>,
     pub mqtt_configs: Vec<StoredMqttClientConfig>,
     pub memory_topics: Vec<StoredMemoryTopic>,
+    pub udfs: Vec<StoredUdf>,
 }
 
 pub struct MetadataStorage {
@@ -270,6 +283,22 @@ impl MetadataStorage {
         self.delete_entry(MEMORY_TOPICS_TABLE, topic)
     }
 
+    pub fn create_udf(&self, udf: StoredUdf) -> Result<(), StorageError> {
+        self.insert_if_absent(UDFS_TABLE, &udf.name, &udf)
+    }
+
+    pub fn get_udf(&self, name: &str) -> Result<Option<StoredUdf>, StorageError> {
+        self.get_entry(UDFS_TABLE, name)
+    }
+
+    pub fn list_udfs(&self) -> Result<Vec<StoredUdf>, StorageError> {
+        self.list_entries(UDFS_TABLE)
+    }
+
+    pub fn delete_udf(&self, name: &str) -> Result<(), StorageError> {
+        self.delete_entry(UDFS_TABLE, name)
+    }
+
     pub fn export_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
         let txn = self.db.begin_read().map_err(StorageError::backend)?;
         Ok(MetadataExportSnapshot {
@@ -278,6 +307,7 @@ impl MetadataStorage {
             pipeline_run_states: Self::list_entries_in_read_txn(&txn, PIPELINE_RUN_STATES_TABLE)?,
             mqtt_configs: Self::list_entries_in_read_txn(&txn, SHARED_MQTT_CONFIGS_TABLE)?,
             memory_topics: Self::list_entries_in_read_txn(&txn, MEMORY_TOPICS_TABLE)?,
+            udfs: Self::list_entries_in_read_txn(&txn, UDFS_TABLE)?,
         })
     }
 
@@ -307,6 +337,7 @@ impl MetadataStorage {
             &snapshot.memory_topics,
             |topic| topic.topic.as_str(),
         )?;
+        Self::replace_table_entries(&txn, UDFS_TABLE, &snapshot.udfs, |udf| udf.name.as_str())?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
     }
@@ -349,6 +380,7 @@ impl MetadataStorage {
             &snapshot.memory_topics,
             |topic| topic.topic.as_str(),
         )?;
+        Self::ensure_entries_absent(&txn, UDFS_TABLE, &snapshot.udfs, |udf| udf.name.as_str())?;
 
         Self::insert_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
@@ -374,6 +406,7 @@ impl MetadataStorage {
             &snapshot.memory_topics,
             |topic| topic.topic.as_str(),
         )?;
+        Self::insert_entries(&txn, UDFS_TABLE, &snapshot.udfs, |udf| udf.name.as_str())?;
         Self::put_entry_in_txn(&txn, INIT_APPLY_META_TABLE, INIT_APPLY_META_KEY, &meta)?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
@@ -397,6 +430,7 @@ impl MetadataStorage {
             .map_err(StorageError::backend)?;
         txn.open_table(INIT_APPLY_META_TABLE)
             .map_err(StorageError::backend)?;
+        txn.open_table(UDFS_TABLE).map_err(StorageError::backend)?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
     }
@@ -572,9 +606,12 @@ pub struct StorageManager {
 
 impl StorageManager {
     /// Create a storage manager; initializes the metadata namespace under base_dir/metadata.
+    /// Also creates base_dir/wasm_files/ for WASM UDF binaries.
     pub fn new(base_dir: impl AsRef<Path>) -> Result<Self, StorageError> {
         let base_dir = base_dir.as_ref().to_path_buf();
         let metadata = MetadataStorage::open(base_dir.join("metadata"))?;
+        let wasm_dir = base_dir.join("wasm_files");
+        fs::create_dir_all(&wasm_dir).map_err(StorageError::io)?;
         Ok(Self { metadata, base_dir })
     }
 
@@ -584,6 +621,11 @@ impl StorageManager {
 
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
+    }
+
+    /// Returns the directory where WASM UDF binaries are persisted.
+    pub fn wasm_files_dir(&self) -> PathBuf {
+        self.base_dir.join("wasm_files")
     }
 
     pub fn create_stream(&self, stream: StoredStream) -> Result<(), StorageError> {
@@ -671,6 +713,22 @@ impl StorageManager {
         self.metadata.delete_memory_topic(topic)
     }
 
+    pub fn create_udf(&self, udf: StoredUdf) -> Result<(), StorageError> {
+        self.metadata.create_udf(udf)
+    }
+
+    pub fn get_udf(&self, name: &str) -> Result<Option<StoredUdf>, StorageError> {
+        self.metadata.get_udf(name)
+    }
+
+    pub fn list_udfs(&self) -> Result<Vec<StoredUdf>, StorageError> {
+        self.metadata.list_udfs()
+    }
+
+    pub fn delete_udf(&self, name: &str) -> Result<(), StorageError> {
+        self.metadata.delete_udf(name)
+    }
+
     pub fn export_metadata_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
         self.metadata.export_snapshot()
     }
@@ -748,10 +806,60 @@ mod tests {
         }
     }
 
+    fn sample_udf(name: &str) -> StoredUdf {
+        StoredUdf {
+            name: name.to_string(),
+            wasm_sha256: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+                .to_string(),
+            raw_json: format!(r#"{{"name":"{name}","description":"test udf"}}"#),
+        }
+    }
+
     fn sample_init_apply_meta() -> StoredInitApplyMeta {
         StoredInitApplyMeta {
             last_applied_at_ms: 1234,
             last_init_json_modified_at_ms: 5678,
+        }
+    }
+
+    #[test]
+    fn udf_roundtrip() {
+        let dir = tempdir().unwrap();
+        let storage = MetadataStorage::open(dir.path()).unwrap();
+
+        let udf = sample_udf("my_udf");
+        storage.create_udf(udf.clone()).unwrap();
+        assert_eq!(storage.get_udf("my_udf").unwrap(), Some(udf.clone()));
+
+        let all = storage.list_udfs().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].name, "my_udf");
+
+        storage.delete_udf("my_udf").unwrap();
+        assert!(storage.get_udf("my_udf").unwrap().is_none());
+    }
+
+    #[test]
+    fn udf_create_fails_on_duplicate() {
+        let dir = tempdir().unwrap();
+        let storage = MetadataStorage::open(dir.path()).unwrap();
+
+        let udf = sample_udf("my_udf");
+        storage.create_udf(udf.clone()).unwrap();
+        match storage.create_udf(udf) {
+            Err(StorageError::AlreadyExists(name)) => assert_eq!(name, "my_udf"),
+            other => panic!("expected AlreadyExists, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn udf_delete_nonexistent() {
+        let dir = tempdir().unwrap();
+        let storage = MetadataStorage::open(dir.path()).unwrap();
+
+        match storage.delete_udf("nonexistent") {
+            Err(StorageError::NotFound(name)) => assert_eq!(name, "nonexistent"),
+            other => panic!("expected NotFound, got {other:?}"),
         }
     }
 
@@ -847,6 +955,8 @@ mod tests {
         storage.create_mqtt_config(mqtt.clone()).unwrap();
         storage.put_pipeline_run_state(run_state.clone()).unwrap();
         storage.create_memory_topic(memory_topic.clone()).unwrap();
+        let udf = sample_udf("udf_1");
+        storage.create_udf(udf.clone()).unwrap();
 
         let snapshot = storage.export_metadata_snapshot().unwrap();
 
@@ -855,6 +965,7 @@ mod tests {
         assert_eq!(snapshot.mqtt_configs, vec![mqtt]);
         assert_eq!(snapshot.pipeline_run_states, vec![run_state]);
         assert_eq!(snapshot.memory_topics, vec![memory_topic]);
+        assert_eq!(snapshot.udfs, vec![udf]);
     }
 
     #[test]
@@ -870,6 +981,7 @@ mod tests {
             pipeline_run_states: vec![sample_pipeline_run_state()],
             mqtt_configs: vec![sample_mqtt_config()],
             memory_topics: vec![sample_memory_topic()],
+            udfs: vec![],
         };
 
         let result = storage.apply_init_snapshot(snapshot, sample_init_apply_meta());
@@ -910,6 +1022,7 @@ mod tests {
             pipeline_run_states: vec![run_state.clone()],
             mqtt_configs: vec![mqtt.clone()],
             memory_topics: vec![memory_topic.clone()],
+            udfs: vec![],
         };
 
         storage.apply_init_snapshot(snapshot, meta.clone()).unwrap();

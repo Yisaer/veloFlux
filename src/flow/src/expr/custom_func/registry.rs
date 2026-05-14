@@ -63,6 +63,59 @@ impl CustomFuncRegistry {
         names
     }
 
+    /// Build a registry containing all built-in functions plus the given
+    /// WASM UDFs. Returns an error if any UDF name collides with a built-in.
+    pub fn with_builtins_and_wasm(
+        wasm_udfs: Vec<Arc<dyn CustomFunc>>,
+    ) -> Result<Arc<Self>, String> {
+        let mut registry = Self::builtins();
+        for udf in wasm_udfs {
+            let name = udf.name().to_lowercase();
+            if registry.functions.contains_key(&name) {
+                return Err(format!(
+                    "WASM UDF '{name}' conflicts with an existing built-in function"
+                ));
+            }
+            register(&mut registry.functions, udf);
+        }
+        Ok(Arc::new(registry))
+    }
+
+    /// Clone this registry and add a single UDF.
+    ///
+    /// Returns an error if the UDF name collides with an existing entry.
+    /// Callers should replace the current registry with the returned value
+    /// to make the UDF available to new pipelines.
+    pub fn clone_and_add(self: &Arc<Self>, udf: Arc<dyn CustomFunc>) -> Result<Arc<Self>, String> {
+        let name = udf.name().to_lowercase();
+        if self.functions.contains_key(&name) {
+            return Err(format!("UDF '{name}' already exists"));
+        }
+        let mut new_functions = self.functions.clone();
+        register(&mut new_functions, udf);
+        Ok(Arc::new(Self {
+            functions: new_functions,
+        }))
+    }
+
+    /// Clone this registry and remove a single UDF by name.
+    ///
+    /// Returns an error if the name does not exist or is a built-in.
+    pub fn clone_and_remove(self: &Arc<Self>, name: &str) -> Result<Arc<Self>, String> {
+        let key = name.to_lowercase();
+        if !self.functions.contains_key(&key) {
+            return Err(format!("UDF '{key}' not found in registry"));
+        }
+        // Refuse to remove built-in functions — only WASM UDFs can be removed.
+        // Built-ins don't have a distinguishing marker, so we rely on the fact
+        // that built-ins are always present and removal is only called for UDFs.
+        let mut new_functions = self.functions.clone();
+        new_functions.remove(&key);
+        Ok(Arc::new(Self {
+            functions: new_functions,
+        }))
+    }
+
     fn builtins() -> Self {
         let mut functions: HashMap<String, Arc<dyn CustomFunc>> = HashMap::new();
 

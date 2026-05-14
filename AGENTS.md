@@ -28,7 +28,9 @@
   - 格式：`<type>(<scope>): <subject>`（`(<scope>)` 可选；breaking change 可用 `!`，例如：`<type>(<scope>)!: <subject>` 或 `<type>!: <subject>`）。
   - `type`/`scope` 使用小写；常用 `type`：`feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert`。
   - 示例：`feat(flow): add ...`、`fix(parser): handle ...`、`docs: update ...`。
+  - PR title 和 PR description 必须使用英文撰写。
 - 当使用 `gh` 处理 PR review comment 后，如产生本地改动，需要主动提交 commit；提交必须使用 `git commit -s` 保持签名一致，并在 commit message body 中说明处理方式与取舍思路。
+- 当 CI 中不熟悉的工具（如 Kani、cargo-deny 等）报错时，必须优先查阅该工具的官方文档理解其工作原理和已知限制，再制定修复方案；禁止仅凭错误信息字面意思猜测 flag 或参数。
 
 ## 测试守则
 - 不要求每次修改代码后都运行 `make test` 做全量验证；优先运行与改动ni相关的最小测试集合（例如仅运行新增/受影响的单元测试）。

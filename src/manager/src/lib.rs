@@ -17,6 +17,8 @@ mod pipeline;
 mod startup;
 pub mod storage_bridge;
 mod stream;
+#[cfg(feature = "wasm_udf")]
+mod udf_handler;
 use axum::Router;
 use axum::routing::{delete, get, post};
 use pipeline::AppState;
@@ -37,7 +39,7 @@ pub use stream::{SchemaParser, register_schema, schema_registry};
 pub(crate) static MQTT_QOS: u8 = 0;
 
 fn build_app(state: AppState) -> Router {
-    Router::new()
+    let app = Router::new()
         .route(
             "/pipelines",
             post(pipeline::create_pipeline_handler).get(pipeline::list_pipelines),
@@ -107,8 +109,23 @@ fn build_app(state: AppState) -> Router {
             get(mqtt_client::get_shared_mqtt_client_handler)
                 .delete(mqtt_client::delete_shared_mqtt_client_handler),
         )
-        .layer(CorsLayer::permissive())
-        .with_state(state)
+        .layer(CorsLayer::permissive());
+    add_udf_routes(app).with_state(state)
+}
+
+#[cfg(feature = "wasm_udf")]
+fn add_udf_routes(app: Router<AppState>) -> Router<AppState> {
+    app.route("/udfs/upload", post(udf_handler::upload_udf_handler))
+        .route("/udfs", get(udf_handler::list_udfs_handler))
+        .route(
+            "/udfs/:name",
+            get(udf_handler::get_udf_handler).delete(udf_handler::delete_udf_handler),
+        )
+}
+
+#[cfg(not(feature = "wasm_udf"))]
+fn add_udf_routes(app: Router<AppState>) -> Router<AppState> {
+    app
 }
 
 async fn serve_manager_with_listener<F>(

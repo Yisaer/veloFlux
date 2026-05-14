@@ -4,7 +4,7 @@ version = "0.0.1"
 edition = "2024"
 
 [dependencies]
-axum = { version = "0.7", features = ["macros", "json"] }
+axum = { version = "0.7", features = ["macros", "json", "multipart"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "net", "sync"] }
@@ -13,8 +13,10 @@ tower-http = { version = "0.6", features = ["cors"] }
 flow = { path = "../flow" }
 parser = { path = "../parser" }
 storage = { path = "../storage" }
+udf = { path = "../udf", optional = true }
 build_info = { path = "../build_info" }
 parking_lot = "0.12"
+sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 urlencoding = "2"
 
@@ -26,4 +28,6 @@ tower = "0.5"
 path = "src/lib.rs"
 
 [features]
+default = ["wasm_udf"]
 deadlock_detection = ["flow/deadlock_detection", "parking_lot/deadlock_detection"]
+wasm_udf = ["dep:udf"]
