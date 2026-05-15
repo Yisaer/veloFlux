@@ -1,5 +1,4 @@
 use axum::{
-    Json,
     extract::State,
     http::{HeaderValue, StatusCode, header},
     response::IntoResponse,
@@ -27,6 +26,7 @@ pub struct ExportResources {
     pub streams: Vec<CreateStreamRequest>,
     pub pipelines: Vec<CreatePipelineRequest>,
     pub pipeline_run_states: Vec<ExportPipelineRunState>,
+    pub udfs: Vec<ExportUdf>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -40,6 +40,14 @@ pub struct ExportMemoryTopic {
 pub struct ExportPipelineRunState {
     pub pipeline_id: String,
     pub desired_state: StoredPipelineDesiredState,
+}
+
+/// UDF metadata included in the export bundle. The actual `.wasm` binary is
+/// stored alongside `metadata.json` in the tar.gz archive, keyed by SHA-256.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ExportUdf {
+    pub name: String,
+    pub wasm_sha256: String,
 }
 
 pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -60,6 +68,7 @@ pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoR
                 .into_response();
         }
     };
+
     let bundle = match build_export_bundle(state.storage.as_ref()) {
         Ok(bundle) => bundle,
         Err(err) => {
@@ -67,7 +76,23 @@ pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoR
         }
     };
 
-    let filename = format!("veloflux-metadata-export-{}.json", bundle.exported_at);
+    let exported_at = bundle.exported_at;
+    let udf_shas: Vec<String> = bundle
+        .resources
+        .udfs
+        .iter()
+        .map(|u| u.wasm_sha256.clone())
+        .collect();
+    let wasm_dir = state.storage.wasm_files_dir();
+
+    let tar_gz = match build_tar_gz(&bundle, &udf_shas, &wasm_dir) {
+        Ok(data) => data,
+        Err(err) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+        }
+    };
+
+    let filename = format!("veloflux-export-{exported_at}.tar.gz");
     let disposition = format!("attachment; filename=\"{filename}\"");
     let disposition = match HeaderValue::from_str(&disposition) {
         Ok(value) => value,
@@ -80,7 +105,59 @@ pub async fn export_storage_handler(State(state): State<AppState>) -> impl IntoR
         }
     };
 
-    ([(header::CONTENT_DISPOSITION, disposition)], Json(bundle)).into_response()
+    (
+        [
+            (header::CONTENT_DISPOSITION, disposition),
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/gzip"),
+            ),
+        ],
+        tar_gz,
+    )
+        .into_response()
+}
+
+fn build_tar_gz(
+    bundle: &ExportBundleV1,
+    udf_shas: &[String],
+    wasm_dir: &std::path::Path,
+) -> Result<Vec<u8>, String> {
+    let metadata_json =
+        serde_json::to_vec(bundle).map_err(|e| format!("serialize export bundle: {e}"))?;
+
+    let mut tar_gz = Vec::new();
+    {
+        let gz = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
+        let mut tar = tar::Builder::new(gz);
+
+        // Write metadata.json
+        let mut header = tar::Header::new_gnu();
+        header.set_size(metadata_json.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "metadata.json", metadata_json.as_slice())
+            .map_err(|e| format!("write metadata.json to tar: {e}"))?;
+
+        // Write each WASM file
+        for sha in udf_shas {
+            let wasm_path = wasm_dir.join(format!("{sha}.wasm"));
+            let wasm_bytes = std::fs::read(&wasm_path)
+                .map_err(|e| format!("read {}: {e}", wasm_path.display()))?;
+
+            let entry_name = format!("wasm_files/{sha}.wasm");
+            let mut header = tar::Header::new_gnu();
+            header.set_size(wasm_bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, &entry_name, wasm_bytes.as_slice())
+                .map_err(|e| format!("write {entry_name} to tar: {e}"))?;
+        }
+
+        let gz = tar.into_inner().map_err(|e| format!("finish tar: {e}"))?;
+        gz.finish().map_err(|e| format!("finish gzip: {e}"))?;
+    }
+    Ok(tar_gz)
 }
 
 pub(crate) fn build_export_bundle(storage: &StorageManager) -> Result<ExportBundleV1, String> {
@@ -155,6 +232,16 @@ pub(crate) fn build_export_bundle(storage: &StorageManager) -> Result<ExportBund
         .collect::<Vec<_>>();
     pipeline_run_states.sort_by(|a, b| a.pipeline_id.cmp(&b.pipeline_id));
 
+    let mut udfs: Vec<ExportUdf> = snapshot
+        .udfs
+        .into_iter()
+        .map(|u| ExportUdf {
+            name: u.name,
+            wasm_sha256: u.wasm_sha256,
+        })
+        .collect();
+    udfs.sort_by(|a, b| a.name.cmp(&b.name));
+
     let exported_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|err| format!("compute export timestamp: {err}"))?
@@ -168,6 +255,7 @@ pub(crate) fn build_export_bundle(storage: &StorageManager) -> Result<ExportBund
             streams,
             pipelines,
             pipeline_run_states,
+            udfs,
         },
     })
 }
@@ -182,16 +270,17 @@ mod tests {
     };
     use axum::body::to_bytes;
     use axum::extract::State;
-    use axum::http::{StatusCode, header};
-    use serde_json::{Value as JsonValue, json};
+    use axum::http::StatusCode;
+    use flate2::read::GzDecoder;
+    use serde_json::Value as JsonValue;
     use storage::{
         StorageManager, StoredMemoryTopic, StoredMemoryTopicKind, StoredPipelineDesiredState,
-        StoredPipelineRunState,
+        StoredPipelineRunState, StoredUdf,
     };
     use tempfile::tempdir;
 
     fn sample_stream_request_named(name: &str) -> CreateStreamRequest {
-        serde_json::from_value(json!({
+        serde_json::from_value(serde_json::json!({
             "name": name,
             "type": "mqtt",
             "schema": {
@@ -221,7 +310,7 @@ mod tests {
     }
 
     fn sample_pipeline_request_named(id: &str, stream_name: &str) -> CreatePipelineRequest {
-        serde_json::from_value(json!({
+        serde_json::from_value(serde_json::json!({
             "id": id,
             "flow_instance_id": DEFAULT_FLOW_INSTANCE_ID,
             "sql": format!("SELECT * FROM {stream_name}"),
@@ -249,6 +338,14 @@ mod tests {
         sample_pipeline_request_named("pipe_1", "stream_1")
     }
 
+    fn sample_stored_udf(name: &str, sha: &str) -> StoredUdf {
+        StoredUdf {
+            name: name.to_string(),
+            wasm_sha256: sha.to_string(),
+            raw_json: serde_json::json!({"name": name, "description": "test"}).to_string(),
+        }
+    }
+
     fn sample_default_instance_spec() -> FlowInstanceSpec {
         FlowInstanceSpec {
             id: DEFAULT_FLOW_INSTANCE_ID.to_string(),
@@ -257,7 +354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn export_storage_handler_returns_bundle_json() {
+    async fn export_storage_handler_returns_tar_gz() {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
 
@@ -281,6 +378,14 @@ mod tests {
             desired_state: StoredPipelineDesiredState::Running,
         };
 
+        // Write a dummy WASM file for the UDF
+        let wasm_bytes = b"dummy wasm";
+        let wasm_sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
+        let wasm_path = storage.wasm_files_dir().join(format!("{wasm_sha}.wasm"));
+        std::fs::write(&wasm_path, wasm_bytes).unwrap();
+
+        let udf = sample_stored_udf("my_udf", wasm_sha);
+
         storage
             .create_stream(stored_stream_from_request(&stream).unwrap())
             .unwrap();
@@ -292,6 +397,7 @@ mod tests {
             .unwrap();
         storage.create_memory_topic(memory_topic).unwrap();
         storage.put_pipeline_run_state(run_state).unwrap();
+        storage.create_udf(udf).unwrap();
 
         let state = AppState::new(
             crate::new_default_flow_instance(),
@@ -309,41 +415,63 @@ mod tests {
             .expect("content disposition header")
             .to_str()
             .expect("header as str");
-        assert!(disposition.starts_with("attachment; filename=\"veloflux-metadata-export-"));
-        assert!(disposition.ends_with(".json\""));
+        assert!(
+            disposition.starts_with("attachment; filename=\"veloflux-export-"),
+            "disposition: {disposition}"
+        );
+        assert!(
+            disposition.ends_with(".tar.gz\""),
+            "disposition: {disposition}"
+        );
 
-        let body = to_bytes(response.into_body(), 1024 * 1024)
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .expect("content type header")
+            .to_str()
+            .expect("header as str");
+        assert_eq!(content_type, "application/gzip");
+
+        let body = to_bytes(response.into_body(), 10 * 1024 * 1024)
             .await
             .expect("read response body");
-        let json: JsonValue = serde_json::from_slice(&body).expect("decode export bundle");
 
-        assert!(json["exported_at"].as_u64().unwrap() > 0);
-        assert_eq!(
-            json["resources"]["memory_topics"].as_array().unwrap().len(),
-            1
+        // Decode tar.gz and verify contents
+        let gz = GzDecoder::new(body.as_ref());
+        let mut archive = tar::Archive::new(gz);
+        let mut entries: Vec<String> = Vec::new();
+        let mut metadata_bytes: Option<Vec<u8>> = None;
+
+        for entry in archive.entries().expect("read tar entries") {
+            let mut entry = entry.expect("tar entry");
+            let path = entry
+                .path()
+                .expect("entry path")
+                .to_string_lossy()
+                .into_owned();
+            entries.push(path.clone());
+            if path == "metadata.json" {
+                let mut buf = Vec::new();
+                std::io::Read::read_to_end(&mut entry, &mut buf).expect("read entry");
+                metadata_bytes = Some(buf);
+            }
+        }
+
+        entries.sort();
+        assert!(
+            entries.contains(&"metadata.json".to_string()),
+            "tar should contain metadata.json, got: {entries:?}"
         );
-        assert_eq!(
-            json["resources"]["shared_mqtt_clients"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
+        assert!(
+            entries.contains(&format!("wasm_files/{wasm_sha}.wasm")),
+            "tar should contain wasm file, got: {entries:?}"
         );
-        assert_eq!(json["resources"]["streams"].as_array().unwrap().len(), 1);
-        assert_eq!(json["resources"]["pipelines"].as_array().unwrap().len(), 1);
-        assert_eq!(
-            json["resources"]["pipeline_run_states"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(json["resources"]["streams"][0]["name"], "stream_1");
-        assert_eq!(json["resources"]["pipelines"][0]["id"], "pipe_1");
-        assert_eq!(
-            json["resources"]["pipeline_run_states"][0]["desired_state"],
-            "Running"
-        );
+
+        let metadata: JsonValue =
+            serde_json::from_slice(&metadata_bytes.expect("metadata.json")).expect("parse json");
+        assert_eq!(metadata["resources"]["streams"][0]["name"], "stream_1");
+        assert_eq!(metadata["resources"]["udfs"][0]["name"], "my_udf",);
+        assert_eq!(metadata["resources"]["udfs"][0]["wasm_sha256"], wasm_sha,);
     }
 
     #[test]
@@ -424,6 +552,14 @@ mod tests {
                 .expect("create pipeline run state");
         }
 
+        // Add UDFs in reverse order to test sorting
+        storage
+            .create_udf(sample_stored_udf("udf_b", "sha_b"))
+            .expect("create udf b");
+        storage
+            .create_udf(sample_stored_udf("udf_a", "sha_a"))
+            .expect("create udf a");
+
         let first_bundle = build_export_bundle(&storage).expect("build first export bundle");
         let second_bundle = build_export_bundle(&storage).expect("build second export bundle");
 
@@ -471,6 +607,15 @@ mod tests {
                 .map(|state| state.pipeline_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["pipe_a", "pipe_b"]
+        );
+        assert_eq!(
+            first_bundle
+                .resources
+                .udfs
+                .iter()
+                .map(|u| u.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["udf_a", "udf_b"]
         );
         assert_eq!(
             serde_json::to_value(&first_bundle.resources).expect("serialize first resources"),

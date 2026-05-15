@@ -37,6 +37,7 @@ The current bundle contains:
 - streams
 - pipelines
 - pipeline desired-state records
+- WASM UDFs (metadata + `.wasm` binaries)
 
 This scope is intentionally broader than pipelines alone. A pipeline snapshot is incomplete without
 the metadata needed to rebuild its runtime context.
@@ -51,6 +52,11 @@ The exported payload is versioned as `ExportBundleV1` and includes:
 - `resources.streams`
 - `resources.pipelines`
 - `resources.pipeline_run_states`
+- `resources.udfs`
+
+Export is delivered as a **tar.gz archive** containing `metadata.json` plus a `wasm_files/`
+directory with one `.wasm` binary per UDF, keyed by SHA-256. The previous JSON-only format is no
+longer supported.
 
 Export sorts each resource collection by stable identity before serialization. This is a design
 choice for deterministic diffs and predictable operator review, not a semantic ordering guarantee.
@@ -68,9 +74,18 @@ Import validates the bundle before touching storage. Current checks include:
 - each pipeline run-state entry must reference a pipeline in the same bundle
 - each pipeline must reference a declared `flow_instance_id`
 - normalized pipeline requests must still pass normal pipeline request validation
+- duplicate UDF names (lowercase)
+- each declared UDF must have a corresponding `<sha256>.wasm` file in the archive
+- SHA-256 of the extracted `.wasm` file must match the declared value
+- when the `wasm_udf` feature is enabled, the `.wasm` module must pass
+  `WasmEngine::validate` and its metadata name must match the declared UDF name
 
 Validation is whole-bundle and strict. There is no best-effort acceptance of a partially valid
 bundle.
+
+Import accepts a tar.gz body (`application/gzip`). The archive is unpacked to a temporary
+directory, `metadata.json` is parsed and validated, and `.wasm` files are copied to the
+shared `wasm_files/` directory after validation.
 
 ## Replace Semantics
 
@@ -160,6 +175,9 @@ not just because operators may want timestamps.
 - Verify import rejects duplicate resource identities within the bundle.
 - Verify import rejects pipeline run-state entries that reference missing pipelines.
 - Verify import rejects pipelines bound to undeclared flow instances.
+- Verify import rejects UDFs with duplicate names.
+- Verify import rejects UDFs whose `.wasm` file is missing from the archive or has a SHA-256
+  mismatch.
 - Verify import replaces storage state instead of merging with pre-existing resources.
 - Verify `init.json` skips when the file is missing.
 - Verify `init.json` skips when stored apply metadata is newer or equal to file modified time.

@@ -66,6 +66,8 @@ bytes = "1"
 criterion = "0.5"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tempfile = "3"
+flate2 = "1"
+tar = "0.4"
 proptest = "1"
 
 [[bench]]

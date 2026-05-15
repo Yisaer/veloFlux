@@ -2,9 +2,11 @@ use super::{
     bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix,
     wait_for_server,
 };
+use flate2::read::GzDecoder;
 use reqwest::{Client as HttpClient, StatusCode};
 use sdk::ManagerClient;
 use serde_json::{json, Value as JsonValue};
+use std::io::Read;
 use std::net::SocketAddr;
 
 struct ImportExportHarness {
@@ -74,7 +76,8 @@ fn bundle_empty() -> JsonValue {
             "shared_mqtt_clients": [],
             "streams": [],
             "pipelines": [],
-            "pipeline_run_states": []
+            "pipeline_run_states": [],
+            "udfs": []
         }
     })
 }
@@ -116,7 +119,8 @@ fn bundle_single_stream_and_pipeline(stream_name: &str, pipeline_id: &str) -> Js
                     "pipeline_id": pipeline_id,
                     "desired_state": "Stopped"
                 }
-            ]
+            ],
+            "udfs": []
         }
     })
 }
@@ -128,15 +132,53 @@ async fn export_bundle(http: &HttpClient, base: &str) -> JsonValue {
         .await
         .expect("export request");
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    assert_eq!(status, StatusCode::OK, "export body: {body}");
-    serde_json::from_str(&body).expect("decode export bundle")
+    let body = resp.bytes().await.unwrap_or_default();
+    assert_eq!(status, StatusCode::OK, "export failed");
+    metadata_json_from_tar_gz(&body).expect("decode export tar.gz")
+}
+
+fn metadata_json_from_tar_gz(data: &[u8]) -> Result<JsonValue, String> {
+    let gz = flate2::read::GzDecoder::new(data);
+    let mut archive = tar::Archive::new(gz);
+    for entry in archive.entries().map_err(|e| format!("tar: {e}"))? {
+        let mut entry = entry.map_err(|e| format!("entry: {e}"))?;
+        if entry
+            .path()
+            .map_err(|e| format!("path: {e}"))?
+            .to_string_lossy()
+            == "metadata.json"
+        {
+            return serde_json::from_reader(&mut entry)
+                .map_err(|e| format!("parse metadata.json: {e}"));
+        }
+    }
+    Err("metadata.json not found in archive".to_string())
+}
+
+fn build_tar_gz_from_metadata(bundle: &JsonValue) -> Result<Vec<u8>, String> {
+    let metadata_json = serde_json::to_vec(bundle).map_err(|e| format!("serialize: {e}"))?;
+    let mut tar_gz = Vec::new();
+    {
+        let gz = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(metadata_json.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "metadata.json", metadata_json.as_slice())
+            .map_err(|e| format!("write tar: {e}"))?;
+        let gz = tar.into_inner().map_err(|e| format!("finish tar: {e}"))?;
+        gz.finish().map_err(|e| format!("finish gzip: {e}"))?;
+    }
+    Ok(tar_gz)
 }
 
 async fn import_bundle(http: &HttpClient, base: &str, bundle: &JsonValue) -> (StatusCode, String) {
+    let tar_gz = build_tar_gz_from_metadata(bundle).expect("build tar.gz");
     let resp = http
         .post(format!("{base}/import"))
-        .json(bundle)
+        .header("content-type", "application/gzip")
+        .body(tar_gz)
         .send()
         .await
         .expect("import request");
@@ -173,7 +215,7 @@ async fn import_rejects_missing_resources() {
     )
     .await;
 
-    assert_eq!(status.as_u16(), 422, "body: {body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
     assert!(body.contains("missing field `resources`"), "body: {body}");
 }
 
@@ -242,7 +284,8 @@ async fn import_rejects_duplicate_identifiers() {
                     "sinks": [{ "type": "nop" }]
                 }
             ],
-            "pipeline_run_states": []
+            "pipeline_run_states": [],
+            "udfs": []
         }
     });
 
@@ -275,7 +318,8 @@ async fn import_rejects_invalid_resources() {
                 }
             ],
             "pipelines": [],
-            "pipeline_run_states": []
+            "pipeline_run_states": [],
+            "udfs": []
         }
     });
 
@@ -302,7 +346,8 @@ async fn import_rejects_empty_name_and_zero_capacity() {
             "shared_mqtt_clients": [],
             "streams": [],
             "pipelines": [],
-            "pipeline_run_states": []
+            "pipeline_run_states": [],
+            "udfs": []
         }
     });
 
@@ -328,7 +373,8 @@ async fn import_rejects_dangling_pipeline_run_state_reference() {
                     "pipeline_id": "no_such_pipeline",
                     "desired_state": "Running"
                 }
-            ]
+            ],
+            "udfs": []
         }
     });
 
@@ -386,7 +432,8 @@ async fn import_full_replace_removes_missing_resources() {
             "shared_mqtt_clients": [],
             "streams": [],
             "pipelines": [],
-            "pipeline_run_states": []
+            "pipeline_run_states": [],
+            "udfs": []
         }
     });
 
@@ -432,7 +479,8 @@ async fn import_invalid_bundle_after_valid_import_preserves_previous_state() {
                 }
             ],
             "pipelines": [],
-            "pipeline_run_states": []
+            "pipeline_run_states": [],
+            "udfs": []
         }
     });
 
@@ -601,7 +649,8 @@ async fn export_arrays_are_sorted_by_stable_identifiers() {
             "pipeline_run_states": [
                 { "pipeline_id": "z_pipe", "desired_state": "Stopped" },
                 { "pipeline_id": "a_pipe", "desired_state": "Stopped" }
-            ]
+            ],
+            "udfs": []
         }
     });
 

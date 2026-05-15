@@ -196,6 +196,7 @@ mod tests {
                 streams: vec![sample_stream_request(stream_name)],
                 pipelines: Vec::new(),
                 pipeline_run_states: Vec::new(),
+                udfs: vec![],
             },
         }
     }

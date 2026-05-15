@@ -199,21 +199,11 @@ work; for now, only persist a new pipeline if you intend to keep the UDF.
 
 ### Integration with import/export
 
-> **Status: planned, not yet implemented.** The current JSON-based
-> `/storage/export` and `/import` endpoints do not include UDF `.wasm`
-> files. Exporting and re-importing will lose all uploaded UDFs.
-> The tar.gz design below is the planned replacement.
-
-**Current state (this PR):**
-- `/storage/export` returns JSON-only `ExportBundleV1` without UDF data.
-- `/import` accepts JSON-only bundles; the `udfs` field is empty by default.
-- UDFs must be manually re-uploaded after a restore.
-
-**Planned design:**
+Export produces a **tar.gz archive** containing:
 
 ```
 veloflux-export-<timestamp>.tar.gz
-├── metadata.json          # ExportBundleV1 (streams, pipelines, mqtt, memory_topics)
+├── metadata.json          # ExportBundleV1 (streams, pipelines, mqtt, memory_topics, udfs)
 └── wasm_files/            # WASM UDF binaries (one .wasm per function)
     ├── <sha256_1>.wasm
     └── <sha256_2>.wasm
@@ -228,33 +218,32 @@ veloflux-export-<timestamp>.tar.gz
 
 **Export flow**
 
-1. Serialize `ExportBundleV1` (streams, pipelines, mqtt, memory_topics, udf metadata)
-   to `metadata.json`. The `udfs` field in `ExportResources` contains `ExportUdf`
-   records with `name` and `wasm_sha256` (but NOT the binary).
-2. Copy all referenced `.wasm` files from `<base_dir>/wasm_files/` into the archive's
+1. Serialize `ExportBundleV1` to `metadata.json`. The `udfs` field contains
+   `ExportUdf` records with `name` and `wasm_sha256` (not the binary).
+2. Copy referenced `.wasm` files from `<base_dir>/wasm_files/` into the archive's
    `wasm_files/` directory.
-3. Create tar.gz and stream as downloadable response.
+3. Return as `application/gzip` with `Content-Disposition: attachment`.
 
 **Import flow**
 
-1. Receive and unpack the tar.gz.
-2. Parse `metadata.json` and validate all resources (streams, pipelines, etc.).
+1. Unpack the tar.gz to a temporary directory.
+2. Parse and validate `metadata.json` (streams, pipelines, etc.).
 3. For each UDF in the `udfs` list:
-   - Verify that `<sha256>.wasm` exists in the archive.
-   - Validate it is a well-formed WASM module (via `WasmEngine::validate`).
-   - Confirm the metadata name matches the declared name.
-4. Write `.wasm` files to `<base_dir>/wasm_files/`.
-5. Apply the `MetadataExportSnapshot` to redb (the existing `replace_metadata_snapshot` flow).
+   - Require `<sha256>.wasm` to exist in the archive.
+   - Recomputed SHA-256 and compare to declared value.
+   - Validate the WASM module via `WasmEngine::validate`.
+   - Confirm metadata name matches the declared name.
+4. Copy `.wasm` files to `<base_dir>/wasm_files/` (skip if already present).
+5. Apply the `MetadataExportSnapshot` to redb.
 
-**Planned API**
+**Current behavior**
 
-| Method | Path              | Description                        |
-|--------|-------------------|------------------------------------|
-| `GET`  | `/storage/export` | Download tar.gz with wasm_files/   |
-| `POST` | `/import`         | Upload tar.gz with wasm_files/     |
+| Method | Path              | Content-Type       |
+|--------|-------------------|--------------------|
+| `GET`  | `/storage/export` | `application/gzip` |
+| `POST` | `/import`         | `application/gzip` |
 
-Backwards compatibility: old JSON-only `ExportBundleV1` will still be accepted
-(udfs default to empty).
+The previous JSON-only format is no longer supported.
 
 ## WASM Runtime Integration (wasmtime)
 
@@ -585,5 +574,7 @@ network access for UDFs that need it, with explicit opt-in and capability contro
   backwards-compatible. All existing `CustomFunc` implementations continue to work.
 - `CustomFuncRegistry`: adding `register_wasm` does not affect existing built-in functions.
 - Storage: new `udfs` table is additive. Existing storage instances don't need migration.
-- Export/import: the `udfs` field in `ExportResources` is optional (`#[serde(default)]`)
-  for backwards compatibility with older export bundles.
+- Export/import: the `udfs` field in `ExportResources` is required. Old JSON-only export
+  bundles (without `resources.udfs`) are not compatible with the current tar.gz format
+  and must be migrated by adding `"udfs": []` to the resources object and wrapping the
+  metadata in the tar.gz layout. The previous JSON body format is no longer supported.

@@ -17,11 +17,13 @@ udf = { path = "../udf", optional = true }
 build_info = { path = "../build_info" }
 parking_lot = "0.12"
 sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 urlencoding = "2"
 
 [dev-dependencies]
-tempfile = "3"
 tower = "0.5"
 
 [lib]

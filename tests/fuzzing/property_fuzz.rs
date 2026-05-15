@@ -247,24 +247,55 @@ async fn post_pipeline_raw(h: &TestHarness, body: JsonValue) -> (StatusCode, Str
 }
 
 async fn export_bundle(h: &TestHarness) -> JsonValue {
-    h.http
+    let resp = h
+        .http
         .get(format!("{}/storage/export", h.base()))
         .send()
         .await
-        .expect("export request")
-        .json::<JsonValue>()
-        .await
-        .expect("decode export bundle")
+        .expect("export request");
+    let status = resp.status();
+    let body = resp.bytes().await.expect("export body");
+    assert_eq!(status, reqwest::StatusCode::OK, "export failed");
+
+    let gz = flate2::read::GzDecoder::new(body.as_ref());
+    let mut archive = tar::Archive::new(gz);
+    for entry in archive.entries().expect("tar entries") {
+        let mut entry = entry.expect("tar entry");
+        if entry.path().expect("entry path").to_string_lossy() == "metadata.json" {
+            return serde_json::from_reader(&mut entry).expect("parse metadata.json");
+        }
+    }
+    panic!("metadata.json not found in archive");
+}
+
+fn build_import_tar_gz(bundle: &JsonValue) -> Vec<u8> {
+    let metadata_json = serde_json::to_vec(bundle).expect("serialize");
+    let mut tar_gz = Vec::new();
+    {
+        let gz = flate2::write::GzEncoder::new(&mut tar_gz, flate2::Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(metadata_json.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, "metadata.json", metadata_json.as_slice())
+            .expect("write tar");
+        let gz = tar.into_inner().expect("finish tar");
+        gz.finish().expect("finish gzip");
+    }
+    tar_gz
 }
 
 async fn import_bundle(
     h: &TestHarness,
     bundle: JsonValue,
 ) -> (StatusCode, String, Option<JsonValue>) {
+    let body = build_import_tar_gz(&bundle);
     let resp = h
         .http
         .post(format!("{}/import", h.base()))
-        .json(&bundle)
+        .header("content-type", "application/gzip")
+        .body(body)
         .send()
         .await
         .expect("import request");
@@ -325,7 +356,8 @@ fn bundle_with_resources(
             "shared_mqtt_clients": [],
             "streams": streams,
             "pipelines": pipelines,
-            "pipeline_run_states": run_states
+            "pipeline_run_states": run_states,
+            "udfs": []
         }
     })
 }
