@@ -303,3 +303,10 @@ fn case_13_changed_functions_ignore_null_must_be_literal() {
         .expect_err("had_changed ignore_null should be literal");
     assert!(err.contains("had_changed() first argument must be a boolean literal"));
 }
+
+#[test]
+fn case_14_acc_functions_reject_two_argument_form() {
+    let err = parse_sql("SELECT acc_sum(a, start) FROM stream")
+        .expect_err("acc two-argument form should be rejected");
+    assert!(err.contains("expects either 1 argument or 3 arguments"));
+}

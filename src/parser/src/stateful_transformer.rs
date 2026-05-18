@@ -597,6 +597,17 @@ fn validate_stateful_builtin_args(func_name: &str, args: &[Expr]) -> Result<(), 
                 validate_bool_literal(ignore_null, "lag() third argument")?;
             }
         }
+        "acc_sum" | "acc_max" | "acc_min" | "acc_count" | "acc_avg"
+            if args.len() != 1 && args.len() != 3 =>
+        {
+            return Err(format!(
+                "stateful function '{}' expects either 1 argument or 3 arguments: {}(value[, begin_cond, reset_cond]), got {}",
+                func_name,
+                func_name,
+                args.len()
+            ));
+        }
+        "acc_sum" | "acc_max" | "acc_min" | "acc_count" | "acc_avg" => {}
         _ => {}
     }
 
