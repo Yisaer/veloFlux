@@ -535,6 +535,244 @@ async fn stateful_function_table_driven() {
             close_before_read: false,
         },
         StatefulCase {
+            name: "acc_sum_begin_reset_lifecycle",
+            sql: "SELECT acc_sum(a, start, stop) AS total FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Float64(10.0),
+                        Value::Float64(1.0),
+                        Value::Float64(2.0),
+                        Value::Float64(3.0),
+                        Value::Float64(4.0),
+                        Value::Float64(5.0),
+                    ],
+                ),
+                (
+                    "start".to_string(),
+                    vec![
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                    ],
+                ),
+                (
+                    "stop".to_string(),
+                    vec![
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 6,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "total".to_string(),
+                    expected_values: vec![
+                        Value::Float64(0.0),
+                        Value::Float64(1.0),
+                        Value::Float64(3.0),
+                        Value::Float64(6.0),
+                        Value::Float64(0.0),
+                        Value::Float64(5.0),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "acc_sum_filter_does_not_block_begin_reset",
+            sql: "SELECT acc_sum(a, start, stop) FILTER (WHERE valid) AS total FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Float64(10.0),
+                        Value::Float64(1.0),
+                        Value::Float64(2.0),
+                        Value::Float64(3.0),
+                    ],
+                ),
+                (
+                    "start".to_string(),
+                    vec![
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                    ],
+                ),
+                (
+                    "stop".to_string(),
+                    vec![
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                    ],
+                ),
+                (
+                    "valid".to_string(),
+                    vec![
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "total".to_string(),
+                    expected_values: vec![
+                        Value::Float64(0.0),
+                        Value::Float64(1.0),
+                        Value::Float64(1.0),
+                        Value::Float64(0.0),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "acc_count_begin_without_reset",
+            sql: "SELECT acc_count(a, start, false) AS n FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Int64(1),
+                        Value::Int64(2),
+                        Value::Null,
+                        Value::Int64(3),
+                    ],
+                ),
+                (
+                    "start".to_string(),
+                    vec![
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 4,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "n".to_string(),
+                    expected_values: vec![
+                        Value::Int64(0),
+                        Value::Int64(1),
+                        Value::Int64(1),
+                        Value::Int64(2),
+                    ],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "acc_sum_begin_reset_partition_by_keeps_independent_state",
+            sql: "SELECT k, acc_sum(a, start, stop) OVER (PARTITION BY k) AS total FROM stream",
+            input_data: vec![
+                (
+                    "k".to_string(),
+                    vec![
+                        Value::String("A".to_string()),
+                        Value::String("B".to_string()),
+                        Value::String("B".to_string()),
+                        Value::String("A".to_string()),
+                        Value::String("A".to_string()),
+                        Value::String("A".to_string()),
+                        Value::String("B".to_string()),
+                    ],
+                ),
+                (
+                    "a".to_string(),
+                    vec![
+                        Value::Float64(1.0),
+                        Value::Float64(10.0),
+                        Value::Float64(2.0),
+                        Value::Float64(3.0),
+                        Value::Float64(4.0),
+                        Value::Float64(5.0),
+                        Value::Float64(1.0),
+                    ],
+                ),
+                (
+                    "start".to_string(),
+                    vec![
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                    ],
+                ),
+                (
+                    "stop".to_string(),
+                    vec![
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                        Value::Bool(true),
+                        Value::Bool(false),
+                        Value::Bool(false),
+                    ],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 7,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "k".to_string(),
+                        expected_values: vec![
+                            Value::String("A".to_string()),
+                            Value::String("B".to_string()),
+                            Value::String("B".to_string()),
+                            Value::String("A".to_string()),
+                            Value::String("A".to_string()),
+                            Value::String("A".to_string()),
+                            Value::String("B".to_string()),
+                        ],
+                    },
+                    ColumnCheck {
+                        expected_name: "total".to_string(),
+                        expected_values: vec![
+                            Value::Float64(1.0),
+                            Value::Float64(0.0),
+                            Value::Float64(2.0),
+                            Value::Float64(4.0),
+                            Value::Float64(8.0),
+                            Value::Float64(0.0),
+                            Value::Float64(3.0),
+                        ],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
             name: "multiple_acc_filter_where_over_partition_by_calls_share_partition_key",
             sql:
                 "SELECT acc_sum(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k) AS total, acc_count(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k) AS n FROM stream",
