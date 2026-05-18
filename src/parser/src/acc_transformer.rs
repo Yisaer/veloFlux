@@ -488,15 +488,15 @@ fn parse_acc_call(
 }
 
 fn validate_acc_arity(func_name: &str, actual: usize) -> Result<(), String> {
-    let expected = match func_name {
-        "acc_sum" | "acc_max" | "acc_min" | "acc_count" | "acc_avg" => 1,
+    match func_name {
+        "acc_sum" | "acc_max" | "acc_min" | "acc_count" | "acc_avg" => {}
         _ => return Err(format!("unknown acc function '{}'", func_name)),
-    };
+    }
 
-    if actual != expected {
+    if actual != 1 && actual != 3 {
         return Err(format!(
-            "acc function '{}' expects {} argument(s), got {}",
-            func_name, expected, actual
+            "acc function '{}' expects either 1 argument or 3 arguments: {}(value[, begin_cond, reset_cond]), got {}",
+            func_name, func_name, actual
         ));
     }
 

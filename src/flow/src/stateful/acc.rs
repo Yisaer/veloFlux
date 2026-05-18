@@ -48,12 +48,30 @@ pub fn acc_count_function_def() -> FunctionDef {
         name: "acc_count".to_string(),
         aliases: vec![],
         signature: FunctionSignatureSpec {
-            args: vec![FunctionArgSpec {
-                name: "x".to_string(),
-                r#type: TypeSpec::Any,
-                optional: false,
-                variadic: false,
-            }],
+            args: vec![
+                FunctionArgSpec {
+                    name: "x".to_string(),
+                    r#type: TypeSpec::Any,
+                    optional: false,
+                    variadic: false,
+                },
+                FunctionArgSpec {
+                    name: "begin_cond".to_string(),
+                    r#type: TypeSpec::Named {
+                        name: "bool".to_string(),
+                    },
+                    optional: true,
+                    variadic: false,
+                },
+                FunctionArgSpec {
+                    name: "reset_cond".to_string(),
+                    r#type: TypeSpec::Named {
+                        name: "bool".to_string(),
+                    },
+                    optional: true,
+                    variadic: false,
+                },
+            ],
             return_type: TypeSpec::Named {
                 name: "int64".to_string(),
             },
@@ -62,12 +80,17 @@ pub fn acc_count_function_def() -> FunctionDef {
         allowed_contexts: vec![FunctionContext::Select, FunctionContext::Where],
         requirements: vec![FunctionRequirement::DeterministicOrder],
         constraints: vec![
-            "Requires exactly 1 argument in the current implementation.".to_string(),
+            "Requires either 1 argument or 3 arguments.".to_string(),
+            "The 3-argument form is acc_count(x, begin_cond, reset_cond).".to_string(),
+            "begin_cond and reset_cond must evaluate to boolean values; NULL is treated as false."
+                .to_string(),
             "Ignores NULL input values.".to_string(),
             "Returns 0 before any non-NULL value has been accepted.".to_string(),
         ],
         examples: vec![
             "SELECT acc_count(a) AS n FROM stream".to_string(),
+            "SELECT acc_count(a, status = 'running', status = 'stopped') AS n FROM stream"
+                .to_string(),
             "SELECT acc_count(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k) AS n FROM stream"
                 .to_string(),
         ],
@@ -84,14 +107,32 @@ fn acc_numeric_function_def(name: &str, description: &str) -> FunctionDef {
         name: name.to_string(),
         aliases: vec![],
         signature: FunctionSignatureSpec {
-            args: vec![FunctionArgSpec {
-                name: "x".to_string(),
-                r#type: TypeSpec::Category {
-                    name: "numeric".to_string(),
+            args: vec![
+                FunctionArgSpec {
+                    name: "x".to_string(),
+                    r#type: TypeSpec::Category {
+                        name: "numeric".to_string(),
+                    },
+                    optional: false,
+                    variadic: false,
                 },
-                optional: false,
-                variadic: false,
-            }],
+                FunctionArgSpec {
+                    name: "begin_cond".to_string(),
+                    r#type: TypeSpec::Named {
+                        name: "bool".to_string(),
+                    },
+                    optional: true,
+                    variadic: false,
+                },
+                FunctionArgSpec {
+                    name: "reset_cond".to_string(),
+                    r#type: TypeSpec::Named {
+                        name: "bool".to_string(),
+                    },
+                    optional: true,
+                    variadic: false,
+                },
+            ],
             return_type: TypeSpec::Named {
                 name: "float64".to_string(),
             },
@@ -100,13 +141,17 @@ fn acc_numeric_function_def(name: &str, description: &str) -> FunctionDef {
         allowed_contexts: vec![FunctionContext::Select, FunctionContext::Where],
         requirements: vec![FunctionRequirement::DeterministicOrder],
         constraints: vec![
-            "Requires exactly 1 argument in the current implementation.".to_string(),
+            "Requires either 1 argument or 3 arguments.".to_string(),
+            format!("The 3-argument form is {name}(x, begin_cond, reset_cond)."),
+            "begin_cond and reset_cond must evaluate to boolean values; NULL is treated as false."
+                .to_string(),
             "Argument type must be numeric.".to_string(),
             "Ignores NULL input values.".to_string(),
             "Returns 0.0 before any non-NULL value has been accepted.".to_string(),
         ],
         examples: vec![
             format!("SELECT {name}(a) FROM stream"),
+            format!("SELECT {name}(a, status = 'running', status = 'stopped') FROM stream"),
             format!("SELECT {name}(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k) FROM stream"),
         ],
         aggregate: None,
@@ -179,37 +224,85 @@ impl Default for AccAvgFunction {
 #[derive(Default)]
 struct AccSumInstance {
     sum: f64,
+    has_begin: bool,
 }
 
 #[derive(Default)]
 struct AccMaxInstance {
     value: Option<f64>,
+    has_begin: bool,
 }
 
 #[derive(Default)]
 struct AccMinInstance {
     value: Option<f64>,
+    has_begin: bool,
 }
 
 #[derive(Default)]
 struct AccCountInstance {
     count: i64,
+    has_begin: bool,
 }
 
 #[derive(Default)]
 struct AccAvgInstance {
     sum: f64,
     count: u64,
+    has_begin: bool,
 }
 
 fn validate_arg_count(name: &str, args: &[Value]) -> Result<(), String> {
-    if args.len() != 1 {
+    if args.len() != 1 && args.len() != 3 {
         return Err(format!(
-            "{name} expects exactly 1 argument in the current implementation, got {}",
+            "{name} expects either 1 argument or 3 arguments: {name}(value[, begin_cond, reset_cond]), got {}",
             args.len()
         ));
     }
     Ok(())
+}
+
+struct AccLifecycle {
+    should_update: bool,
+    reset_before_eval: bool,
+    reset_after_eval: bool,
+}
+
+fn condition_arg(name: &str, arg_name: &str, value: &Value) -> Result<bool, String> {
+    match value {
+        Value::Bool(v) => Ok(*v),
+        Value::Null => Ok(false),
+        other => Err(format!("{name} {arg_name} must be bool, got {other:?}")),
+    }
+}
+
+fn prepare_lifecycle(
+    name: &str,
+    args: &[Value],
+    should_apply: bool,
+    has_begin: &mut bool,
+) -> Result<AccLifecycle, String> {
+    validate_arg_count(name, args)?;
+    if args.len() == 1 {
+        return Ok(AccLifecycle {
+            should_update: should_apply,
+            reset_before_eval: false,
+            reset_after_eval: false,
+        });
+    }
+
+    let reset_before_eval = !*has_begin;
+    let begin_cond = condition_arg(name, "begin_cond", &args[1])?;
+    let reset_cond = condition_arg(name, "reset_cond", &args[2])?;
+    if begin_cond {
+        *has_begin = true;
+    }
+
+    Ok(AccLifecycle {
+        should_update: *has_begin && should_apply,
+        reset_before_eval,
+        reset_after_eval: reset_cond,
+    })
 }
 
 fn numeric_arg(name: &str, value: &Value) -> Result<Option<f64>, String> {
@@ -228,12 +321,8 @@ fn validate_numeric_return_type(
     name: &str,
     input_types: &[ConcreteDatatype],
 ) -> Result<ConcreteDatatype, String> {
-    if input_types.len() != 1 {
-        return Err(format!(
-            "{name} expects exactly 1 argument type, got {}",
-            input_types.len()
-        ));
-    }
+    validate_return_type_arity(name, input_types)?;
+    validate_lifecycle_return_types(name, input_types)?;
 
     match &input_types[0] {
         ConcreteDatatype::Int8(_)
@@ -250,22 +339,73 @@ fn validate_numeric_return_type(
     }
 }
 
+fn validate_return_type_arity(name: &str, input_types: &[ConcreteDatatype]) -> Result<(), String> {
+    if input_types.len() != 1 && input_types.len() != 3 {
+        return Err(format!(
+            "{name} expects either 1 argument type or 3 argument types, got {}",
+            input_types.len()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_lifecycle_return_types(
+    name: &str,
+    input_types: &[ConcreteDatatype],
+) -> Result<(), String> {
+    if input_types.len() == 3 {
+        for (arg_name, ty) in [
+            ("begin_cond", &input_types[1]),
+            ("reset_cond", &input_types[2]),
+        ] {
+            match ty {
+                ConcreteDatatype::Bool(_) | ConcreteDatatype::Null => {}
+                other => {
+                    return Err(format!("{name} {arg_name} must be bool, got {other:?}"));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 impl StatefulFunctionInstance for AccSumInstance {
     fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        validate_arg_count("acc_sum", input.args)?;
-        if input.should_apply {
+        let lifecycle = prepare_lifecycle(
+            "acc_sum",
+            input.args,
+            input.should_apply,
+            &mut self.has_begin,
+        )?;
+        if lifecycle.reset_before_eval {
+            self.sum = 0.0;
+        }
+        if lifecycle.should_update {
             if let Some(value) = numeric_arg("acc_sum", &input.args[0])? {
                 self.sum += value;
             }
         }
-        Ok(Value::Float64(self.sum))
+        let out = Value::Float64(self.sum);
+        if lifecycle.reset_after_eval {
+            self.sum = 0.0;
+            self.has_begin = false;
+        }
+        Ok(out)
     }
 }
 
 impl StatefulFunctionInstance for AccMaxInstance {
     fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        validate_arg_count("acc_max", input.args)?;
-        if input.should_apply {
+        let lifecycle = prepare_lifecycle(
+            "acc_max",
+            input.args,
+            input.should_apply,
+            &mut self.has_begin,
+        )?;
+        if lifecycle.reset_before_eval {
+            self.value = None;
+        }
+        if lifecycle.should_update {
             if let Some(value) = numeric_arg("acc_max", &input.args[0])? {
                 self.value = Some(match self.value {
                     Some(current) => current.max(value),
@@ -273,14 +413,27 @@ impl StatefulFunctionInstance for AccMaxInstance {
                 });
             }
         }
-        Ok(Value::Float64(self.value.unwrap_or(0.0)))
+        let out = Value::Float64(self.value.unwrap_or(0.0));
+        if lifecycle.reset_after_eval {
+            self.value = None;
+            self.has_begin = false;
+        }
+        Ok(out)
     }
 }
 
 impl StatefulFunctionInstance for AccMinInstance {
     fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        validate_arg_count("acc_min", input.args)?;
-        if input.should_apply {
+        let lifecycle = prepare_lifecycle(
+            "acc_min",
+            input.args,
+            input.should_apply,
+            &mut self.has_begin,
+        )?;
+        if lifecycle.reset_before_eval {
+            self.value = None;
+        }
+        if lifecycle.should_update {
             if let Some(value) = numeric_arg("acc_min", &input.args[0])? {
                 self.value = Some(match self.value {
                     Some(current) => current.min(value),
@@ -288,34 +441,67 @@ impl StatefulFunctionInstance for AccMinInstance {
                 });
             }
         }
-        Ok(Value::Float64(self.value.unwrap_or(0.0)))
+        let out = Value::Float64(self.value.unwrap_or(0.0));
+        if lifecycle.reset_after_eval {
+            self.value = None;
+            self.has_begin = false;
+        }
+        Ok(out)
     }
 }
 
 impl StatefulFunctionInstance for AccCountInstance {
     fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        validate_arg_count("acc_count", input.args)?;
-        if input.should_apply && !input.args[0].is_null() {
+        let lifecycle = prepare_lifecycle(
+            "acc_count",
+            input.args,
+            input.should_apply,
+            &mut self.has_begin,
+        )?;
+        if lifecycle.reset_before_eval {
+            self.count = 0;
+        }
+        if lifecycle.should_update && !input.args[0].is_null() {
             self.count = self.count.saturating_add(1);
         }
-        Ok(Value::Int64(self.count))
+        let out = Value::Int64(self.count);
+        if lifecycle.reset_after_eval {
+            self.count = 0;
+            self.has_begin = false;
+        }
+        Ok(out)
     }
 }
 
 impl StatefulFunctionInstance for AccAvgInstance {
     fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
-        validate_arg_count("acc_avg", input.args)?;
-        if input.should_apply {
+        let lifecycle = prepare_lifecycle(
+            "acc_avg",
+            input.args,
+            input.should_apply,
+            &mut self.has_begin,
+        )?;
+        if lifecycle.reset_before_eval {
+            self.sum = 0.0;
+            self.count = 0;
+        }
+        if lifecycle.should_update {
             if let Some(value) = numeric_arg("acc_avg", &input.args[0])? {
                 self.sum += value;
                 self.count = self.count.saturating_add(1);
             }
         }
-        if self.count == 0 {
-            Ok(Value::Float64(0.0))
+        let out = if self.count == 0 {
+            Value::Float64(0.0)
         } else {
-            Ok(Value::Float64(self.sum / self.count as f64))
+            Value::Float64(self.sum / self.count as f64)
+        };
+        if lifecycle.reset_after_eval {
+            self.sum = 0.0;
+            self.count = 0;
+            self.has_begin = false;
         }
+        Ok(out)
     }
 }
 
@@ -367,12 +553,8 @@ impl StatefulFunction for AccCountFunction {
     }
 
     fn return_type(&self, input_types: &[ConcreteDatatype]) -> Result<ConcreteDatatype, String> {
-        if input_types.len() != 1 {
-            return Err(format!(
-                "acc_count expects exactly 1 argument type, got {}",
-                input_types.len()
-            ));
-        }
+        validate_return_type_arity("acc_count", input_types)?;
+        validate_lifecycle_return_types("acc_count", input_types)?;
         Ok(ConcreteDatatype::Int64(Int64Type))
     }
 

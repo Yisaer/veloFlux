@@ -169,6 +169,11 @@ acc_max(x)
 acc_min(x)
 acc_count(x)
 acc_avg(x)
+acc_sum(x, begin_cond, reset_cond)
+acc_max(x, begin_cond, reset_cond)
+acc_min(x, begin_cond, reset_cond)
+acc_count(x, begin_cond, reset_cond)
+acc_avg(x, begin_cond, reset_cond)
 ```
 
 Semantics:
@@ -182,10 +187,19 @@ Semantics:
   numeric value has been accepted.
 - `acc_count` returns `0` before any non-`NULL` value has been accepted.
 - Numeric acc functions reject non-numeric values at runtime.
+- The three-argument form adds lifecycle control:
+  - `begin_cond` opens the accumulation lifecycle for the current partition when it evaluates to
+    `true`.
+  - `reset_cond` closes the accumulation lifecycle for the current partition after the current row
+    has been evaluated when it evaluates to `true`.
+  - Before `begin_cond` has opened the lifecycle, the accumulator stays at its initial value.
+  - `begin_cond` and `reset_cond` must evaluate to boolean values. `NULL` is treated as `false`.
+  - A lifecycle with only a begin condition can be written as `acc_sum(x, begin_cond, false)`.
 - When `OVER (PARTITION BY ...)` is absent, each acc call keeps one global state.
 - When `OVER (PARTITION BY ...)` is present, each acc call keeps independent state per partition.
 - `FILTER (WHERE ...)` controls whether the current row updates the acc state. When the filter is
   false, the function returns the current visible state without advancing it.
+- `FILTER (WHERE ...)` does not prevent `begin_cond` or `reset_cond` from being evaluated.
 - Multiple acc calls can appear in the same statement. Each distinct call keeps independent state.
 
 Examples:
@@ -196,6 +210,14 @@ SELECT acc_sum(a) AS running_total FROM stream
 
 ```sql
 SELECT acc_count(status) AS seen_status_count FROM stream
+```
+
+```sql
+SELECT acc_sum(a, status = 'running', status = 'stopped') AS running_total FROM stream
+```
+
+```sql
+SELECT acc_sum(a, status = 'running', false) AS total_after_start FROM stream
 ```
 
 ```sql
@@ -217,14 +239,16 @@ For stateful functions, the current implementation supports only:
 
 For acc functions, the current implementation supports only:
 
-- One positional expression argument in the currently supported built-in acc functions.
+- One positional expression argument, or three positional expression arguments in the shape
+  `acc_x(value, begin_cond, reset_cond)`.
 - Optional `FILTER (WHERE <expr>)`.
 - Optional `OVER (PARTITION BY <expr> [, <expr> ...])`.
 - Multiple acc calls in one statement.
 
 The following acc shapes are rejected:
 
-- Multiple positional arguments in the currently supported built-in acc functions.
+- Two positional arguments.
+- More than three positional arguments.
 
 The following are rejected:
 
