@@ -12,8 +12,9 @@ use tokio::time::Duration;
 
 use super::common::ColumnCheck;
 use super::common::{
-    build_expected_json, declare_memory_input_output_topics, install_memory_stream_schema,
-    make_memory_topics, normalize_json, publish_input_collection, recv_next_json,
+    assert_no_json_output, build_expected_json, declare_memory_input_output_topics,
+    install_memory_stream_schema, make_memory_topics, normalize_json, publish_input_collection,
+    recv_next_json,
 };
 
 struct ExpectedCollection {
@@ -1599,6 +1600,184 @@ async fn stateful_projection_followed_by_row_diff_delta_output() {
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
 }
 
+// coverage-covers: parser.function.stateful_functions, sink.output.row_diff, sink.output.omit_if_empty
+#[tokio::test]
+async fn acc_lifecycle_delta_omit_if_empty_suppresses_unchanged_inactive_state() {
+    let case_name = "acc_lifecycle_delta_omit_if_empty_suppresses_unchanged_inactive_state";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("stateful_function_delta_omit", case_name);
+    let schema_hint = vec![
+        (
+            "a".to_string(),
+            vec![Value::Float64(10.0), Value::Float64(20.0)],
+        ),
+        (
+            "start".to_string(),
+            vec![Value::Bool(false), Value::Bool(true)],
+        ),
+        (
+            "stop".to_string(),
+            vec![Value::Bool(false), Value::Bool(true)],
+        ),
+    ];
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    install_memory_stream_schema(&instance, &input_topic, &schema_hint).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT acc_sum(a, start, stop) AS total FROM stream",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )
+        .with_output(SinkOutputConfig::delta().with_omit_if_empty(true))],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    let inactive_batch = batch_from_columns_simple(vec![
+        (
+            "stream".to_string(),
+            "a".to_string(),
+            vec![Value::Float64(10.0), Value::Float64(20.0)],
+        ),
+        (
+            "stream".to_string(),
+            "start".to_string(),
+            vec![Value::Bool(false), Value::Bool(false)],
+        ),
+        (
+            "stream".to_string(),
+            "stop".to_string(),
+            vec![Value::Bool(false), Value::Bool(false)],
+        ),
+    ])
+    .expect("create inactive acc batch");
+    publish_input_collection(
+        &instance,
+        &input_topic,
+        Box::new(inactive_batch),
+        timeout_duration,
+    )
+    .await;
+
+    let first_actual: JsonValue = recv_next_json(&mut output, timeout_duration).await;
+    let first_expected = serde_json::json!([
+        {"total": 0.0},
+        {}
+    ]);
+    assert_eq!(
+        normalize_json(first_actual),
+        normalize_json(first_expected),
+        "Wrong initial inactive delta JSON for test: {}",
+        case_name
+    );
+
+    let repeated_inactive_batch = batch_from_columns_simple(vec![
+        (
+            "stream".to_string(),
+            "a".to_string(),
+            vec![Value::Float64(10.0), Value::Float64(20.0)],
+        ),
+        (
+            "stream".to_string(),
+            "start".to_string(),
+            vec![Value::Bool(false), Value::Bool(false)],
+        ),
+        (
+            "stream".to_string(),
+            "stop".to_string(),
+            vec![Value::Bool(false), Value::Bool(false)],
+        ),
+    ])
+    .expect("create repeated inactive acc batch");
+    publish_input_collection(
+        &instance,
+        &input_topic,
+        Box::new(repeated_inactive_batch),
+        timeout_duration,
+    )
+    .await;
+    assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+
+    let active_batch = batch_from_columns_simple(vec![
+        (
+            "stream".to_string(),
+            "a".to_string(),
+            vec![
+                Value::Float64(1.0),
+                Value::Float64(2.0),
+                Value::Float64(3.0),
+                Value::Float64(4.0),
+            ],
+        ),
+        (
+            "stream".to_string(),
+            "start".to_string(),
+            vec![
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+                Value::Bool(true),
+            ],
+        ),
+        (
+            "stream".to_string(),
+            "stop".to_string(),
+            vec![
+                Value::Bool(false),
+                Value::Bool(true),
+                Value::Bool(false),
+                Value::Bool(false),
+            ],
+        ),
+    ])
+    .expect("create active acc batch");
+    publish_input_collection(
+        &instance,
+        &input_topic,
+        Box::new(active_batch),
+        timeout_duration,
+    )
+    .await;
+
+    let active_actual: JsonValue = recv_next_json(&mut output, timeout_duration).await;
+    let active_expected = serde_json::json!([
+        {"total": 1.0},
+        {"total": 3.0},
+        {"total": 0.0},
+        {"total": 4.0}
+    ]);
+    assert_eq!(
+        normalize_json(active_actual),
+        normalize_json(active_expected),
+        "Wrong active lifecycle delta JSON for test: {}",
+        case_name
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to stop pipeline for test {}: {err}", case_name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
+}
+
 // coverage-covers: parser.function.stateful_functions, sink.output.batching, sink.connector.memory_output
 #[tokio::test]
 async fn stateful_projection_with_batched_streaming_encoder() {
@@ -1669,6 +1848,99 @@ async fn stateful_projection_with_batched_streaming_encoder() {
         normalize_json(actual_second),
         normalize_json(expected_second),
         "Wrong second batched JSON for test: {}",
+        case_name
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to stop pipeline for test {}: {err}", case_name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
+}
+
+// coverage-covers: parser.function.stateful_functions, sink.output.batching, sink.connector.memory_output
+#[tokio::test]
+async fn acc_lifecycle_with_batched_streaming_encoder() {
+    let case_name = "acc_lifecycle_with_batched_streaming_encoder";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("stateful_function_batching", case_name);
+    let input_data = vec![
+        (
+            "a".to_string(),
+            vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+        ),
+        (
+            "start".to_string(),
+            vec![Value::Bool(true), Value::Bool(false), Value::Bool(true)],
+        ),
+        (
+            "stop".to_string(),
+            vec![Value::Bool(false), Value::Bool(true), Value::Bool(false)],
+        ),
+    ];
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    install_memory_stream_schema(&instance, &input_topic, &input_data).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT acc_count(a, start, stop) AS n FROM stream",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )
+        .with_common_props(CommonSinkProps {
+            batch_count: Some(2),
+            batch_duration: Some(Duration::from_millis(50)),
+        })],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let columns = input_data
+        .into_iter()
+        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+        .collect();
+    let batch = batch_from_columns_simple(columns)
+        .unwrap_or_else(|_| panic!("Failed to create test RecordBatch for: {}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+
+    let actual_first: JsonValue = recv_next_json(&mut output, timeout_duration).await;
+    let expected_first = serde_json::json!([
+        {"n": 1},
+        {"n": 2}
+    ]);
+    assert_eq!(
+        normalize_json(actual_first),
+        normalize_json(expected_first),
+        "Wrong first acc batched JSON for test: {}",
+        case_name
+    );
+
+    let actual_second: JsonValue = recv_next_json(&mut output, timeout_duration).await;
+    let expected_second = serde_json::json!([
+        {"n": 1}
+    ]);
+    assert_eq!(
+        normalize_json(actual_second),
+        normalize_json(expected_second),
+        "Wrong second acc batched JSON for test: {}",
         case_name
     );
 

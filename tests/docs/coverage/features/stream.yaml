@@ -65,3 +65,11 @@ features:
       - docs/syntax/functions/date_time_functions.md
       - docs/syntax/functions/function_semantics.md
     status: active
+
+  - id: stream.function.custom_udf
+    title: Custom UDF functions
+    summary: Evaluate registered custom scalar functions through the SQL-visible function registry contract.
+    doc_refs:
+      - docs/integrations/wasm-udf.md
+      - docs/syntax/functions/function_semantics.md
+    status: active

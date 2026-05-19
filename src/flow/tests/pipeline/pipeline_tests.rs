@@ -2068,6 +2068,105 @@ async fn memory_source_json_timestamp_decodes_filters_and_encodes_utc() {
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for {}: {err}", case_name));
 }
 
+// coverage-covers: stream.datatype.timestamp, stream.function.date_time_scalars, source.memory.bytes_input, sink.connector.memory_output
+#[tokio::test]
+async fn memory_source_json_timestamp_feeds_date_time_scalars() {
+    let case_name = "memory_source_json_timestamp_feeds_date_time_scalars";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_timestamp", case_name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+
+    let schema_ts = TimestampValue::parse_rfc3339("2026-05-08T10:20:30Z").expect("valid timestamp");
+    install_memory_json_stream_schema_with_name(
+        &instance,
+        &input_topic,
+        "stream_ts",
+        &[("event_time".to_string(), vec![Value::Timestamp(schema_ts)])],
+    )
+    .await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT format_time(event_time, '%Y-%m-%d %H:%M:%S') AS formatted, day_of_month(event_time) AS day, month_name(event_time) AS month_name, second(event_time) AS second FROM stream_ts WHERE day(event_time) = 8",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    instance
+        .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
+        .await
+        .expect("wait for bytes source subscriber");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open input bytes publisher");
+    publisher
+        .publish_bytes(
+            serde_json::to_vec(&serde_json::json!([
+                {"event_time": "2026-05-08T18:20:30+08:00"},
+                {"event_time": "2026-05-09T00:00:01Z"}
+            ]))
+            .expect("encode timestamp date-time source rows"),
+        )
+        .expect("publish timestamp date-time source rows");
+
+    let actual = recv_next_json(&mut output, timeout_duration).await;
+    let expected = serde_json::json!([
+        {
+            "formatted": "2026-05-08 10:20:30",
+            "day": 8,
+            "month_name": "May",
+            "second": 30
+        }
+    ]);
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected),
+        "Wrong timestamp date-time JSON output for test: {}",
+        case_name
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to stop pipeline for {}: {err}", case_name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for {}: {err}", case_name));
+}
+
 // coverage-covers: source.memory.bytes_input, sink.output.batching
 #[tokio::test]
 async fn memory_source_bytes_topic_batches_json_output() {
@@ -3279,6 +3378,7 @@ impl flow::CustomFunc for DoubleUdf {
     }
 }
 
+// coverage-covers: stream.function.custom_udf, sink.connector.memory_output
 #[tokio::test]
 async fn udf() {
     let test_name = "udf";
@@ -3357,7 +3457,10 @@ async fn udf() {
         "3 doubled should be 6"
     );
 
-    let _ = instance.stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration);
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .expect("stop pipeline");
     instance
         .delete_pipeline(&pipeline_id)
         .await

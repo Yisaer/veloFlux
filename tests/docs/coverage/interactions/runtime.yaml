@@ -295,6 +295,33 @@ interactions:
       - sink.connector.memory_output
     status: active
 
+  - id: runtime.stateful.row_diff_omit_if_empty
+    title: Stateful row-diff omit-if-empty output
+    summary: Validate stateful projection lifecycle output together with row-diff tracking and omit-if-empty suppression.
+    features:
+      - parser.function.stateful_functions
+      - sink.output.row_diff
+      - sink.output.omit_if_empty
+    status: active
+
+  - id: runtime.timestamp.date_time_memory_output
+    title: Timestamp date-time memory output
+    summary: Validate timestamp decoding together with date/time scalar evaluation and memory sink output.
+    features:
+      - stream.datatype.timestamp
+      - stream.function.date_time_scalars
+      - source.memory.bytes_input
+      - sink.connector.memory_output
+    status: active
+
+  - id: runtime.custom_udf.memory_output
+    title: Custom UDF memory output
+    summary: Validate registered custom UDF evaluation through memory sink output.
+    features:
+      - stream.function.custom_udf
+      - sink.connector.memory_output
+    status: active
+
   - id: runtime.memory_collection_source_materialize_pairing
     title: Memory collection source materialize pairing
     summary: Validate memory collection input together with memory collection sink materialization and SQL-visible aliases.
