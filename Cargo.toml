@@ -60,6 +60,7 @@ allocator-system = []
 deadlock_detection = ["flow/deadlock_detection", "manager/deadlock_detection", "parking_lot/deadlock_detection"]
 gmp_force_cross = ["flow/gmp_force_cross"]
 wasm_udf = ["manager/wasm_udf", "veloflux_sdv/wasm_udf"]
+video_gstreamer = ["flow/video_gstreamer"]
 
 [dev-dependencies]
 bytes = "1"

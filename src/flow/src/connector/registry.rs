@@ -2,6 +2,7 @@ use super::sink::kuksa::KuksaSinkConnector;
 use super::sink::memory::MemorySinkConnector;
 use super::sink::mqtt::MqttSinkConnector;
 use super::sink::nop::NopSinkConnector;
+use super::sink::video::VideoSinkConnector;
 use super::sink::SinkConnector;
 use super::ConnectorError;
 use crate::connector::MemoryPubSubRegistry;
@@ -142,6 +143,20 @@ impl ConnectorRegistry {
                 ))),
                 other => Err(ConnectorError::Other(format!(
                     "connector `{sink_id}` expected Memory config but received {:?}",
+                    other.kind()
+                ))),
+            }),
+        );
+
+        self.register_sink_factory(
+            "video",
+            Arc::new(|sink_id, config, _, _, _| match config {
+                SinkConnectorConfig::Video(cfg) => Ok(Box::new(VideoSinkConnector::new(
+                    sink_id.to_string(),
+                    cfg.clone(),
+                ))),
+                other => Err(ConnectorError::Other(format!(
+                    "connector `{sink_id}` expected Video config but received {:?}",
                     other.kind()
                 ))),
             }),

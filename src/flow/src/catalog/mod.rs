@@ -28,6 +28,8 @@ pub enum CatalogError {
 pub enum StreamProps {
     /// Stream is backed by an MQTT connector.
     Mqtt(MqttStreamProps),
+    /// Stream is backed by a video source.
+    Video(VideoStreamProps),
     /// Stream is backed by an in-memory mock connector (tests only).
     Mock(MockStreamProps),
     /// Stream is backed by a History source (Parquet files).
@@ -41,6 +43,8 @@ pub enum StreamProps {
 pub enum StreamType {
     /// Stream backed by an MQTT source.
     Mqtt,
+    /// Stream backed by a video source.
+    Video,
     /// Stream backed by a mock source.
     Mock,
     /// Stream backed by a history source.
@@ -78,6 +82,49 @@ impl MqttStreamProps {
     pub fn with_connector_key(mut self, key: impl Into<String>) -> Self {
         self.connector_key = Some(key.into());
         self
+    }
+}
+
+/// Properties for video streams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoStreamProps {
+    pub url: String,
+    pub rtsp_transport: VideoRtspTransport,
+    pub reconnect: VideoReconnectConfig,
+}
+
+/// RTSP transport mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoRtspTransport {
+    #[default]
+    Tcp,
+    Udp,
+}
+
+impl VideoRtspTransport {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VideoRtspTransport::Tcp => "tcp",
+            VideoRtspTransport::Udp => "udp",
+        }
+    }
+}
+
+/// Reconnect behavior for live video sources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoReconnectConfig {
+    pub enabled: bool,
+    pub initial_delay: std::time::Duration,
+    pub max_delay: std::time::Duration,
+}
+
+impl Default for VideoReconnectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            initial_delay: std::time::Duration::from_secs(1),
+            max_delay: std::time::Duration::from_secs(30),
+        }
     }
 }
 
@@ -158,6 +205,7 @@ impl StreamDefinition {
     ) -> Self {
         let stream_type = match props {
             StreamProps::Mqtt(_) => StreamType::Mqtt,
+            StreamProps::Video(_) => StreamType::Video,
             StreamProps::Mock(_) => StreamType::Mock,
             StreamProps::History(_) => StreamType::History,
             StreamProps::Memory(_) => StreamType::Memory,
@@ -237,6 +285,10 @@ impl StreamDecoderConfig {
 
     pub fn json() -> Self {
         Self::new("json", JsonMap::new())
+    }
+
+    pub fn none() -> Self {
+        Self::new("none", JsonMap::new())
     }
 }
 

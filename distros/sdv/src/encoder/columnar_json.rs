@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use flow::codec::encoder::{CollectionEncoder, CollectionEncoderStream, EncodeError};
 use flow::model::Collection;
 use flow::planner::physical::output_schema::OutputSchema;
@@ -143,6 +145,7 @@ fn to_json_value(val: &datatypes::Value) -> JsonValue {
             .map(JsonValue::Number)
             .unwrap_or(JsonValue::Null),
         String(s) => JsonValue::String(s.clone()),
+        Bytes(bytes) => JsonValue::String(BASE64_STANDARD.encode(bytes.as_ref())),
         Timestamp(ts) => ts
             .to_rfc3339_utc()
             .map(JsonValue::String)

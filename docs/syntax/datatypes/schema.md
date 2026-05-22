@@ -44,6 +44,7 @@ contract.
 | `float32` | 32-bit floating point number. |
 | `float64` | 64-bit floating point number. |
 | `string` | UTF-8 string. |
+| `bytes` | Opaque binary payload. |
 | `timestamp` | Absolute timestamp value normalized to UTC. |
 
 ## List Syntax

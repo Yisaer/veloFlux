@@ -2,6 +2,8 @@ use crate::catalog::{
     FunctionArgSpec, FunctionContext, FunctionDef, FunctionKind, FunctionSignatureSpec, TypeSpec,
 };
 use crate::expr::func::EvalError;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use datatypes::{
     ConcreteDatatype, ListValue, StructField, StructType, StructValue, TimestampValue, Value,
 };
@@ -1164,6 +1166,9 @@ pub fn value_to_json_value(v: &Value) -> Result<serde_json::Value, EvalError> {
             }),
 
         Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+        Value::Bytes(bytes) => Ok(serde_json::Value::String(
+            BASE64_STANDARD.encode(bytes.as_ref()),
+        )),
 
         Value::Timestamp(ts) => ts
             .to_rfc3339_utc()

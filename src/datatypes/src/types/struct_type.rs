@@ -102,6 +102,7 @@ fn get_type_name(dt: &ConcreteDatatype) -> String {
         ConcreteDatatype::Uint32(_) => "Uint32",
         ConcreteDatatype::Uint64(_) => "Uint64",
         ConcreteDatatype::String(_) => "String",
+        ConcreteDatatype::Bytes(_) => "Bytes",
         ConcreteDatatype::Bool(_) => "Boolean",
         ConcreteDatatype::Timestamp(_) => "Timestamp",
         ConcreteDatatype::Struct(_) => "Struct",
@@ -124,6 +125,7 @@ fn get_default_value(dt: &ConcreteDatatype) -> Value {
         ConcreteDatatype::Uint32(_) => Value::Uint32(0),
         ConcreteDatatype::Uint64(_) => Value::Uint64(0),
         ConcreteDatatype::String(_) => Value::String(String::new()),
+        ConcreteDatatype::Bytes(_) => Value::Bytes(bytes::Bytes::new()),
         ConcreteDatatype::Bool(_) => Value::Bool(false),
         ConcreteDatatype::Timestamp(_) => {
             Value::Timestamp(crate::TimestampValue::from_epoch_micros(0))

@@ -1,5 +1,4 @@
-use crate::catalog::EventtimeDefinition;
-use crate::catalog::StreamDecoderConfig;
+use crate::catalog::{EventtimeDefinition, StreamDecoderConfig, StreamType};
 use crate::pipeline::SourceInputConfig;
 use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::logical::BaseLogicalPlan;
@@ -11,6 +10,7 @@ use std::sync::Arc;
 pub struct DataSource {
     pub base: BaseLogicalPlan,
     pub source_name: String,
+    pub stream_type: StreamType,
     pub alias: Option<String>,
     pub decoder: StreamDecoderConfig,
     pub schema: Arc<Schema>,
@@ -38,6 +38,7 @@ impl DataSource {
         Self {
             base,
             source_name,
+            stream_type: StreamType::Mock,
             alias,
             decoder,
             schema,
@@ -49,8 +50,17 @@ impl DataSource {
         }
     }
 
+    pub fn with_stream_type(mut self, stream_type: StreamType) -> Self {
+        self.stream_type = stream_type;
+        self
+    }
+
     pub fn decoder(&self) -> &StreamDecoderConfig {
         &self.decoder
+    }
+
+    pub fn stream_type(&self) -> StreamType {
+        self.stream_type
     }
 
     pub fn schema(&self) -> Arc<Schema> {

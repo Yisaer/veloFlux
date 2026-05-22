@@ -3,6 +3,7 @@ use flow::EncoderRegistry;
 use flow::pipeline::{
     KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
     PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType, SourceDefinition,
+    VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
 use parser::SelectStmt;
@@ -14,6 +15,7 @@ use std::time::Duration;
 use super::types::{
     CreatePipelineRequest, CreatePipelineSourceRequest, EncoderTransformRequest,
     MemorySinkPropsRequest, MqttSinkPropsRequest, NopSinkPropsRequest, SinkOutputConfigRequest,
+    VideoSinkPropsRequest,
 };
 
 #[derive(Deserialize)]
@@ -21,6 +23,66 @@ struct KuksaSinkPropsRequest {
     pub addr: Option<String>,
     #[serde(rename = "vss_path")]
     pub vss_path: Option<String>,
+}
+
+fn build_video_sink_props(
+    sink_id: &str,
+    req: VideoSinkPropsRequest,
+) -> Result<VideoSinkProps, String> {
+    let path = req
+        .path
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "video sink requires props.path".to_string())?;
+    if let Some(prefix) = &req.filename_prefix {
+        flow::pipeline::validate_video_filename_prefix(prefix)
+            .map_err(|err| format!("invalid video sink filename_prefix: {err}"))?;
+    }
+    let codec = match req.codec.trim().to_ascii_lowercase().as_str() {
+        "h264" => VideoCodec::H264,
+        "h265" => VideoCodec::H265,
+        other => {
+            return Err(format!(
+                "unsupported video codec `{other}` (expected h264|h265)"
+            ));
+        }
+    };
+    let container = match req.container.trim().to_ascii_lowercase().as_str() {
+        "mp4" => VideoContainer::Mp4,
+        other => {
+            return Err(format!(
+                "unsupported video container `{other}` (expected mp4)"
+            ));
+        }
+    };
+    let rolling = match req
+        .rolling
+        .rolling_type
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "duration" => {
+            if req.rolling.seconds == 0 {
+                return Err("video sink rolling duration requires positive seconds".to_string());
+            }
+            VideoRollingConfig::Duration {
+                seconds: req.rolling.seconds,
+            }
+        }
+        other => {
+            return Err(format!(
+                "unsupported video rolling type `{other}` for sink `{sink_id}` (expected duration)"
+            ));
+        }
+    };
+    let mut props = VideoSinkProps::new(path, rolling)
+        .with_codec(codec)
+        .with_container(container);
+    if let Some(prefix) = req.filename_prefix {
+        props = props.with_filename_prefix(prefix);
+    }
+    Ok(props)
 }
 
 fn normalized_optional_string(value: Option<String>) -> Option<String> {
@@ -253,11 +315,30 @@ pub(crate) fn build_pipeline_definition(
                     SinkProps::Memory(MemorySinkProps::new(topic)),
                 )
             }
+            "video" => {
+                let video_props: VideoSinkPropsRequest =
+                    serde_json::from_value(sink_req.props.to_value())
+                        .map_err(|err| format!("invalid video sink props: {err}"))?;
+                let props = build_video_sink_props(&sink_id, video_props)?;
+                SinkDefinition::new(sink_id.clone(), SinkType::Video, SinkProps::Video(props))
+            }
             other => return Err(format!("unsupported sink type: {other}")),
         };
 
         let mut encoder_config = match sink_definition.sink_type {
             SinkType::Kuksa => SinkEncoderConfig::new("none", JsonMap::new()),
+            SinkType::Video => {
+                let default_encoder = sink_req.encoder.encode_type.eq_ignore_ascii_case("json")
+                    && sink_req.encoder.props.is_empty()
+                    && sink_req.encoder.transform.is_none();
+                let none_encoder = sink_req.encoder.encode_type.eq_ignore_ascii_case("none")
+                    && sink_req.encoder.props.is_empty()
+                    && sink_req.encoder.transform.is_none();
+                if !default_encoder && !none_encoder {
+                    return Err("video sink does not support encoder config".to_string());
+                }
+                SinkEncoderConfig::new("none", JsonMap::new())
+            }
             SinkType::Memory if sink_req.encoder.encode_type.eq_ignore_ascii_case("none") => {
                 SinkEncoderConfig::new("none", sink_req.encoder.props.clone())
             }
@@ -281,6 +362,9 @@ pub(crate) fn build_pipeline_definition(
             .map(SinkOutputConfigRequest::to_output_config)
             .transpose()?
             .unwrap_or_default();
+        if matches!(sink_definition.sink_type, SinkType::Video) && output_config.is_delta() {
+            return Err("video sink does not support output.mode=delta".to_string());
+        }
 
         let sink_definition = sink_definition
             .with_encoder(encoder_config)

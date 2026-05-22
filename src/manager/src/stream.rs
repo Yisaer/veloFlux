@@ -12,7 +12,8 @@ use axum::{
 use flow::DecoderRegistry;
 use flow::catalog::{
     CatalogError, EventtimeDefinition, HistoryStreamProps, MemoryStreamProps, MockStreamProps,
-    MqttStreamProps, StreamDecoderConfig,
+    MqttStreamProps, StreamDecoderConfig, VideoReconnectConfig, VideoRtspTransport,
+    VideoStreamProps,
 };
 use flow::processor::ProcessorStatsEntry;
 use flow::processor::SamplerConfig;
@@ -27,9 +28,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 
 use flow::{
-    BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int8Type, Int16Type,
-    Int32Type, Int64Type, ListType, StringType, StructField, StructType, TimestampType, Uint8Type,
-    Uint16Type, Uint32Type, Uint64Type,
+    BooleanType, BytesType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int8Type,
+    Int16Type, Int32Type, Int64Type, ListType, StringType, StructField, StructType, TimestampType,
+    Uint8Type, Uint16Type, Uint32Type, Uint64Type,
 };
 use storage::{StorageError, StorageManager, StoredMemoryTopicKind};
 
@@ -38,6 +39,7 @@ pub struct CreateStreamRequest {
     pub name: String,
     #[serde(rename = "type")]
     pub stream_type: String,
+    #[serde(default)]
     pub schema: SchemaConfigRequest,
     #[serde(default)]
     pub props: StreamPropsRequest,
@@ -240,6 +242,33 @@ pub struct HistoryStreamPropsRequest {
 #[serde(default)]
 pub struct MemoryStreamPropsRequest {
     pub topic: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct VideoStreamPropsRequest {
+    pub url: Option<String>,
+    pub rtsp_transport: Option<String>,
+    pub reconnect: VideoReconnectRequest,
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct VideoReconnectRequest {
+    pub enabled: bool,
+    pub initial_delay_ms: u64,
+    pub max_delay_ms: u64,
+}
+
+impl Default for VideoReconnectRequest {
+    fn default() -> Self {
+        let defaults = VideoReconnectConfig::default();
+        Self {
+            enabled: defaults.enabled,
+            initial_delay_ms: u64::try_from(defaults.initial_delay.as_millis()).unwrap_or(u64::MAX),
+            max_delay_ms: u64::try_from(defaults.max_delay.as_millis()).unwrap_or(u64::MAX),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -777,6 +806,7 @@ pub(crate) fn into_shared_stream_stats_response(
 fn stream_type_label(stream_type: flow::catalog::StreamType) -> &'static str {
     match stream_type {
         flow::catalog::StreamType::Mqtt => "mqtt",
+        flow::catalog::StreamType::Video => "video",
         flow::catalog::StreamType::Mock => "mock",
         flow::catalog::StreamType::History => "history",
         flow::catalog::StreamType::Memory => "memory",
@@ -825,9 +855,36 @@ fn stream_props_value(props: &StreamProps) -> JsonValue {
             map.insert("topic".to_string(), JsonValue::String(memory.topic.clone()));
             JsonValue::Object(map)
         }
+        StreamProps::Video(video) => video_props_value(video),
         StreamProps::Mock(_) => JsonValue::Object(JsonMap::new()),
         StreamProps::History(_) => JsonValue::Object(JsonMap::new()),
     }
+}
+
+fn video_props_value(video: &VideoStreamProps) -> JsonValue {
+    let mut map = JsonMap::new();
+    map.insert("url".to_string(), JsonValue::String(video.url.clone()));
+    if flow::pipeline::is_rtsp_video_url(&video.url) {
+        map.insert(
+            "rtsp_transport".to_string(),
+            JsonValue::String(video.rtsp_transport.as_str().to_string()),
+        );
+    }
+    let mut reconnect = JsonMap::new();
+    reconnect.insert(
+        "enabled".to_string(),
+        JsonValue::Bool(video.reconnect.enabled),
+    );
+    reconnect.insert(
+        "initial_delay_ms".to_string(),
+        JsonValue::from(duration_millis_u64(video.reconnect.initial_delay)),
+    );
+    reconnect.insert(
+        "max_delay_ms".to_string(),
+        JsonValue::from(duration_millis_u64(video.reconnect.max_delay)),
+    );
+    map.insert("reconnect".to_string(), JsonValue::Object(reconnect));
+    JsonValue::Object(map)
 }
 
 fn stream_column_info(name: &str, datatype: &ConcreteDatatype) -> StreamColumnInfo {
@@ -857,6 +914,10 @@ fn stream_column_info(name: &str, datatype: &ConcreteDatatype) -> StreamColumnIn
     info
 }
 
+fn duration_millis_u64(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 fn parse_json_schema(
     stream_name: &str,
     props: &JsonMap<String, JsonValue>,
@@ -880,6 +941,9 @@ fn schema_from_columns(
 }
 
 pub(crate) fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Schema, String> {
+    if req.stream_type.eq_ignore_ascii_case("video") {
+        return Ok(flow::codec::default_video_schema(req.name.clone()));
+    }
     schema_registry().parse(&req.schema.schema_type, &req.name, &req.schema.props)
 }
 
@@ -908,6 +972,11 @@ pub(crate) fn build_stream_props(
                 client_id: mqtt_props.client_id,
                 connector_key,
             }))
+        }
+        "video" => {
+            let video_props: VideoStreamPropsRequest = serde_json::from_value(props.to_value())
+                .map_err(|err| format!("invalid video props: {err}"))?;
+            build_video_stream_props(video_props)
         }
         "history" => {
             let history_props: HistoryStreamPropsRequest = serde_json::from_value(props.to_value())
@@ -944,10 +1013,62 @@ pub(crate) fn build_stream_props(
     }
 }
 
+fn build_video_stream_props(req: VideoStreamPropsRequest) -> Result<StreamProps, String> {
+    let url = req
+        .url
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "video stream requires props.url".to_string())?;
+    let is_rtsp = flow::pipeline::is_rtsp_video_url(&url);
+    if !is_rtsp && !flow::pipeline::is_hls_video_url(&url) {
+        return Err(
+            "video stream props.url must be rtsp://, rtsps://, or http(s)://...m3u8".to_string(),
+        );
+    }
+    let rtsp_transport = match req.rtsp_transport {
+        Some(value) if is_rtsp => match value.trim().to_ascii_lowercase().as_str() {
+            "tcp" => VideoRtspTransport::Tcp,
+            "udp" => VideoRtspTransport::Udp,
+            other => {
+                return Err(format!(
+                    "invalid video stream rtsp_transport `{other}` (expected tcp|udp)"
+                ));
+            }
+        },
+        Some(_) => {
+            return Err("video stream rtsp_transport is only valid for RTSP URLs".to_string());
+        }
+        None => VideoRtspTransport::Tcp,
+    };
+    if req.reconnect.initial_delay_ms == 0 || req.reconnect.max_delay_ms == 0 {
+        return Err("video stream reconnect delays must be positive".to_string());
+    }
+    if req.reconnect.initial_delay_ms > req.reconnect.max_delay_ms {
+        return Err(
+            "video stream reconnect initial_delay_ms must be less than or equal to max_delay_ms"
+                .to_string(),
+        );
+    }
+    Ok(StreamProps::Video(VideoStreamProps {
+        url,
+        rtsp_transport,
+        reconnect: VideoReconnectConfig {
+            enabled: req.reconnect.enabled,
+            initial_delay: std::time::Duration::from_millis(req.reconnect.initial_delay_ms),
+            max_delay: std::time::Duration::from_millis(req.reconnect.max_delay_ms),
+        },
+    }))
+}
+
 pub(crate) fn build_stream_decoder(
     req: &CreateStreamRequest,
     decoder_registry: &DecoderRegistry,
 ) -> Result<StreamDecoderConfig, String> {
+    if req.stream_type.eq_ignore_ascii_case("video")
+        && req.decoder.decode_type.eq_ignore_ascii_case("json")
+        && req.decoder.props.is_empty()
+    {
+        return Ok(StreamDecoderConfig::none());
+    }
     let decoder_config = req.decoder.clone();
     if decoder_config.decode_type == "none" {
         return Ok(StreamDecoderConfig::new(
@@ -973,6 +1094,33 @@ pub(crate) fn validate_stream_decoder_config(
 ) -> Result<(), String> {
     let stream_type = req.stream_type.to_ascii_lowercase();
     let is_none = decoder.kind() == "none";
+    if stream_type == "video" {
+        if req.shared {
+            return Err(format!(
+                "stream `{}` does not support shared=true for video streams",
+                req.name
+            ));
+        }
+        if !is_none {
+            return Err(format!(
+                "stream `{}` requires decoder type `none` for video streams",
+                req.name
+            ));
+        }
+        if req.eventtime.is_some() {
+            return Err(format!(
+                "stream `{}` does not support eventtime for video streams",
+                req.name
+            ));
+        }
+        if req.sampler.is_some() {
+            return Err(format!(
+                "stream `{}` does not support sampler for video streams",
+                req.name
+            ));
+        }
+        return Ok(());
+    }
     if req.shared && stream_type == "memory" {
         return Err(format!(
             "shared stream `{}` does not support stream type `memory`",
@@ -1082,6 +1230,7 @@ fn parse_datatype(column: &StreamColumnRequest) -> Result<ConcreteDatatype, Stri
         "float32" => Ok(ConcreteDatatype::Float32(Float32Type)),
         "float64" => Ok(ConcreteDatatype::Float64(Float64Type)),
         "string" => Ok(ConcreteDatatype::String(StringType)),
+        "bytes" => Ok(ConcreteDatatype::Bytes(BytesType)),
         "timestamp" => Ok(ConcreteDatatype::Timestamp(TimestampType)),
         "list" => {
             let element = column.element.as_deref().ok_or_else(|| {
@@ -1125,6 +1274,7 @@ fn datatype_name(datatype: &ConcreteDatatype) -> String {
         ConcreteDatatype::Uint32(_) => "uint32",
         ConcreteDatatype::Uint64(_) => "uint64",
         ConcreteDatatype::String(_) => "string",
+        ConcreteDatatype::Bytes(_) => "bytes",
         ConcreteDatatype::Timestamp(_) => "timestamp",
         ConcreteDatatype::Struct(_) => "struct",
         ConcreteDatatype::List(_) => "list",
@@ -1448,6 +1598,20 @@ mod tests {
 
         assert!(matches!(datatype, ConcreteDatatype::Timestamp(_)));
         assert_eq!(datatype_name(&datatype), "timestamp");
+    }
+
+    #[test]
+    fn parse_datatype_bytes() {
+        let column = StreamColumnRequest {
+            name: "payload".to_string(),
+            data_type: "bytes".to_string(),
+            fields: None,
+            element: None,
+        };
+        let datatype = parse_datatype(&column).expect("should parse bytes");
+
+        assert!(matches!(datatype, ConcreteDatatype::Bytes(_)));
+        assert_eq!(datatype_name(&datatype), "bytes");
     }
 
     #[test]

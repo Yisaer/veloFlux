@@ -6,6 +6,8 @@
 //!
 //! Output format: `{"email":"a@b.com,c@d.com","id":"1,2","name":"foo,bar"}`
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use datatypes::Value;
 use flow::codec::encoder::{CollectionEncoder, CollectionEncoderStream, EncodeError};
 use flow::model::{Collection, Tuple};
@@ -284,6 +286,9 @@ fn write_value_to_buffer(value: &Value, buffer: &mut String) {
         }
         Value::String(s) => {
             buffer.push_str(s);
+        }
+        Value::Bytes(bytes) => {
+            buffer.push_str(&BASE64_STANDARD.encode(bytes.as_ref()));
         }
         Value::Timestamp(ts) => {
             if let Some(value) = ts.to_rfc3339_utc() {

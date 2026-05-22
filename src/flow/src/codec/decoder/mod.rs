@@ -2,6 +2,9 @@
 
 use crate::model::{CollectionError, Message, RecordBatch, Tuple};
 use crate::planner::decode_projection::{DecodeProjection, ProjectionNode};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
+use bytes::Bytes;
 use datatypes::{
     ConcreteDatatype, ListType, ListValue, Schema, StructField, StructType, StructValue,
     TimestampValue, Value,
@@ -257,6 +260,7 @@ fn json_to_value_with_datatype(value: &JsonValue, datatype: &ConcreteDatatype) -
             _ => Value::Null,
         },
         ConcreteDatatype::Timestamp(_) => json_to_timestamp_value(value),
+        ConcreteDatatype::Bytes(_) => json_to_bytes_value(value),
         ConcreteDatatype::Int8(_)
         | ConcreteDatatype::Int16(_)
         | ConcreteDatatype::Int32(_)
@@ -293,6 +297,7 @@ fn json_to_value_with_datatype_and_projection(
             _ => Value::Null,
         },
         ConcreteDatatype::Timestamp(_) => json_to_timestamp_value(value),
+        ConcreteDatatype::Bytes(_) => json_to_bytes_value(value),
         ConcreteDatatype::Int8(_)
         | ConcreteDatatype::Int16(_)
         | ConcreteDatatype::Int32(_)
@@ -308,6 +313,17 @@ fn json_to_value_with_datatype_and_projection(
         ConcreteDatatype::Struct(struct_type) => {
             json_to_struct_value_with_datatype_and_projection(value, struct_type, projection)
         }
+    }
+}
+
+fn json_to_bytes_value(value: &JsonValue) -> Value {
+    match value {
+        JsonValue::String(s) => BASE64_STANDARD
+            .decode(s.as_bytes())
+            .map(Bytes::from)
+            .map(Value::Bytes)
+            .unwrap_or(Value::Null),
+        _ => Value::Null,
     }
 }
 
@@ -430,8 +446,8 @@ fn json_to_struct_value_with_datatype_and_projection(
 mod tests {
     use super::*;
     use datatypes::{
-        ColumnSchema, ConcreteDatatype, Int64Type, Schema, StringType, StructField, StructType,
-        TimestampType, TimestampValue, Value,
+        BytesType, ColumnSchema, ConcreteDatatype, Int64Type, Schema, StringType, StructField,
+        StructType, TimestampType, TimestampValue, Value,
     };
     use serde_json::Map as JsonMap;
 
@@ -562,6 +578,35 @@ mod tests {
                 Some(&Value::Null)
             );
         }
+    }
+
+    #[test]
+    fn json_decoder_decodes_typed_bytes_from_base64_strings() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "frames".to_string(),
+            "payload".to_string(),
+            ConcreteDatatype::Bytes(BytesType),
+        )]));
+        let decoder = JsonDecoder::new("frames", schema, JsonMap::new());
+        let tuple = decode_one(&decoder, br#"{"payload":"aGVsbG8="}"#);
+
+        assert_eq!(
+            tuple.value_by_name("frames", "payload"),
+            Some(&Value::Bytes(Bytes::from_static(b"hello")))
+        );
+    }
+
+    #[test]
+    fn json_decoder_decodes_invalid_typed_bytes_as_null() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "frames".to_string(),
+            "payload".to_string(),
+            ConcreteDatatype::Bytes(BytesType),
+        )]));
+        let decoder = JsonDecoder::new("frames", schema, JsonMap::new());
+        let tuple = decode_one(&decoder, br#"{"payload":"not base64!"}"#);
+
+        assert_eq!(tuple.value_by_name("frames", "payload"), Some(&Value::Null));
     }
 
     #[test]

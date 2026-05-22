@@ -1,7 +1,13 @@
+use crate::catalog::StreamType;
+use crate::codec::{
+    VIDEO_FORMAT_COLUMN, VIDEO_HEIGHT_COLUMN, VIDEO_PAYLOAD_COLUMN, VIDEO_TIMESTAMP_COLUMN,
+    VIDEO_WIDTH_COLUMN,
+};
 use crate::expr::internal_columns::is_internal_derived;
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry};
 use crate::planner::decode_projection::{DecodeProjection, FieldPath, FieldPathSegment, ListIndex};
 use crate::planner::logical::{LogicalPlan, TailPlan};
+use crate::planner::sink::SinkConnectorConfig;
 use datatypes::Schema;
 use sqlparser::ast::{
     Expr as SqlExpr, FunctionArg, FunctionArgExpr, Ident, ObjectName, WindowType,
@@ -47,6 +53,7 @@ pub fn optimize_logical_plan_with_options(
         }),
         Box::new(StructFieldPruning),
         Box::new(ListElementPruning),
+        Box::new(EliminateVideoSinkIdentityProject),
     ];
 
     let mut current_plan = logical_plan;
@@ -66,6 +73,188 @@ pub fn optimize_logical_plan_with_options(
 /// This inserts a `LogicalCompute` node that materializes CSE temps (`__vf_cse_N`) and rewrites
 /// expressions in `Project` (and its adjacent `Filter`, if needed) to reference those temps.
 struct CommonSubexpressionElimination;
+
+/// Rule: remove identity `Project` nodes that only preserve the complete video tuple before a
+/// single video sink.
+struct EliminateVideoSinkIdentityProject;
+
+impl LogicalOptRule for EliminateVideoSinkIdentityProject {
+    fn name(&self) -> &str {
+        "eliminate_video_sink_identity_project"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<LogicalPlan>,
+        bindings: &SchemaBinding,
+    ) -> (Arc<LogicalPlan>, SchemaBinding) {
+        (
+            eliminate_video_sink_identity_project(plan),
+            bindings.clone(),
+        )
+    }
+}
+
+fn eliminate_video_sink_identity_project(plan: Arc<LogicalPlan>) -> Arc<LogicalPlan> {
+    match plan.as_ref() {
+        LogicalPlan::Tail(tail) => {
+            let mut new = tail.clone();
+            new.base.children = rewrite_logical_children(&tail.base.children);
+            Arc::new(LogicalPlan::Tail(new))
+        }
+        LogicalPlan::DataSink(sink) => {
+            let Some(child) = sink.base.children.first() else {
+                return plan;
+            };
+            let rewritten_child = eliminate_video_sink_identity_project(Arc::clone(child));
+            let final_child = try_eliminate_video_sink_project(sink, Arc::clone(&rewritten_child))
+                .unwrap_or(rewritten_child);
+            let mut new = sink.clone();
+            new.base.children = vec![final_child];
+            Arc::new(LogicalPlan::DataSink(new))
+        }
+        LogicalPlan::StatefulFunction(stateful) => {
+            let mut new = stateful.clone();
+            new.base.children = rewrite_logical_children(&stateful.base.children);
+            Arc::new(LogicalPlan::StatefulFunction(new))
+        }
+        LogicalPlan::Filter(filter) => {
+            let mut new = filter.clone();
+            new.base.children = rewrite_logical_children(&filter.base.children);
+            Arc::new(LogicalPlan::Filter(new))
+        }
+        LogicalPlan::Aggregation(aggregation) => {
+            let mut new = aggregation.clone();
+            new.base.children = rewrite_logical_children(&aggregation.base.children);
+            Arc::new(LogicalPlan::Aggregation(new))
+        }
+        LogicalPlan::Compute(compute) => {
+            let mut new = compute.clone();
+            new.base.children = rewrite_logical_children(&compute.base.children);
+            Arc::new(LogicalPlan::Compute(new))
+        }
+        LogicalPlan::Order(order) => {
+            let mut new = order.clone();
+            new.base.children = rewrite_logical_children(&order.base.children);
+            Arc::new(LogicalPlan::Order(new))
+        }
+        LogicalPlan::Project(project) => {
+            let mut new = project.clone();
+            new.base.children = rewrite_logical_children(&project.base.children);
+            Arc::new(LogicalPlan::Project(new))
+        }
+        LogicalPlan::Window(window) => {
+            let mut new = window.clone();
+            new.base.children = rewrite_logical_children(&window.base.children);
+            Arc::new(LogicalPlan::Window(new))
+        }
+        LogicalPlan::DataSource(_) => plan,
+    }
+}
+
+fn rewrite_logical_children(children: &[Arc<LogicalPlan>]) -> Vec<Arc<LogicalPlan>> {
+    children
+        .iter()
+        .map(|child| eliminate_video_sink_identity_project(Arc::clone(child)))
+        .collect()
+}
+
+fn try_eliminate_video_sink_project(
+    sink: &crate::planner::logical::DataSinkPlan,
+    child: Arc<LogicalPlan>,
+) -> Option<Arc<LogicalPlan>> {
+    if sink.sink.forward_to_result
+        || !matches!(sink.sink.connector.connector, SinkConnectorConfig::Video(_))
+    {
+        return None;
+    }
+
+    let LogicalPlan::Project(project) = child.as_ref() else {
+        return None;
+    };
+    if project.base.children.len() != 1 || !is_complete_video_identity_project(project) {
+        return None;
+    }
+
+    let project_child = Arc::clone(project.base.children.first()?);
+    if !has_single_video_source(project_child.as_ref()) {
+        return None;
+    }
+
+    Some(project_child)
+}
+
+fn is_complete_video_identity_project(project: &crate::planner::logical::Project) -> bool {
+    if project.fields.len() == 1 && is_unqualified_wildcard(&project.fields[0].expr) {
+        return true;
+    }
+
+    let required = video_required_columns();
+    if project.fields.len() != required.len() {
+        return false;
+    }
+
+    let mut seen = HashSet::with_capacity(required.len());
+    for field in &project.fields {
+        let Some(column_name) = direct_column_name(&field.expr) else {
+            return false;
+        };
+        if field.field_name.as_str() != column_name || !required.contains(column_name) {
+            return false;
+        }
+        if !seen.insert(column_name) {
+            return false;
+        }
+    }
+
+    seen.len() == required.len()
+}
+
+fn video_required_columns() -> HashSet<&'static str> {
+    [
+        VIDEO_PAYLOAD_COLUMN,
+        VIDEO_WIDTH_COLUMN,
+        VIDEO_HEIGHT_COLUMN,
+        VIDEO_FORMAT_COLUMN,
+        VIDEO_TIMESTAMP_COLUMN,
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn is_unqualified_wildcard(expr: &SqlExpr) -> bool {
+    matches!(expr, SqlExpr::Identifier(ident) if ident.value == "*")
+}
+
+fn direct_column_name(expr: &SqlExpr) -> Option<&str> {
+    match expr {
+        SqlExpr::Identifier(ident) if ident.value != "*" => Some(ident.value.as_str()),
+        SqlExpr::CompoundIdentifier(idents) if idents.len() == 2 && idents[1].value != "*" => {
+            Some(idents[1].value.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn has_single_video_source(plan: &LogicalPlan) -> bool {
+    let mut found = 0usize;
+    let mut all_sources_are_video = true;
+    collect_source_kinds(plan, &mut found, &mut all_sources_are_video);
+    found == 1 && all_sources_are_video
+}
+
+fn collect_source_kinds(plan: &LogicalPlan, found: &mut usize, all_sources_are_video: &mut bool) {
+    if let LogicalPlan::DataSource(ds) = plan {
+        *found += 1;
+        if ds.stream_type() != StreamType::Video {
+            *all_sources_are_video = false;
+        }
+    }
+
+    for child in plan.children() {
+        collect_source_kinds(child.as_ref(), found, all_sources_are_video);
+    }
+}
 
 impl LogicalOptRule for CommonSubexpressionElimination {
     fn name(&self) -> &str {

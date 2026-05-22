@@ -4,6 +4,8 @@ use crate::model::{Collection, Tuple};
 use crate::planner::physical::output_schema::{OutputSchema, OutputValueGetter};
 use crate::planner::physical::ByIndexProjection;
 use crate::planner::sink::{SinkEncoderConfig, SinkEncoderTransformConfig};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use datatypes::Value;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 use std::sync::Arc;
@@ -232,6 +234,7 @@ fn value_to_json(value: &Value, null_policy: NullColumnPolicy) -> JsonValue {
         Value::Null => JsonValue::Null,
         Value::Bool(v) => JsonValue::Bool(*v),
         Value::String(v) => JsonValue::String(v.clone()),
+        Value::Bytes(v) => JsonValue::String(BASE64_STANDARD.encode(v.as_ref())),
         Value::Float32(v) => number_from_f64(*v as f64),
         Value::Float64(v) => number_from_f64(*v),
         Value::Int8(v) => JsonValue::Number(JsonNumber::from(*v)),
@@ -617,6 +620,22 @@ mod tests {
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(json, serde_json::json!([{ "amount": 10, "status": null }]));
+    }
+
+    #[test]
+    fn json_encoder_emits_bytes_as_base64_strings() {
+        let batch = batch_from_columns_simple(vec![(
+            "frames".to_string(),
+            "payload".to_string(),
+            vec![Value::Bytes(bytes::Bytes::from_static(b"hello"))],
+        )])
+        .expect("valid batch");
+
+        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
+        let payload = encoder.encode(&batch).expect("encode collection");
+
+        let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(json, serde_json::json!([{ "payload": "aGVsbG8=" }]));
     }
 
     #[test]

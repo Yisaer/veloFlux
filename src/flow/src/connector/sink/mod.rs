@@ -54,3 +54,4 @@ pub mod memory;
 pub mod mock;
 pub mod mqtt;
 pub mod nop;
+pub mod video;

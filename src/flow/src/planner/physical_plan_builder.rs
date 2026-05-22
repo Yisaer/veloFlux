@@ -23,6 +23,7 @@ use crate::planner::physical::{
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{PipelineSink, PipelineSinkConnector};
 use crate::PipelineRegistries;
+use datatypes::ConcreteDatatype;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1246,13 +1247,13 @@ fn add_regular_encoder_with_builder(
         let connector_config = connector.connector.clone();
         let mut sink_input = encoder_input;
 
-        if let crate::planner::sink::SinkConnectorConfig::Memory(cfg) = &connector_config {
-            match cfg.kind {
+        match &connector_config {
+            crate::planner::sink::SinkConnectorConfig::Memory(cfg) => match cfg.kind {
                 crate::connector::MemoryTopicKind::Bytes => {
                     return Err(format!(
-                        "memory sink `{}` with encoder.type=none must publish to a collection topic",
-                        sink.sink_id
-                    ));
+                            "memory sink `{}` with encoder.type=none must publish to a collection topic",
+                            sink.sink_id
+                        ));
                 }
                 crate::connector::MemoryTopicKind::Collection => {
                     let output_schema = sink_input.output_schema()?;
@@ -1260,7 +1261,12 @@ fn add_regular_encoder_with_builder(
                     sink_input = builder
                         .get_or_create_memory_collection_materialize(sink_input, output_schema);
                 }
+            },
+            crate::planner::sink::SinkConnectorConfig::Video(_) => {
+                let output_schema = sink_input.output_schema()?;
+                validate_video_sink_input_schema(sink.sink_id.as_str(), &output_schema)?;
             }
+            _ => {}
         }
 
         Ok((
@@ -1273,6 +1279,15 @@ fn add_regular_encoder_with_builder(
             ),
         ))
     } else {
+        if matches!(
+            connector.connector,
+            crate::planner::sink::SinkConnectorConfig::Video(_)
+        ) {
+            return Err(format!(
+                "video sink `{}` requires encoder.type=none",
+                sink.sink_id
+            ));
+        }
         connector
             .encoder
             .validate()
@@ -1300,6 +1315,129 @@ fn add_regular_encoder_with_builder(
                 Some(encoder_index),
             ),
         ))
+    }
+}
+
+fn validate_video_sink_input_schema(
+    sink_id: &str,
+    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+) -> Result<(), String> {
+    validate_video_sink_column(
+        sink_id,
+        output_schema,
+        crate::codec::VIDEO_PAYLOAD_COLUMN,
+        "bytes",
+        is_bytes_datatype,
+    )?;
+    validate_video_sink_column(
+        sink_id,
+        output_schema,
+        crate::codec::VIDEO_WIDTH_COLUMN,
+        "integer",
+        is_integer_datatype,
+    )?;
+    validate_video_sink_column(
+        sink_id,
+        output_schema,
+        crate::codec::VIDEO_HEIGHT_COLUMN,
+        "integer",
+        is_integer_datatype,
+    )?;
+    validate_video_sink_column(
+        sink_id,
+        output_schema,
+        crate::codec::VIDEO_FORMAT_COLUMN,
+        "string",
+        is_string_datatype,
+    )?;
+    validate_video_sink_column(
+        sink_id,
+        output_schema,
+        crate::codec::VIDEO_TIMESTAMP_COLUMN,
+        "timestamp",
+        is_timestamp_datatype,
+    )
+}
+
+fn validate_video_sink_column(
+    sink_id: &str,
+    output_schema: &crate::planner::physical::output_schema::OutputSchema,
+    column_name: &str,
+    expected: &str,
+    matches_expected: fn(&ConcreteDatatype) -> bool,
+) -> Result<(), String> {
+    let matches = output_schema
+        .columns
+        .iter()
+        .filter(|column| column.name.as_ref() == column_name)
+        .collect::<Vec<_>>();
+
+    if matches.is_empty() {
+        return Err(format!(
+            "video sink `{sink_id}` requires output column `{column_name}`"
+        ));
+    }
+    if matches.len() > 1 {
+        return Err(format!(
+            "video sink `{sink_id}` output column `{column_name}` is ambiguous"
+        ));
+    }
+
+    let data_type = &matches[0].data_type;
+    if !matches_expected(data_type) {
+        return Err(format!(
+            "video sink `{sink_id}` output column `{column_name}` must be {expected}, got {}",
+            format_datatype(data_type)
+        ));
+    }
+    Ok(())
+}
+
+fn is_bytes_datatype(data_type: &ConcreteDatatype) -> bool {
+    matches!(data_type, ConcreteDatatype::Bytes(_))
+}
+
+fn is_integer_datatype(data_type: &ConcreteDatatype) -> bool {
+    matches!(
+        data_type,
+        ConcreteDatatype::Int8(_)
+            | ConcreteDatatype::Int16(_)
+            | ConcreteDatatype::Int32(_)
+            | ConcreteDatatype::Int64(_)
+            | ConcreteDatatype::Uint8(_)
+            | ConcreteDatatype::Uint16(_)
+            | ConcreteDatatype::Uint32(_)
+            | ConcreteDatatype::Uint64(_)
+    )
+}
+
+fn is_string_datatype(data_type: &ConcreteDatatype) -> bool {
+    matches!(data_type, ConcreteDatatype::String(_))
+}
+
+fn is_timestamp_datatype(data_type: &ConcreteDatatype) -> bool {
+    matches!(data_type, ConcreteDatatype::Timestamp(_))
+}
+
+fn format_datatype(data_type: &ConcreteDatatype) -> &'static str {
+    match data_type {
+        ConcreteDatatype::Null => "null",
+        ConcreteDatatype::Float32(_) => "float32",
+        ConcreteDatatype::Float64(_) => "float64",
+        ConcreteDatatype::Int8(_) => "int8",
+        ConcreteDatatype::Int16(_) => "int16",
+        ConcreteDatatype::Int32(_) => "int32",
+        ConcreteDatatype::Int64(_) => "int64",
+        ConcreteDatatype::Uint8(_) => "uint8",
+        ConcreteDatatype::Uint16(_) => "uint16",
+        ConcreteDatatype::Uint32(_) => "uint32",
+        ConcreteDatatype::Uint64(_) => "uint64",
+        ConcreteDatatype::String(_) => "string",
+        ConcreteDatatype::Bytes(_) => "bytes",
+        ConcreteDatatype::Struct(_) => "struct",
+        ConcreteDatatype::List(_) => "list",
+        ConcreteDatatype::Bool(_) => "bool",
+        ConcreteDatatype::Timestamp(_) => "timestamp",
     }
 }
 

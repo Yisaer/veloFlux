@@ -1,4 +1,5 @@
 pub mod boolean_type;
+pub mod bytes_type;
 pub mod float32_type;
 pub mod float64_type;
 pub mod int16_type;
@@ -15,6 +16,7 @@ pub mod uint64_type;
 pub mod uint8_type;
 
 pub use boolean_type::BooleanType;
+pub use bytes_type::BytesType;
 pub use float32_type::Float32Type;
 pub use float64_type::Float64Type;
 pub use int16_type::Int16Type;

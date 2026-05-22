@@ -2,8 +2,14 @@ use datatypes::{
     ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
     StructType, Value,
 };
-use flow::catalog::MemoryStreamProps;
 use flow::catalog::MockStreamProps;
+use flow::catalog::{
+    MemoryStreamProps, VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
+};
+use flow::connector::sink::video::{
+    VideoCodecConfig, VideoContainerConfig, VideoFileSinkConfig, VideoRollingConfig,
+    VideoSinkConfig, VideoSinkTargetConfig,
+};
 use flow::connector::{KuksaSinkConfig, MemorySinkConfig, MemoryTopicKind};
 use flow::expr::func::EvalError;
 use flow::planner::logical::{create_logical_plan, create_logical_plan_with_source_inputs};
@@ -254,6 +260,17 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamDecoderConfig::json(),
     );
 
+    let camera_def = StreamDefinition::new(
+        "camera",
+        Arc::new(flow::codec::default_video_schema("camera")),
+        StreamProps::Video(VideoStreamProps {
+            url: "rtsp://127.0.0.1:8554/camera".to_string(),
+            rtsp_transport: VideoRtspTransport::Tcp,
+            reconnect: VideoReconnectConfig::default(),
+        }),
+        StreamDecoderConfig::none(),
+    );
+
     let mut stream_defs = HashMap::new();
     stream_defs.insert("stream".to_string(), Arc::new(stream_def));
     stream_defs.insert("stream_sampler".to_string(), Arc::new(stream_sampler_def));
@@ -269,6 +286,7 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs.insert("memory_collect".to_string(), Arc::new(memory_collect_def));
     stream_defs.insert("memory_bytes".to_string(), Arc::new(memory_bytes_def));
     stream_defs.insert("vehicle_stream".to_string(), Arc::new(vehicle_stream_def));
+    stream_defs.insert("camera".to_string(), Arc::new(camera_def));
 
     stream_defs
 }
@@ -463,6 +481,25 @@ fn build_nop_none_sink(sink_id: &'static str) -> PipelineSink {
     PipelineSink::new(sink_id, connector)
 }
 
+fn build_video_sink(sink_id: &'static str) -> PipelineSink {
+    let connector = PipelineSinkConnector::new(
+        "test_video_connector",
+        SinkConnectorConfig::Video(VideoSinkConfig {
+            target: VideoSinkTargetConfig::File(VideoFileSinkConfig {
+                path: "/tmp/veloflux-video-planner".to_string(),
+                filename_prefix: "camera".to_string(),
+            }),
+            codec: VideoCodecConfig::H264,
+            container: VideoContainerConfig::Mp4,
+            rolling: VideoRollingConfig::Duration {
+                duration: Duration::from_secs(60),
+            },
+        }),
+        SinkEncoderConfig::new("none", JsonMap::new()),
+    );
+    PipelineSink::new(sink_id, connector)
+}
+
 fn build_memory_collection_delta_sink_with_columns(
     sink_id: &'static str,
     topic: &'static str,
@@ -607,6 +644,55 @@ fn explain_json_before_after_physical_opt(sql: &str, sinks: Vec<PipelineSink>) -
 
 fn explain_json_string(sql: &str) -> String {
     explain_json(sql, vec![])
+}
+
+#[test]
+fn plan_explain_video_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        sinks: Vec<PipelineSink>,
+        expected: &'static str,
+        covers: &'static [&'static str],
+    }
+
+    let cases = vec![
+        Case {
+            name: "video_source_projection_filter_uses_tuple_path",
+            sql: "SELECT payload, width FROM camera WHERE width > 0",
+            sinks: vec![build_nop_json_sink("json_sink", None)],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=camera","decoder=none","schema=[payload, width]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=width > 0"],"operator":"Filter"}],"id":"Project_2","info":["fields=[payload; width]"],"operator":"Project"}],"id":"DataSink_3","info":["sink_id=json_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_4","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=camera","schema=[payload, width]"],"operator":"PhysicalDataSource"}],"id":"PhysicalFilter_1","info":["predicate=width > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_2","info":["fields=[]","passthrough_messages=true"],"operator":"PhysicalProject"}],"id":"PhysicalEncoder_4","info":["sink_id=json_sink","encoder=json","by_index_projection=[camera#0->payload; camera#1->width]"],"operator":"PhysicalEncoder"}],"id":"PhysicalDataSink_3","info":["sink_id=json_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+            covers: &["source.video.tuple_input"],
+        },
+        Case {
+            name: "video_sink_consumes_collection_without_veloflux_encoder",
+            sql: "SELECT * FROM camera",
+            sinks: vec![build_video_sink("video_sink")],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=camera","decoder=none","schema=[payload, width, height, format, timestamp]"],"operator":"DataSource"}],"id":"DataSink_2","info":["sink_id=video_sink","connector=video","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=camera","schema=[payload, width, height, format, timestamp]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDataSink_1","info":["sink_id=video_sink","connector=video"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_2","info":[],"operator":"PhysicalResultCollect"}}"##,
+            covers: &["source.video.tuple_input", "sink.connector.video_output"],
+        },
+        Case {
+            name: "video_sink_eliminates_complete_identity_projection",
+            sql: "SELECT payload, width, height, format, timestamp FROM camera",
+            sinks: vec![build_video_sink("video_sink")],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=camera","decoder=none","schema=[payload, width, height, format, timestamp]"],"operator":"DataSource"}],"id":"DataSink_2","info":["sink_id=video_sink","connector=video","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=camera","schema=[payload, width, height, format, timestamp]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDataSink_1","info":["sink_id=video_sink","connector=video"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_2","info":[],"operator":"PhysicalResultCollect"}}"##,
+            covers: &[
+                "source.video.tuple_input",
+                "sink.connector.video_output",
+                "planner.logical.video_sink_identity_project_elimination",
+            ],
+        },
+    ];
+
+    for case in cases {
+        assert!(
+            !case.covers.is_empty(),
+            "case={} missing coverage",
+            case.name
+        );
+        let got = explain_json(case.sql, case.sinks);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
 }
 
 fn explain_eventtime_json_string(sql: &str, options: &PipelineOptions) -> String {

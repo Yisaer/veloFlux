@@ -199,7 +199,8 @@ pub fn create_logical_plan_with_source_inputs(
             schema,
             definition.eventtime().cloned(),
             definition.sampler().cloned(),
-        );
+        )
+        .with_stream_type(definition.stream_type());
         let mut datasource = datasource;
         datasource.source_input = source_inputs
             .get(&source_info.name)

@@ -372,6 +372,9 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
         "memory" => {
             SinkConnectorConfig::Memory(memory_sink_from_ir_settings(&sink.connector_settings)?)
         }
+        "video" => {
+            SinkConnectorConfig::Video(video_sink_from_ir_settings(&sink.connector_settings)?)
+        }
         other => SinkConnectorConfig::Custom(CustomSinkConnectorConfig {
             kind: other.to_string(),
             settings: sink.connector_settings.clone(),
@@ -421,6 +424,72 @@ fn memory_sink_from_ir_settings(
     Ok(crate::connector::MemorySinkConfig::new(
         sink_name, topic, kind,
     ))
+}
+
+fn video_sink_from_ir_settings(
+    settings: &JsonValue,
+) -> Result<crate::connector::sink::video::VideoSinkConfig, String> {
+    let obj = settings
+        .as_object()
+        .ok_or_else(|| "video sink settings must be an object".to_string())?;
+    let path = obj
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "video sink settings missing path".to_string())?
+        .to_string();
+    let filename_prefix = obj
+        .get("filename_prefix")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "video sink settings missing filename_prefix".to_string())?
+        .to_string();
+    let codec = match obj.get("codec").and_then(|v| v.as_str()).unwrap_or("h264") {
+        "h264" => crate::connector::sink::video::VideoCodecConfig::H264,
+        "h265" => crate::connector::sink::video::VideoCodecConfig::H265,
+        other => return Err(format!("video sink settings invalid codec `{other}`")),
+    };
+    let container = match obj
+        .get("container")
+        .and_then(|v| v.as_str())
+        .unwrap_or("mp4")
+    {
+        "mp4" => crate::connector::sink::video::VideoContainerConfig::Mp4,
+        other => return Err(format!("video sink settings invalid container `{other}`")),
+    };
+    let rolling = obj
+        .get("rolling")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| "video sink settings missing rolling".to_string())?;
+    let rolling = match rolling
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("duration")
+    {
+        "duration" => crate::connector::sink::video::VideoRollingConfig::Duration {
+            duration: std::time::Duration::from_secs(
+                rolling
+                    .get("seconds")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| "video sink rolling duration missing seconds".to_string())?,
+            ),
+        },
+        other => {
+            return Err(format!(
+                "video sink settings invalid rolling type `{other}`"
+            ))
+        }
+    };
+
+    Ok(crate::connector::sink::video::VideoSinkConfig {
+        target: crate::connector::sink::video::VideoSinkTargetConfig::File(
+            crate::connector::sink::video::VideoFileSinkConfig {
+                path,
+                filename_prefix,
+            },
+        ),
+        codec,
+        container,
+        rolling,
+    })
 }
 
 fn mqtt_sink_from_ir_settings(settings: &JsonValue) -> Result<MqttSinkConfig, String> {
@@ -796,6 +865,31 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "kind": cfg.kind.to_string(),
             }),
         ),
+        SinkConnectorConfig::Video(cfg) => {
+            let crate::connector::sink::video::VideoSinkTargetConfig::File(file) = &cfg.target;
+            (
+                "video".to_string(),
+                serde_json::json!({
+                    "path": file.path,
+                    "filename_prefix": file.filename_prefix,
+                    "codec": match cfg.codec {
+                        crate::connector::sink::video::VideoCodecConfig::H264 => "h264",
+                        crate::connector::sink::video::VideoCodecConfig::H265 => "h265",
+                    },
+                    "container": match cfg.container {
+                        crate::connector::sink::video::VideoContainerConfig::Mp4 => "mp4",
+                    },
+                    "rolling": match &cfg.rolling {
+                        crate::connector::sink::video::VideoRollingConfig::Duration { duration } => {
+                            serde_json::json!({
+                                "type": "duration",
+                                "seconds": duration.as_secs(),
+                            })
+                        }
+                    },
+                }),
+            )
+        }
         SinkConnectorConfig::Custom(custom) => (custom.kind.clone(), custom.settings.clone()),
     }
 }

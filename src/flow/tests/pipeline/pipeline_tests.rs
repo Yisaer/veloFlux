@@ -1,8 +1,8 @@
 //! Table-driven tests for pipeline creation helpers.
 
 use datatypes::{
-    ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
-    StructType, TimestampValue, Value,
+    BytesType, ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType,
+    StructField, StructType, TimestampValue, Value,
 };
 use flow::catalog::{MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::connector::MemoryTopicKind;
@@ -1929,6 +1929,101 @@ async fn memory_source_bytes_topic_with_json_decoder_emits_expected_rows() {
     let expected = serde_json::json!([
         {"a": 1, "b": 10},
         {"a": 2, "b": 20}
+    ]);
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected),
+        "Wrong JSON output for test: {}",
+        case_name
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to stop pipeline for {}: {err}", case_name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for {}: {err}", case_name));
+}
+
+// coverage-covers: stream.datatype.bytes, source.memory.bytes_input, sink.connector.memory_output
+#[tokio::test]
+async fn memory_source_json_bytes_decodes_and_encodes_base64() {
+    let case_name = "memory_source_json_bytes_decodes_and_encodes_base64";
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_bytes_datatype", case_name);
+    instance
+        .declare_memory_topic(
+            &input_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare input bytes topic");
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            flow::connector::DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output bytes topic");
+
+    let schema = Schema::new(vec![ColumnSchema::new(
+        "stream_bytes".to_string(),
+        "payload".to_string(),
+        ConcreteDatatype::Bytes(BytesType),
+    )]);
+    let stream = StreamDefinition::new(
+        "stream_bytes".to_string(),
+        Arc::new(schema),
+        StreamProps::Memory(MemoryStreamProps::new(input_topic.clone())),
+        StreamDecoderConfig::new("json", JsonMap::new()),
+    );
+    instance
+        .create_stream(stream, false)
+        .await
+        .expect("create bytes stream");
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+
+    let pipeline_id = format!("pipe_{}", output_topic);
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT payload FROM stream_bytes",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case_name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {}: {err}", case_name));
+
+    let timeout_duration = Duration::from_secs(5);
+    instance
+        .wait_for_memory_subscribers(&input_topic, MemoryTopicKind::Bytes, 1, timeout_duration)
+        .await
+        .expect("wait for bytes source subscriber");
+    let publisher = instance
+        .open_memory_publisher_bytes(&input_topic)
+        .expect("open input bytes publisher");
+    publisher
+        .publish_bytes(br#"{"payload":"aGVsbG8="}"#.as_ref())
+        .expect("publish base64 bytes source row");
+
+    let actual = recv_next_json(&mut output, timeout_duration).await;
+    let expected = serde_json::json!([
+        {"payload": "aGVsbG8="}
     ]);
     assert_eq!(
         normalize_json(actual),

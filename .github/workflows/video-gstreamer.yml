@@ -1,0 +1,84 @@
+name: Video GStreamer
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/video-gstreamer.yml"
+      - "src/flow/Cargo.toml"
+      - "src/flow/src/codec/video.rs"
+      - "src/flow/src/connector/source/video.rs"
+      - "src/flow/src/connector/sink/video.rs"
+      - "src/flow/tests/video_gstreamer.rs"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  VELOFLUX_VIDEO_OUTPUT_DIR: /tmp/veloflux-video-output
+
+jobs:
+  video-gstreamer:
+    name: Video GStreamer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install GStreamer, FFmpeg, and mediamtx
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav \
+            ffmpeg \
+            python3
+          python3 - <<'PY'
+          import json
+          import os
+          import tarfile
+          import urllib.request
+
+          release = json.load(urllib.request.urlopen("https://api.github.com/repos/bluenviron/mediamtx/releases/latest"))
+          asset = next(
+              item for item in release["assets"]
+              if "linux_amd64" in item["name"] and item["name"].endswith(".tar.gz")
+          )
+          archive = "/tmp/mediamtx.tar.gz"
+          urllib.request.urlretrieve(asset["browser_download_url"], archive)
+          with tarfile.open(archive, "r:gz") as tar:
+              member = next(item for item in tar.getmembers() if item.name.endswith("/mediamtx") or item.name == "mediamtx")
+              member.name = "mediamtx"
+              tar.extract(member, "/tmp")
+          os.chmod("/tmp/mediamtx", 0o755)
+          PY
+          sudo mv /tmp/mediamtx /usr/local/bin/mediamtx
+          mediamtx --version
+
+      - name: Run video stream/sink integration test
+        run: timeout 900s cargo test -p flow --features video_gstreamer --test video_gstreamer -- --nocapture
+
+      - name: Validate generated video artifact
+        if: always()
+        run: |
+          find "$VELOFLUX_VIDEO_OUTPUT_DIR" -type f -print -ls || true
+          MP4_FILE="$(find "$VELOFLUX_VIDEO_OUTPUT_DIR" -type f -name '*.mp4' -size +0c | head -n 1)"
+          if [ -z "$MP4_FILE" ]; then
+            echo "No non-empty mp4 file was generated"
+            exit 1
+          fi
+          ffprobe -v error -show_entries stream=codec_type,codec_name,width,height -of default=noprint_wrappers=1 "$MP4_FILE"

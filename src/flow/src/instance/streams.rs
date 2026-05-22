@@ -374,6 +374,9 @@ impl FlowInstance {
             StreamProps::Memory(_) => Err(FlowInstanceError::Invalid(
                 "memory stream props cannot be used to create shared streams".to_string(),
             )),
+            StreamProps::Video(_) => Err(FlowInstanceError::Invalid(
+                "video stream props cannot be used to create shared streams".to_string(),
+            )),
         }
     }
 }

@@ -1,9 +1,15 @@
 use super::*;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
+use crate::connector::sink::video::{
+    VideoCodecConfig, VideoContainerConfig, VideoFileSinkConfig,
+    VideoRollingConfig as VideoSinkRollingConfig, VideoSinkTargetConfig,
+};
+use crate::connector::source::video::{VideoReconnectRuntimeConfig, VideoRtspTransportConfig};
 use crate::connector::{
     HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig, MemorySinkConfig,
     MemorySourceConfig, MemorySourceConnector, MemoryTopicKind, MockSourceConnector,
-    MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
+    MqttSinkConfig, MqttSourceConfig, MqttSourceConnector, VideoSinkConfig, VideoSourceConfig,
+    VideoSourceConnector,
 };
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan_with_source_inputs;
@@ -708,6 +714,69 @@ fn build_sinks_from_definition(
                     .with_output(sink.output.clone());
                 sinks.push(pipeline_sink);
             }
+            SinkType::Video => {
+                let props = match &sink.props {
+                    SinkProps::Video(props) => props,
+                    other => {
+                        return Err(format!(
+                            "sink {} expected video props but received {other:?}",
+                            sink.sink_id
+                        ));
+                    }
+                };
+                if !matches!(sink.encoder.kind(), SinkEncoderKind::None) {
+                    return Err(format!(
+                        "sink {} expected encoder `none` for video but received {}",
+                        sink.sink_id,
+                        sink.encoder.kind_str()
+                    ));
+                }
+                let filename_prefix = props
+                    .filename_prefix
+                    .as_deref()
+                    .unwrap_or_else(|| definition.id());
+                validate_video_filename_prefix(filename_prefix).map_err(|err| {
+                    format!(
+                        "invalid video sink filename_prefix for {}: {err}",
+                        sink.sink_id
+                    )
+                })?;
+                let rolling = match &props.rolling {
+                    VideoRollingConfig::Duration { seconds } => {
+                        if *seconds == 0 {
+                            return Err(format!(
+                                "sink {} video rolling duration requires positive seconds",
+                                sink.sink_id
+                            ));
+                        }
+                        VideoSinkRollingConfig::Duration {
+                            duration: Duration::from_secs(*seconds),
+                        }
+                    }
+                };
+                let connector = PipelineSinkConnector::new(
+                    sink.sink_id.clone(),
+                    SinkConnectorConfig::Video(VideoSinkConfig {
+                        target: VideoSinkTargetConfig::File(VideoFileSinkConfig {
+                            path: props.path.clone(),
+                            filename_prefix: filename_prefix.to_string(),
+                        }),
+                        codec: match props.codec {
+                            VideoCodec::H264 => VideoCodecConfig::H264,
+                            VideoCodec::H265 => VideoCodecConfig::H265,
+                        },
+                        container: match props.container {
+                            VideoContainer::Mp4 => VideoContainerConfig::Mp4,
+                        },
+                        rolling,
+                    }),
+                    sink.encoder.clone(),
+                );
+                let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
+                    .with_common_props(sink.common.clone())
+                    .with_output(sink.output.clone());
+                sinks.push(pipeline_sink);
+            }
             SinkType::Memory => {
                 let props = match &sink.props {
                     SinkProps::Memory(props) => props,
@@ -785,6 +854,30 @@ pub(super) fn attach_sources_from_catalog(
                         context.flow_instance_id(),
                         mqtt_client_manager.clone(),
                         context.spawner().clone(),
+                    )
+                    .with_channel_capacity(data_channel_capacity);
+                    ds.add_connector(Box::new(connector));
+                }
+                StreamProps::Video(stream_props) => {
+                    let connector = VideoSourceConnector::new(
+                        format!("{processor_id}_video_source_connector"),
+                        VideoSourceConfig {
+                            stream_name: stream_name.clone(),
+                            url: stream_props.url.clone(),
+                            rtsp_transport: match stream_props.rtsp_transport {
+                                crate::catalog::VideoRtspTransport::Tcp => {
+                                    VideoRtspTransportConfig::Tcp
+                                }
+                                crate::catalog::VideoRtspTransport::Udp => {
+                                    VideoRtspTransportConfig::Udp
+                                }
+                            },
+                            reconnect: VideoReconnectRuntimeConfig {
+                                enabled: stream_props.reconnect.enabled,
+                                initial_delay: stream_props.reconnect.initial_delay,
+                                max_delay: stream_props.reconnect.max_delay,
+                            },
+                        },
                     )
                     .with_channel_capacity(data_channel_capacity);
                     ds.add_connector(Box::new(connector));

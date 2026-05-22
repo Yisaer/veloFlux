@@ -1,6 +1,7 @@
 use crate::connector::sink::kuksa::KuksaSinkConfig;
 use crate::connector::sink::memory::MemorySinkConfig;
 use crate::connector::sink::mqtt::MqttSinkConfig;
+use crate::connector::sink::video::VideoSinkConfig;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fmt;
 use std::time::Duration;
@@ -174,6 +175,7 @@ pub enum SinkConnectorConfig {
     Nop(NopSinkConfig),
     Kuksa(KuksaSinkConfig),
     Memory(MemorySinkConfig),
+    Video(VideoSinkConfig),
     Custom(CustomSinkConnectorConfig),
 }
 
@@ -184,6 +186,7 @@ impl SinkConnectorConfig {
             SinkConnectorConfig::Nop(_) => "nop",
             SinkConnectorConfig::Kuksa(_) => "kuksa",
             SinkConnectorConfig::Memory(_) => "memory",
+            SinkConnectorConfig::Video(_) => "video",
             SinkConnectorConfig::Custom(custom) => custom.kind.as_str(),
         }
     }

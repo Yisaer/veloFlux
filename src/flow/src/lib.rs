@@ -27,16 +27,17 @@ mod test_support;
 pub use aggregation::AggregateFunctionRegistry;
 pub use catalog::{
     Catalog, CatalogError, EventtimeDefinition, MqttStreamProps, StreamDecoderConfig,
-    StreamDefinition, StreamProps, StreamType,
+    StreamDefinition, StreamProps, StreamType, VideoReconnectConfig, VideoRtspTransport,
+    VideoStreamProps,
 };
 pub use codec::{
     CodecError, CollectionEncoder, CollectionEncoderStream, DecoderRegistry, EncodeError,
     EncoderRegistry, JsonDecoder, JsonEncoder, Merger, MergerRegistry, RecordDecoder,
 };
 pub use datatypes::{
-    BooleanType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type, Int32Type,
-    Int64Type, Int8Type, ListType, Schema, StringType, StructField, StructType, TimestampType,
-    TimestampValue, Uint16Type, Uint32Type, Uint64Type, Uint8Type,
+    BooleanType, BytesType, ColumnSchema, ConcreteDatatype, Float32Type, Float64Type, Int16Type,
+    Int32Type, Int64Type, Int8Type, ListType, Schema, StringType, StructField, StructType,
+    TimestampType, TimestampValue, Uint16Type, Uint32Type, Uint64Type, Uint8Type,
 };
 pub use eventtime::{
     BuiltinEventtimeType, EventtimeParseError, EventtimeTypeParser, EventtimeTypeRegistry,
@@ -58,6 +59,7 @@ pub use pipeline::{
     MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
     PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps,
     SinkType, SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
+    VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 pub use planner::create_physical_plan;
 pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};

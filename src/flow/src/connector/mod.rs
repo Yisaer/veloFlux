@@ -88,6 +88,7 @@ pub use sink::kuksa::KuksaSinkConfig;
 pub use sink::memory::{MemorySinkConfig, MemorySinkConnector};
 pub use sink::mock::{MockSinkConnector, MockSinkHandle};
 pub use sink::mqtt::MqttSinkConfig;
+pub use sink::video::{VideoSinkConfig, VideoSinkConnector};
 pub use sink::{SinkConnector, SinkConnectorError};
 /// History source connector implementation.
 pub use source::history::HistorySourceConfig;
@@ -97,3 +98,4 @@ pub use source::mock::{MockSourceConnector, MockSourceError, MockSourceHandle};
 /// MQTT-specific helpers and connector implementation.
 pub use source::mqtt::MqttSourceConfig;
 pub(crate) use source::mqtt::MqttSourceConnector;
+pub use source::video::{VideoSourceConfig, VideoSourceConnector};

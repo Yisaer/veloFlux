@@ -92,3 +92,10 @@ features:
     doc_refs:
       - docs/runtime/processors/barrier_signal.md
     status: active
+
+  - id: planner.logical.video_sink_identity_project_elimination
+    title: Video sink identity project elimination
+    summary: Remove complete identity video tuple projections immediately before direct video sink branches.
+    doc_refs:
+      - docs/planner/optimize/logical/eliminate_video_sink_identity_project.md
+    status: active

@@ -104,6 +104,45 @@ pub struct MemoryTopicSpec {
     pub capacity: usize,
 }
 
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct VideoSinkPropsRequest {
+    pub path: Option<String>,
+    pub filename_prefix: Option<String>,
+    pub codec: String,
+    pub container: String,
+    pub rolling: VideoRollingRequest,
+}
+
+impl Default for VideoSinkPropsRequest {
+    fn default() -> Self {
+        Self {
+            path: None,
+            filename_prefix: None,
+            codec: "h264".to_string(),
+            container: "mp4".to_string(),
+            rolling: VideoRollingRequest::default(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
+#[serde(default)]
+pub struct VideoRollingRequest {
+    #[serde(rename = "type")]
+    pub rolling_type: String,
+    pub seconds: u64,
+}
+
+impl Default for VideoRollingRequest {
+    fn default() -> Self {
+        Self {
+            rolling_type: "duration".to_string(),
+            seconds: 60,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(default)]
 pub(crate) struct CollectStatsQuery {

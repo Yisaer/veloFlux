@@ -39,6 +39,7 @@ The current JSON decoder has a mixed strict and native conversion model:
 | `uint8`, `uint16`, `uint32` | Uses native JSON number conversion today; range enforcement is not applied at decode time. |
 | `float32`, `float64` | Uses native JSON number conversion today. |
 | `string` | Uses native JSON string conversion today. |
+| `bytes` | Base64-encoded JSON string. Invalid base64 and non-string values decode to `NULL`. |
 
 The native conversion path maps JSON values to the closest internal value shape:
 

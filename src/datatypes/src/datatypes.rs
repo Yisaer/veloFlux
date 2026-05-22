@@ -1,6 +1,6 @@
 use crate::types::{
-    BooleanType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type, ListType,
-    StringType, StructType, TimestampType, Uint16Type, Uint32Type, Uint64Type, Uint8Type,
+    BooleanType, BytesType, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type, Int8Type,
+    ListType, StringType, StructType, TimestampType, Uint16Type, Uint32Type, Uint64Type, Uint8Type,
 };
 use crate::value::Value;
 
@@ -44,6 +44,8 @@ pub enum ConcreteDatatype {
     Uint64(Uint64Type),
     /// String type
     String(StringType),
+    /// Opaque bytes type
+    Bytes(BytesType),
     /// Struct type, containing field definitions
     Struct(StructType),
     /// List type, containing element type

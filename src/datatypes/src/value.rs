@@ -1,5 +1,6 @@
 use crate::datatypes::ConcreteDatatype;
 use crate::types::StructType;
+use bytes::Bytes;
 use chrono::{DateTime, SecondsFormat, Utc};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -128,6 +129,8 @@ pub enum Value {
     Uint64(u64),
     /// String type
     String(String),
+    /// Opaque bytes payload.
+    Bytes(Bytes),
     /// Boolean type
     Bool(bool),
     /// UTC timestamp type
@@ -159,6 +162,7 @@ impl Value {
             Value::Uint32(_) => ConcreteDatatype::Uint32(crate::types::Uint32Type),
             Value::Uint64(_) => ConcreteDatatype::Uint64(crate::types::Uint64Type),
             Value::String(_) => ConcreteDatatype::String(crate::types::StringType),
+            Value::Bytes(_) => ConcreteDatatype::Bytes(crate::types::BytesType),
             Value::Bool(_) => ConcreteDatatype::Bool(crate::types::BooleanType),
             Value::Timestamp(_) => ConcreteDatatype::Timestamp(crate::types::TimestampType),
             Value::Struct(s) => ConcreteDatatype::Struct(s.fields().clone()),
@@ -184,6 +188,7 @@ impl PartialEq for Value {
             (Value::Uint32(a), Value::Uint32(b)) => a == b,
             (Value::Uint64(a), Value::Uint64(b)) => a == b,
             (Value::String(a), Value::String(b)) => a == b,
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
             (Value::Struct(a), Value::Struct(b)) => a == b,
@@ -257,20 +262,24 @@ impl Hash for Value {
                 11_u8.hash(state);
                 v.hash(state);
             }
-            Value::Bool(v) => {
+            Value::Bytes(v) => {
                 12_u8.hash(state);
                 v.hash(state);
             }
-            Value::Timestamp(v) => {
+            Value::Bool(v) => {
                 13_u8.hash(state);
                 v.hash(state);
             }
-            Value::Struct(v) => {
+            Value::Timestamp(v) => {
                 14_u8.hash(state);
                 v.hash(state);
             }
-            Value::List(v) => {
+            Value::Struct(v) => {
                 15_u8.hash(state);
+                v.hash(state);
+            }
+            Value::List(v) => {
+                16_u8.hash(state);
                 v.hash(state);
             }
         }

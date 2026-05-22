@@ -48,3 +48,10 @@ features:
     doc_refs:
       - docs/runtime/sinks/output/omit_if_empty.md
     status: active
+
+  - id: sink.connector.video_output
+    title: Video sink connector
+    summary: Emit video tuple output through the documented video sink connector contract.
+    doc_refs:
+      - docs/runtime/sinks/connectors/video.md
+    status: active

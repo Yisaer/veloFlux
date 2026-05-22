@@ -66,6 +66,7 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value, AbiError> {
             .map(serde_json::Value::Number)
             .ok_or(AbiError::UnsupportedJsonType),
         Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+        Value::Bytes(_) => Err(AbiError::UnsupportedJsonType),
         Value::Timestamp(_) => Err(AbiError::UnsupportedJsonType),
         Value::List(_) | Value::Struct(_) => Err(AbiError::UnsupportedJsonType),
     }

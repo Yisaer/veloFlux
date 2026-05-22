@@ -259,6 +259,12 @@ fn datatype_value_to_json(value: &Value) -> JsonValue {
         Value::Null => JsonValue::Null,
         Value::Bool(v) => JsonValue::Bool(*v),
         Value::String(v) => JsonValue::String(v.clone()),
+        Value::Bytes(v) => {
+            use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+            use base64::Engine;
+
+            JsonValue::String(BASE64_STANDARD.encode(v.as_ref()))
+        }
         Value::Float32(v) => serde_json::Number::from_f64(*v as f64)
             .map(JsonValue::Number)
             .unwrap_or(JsonValue::Null),

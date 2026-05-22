@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use std::time::Duration;
+use url::Url;
 
 /// Errors that can occur when mutating pipeline definitions.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -31,6 +32,8 @@ pub enum SinkType {
     Kuksa,
     /// Memory sink that publishes to an in-process pub/sub topic.
     Memory,
+    /// Video sink that records video frame tuples.
+    Video,
 }
 
 /// Sink configuration payload.
@@ -44,6 +47,8 @@ pub enum SinkProps {
     Kuksa(KuksaSinkProps),
     /// Memory sink config.
     Memory(MemorySinkProps),
+    /// Video sink config.
+    Video(VideoSinkProps),
 }
 
 /// Runtime state for pipeline execution.
@@ -111,12 +116,92 @@ pub struct MemorySinkProps {
     pub topic: String,
 }
 
+/// Concrete video sink configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VideoSinkProps {
+    pub path: String,
+    pub filename_prefix: Option<String>,
+    pub codec: VideoCodec,
+    pub container: VideoContainer,
+    pub rolling: VideoRollingConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoCodec {
+    #[default]
+    H264,
+    H265,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoContainer {
+    #[default]
+    Mp4,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VideoRollingConfig {
+    Duration { seconds: u64 },
+}
+
 impl MemorySinkProps {
     pub fn new(topic: impl Into<String>) -> Self {
         Self {
             topic: topic.into(),
         }
     }
+}
+
+impl VideoSinkProps {
+    pub fn new(path: impl Into<String>, rolling: VideoRollingConfig) -> Self {
+        Self {
+            path: path.into(),
+            filename_prefix: None,
+            codec: VideoCodec::default(),
+            container: VideoContainer::default(),
+            rolling,
+        }
+    }
+
+    pub fn with_filename_prefix(mut self, filename_prefix: impl Into<String>) -> Self {
+        self.filename_prefix = Some(filename_prefix.into());
+        self
+    }
+
+    pub fn with_codec(mut self, codec: VideoCodec) -> Self {
+        self.codec = codec;
+        self
+    }
+
+    pub fn with_container(mut self, container: VideoContainer) -> Self {
+        self.container = container;
+        self
+    }
+}
+
+pub fn validate_video_filename_prefix(prefix: &str) -> Result<(), String> {
+    if prefix.trim().is_empty() {
+        return Err("filename_prefix must not be empty".to_string());
+    }
+    if prefix.contains('/') || prefix.contains('\\') {
+        return Err("filename_prefix must not contain path separators".to_string());
+    }
+    Ok(())
+}
+
+pub fn is_rtsp_video_url(raw_url: &str) -> bool {
+    Url::parse(raw_url)
+        .map(|url| matches!(url.scheme(), "rtsp" | "rtsps"))
+        .unwrap_or(false)
+}
+
+pub fn is_hls_video_url(raw_url: &str) -> bool {
+    Url::parse(raw_url)
+        .map(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.path().to_ascii_lowercase().ends_with(".m3u8")
+        })
+        .unwrap_or(false)
 }
 
 impl MqttSinkProps {

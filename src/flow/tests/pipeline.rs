@@ -21,3 +21,6 @@ mod eventtime_tests;
 
 #[path = "pipeline/shared_stream_tests.rs"]
 mod shared_stream_tests;
+
+#[path = "pipeline/video_smoke_tests.rs"]
+mod video_smoke_tests;

@@ -69,3 +69,10 @@ features:
     doc_refs:
       - docs/runtime/sources/history.md
     status: active
+
+  - id: source.video.tuple_input
+    title: Video tuple input
+    summary: Consume video source frames as the documented fixed tuple schema.
+    doc_refs:
+      - docs/runtime/sources/video.md
+    status: active
