@@ -1,0 +1,209 @@
+name: Kura Smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/kura-smoke.yml"
+      - "src/flow/Cargo.toml"
+      - "src/flow/src/connector/**"
+      - "src/flow/src/pipeline/**"
+      - "src/flow/src/planner/**"
+      - "src/manager/**"
+      - "docs/runtime/sinks/connectors/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  kura-smoke:
+    name: Start Kura
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      KURA_REPO: https://github.com/yoriito/kura.git
+      KURA_COMMIT: 3489f0ba019b59eb6160090000be2644f1d1ef2d
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull Yoriito devcontainer image
+        run: docker pull yoriito/devcontainer:latest
+
+      - name: Start Kura
+        run: |
+          docker run \
+            --detach \
+            --name kura-smoke \
+            --publish 50052:50052 \
+            --publish 50053:50053 \
+            --entrypoint /usr/bin/kura \
+            yoriito/devcontainer:latest \
+            --config-file-path /etc/yoriito/viss/config.yml
+
+      - name: Wait for Kura ports
+        run: |
+          docker exec kura-smoke bash -lc '
+            set -euo pipefail
+            for port in 50052 50053; do
+              echo "Waiting for Kura port ${port}"
+              for i in $(seq 1 60); do
+                if timeout 1 bash -c "</dev/tcp/127.0.0.1/${port}" 2>/dev/null; then
+                  echo "Kura port ${port} is accepting connections"
+                  break
+                fi
+                if [ "$i" -eq 60 ]; then
+                  echo "Timed out waiting for Kura port ${port}"
+                  exit 1
+                fi
+                sleep 1
+              done
+            done
+          '
+
+      - name: Fetch Kura Python client
+        run: |
+          git init /tmp/kura
+          git -C /tmp/kura remote add origin "$KURA_REPO"
+          git -C /tmp/kura fetch --depth 1 origin "$KURA_COMMIT"
+          git -C /tmp/kura checkout --detach FETCH_HEAD
+
+      - name: Install Kura client dependencies
+        run: |
+          docker cp /tmp/kura/client/vshot/vshot kura-smoke:/tmp/vshot
+          docker exec kura-smoke bash -lc '
+            set -euo pipefail
+            python3 -m venv /tmp/kura-venv
+            /tmp/kura-venv/bin/python -m pip install --upgrade pip
+            /tmp/kura-venv/bin/python -m pip install grpcio protobuf
+          '
+
+      - name: Verify Kura gRPC read/write
+        run: |
+          docker exec kura-smoke bash -lc 'PYTHONPATH=/tmp/vshot /tmp/kura-venv/bin/python -' <<'PY'
+          import time
+
+          import grpc
+
+          from yoriito.viss.v1 import common_pb2
+          from yoriito.viss.v1 import consumer_pb2
+          from yoriito.viss.v1 import consumer_pb2_grpc
+          from yoriito.viss.v1 import producer_pb2
+          from yoriito.viss.v1 import producer_pb2_grpc
+          from yoriito.viss.v1.types import value_pb2
+
+
+          PRODUCER_ENDPOINT = "127.0.0.1:50053"
+          CONSUMER_ENDPOINT = "127.0.0.1:50052"
+
+          TEST_VALUES = {
+              value_pb2.DATATYPE_BOOL: ("bool", True, value_pb2.ValueType(bool=True)),
+              value_pb2.DATATYPE_STRING: ("string", "veloflux-kura-smoke", value_pb2.ValueType(string="veloflux-kura-smoke")),
+              value_pb2.DATATYPE_INT8: ("int8", 7, value_pb2.ValueType(int8=7)),
+              value_pb2.DATATYPE_INT16: ("int16", 1234, value_pb2.ValueType(int16=1234)),
+              value_pb2.DATATYPE_INT32: ("int32", 123456, value_pb2.ValueType(int32=123456)),
+              value_pb2.DATATYPE_INT64: ("int64", 123456789, value_pb2.ValueType(int64=123456789)),
+              value_pb2.DATATYPE_UINT8: ("uint8", 7, value_pb2.ValueType(uint8=7)),
+              value_pb2.DATATYPE_UINT16: ("uint16", 1234, value_pb2.ValueType(uint16=1234)),
+              value_pb2.DATATYPE_UINT32: ("uint32", 123456, value_pb2.ValueType(uint32=123456)),
+              value_pb2.DATATYPE_UINT64: ("uint64", 123456789, value_pb2.ValueType(uint64=123456789)),
+              value_pb2.DATATYPE_FLOAT: ("float", 12.5, value_pb2.ValueType(float=12.5)),
+              value_pb2.DATATYPE_DOUBLE: ("double", 12.5, value_pb2.ValueType(double=12.5)),
+          }
+
+
+          def wait_for_channel(endpoint):
+              deadline = time.time() + 60
+              last_error = None
+              while time.time() < deadline:
+                  channel = grpc.insecure_channel(endpoint)
+                  try:
+                      grpc.channel_ready_future(channel).result(timeout=1)
+                      return channel
+                  except grpc.FutureTimeoutError as exc:
+                      last_error = exc
+                      channel.close()
+                      time.sleep(1)
+              raise RuntimeError(f"gRPC endpoint {endpoint} did not become ready: {last_error}")
+
+
+          def assert_success(response, operation):
+              result = response.WhichOneof("result")
+              if result != "success":
+                  raise AssertionError(f"{operation} failed: result={result} response={response}")
+
+
+          def scalar_from_value(value):
+              field = value.WhichOneof("value_type")
+              if field is None:
+                  return None
+              return field, getattr(value, field)
+
+
+          producer_channel = wait_for_channel(PRODUCER_ENDPOINT)
+          consumer_channel = wait_for_channel(CONSUMER_ENDPOINT)
+          producer = producer_pb2_grpc.VISSStub(producer_channel)
+          consumer = consumer_pb2_grpc.VISSStub(consumer_channel)
+
+          inspect = producer.Inspect(common_pb2.InspectRequest(path="*"), timeout=10)
+          if inspect.WhichOneof("result") != "metadata":
+              raise AssertionError(f"Inspect failed: {inspect}")
+
+          candidate = None
+          for entry in inspect.metadata.entries:
+              if entry.type != value_pb2.NODE_SENSOR:
+                  continue
+              if entry.datatype not in TEST_VALUES:
+                  continue
+              candidate = entry
+              break
+
+          if candidate is None:
+              raise AssertionError("No writable scalar sensor path was found in Kura metadata")
+
+          field_name, expected, write_value = TEST_VALUES[candidate.datatype]
+          print(f"Selected Kura sensor path {candidate.path} with datatype {candidate.datatype}")
+
+          data_point = value_pb2.DataPointCurrent(value=write_value)
+          data_package = value_pb2.DataPackageCurrent(path=candidate.path, dp=[data_point])
+          set_request = producer_pb2.SetCurrentRequest(
+              data=value_pb2.DataPackagesCurrent(data=[data_package])
+          )
+          set_response = producer.SetCurrent(set_request, timeout=10)
+          assert_success(set_response, "SetCurrent")
+
+          get_response = consumer.GetCurrent(
+              consumer_pb2.GetCurrentRequest(path=candidate.path),
+              timeout=10,
+          )
+          if get_response.WhichOneof("result") != "data":
+              raise AssertionError(f"GetCurrent failed: {get_response}")
+          if not get_response.data.data:
+              raise AssertionError(f"GetCurrent returned no data for {candidate.path}: {get_response}")
+          if not get_response.data.data[0].dp:
+              raise AssertionError(f"GetCurrent returned no datapoints for {candidate.path}: {get_response}")
+
+          actual_field, actual = scalar_from_value(get_response.data.data[0].dp[0].value)
+          if actual_field != field_name:
+              raise AssertionError(
+                  f"Unexpected value field for {candidate.path}: expected {field_name}, got {actual_field}"
+              )
+          if isinstance(expected, float):
+              if abs(actual - expected) > 0.0001:
+                  raise AssertionError(f"Unexpected value for {candidate.path}: expected {expected}, got {actual}")
+          elif actual != expected:
+              raise AssertionError(f"Unexpected value for {candidate.path}: expected {expected}, got {actual}")
+
+          print(f"Kura SetCurrent/GetCurrent round-trip succeeded for {candidate.path}: {actual}")
+          producer_channel.close()
+          consumer_channel.close()
+          PY
+
+      - name: Show Kura logs
+        if: always()
+        run: docker logs kura-smoke || true
+
+      - name: Stop Kura
+        if: always()
+        run: docker rm -f kura-smoke || true
