@@ -250,15 +250,15 @@ jobs:
       - name: Generate veloFlux config
         run: |
           cat > /tmp/veloflux-config.yml <<'YAML'
-          instances:
-            - id: default
-              backend: in_process
-          storage:
-            type: sqlite
-            path: /tmp/veloflux-storage.sqlite
           server:
             host: 127.0.0.1
             port: 9876
+            flow_instances:
+              - id: default
+                backend: in_process
+          storage:
+            type: sqlite
+            path: /tmp/veloflux-storage.sqlite
           YAML
 
       - name: Start veloFlux server
