@@ -71,12 +71,17 @@ jobs:
 
       - name: Install Kura client dependencies
         run: |
-          python3 -m pip install --upgrade pip
-          python3 -m pip install grpcio protobuf
+          docker cp /tmp/kura/client/vshot/vshot kura-smoke:/tmp/vshot
+          docker exec kura-smoke bash -lc '
+            set -euo pipefail
+            python3 -m venv /tmp/kura-venv
+            /tmp/kura-venv/bin/python -m pip install --upgrade pip
+            /tmp/kura-venv/bin/python -m pip install grpcio protobuf
+          '
 
       - name: Verify Kura gRPC read/write
         run: |
-          PYTHONPATH=/tmp/kura/client/vshot/vshot python3 - <<'PY'
+          docker exec kura-smoke bash -lc 'PYTHONPATH=/tmp/vshot /tmp/kura-venv/bin/python -' <<'PY'
           import time
 
           import grpc
