@@ -6,6 +6,8 @@ on:
     paths:
       - ".github/workflows/kura-smoke.yml"
       - "src/flow/Cargo.toml"
+      - "src/flow/build.rs"
+      - "src/flow/proto/**"
       - "src/flow/src/connector/**"
       - "src/flow/src/pipeline/**"
       - "src/flow/src/planner/**"
@@ -18,14 +20,26 @@ concurrency:
 
 jobs:
   kura-smoke:
-    name: Start Kura
+    name: Kura Smoke & veloFlux E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       KURA_REPO: https://github.com/yoriito/kura.git
       KURA_COMMIT: 3489f0ba019b59eb6160090000be2644f1d1ef2d
+      CARGO_INCREMENTAL: 0
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+
+    services:
+      nanomq:
+        image: emqx/nanomq
+        ports:
+          - 1883:1883
 
     steps:
+      # ═══════════════════════════════════════════════════════════════════
+      # Phase 1 — Start Kura & verify gRPC (existing)
+      # ═══════════════════════════════════════════════════════════════════
+
       - uses: actions/checkout@v4
 
       - name: Pull Yoriito devcontainer image
@@ -200,10 +214,195 @@ jobs:
           consumer_channel.close()
           PY
 
+      # ═══════════════════════════════════════════════════════════════════
+      # Phase 2 — Build veloFlux & run kura sink E2E
+      # ═══════════════════════════════════════════════════════════════════
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-kura-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-kura-e2e-
+
+      - name: Build veloFlux
+        run: cargo build --release --bin veloflux
+
+      - name: Create kura mapping file
+        run: |
+          cat > /tmp/kura_mapping.json <<'JSON'
+          {
+            "value": "Vehicle.Speed",
+            "name":  "Vehicle.VehicleIdentification.VIN"
+          }
+          JSON
+
+      - name: Generate veloFlux config
+        run: |
+          cat > /tmp/veloflux-config.yml <<'YAML'
+          instances:
+            - id: default
+              backend: in_process
+          storage:
+            type: sqlite
+            path: /tmp/veloflux-storage.sqlite
+          server:
+            host: 127.0.0.1
+            port: 9876
+          YAML
+
+      - name: Start veloFlux server
+        run: |
+          ./target/release/veloflux \
+            --config-file /tmp/veloflux-config.yml \
+            > /tmp/veloflux.log 2>&1 &
+          echo $! > /tmp/veloflux.pid
+
+          # Wait until the REST API is accepting connections.
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:9876/pipelines >/dev/null 2>&1; then
+              echo "veloFlux server ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "veloFlux server did not become ready"
+          cat /tmp/veloflux.log
+          exit 1
+
+      - name: Create MQTT source stream
+        run: |
+          curl -fsS -X POST http://127.0.0.1:9876/streams \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "name": "kura_e2e_input",
+              "type": "mqtt",
+              "schema": {
+                "type": "json",
+                "props": {
+                  "columns": [
+                    {"name": "value", "data_type": "float64"},
+                    {"name": "name",  "data_type": "string"}
+                  ]
+                }
+              },
+              "props": {
+                "broker_url": "tcp://127.0.0.1:1883",
+                "topic": "test/kura/e2e",
+                "qos": 0
+              },
+              "decoder": {"type": "json", "props": {}}
+            }'
+
+      - name: Create pipeline with kura sink
+        run: |
+          curl -fsS -X POST http://127.0.0.1:9876/pipelines \
+            -H 'Content-Type: application/json' \
+            -d '{
+              "id": "kura_e2e_pipe",
+              "sql": "SELECT value, name FROM kura_e2e_input",
+              "sinks": [{
+                "type": "kura",
+                "props": {
+                  "addr": "http://127.0.0.1:50053",
+                  "mapping_path": "/tmp/kura_mapping.json"
+                },
+                "encoder": {"type": "none"}
+              }]
+            }'
+
+      - name: Start pipeline
+        run: |
+          curl -fsS -X POST http://127.0.0.1:9876/pipelines/kura_e2e_pipe/start
+
+      - name: Publish test data via MQTT
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq mosquitto-clients
+          for i in $(seq 1 5); do
+            mosquitto_pub -h 127.0.0.1 -p 1883 -t test/kura/e2e \
+              -m "{\"value\": 12${i}.5, \"name\": \"kura-e2e-${i}\"}"
+            sleep 0.5
+          done
+          # Allow the pipeline to process the messages and the kura sink to
+          # flush its gRPC call.
+          sleep 5
+
+      - name: Verify data arrived in Kura via veloFlux sink
+        run: |
+          docker exec kura-smoke bash -lc 'PYTHONPATH=/tmp/vshot /tmp/kura-venv/bin/python -' <<'PY'
+          import grpc
+
+          from yoriito.viss.v1 import consumer_pb2
+          from yoriito.viss.v1 import consumer_pb2_grpc
+
+
+          CONSUMER_ENDPOINT = "127.0.0.1:50052"
+
+          channel = grpc.insecure_channel(CONSUMER_ENDPOINT)
+          consumer = consumer_pb2_grpc.VISSStub(channel)
+
+          # ── verify Vehicle.Speed ──────────────────────────────────────
+          resp = consumer.GetCurrent(
+              consumer_pb2.GetCurrentRequest(path="Vehicle.Speed"),
+              timeout=10,
+          )
+          assert resp.WhichOneof("result") == "data", \
+              f"GetCurrent Vehicle.Speed unexpected result: {resp}"
+          assert resp.data.data, \
+              f"GetCurrent Vehicle.Speed returned no data packages"
+          assert resp.data.data[0].dp, \
+              f"GetCurrent Vehicle.Speed returned no datapoints"
+
+          value = resp.data.data[0].dp[0].value
+          field = value.WhichOneof("value_type")
+          actual = getattr(value, field)
+          print(f"Vehicle.Speed = {actual}  (field={field})")
+          assert actual > 0, f"Expected positive speed, got {actual}"
+
+          # ── verify Vehicle.VehicleIdentification.VIN ───────────────────
+          resp2 = consumer.GetCurrent(
+              consumer_pb2.GetCurrentRequest(path="Vehicle.VehicleIdentification.VIN"),
+              timeout=10,
+          )
+          assert resp2.WhichOneof("result") == "data", \
+              f"GetCurrent Vehicle.VIN unexpected result: {resp2}"
+          assert resp2.data.data, \
+              f"GetCurrent Vehicle.VIN returned no data packages"
+          assert resp2.data.data[0].dp, \
+              f"GetCurrent Vehicle.VIN returned no datapoints"
+
+          vin_value = resp2.data.data[0].dp[0].value
+          vin_field = vin_value.WhichOneof("value_type")
+          vin_actual = getattr(vin_value, vin_field)
+          print(f"Vehicle.VehicleIdentification.VIN = {vin_actual}  (field={vin_field})")
+          assert vin_actual.startswith("kura-e2e-"), \
+              f"Expected VIN to start with 'kura-e2e-', got {vin_actual}"
+
+          print("veloFlux → Kura E2E verification passed")
+          channel.close()
+          PY
+
+      # ═══════════════════════════════════════════════════════════════════
+      # Cleanup
+      # ═══════════════════════════════════════════════════════════════════
+
       - name: Show Kura logs
         if: always()
         run: docker logs kura-smoke || true
 
-      - name: Stop Kura
+      - name: Show veloFlux logs
         if: always()
-        run: docker rm -f kura-smoke || true
+        run: cat /tmp/veloflux.log || true
+
+      - name: Stop services
+        if: always()
+        run: |
+          kill $(cat /tmp/veloflux.pid) 2>/dev/null || true
+          docker rm -f kura-smoke || true
