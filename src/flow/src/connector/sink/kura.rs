@@ -11,6 +11,7 @@ use crate::model::Collection;
 use crate::runtime::TaskSpawner;
 
 // ── generated protobuf types ────────────────────────────────────────────────
+#[allow(clippy::enum_variant_names)]
 mod kura_proto {
     tonic::include_proto!("yoriito.viss.v1");
 
@@ -141,9 +142,9 @@ impl KuraSinkConnector {
 
     /// Walk a collection row and resolve every non-null column that appears in
     /// the mapping file.  Returns `(path, DataPointCurrent)` pairs.
-    fn iter_updates_for_row<'a>(
+    fn iter_updates_for_row(
         mapping: &HashMap<String, String>,
-        tuple: &'a crate::model::Tuple,
+        tuple: &crate::model::Tuple,
     ) -> Result<Vec<(String, DataPointCurrent)>, SinkConnectorError> {
         let mut out: Vec<(String, DataPointCurrent)> = Vec::new();
         for ((_, column_name), value) in tuple.entries() {
