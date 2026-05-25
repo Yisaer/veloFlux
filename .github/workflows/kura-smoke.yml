@@ -22,7 +22,7 @@ jobs:
   kura-smoke:
     name: Kura Smoke & veloFlux E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     env:
       KURA_REPO: https://github.com/yoriito/kura.git
       KURA_COMMIT: 3489f0ba019b59eb6160090000be2644f1d1ef2d
@@ -233,7 +233,7 @@ jobs:
             ${{ runner.os }}-kura-e2e-
 
       - name: Build veloFlux
-        run: cargo build --release --bin veloflux
+        run: cargo build --bin veloflux
 
       - name: Create kura mapping file
         run: |
@@ -260,7 +260,7 @@ jobs:
 
       - name: Start veloFlux server
         run: |
-          ./target/release/veloflux \
+          ./target/debug/veloflux \
             --config-file /tmp/veloflux-config.yml \
             > /tmp/veloflux.log 2>&1 &
           echo $! > /tmp/veloflux.pid
