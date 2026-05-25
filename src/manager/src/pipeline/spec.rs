@@ -1,7 +1,7 @@
 use crate::MQTT_QOS;
 use flow::EncoderRegistry;
 use flow::pipeline::{
-    KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
+    KuraSinkProps, KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
     PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType,
 };
 use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
@@ -10,8 +10,9 @@ use serde_json::Map as JsonMap;
 use std::time::Duration;
 
 use super::types::{
-    CreatePipelineRequest, EncoderTransformRequest, MemorySinkPropsRequest, MqttSinkPropsRequest,
-    NopSinkPropsRequest, SinkOutputConfigRequest,
+    CreatePipelineRequest, EncoderTransformRequest, KuraSinkPropsRequest,
+    MemorySinkPropsRequest, MqttSinkPropsRequest, NopSinkPropsRequest,
+    SinkOutputConfigRequest,
 };
 
 #[derive(Deserialize)]
@@ -105,6 +106,22 @@ pub(crate) fn build_pipeline_definition(
                     SinkProps::Kuksa(KuksaSinkProps { addr, vss_path }),
                 )
             }
+            "kura" => {
+                let kura_props: KuraSinkPropsRequest =
+                    serde_json::from_value(sink_req.props.to_value())
+                        .map_err(|err| format!("invalid kura sink props: {err}"))?;
+                let addr = kura_props
+                    .addr
+                    .ok_or_else(|| "kura sink props missing addr".to_string())?;
+                let mapping_path = kura_props
+                    .mapping_path
+                    .ok_or_else(|| "kura sink props missing mapping_path".to_string())?;
+                SinkDefinition::new(
+                    sink_id.clone(),
+                    SinkType::Kura,
+                    SinkProps::Kura(KuraSinkProps { addr, mapping_path }),
+                )
+            }
             "memory" => {
                 let memory_props: MemorySinkPropsRequest =
                     serde_json::from_value(sink_req.props.to_value())
@@ -140,7 +157,7 @@ pub(crate) fn build_pipeline_definition(
         };
 
         let mut encoder_config = match sink_definition.sink_type {
-            SinkType::Kuksa => SinkEncoderConfig::new("none", JsonMap::new()),
+            SinkType::Kuksa | SinkType::Kura => SinkEncoderConfig::new("none", JsonMap::new()),
             SinkType::Memory if sink_req.encoder.encode_type.eq_ignore_ascii_case("none") => {
                 SinkEncoderConfig::new("none", sink_req.encoder.props.clone())
             }

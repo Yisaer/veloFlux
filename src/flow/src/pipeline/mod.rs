@@ -17,7 +17,7 @@ mod internal;
 pub(crate) use api::PipelineManager;
 pub use api::{
     CreatePipelineRequest, CreatePipelineResult, EventtimeOptions, ExplainPipelineTarget,
-    KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
+    KuraSinkProps, KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
     PipelineError, PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode,
     SinkDefinition, SinkProps, SinkType,
 };

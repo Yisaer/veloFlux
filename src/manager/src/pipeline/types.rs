@@ -238,6 +238,14 @@ pub struct MemorySinkPropsRequest {
 
 #[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
+pub struct KuraSinkPropsRequest {
+    pub addr: Option<String>,
+    #[serde(rename = "mapping_path")]
+    pub mapping_path: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
 pub struct CommonSinkPropsRequest {
     #[serde(rename = "batch_count")]
     pub batch_count: Option<usize>,

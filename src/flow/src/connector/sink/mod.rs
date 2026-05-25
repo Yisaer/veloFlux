@@ -49,6 +49,7 @@ pub enum SinkConnectorError {
     Other(String),
 }
 
+pub mod kura;
 pub mod kuksa;
 pub mod memory;
 pub mod mock;

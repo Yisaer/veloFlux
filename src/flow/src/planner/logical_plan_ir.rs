@@ -770,6 +770,14 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "vss_path": cfg.vss_path,
             }),
         ),
+        SinkConnectorConfig::Kura(cfg) => (
+            "kura".to_string(),
+            serde_json::json!({
+                "sink_name": cfg.sink_name,
+                "addr": cfg.addr,
+                "mapping_path": cfg.mapping_path,
+            }),
+        ),
         SinkConnectorConfig::Nop(cfg) => {
             if cfg.log {
                 ("nop".to_string(), serde_json::json!({ "log": true }))

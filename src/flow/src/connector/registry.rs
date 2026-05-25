@@ -1,3 +1,4 @@
+use super::sink::kura::KuraSinkConnector;
 use super::sink::kuksa::KuksaSinkConnector;
 use super::sink::memory::MemorySinkConnector;
 use super::sink::mqtt::MqttSinkConnector;
@@ -127,6 +128,21 @@ impl ConnectorRegistry {
                 ))),
                 other => Err(ConnectorError::Other(format!(
                     "connector `{sink_id}` expected Kuksa config but received {:?}",
+                    other.kind()
+                ))),
+            }),
+        );
+
+        self.register_sink_factory(
+            "kura",
+            Arc::new(|sink_id, config, _, _, spawner| match config {
+                SinkConnectorConfig::Kura(cfg) => Ok(Box::new(KuraSinkConnector::new(
+                    sink_id.to_string(),
+                    cfg.clone(),
+                    spawner.clone(),
+                ))),
+                other => Err(ConnectorError::Other(format!(
+                    "connector `{sink_id}` expected Kura config but received {:?}",
                     other.kind()
                 ))),
             }),
