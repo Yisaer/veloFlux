@@ -1,7 +1,7 @@
 use super::*;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
-    HistorySourceConfig, HistorySourceConnector, KuraSinkConfig, KuksaSinkConfig, MemorySinkConfig,
+    HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig, KuraSinkConfig, MemorySinkConfig,
     MemorySourceConfig, MemorySourceConnector, MemoryTopicKind, MockSourceConnector,
     MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };

@@ -4,9 +4,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_client(true)
         .build_server(false)
-        .compile(
-            &["proto/yoriito/viss/v1/producer.proto"],
-            &["proto"],
-        )?;
+        .compile(&["proto/yoriito/viss/v1/producer.proto"], &["proto"])?;
     Ok(())
 }

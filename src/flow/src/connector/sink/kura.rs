@@ -209,10 +209,7 @@ impl SinkConnector for KuraSinkConnector {
         for tuple in collection.rows() {
             let entries = Self::iter_updates_for_row(mapping.as_ref(), tuple)?;
             for (path, dp) in entries {
-                packages.push(DataPackageCurrent {
-                    path,
-                    dp: vec![dp],
-                });
+                packages.push(DataPackageCurrent { path, dp: vec![dp] });
             }
         }
 

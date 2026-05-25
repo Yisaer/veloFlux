@@ -84,8 +84,8 @@ pub use memory_pubsub::{
 pub(crate) use mqtt_client::MqttClientManager;
 pub use mqtt_client::SharedMqttClientConfig;
 pub use registry::ConnectorRegistry;
-pub use sink::kura::KuraSinkConfig;
 pub use sink::kuksa::KuksaSinkConfig;
+pub use sink::kura::KuraSinkConfig;
 pub use sink::memory::{MemorySinkConfig, MemorySinkConnector};
 pub use sink::mock::{MockSinkConnector, MockSinkHandle};
 pub use sink::mqtt::MqttSinkConfig;

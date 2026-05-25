@@ -1,8 +1,8 @@
 use crate::MQTT_QOS;
 use flow::EncoderRegistry;
 use flow::pipeline::{
-    KuraSinkProps, KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
-    PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType,
+    KuksaSinkProps, KuraSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps,
+    PipelineDefinition, PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType,
 };
 use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
 use serde::Deserialize;
@@ -10,9 +10,8 @@ use serde_json::Map as JsonMap;
 use std::time::Duration;
 
 use super::types::{
-    CreatePipelineRequest, EncoderTransformRequest, KuraSinkPropsRequest,
-    MemorySinkPropsRequest, MqttSinkPropsRequest, NopSinkPropsRequest,
-    SinkOutputConfigRequest,
+    CreatePipelineRequest, EncoderTransformRequest, KuraSinkPropsRequest, MemorySinkPropsRequest,
+    MqttSinkPropsRequest, NopSinkPropsRequest, SinkOutputConfigRequest,
 };
 
 #[derive(Deserialize)]

@@ -1,5 +1,5 @@
-use super::sink::kura::KuraSinkConnector;
 use super::sink::kuksa::KuksaSinkConnector;
+use super::sink::kura::KuraSinkConnector;
 use super::sink::memory::MemorySinkConnector;
 use super::sink::mqtt::MqttSinkConnector;
 use super::sink::nop::NopSinkConnector;

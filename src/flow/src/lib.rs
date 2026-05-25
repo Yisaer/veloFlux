@@ -46,8 +46,8 @@ pub use instance::{
 };
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
-    CreatePipelineRequest, CreatePipelineResult, ExplainPipelineTarget, KuraSinkProps, KuksaSinkProps,
-    MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
+    CreatePipelineRequest, CreatePipelineResult, ExplainPipelineTarget, KuksaSinkProps,
+    KuraSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
     PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps,
     SinkType,
 };

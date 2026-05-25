@@ -1,5 +1,5 @@
-use crate::connector::sink::kura::KuraSinkConfig;
 use crate::connector::sink::kuksa::KuksaSinkConfig;
+use crate::connector::sink::kura::KuraSinkConfig;
 use crate::connector::sink::memory::MemorySinkConfig;
 use crate::connector::sink::mqtt::MqttSinkConfig;
 use serde_json::{Map as JsonMap, Value as JsonValue};
