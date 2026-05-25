@@ -552,43 +552,41 @@ fn parse_stateful_window_spec_partition_by(
 
 fn validate_stateful_builtin_args(func_name: &str, args: &[Expr]) -> Result<(), String> {
     match func_name {
-        "latest" => {
-            if args.len() != 1 {
-                return Err(format!(
-                    "stateful function '{}' expects exactly 1 argument, got {}",
-                    func_name,
-                    args.len()
-                ));
-            }
+        "latest" if args.len() != 1 => {
+            return Err(format!(
+                "stateful function '{}' expects exactly 1 argument, got {}",
+                func_name,
+                args.len()
+            ));
+        }
+        "changed_col" if args.len() != 2 => {
+            return Err(format!(
+                "stateful function '{}' expects exactly 2 arguments, got {}",
+                func_name,
+                args.len()
+            ));
         }
         "changed_col" => {
-            if args.len() != 2 {
-                return Err(format!(
-                    "stateful function '{}' expects exactly 2 arguments, got {}",
-                    func_name,
-                    args.len()
-                ));
-            }
             validate_bool_literal(&args[0], "changed_col() first argument")?;
         }
+        "had_changed" if args.len() < 2 => {
+            return Err(format!(
+                "stateful function '{}' expects at least 2 arguments, got {}",
+                func_name,
+                args.len()
+            ));
+        }
         "had_changed" => {
-            if args.len() < 2 {
-                return Err(format!(
-                    "stateful function '{}' expects at least 2 arguments, got {}",
-                    func_name,
-                    args.len()
-                ));
-            }
             validate_bool_literal(&args[0], "had_changed() first argument")?;
         }
+        "lag" if args.is_empty() || args.len() > 3 => {
+            return Err(format!(
+                "stateful function '{}' expects 1 to 3 arguments, got {}",
+                func_name,
+                args.len()
+            ));
+        }
         "lag" => {
-            if args.is_empty() || args.len() > 3 {
-                return Err(format!(
-                    "stateful function '{}' expects 1 to 3 arguments, got {}",
-                    func_name,
-                    args.len()
-                ));
-            }
             if let Some(offset) = args.get(1) {
                 validate_positive_integer_literal(offset, "lag() second argument")?;
             }
