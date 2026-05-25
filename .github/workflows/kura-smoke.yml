@@ -251,20 +251,19 @@ jobs:
         run: |
           cat > /tmp/veloflux-config.yml <<'YAML'
           server:
-            host: 127.0.0.1
-            port: 9876
+            manager_addr: "127.0.0.1:9876"
             flow_instances:
-              - id: default
-                backend: in_process
+              - id: "default"
+                backend: "in_process"
           storage:
-            type: sqlite
-            path: /tmp/veloflux-storage.sqlite
+            type: "sqlite"
+            path: "/tmp/veloflux-storage.sqlite"
           YAML
 
       - name: Start veloFlux server
         run: |
           ./target/debug/veloflux \
-            --config-file /tmp/veloflux-config.yml \
+            --config /tmp/veloflux-config.yml \
             > /tmp/veloflux.log 2>&1 &
           echo $! > /tmp/veloflux.pid
 
