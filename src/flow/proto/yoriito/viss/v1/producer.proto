@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Copyright 2026 JASPAR
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+package yoriito.viss.v1.producer;
+
+import "google/protobuf/empty.proto";
+
+import "yoriito/viss/v1/types/error.proto";
+import "yoriito/viss/v1/types/filter.proto";
+import "yoriito/viss/v1/types/value.proto";
+import "yoriito/viss/v1/common.proto";
+
+service VISS {
+  rpc GetTarget(GetTargetRequest) returns (GetTargetResponse);
+  rpc SetCurrent(SetCurrentRequest) returns (SetCurrentResponse);
+  rpc Inspect(InspectRequest) returns (InspectResponse);
+  rpc Define(DefineRequest) returns (DefineResponse);
+  rpc Delete(DeleteRequest) returns (DeleteResponse);
+  rpc SubscribeTarget(SubscribeTargetRequest) returns (stream SubscribeTargetResponse);
+  rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse);
+}
+
+// GetTargetRequest
+message GetTargetRequest {
+  string path = 1;
+  optional GetFilter filter = 2;
+}
+
+message GetTargetResponse {
+  int64 ts = 1;
+  oneof result {
+    DataPackagesTarget data = 11;
+    Error error = 12;
+  }
+}
+
+// SetCurrentRequest
+message SetCurrentRequest {
+  DataPackagesCurrent data = 1;
+}
+
+message SetCurrentResponse {
+  int64 ts = 1;
+  oneof result {
+    google.protobuf.Empty success = 11;
+    Error error = 12;
+  }
+}
+
+// SubscribeTargetRequest
+message SubscribeTargetRequest {
+  string path = 1;
+  SubscribeFilter filter = 2;
+}
+
+message SubscribeTargetResponse {
+  int64 ts = 1;
+  oneof message_type {
+    SubscribeSuccess success = 10;
+    SubscribeError error = 20;
+    SubscriptionTargetEvent event = 30;
+  }
+}
+
+message SubscriptionTargetEvent {
+  string subscription_id = 31;
+  DataPackagesTarget data = 32;
+}
+
+// DefineRequest
+message DefineRequest {
+  MetadataEntries entries = 1;
+}
+
+message DefineResponse {
+  int64 ts = 1;
+  oneof result {
+    google.protobuf.Empty success = 11;
+    Error error = 12;
+  }
+}
+
+// DeleteRequest
+message DeleteRequest {
+  repeated string path = 1;
+}
+
+message DeleteResponse {
+  int64 ts = 1;
+  oneof result {
+    google.protobuf.Empty success = 11;
+    Error error = 12;
+  }
+}

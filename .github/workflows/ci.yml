@@ -38,6 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -72,6 +75,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -100,6 +106,9 @@ jobs:
           - 1883:1883
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly

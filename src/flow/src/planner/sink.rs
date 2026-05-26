@@ -1,4 +1,5 @@
 use crate::connector::sink::kuksa::KuksaSinkConfig;
+use crate::connector::sink::kura::KuraSinkConfig;
 use crate::connector::sink::memory::MemorySinkConfig;
 use crate::connector::sink::mqtt::MqttSinkConfig;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -173,6 +174,7 @@ pub enum SinkConnectorConfig {
     Mqtt(MqttSinkConfig),
     Nop(NopSinkConfig),
     Kuksa(KuksaSinkConfig),
+    Kura(KuraSinkConfig),
     Memory(MemorySinkConfig),
     Custom(CustomSinkConnectorConfig),
 }
@@ -183,6 +185,7 @@ impl SinkConnectorConfig {
             SinkConnectorConfig::Mqtt(_) => "mqtt",
             SinkConnectorConfig::Nop(_) => "nop",
             SinkConnectorConfig::Kuksa(_) => "kuksa",
+            SinkConnectorConfig::Kura(_) => "kura",
             SinkConnectorConfig::Memory(_) => "memory",
             SinkConnectorConfig::Custom(custom) => custom.kind.as_str(),
         }

@@ -1,7 +1,7 @@
 use super::*;
 use crate::catalog::{Catalog, StreamDefinition, StreamProps};
 use crate::connector::{
-    HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig, MemorySinkConfig,
+    HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig, KuraSinkConfig, MemorySinkConfig,
     MemorySourceConfig, MemorySourceConnector, MemoryTopicKind, MockSourceConnector,
     MqttSinkConfig, MqttSourceConfig, MqttSourceConnector,
 };
@@ -682,6 +682,37 @@ fn build_sinks_from_definition(
                         sink_name: sink.sink_id.clone(),
                         addr: props.addr.clone(),
                         vss_path: props.vss_path.clone(),
+                    }),
+                    sink.encoder.clone(),
+                );
+                let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
+                    .with_common_props(sink.common.clone())
+                    .with_output(sink.output.clone());
+                sinks.push(pipeline_sink);
+            }
+            SinkType::Kura => {
+                let props = match &sink.props {
+                    SinkProps::Kura(props) => props,
+                    other => {
+                        return Err(format!(
+                            "sink {} expected kura props but received {other:?}",
+                            sink.sink_id
+                        ));
+                    }
+                };
+                if !matches!(sink.encoder.kind(), SinkEncoderKind::None) {
+                    return Err(format!(
+                        "sink {} expected encoder `none` for kura but received {}",
+                        sink.sink_id,
+                        sink.encoder.kind_str()
+                    ));
+                }
+                let connector = PipelineSinkConnector::new(
+                    sink.sink_id.clone(),
+                    SinkConnectorConfig::Kura(KuraSinkConfig {
+                        sink_name: sink.sink_id.clone(),
+                        addr: props.addr.clone(),
+                        mapping_path: props.mapping_path.clone(),
                     }),
                     sink.encoder.clone(),
                 );

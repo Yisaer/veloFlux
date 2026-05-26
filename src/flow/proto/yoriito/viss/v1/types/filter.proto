@@ -1,0 +1,136 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Copyright 2026 JASPAR
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package yoriito.viss.v1;
+
+// Operator represents the comparison operators used in VISS
+enum Operator {
+  // less than
+  LESS_THAN = 0;
+  // greater than
+  GREATER_THAN = 1;
+  // less than or equal to
+  LESS_THAN_OR_EQUAL = 2;
+  // greater than or equal to
+  GREATER_THAN_OR_EQUAL = 3;
+  // equal to
+  EQUAL_TO = 4;
+  // not equal to
+  NOT_EQUAL_TO = 5;
+}
+
+// PathsFilter represents a filter that specifies which paths to include
+message PathsFilter {
+  // repeated field of paths
+  repeated string paths = 1;
+}
+
+// TimebasedFilter represents a filter based on time period
+message TimebasedFilter {
+  // period in ISO8601 format
+  string period = 1;
+}
+
+// ChangeFilter represents a filter based on changes in data value
+message ChangeFilter {
+  // logic operator
+  int32 logic_op = 1;
+  // diff value
+  string diff = 2;
+}
+
+// RangeFilter represents a filter based on range of data values
+message RangeFilter {
+  // type of range filter
+  oneof range_type {
+    // single range condition
+    RangeCondition single = 1;
+    // multiple range conditions with logical operator
+    RangeConditionSet multi = 2;
+  }
+}
+
+// RangeCondition represents a single range condition
+message RangeCondition {
+  // boundary operator
+  int32 boundary_op = 1;
+  // boundary value
+  string boundary = 2;
+}
+
+// RangeConditionSet represents a set of range conditions with logical operator
+message RangeConditionSet {
+  // logic operator for combining conditions
+  int32 logic_op = 1;
+  // repeated field of range conditions
+  repeated RangeCondition conditions = 2;
+}
+
+// InspectFilter represents a filter for Inspect requests
+message InspectFilter {
+  // parameter variant
+  oneof parameter_variant {
+    // paths parameter
+    PathsFilter paths_parameter = 1;
+  }
+}
+
+// GetFilter represents a filter for Get requests
+message GetFilter {
+  // parameter variant
+  oneof parameter_variant {
+    // paths parameter
+    PathsFilter paths_parameter = 1;
+    // history parameter
+    TimebasedFilter history_parameter = 2;
+  }
+}
+
+// SubscribeFilter represents a filter for Subscribe requests
+message SubscribeFilter {
+  // parameter variant
+  oneof parameter_variant {
+    // paths parameter
+    PathsFilter paths_parameter = 1;
+    // misc parameter (timebased, change, range)
+    MiscFilterParameter misc_parameter = 2;
+    // combo filter (both paths and misc)
+    SubscribeComboFilter combo_filter = 3;
+  }
+}
+
+// MiscFilterParameter represents miscellaneous filter parameters
+message MiscFilterParameter {
+  // parameter variant
+  oneof parameter_variant {
+    // timebased filter
+    TimebasedFilter timebased_parameter = 1;
+    // change filter
+    ChangeFilter change_parameter = 2;
+    // range filter
+    RangeFilter range_parameter = 3;
+  }
+}
+
+// SubscribeComboFilter represents a combination of paths and misc filters
+message SubscribeComboFilter {
+  // paths parameter
+  optional PathsFilter paths_parameter = 1;
+  // misc parameter
+  optional MiscFilterParameter misc_parameter = 2;
+}
