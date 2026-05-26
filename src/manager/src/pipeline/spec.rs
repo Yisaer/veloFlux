@@ -1,9 +1,9 @@
 use crate::MQTT_QOS;
 use flow::EncoderRegistry;
 use flow::pipeline::{
-    KuksaSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition,
-    PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType, SourceDefinition,
-    VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
+    KuksaSinkProps, KuraSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps,
+    PipelineDefinition, PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType,
+    SourceDefinition, VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
 use parser::SelectStmt;
@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use super::types::{
     CreatePipelineRequest, CreatePipelineSourceRequest, EncoderTransformRequest,
-    MemorySinkPropsRequest, MqttSinkPropsRequest, NopSinkPropsRequest, SinkOutputConfigRequest,
-    VideoSinkPropsRequest,
+    KuraSinkPropsRequest, MemorySinkPropsRequest, MqttSinkPropsRequest, NopSinkPropsRequest,
+    SinkOutputConfigRequest, VideoSinkPropsRequest,
 };
 
 #[derive(Deserialize)]
@@ -284,6 +284,22 @@ pub(crate) fn build_pipeline_definition(
                     SinkProps::Kuksa(KuksaSinkProps { addr, vss_path }),
                 )
             }
+            "kura" => {
+                let kura_props: KuraSinkPropsRequest =
+                    serde_json::from_value(sink_req.props.to_value())
+                        .map_err(|err| format!("invalid kura sink props: {err}"))?;
+                let addr = kura_props
+                    .addr
+                    .ok_or_else(|| "kura sink props missing addr".to_string())?;
+                let mapping_path = kura_props
+                    .mapping_path
+                    .ok_or_else(|| "kura sink props missing mapping_path".to_string())?;
+                SinkDefinition::new(
+                    sink_id.clone(),
+                    SinkType::Kura,
+                    SinkProps::Kura(KuraSinkProps { addr, mapping_path }),
+                )
+            }
             "memory" => {
                 let memory_props: MemorySinkPropsRequest =
                     serde_json::from_value(sink_req.props.to_value())
@@ -326,7 +342,7 @@ pub(crate) fn build_pipeline_definition(
         };
 
         let mut encoder_config = match sink_definition.sink_type {
-            SinkType::Kuksa => SinkEncoderConfig::new("none", JsonMap::new()),
+            SinkType::Kuksa | SinkType::Kura => SinkEncoderConfig::new("none", JsonMap::new()),
             SinkType::Video => {
                 let default_encoder = sink_req.encoder.encode_type.eq_ignore_ascii_case("json")
                     && sink_req.encoder.props.is_empty()

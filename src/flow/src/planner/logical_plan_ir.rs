@@ -360,6 +360,7 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
         "kuksa" => {
             SinkConnectorConfig::Kuksa(kuksa_sink_from_ir_settings(&sink.connector_settings)?)
         }
+        "kura" => SinkConnectorConfig::Kura(kura_sink_from_ir_settings(&sink.connector_settings)?),
         "nop" => {
             let log = sink
                 .connector_settings
@@ -582,6 +583,36 @@ fn kuksa_sink_from_ir_settings(
         sink_name,
         addr,
         vss_path,
+    })
+}
+
+fn kura_sink_from_ir_settings(
+    settings: &JsonValue,
+) -> Result<crate::connector::KuraSinkConfig, String> {
+    let obj = settings
+        .as_object()
+        .ok_or_else(|| "kura sink settings must be an object".to_string())?;
+
+    let sink_name = obj
+        .get("sink_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "kura sink settings missing sink_name".to_string())?
+        .to_string();
+    let addr = obj
+        .get("addr")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "kura sink settings missing addr".to_string())?
+        .to_string();
+    let mapping_path = obj
+        .get("mapping_path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "kura sink settings missing mapping_path".to_string())?
+        .to_string();
+
+    Ok(crate::connector::KuraSinkConfig {
+        sink_name,
+        addr,
+        mapping_path,
     })
 }
 
@@ -848,6 +879,14 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "sink_name": cfg.sink_name,
                 "addr": cfg.addr,
                 "vss_path": cfg.vss_path,
+            }),
+        ),
+        SinkConnectorConfig::Kura(cfg) => (
+            "kura".to_string(),
+            serde_json::json!({
+                "sink_name": cfg.sink_name,
+                "addr": cfg.addr,
+                "mapping_path": cfg.mapping_path,
             }),
         ),
         SinkConnectorConfig::Nop(cfg) => {

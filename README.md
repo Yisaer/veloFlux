@@ -5,7 +5,9 @@ an open-source streaming processor written in Rust and designed for resource-sen
 [![codecov](https://codecov.io/gh/Yisaer/veloFlux/branch/main/graph/badge.svg)](https://app.codecov.io/gh/Yisaer/veloFlux)
 
 ## Quick start
-Prereq: Rust stable toolchain and `make`.
+Prereq: Rust stable toolchain, `make`, and `protoc` (protobuf compiler, e.g. `apt-get install protobuf-compiler`).
+
+The `tonic-build` codegen requires `protoc` to compile gRPC service stubs from proto definitions bundled in the `flow` crate.
 
 Build and test:
 - `make build` / `make release` / `make release-thin`

@@ -27,6 +27,9 @@ parquet = "53.0.0"
 arrow = "53.0.0"
 kuksa-rust-sdk = "0.2.1"
 http = "0.2.12"
+tonic = "0.11"
+prost = "0.12"
+prost-types = "0.12"
 humantime-serde = "1"
 libc = "0.2"
 rand = "0.10.0"
@@ -43,6 +46,9 @@ chrono = "0.4"
 gmp-mpfr-sys = { version = "~1.6", default-features = false, optional = true }
 gstreamer = { version = "0.23", optional = true }
 gstreamer-app = { version = "0.23", optional = true }
+
+[build-dependencies]
+tonic-build = "0.11"
 
 [dev-dependencies]
 rumqttd = "0.20.0"

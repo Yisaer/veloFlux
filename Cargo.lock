@@ -1554,6 +1554,8 @@ dependencies = [
  "parking_lot",
  "parquet",
  "parser",
+ "prost 0.12.6",
+ "prost-types 0.12.6",
  "rand 0.10.0",
  "regex",
  "rug",
@@ -1568,6 +1570,8 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-stream",
+ "tonic",
+ "tonic-build 0.11.0",
  "tracing",
  "upon",
  "url",
@@ -2919,7 +2923,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
- "tonic-build",
+ "tonic-build 0.8.4",
 ]
 
 [[package]]
@@ -3947,6 +3951,27 @@ dependencies = [
  "syn 1.0.109",
  "tempfile",
  "which",
+]
+
+[[package]]
+name = "prost-build"
+version = "0.12.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
+dependencies = [
+ "bytes",
+ "heck 0.5.0",
+ "itertools 0.12.1",
+ "log",
+ "multimap",
+ "once_cell",
+ "petgraph",
+ "prettyplease 0.2.37",
+ "prost 0.12.6",
+ "prost-types 0.12.6",
+ "regex",
+ "syn 2.0.117",
+ "tempfile",
 ]
 
 [[package]]
@@ -5702,9 +5727,22 @@ checksum = "5bf5e9b9c0f7e0a7c027dcfaba7b2c60816c7049171f679d99ee2ff65d0de8c4"
 dependencies = [
  "prettyplease 0.1.25",
  "proc-macro2",
- "prost-build",
+ "prost-build 0.11.9",
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "tonic-build"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be4ef6dd70a610078cb4e338a0f79d06bc759ff1b22d2120c2ff02ae264ba9c2"
+dependencies = [
+ "prettyplease 0.2.37",
+ "proc-macro2",
+ "prost-build 0.12.6",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]

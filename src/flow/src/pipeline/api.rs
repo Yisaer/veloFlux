@@ -30,6 +30,8 @@ pub enum SinkType {
     Nop,
     /// Kuksa sink that updates VSS paths via kuksa.val.v2.
     Kuksa,
+    /// Kura sink that sends VSS values to a kura server via gRPC (yoriito VISS producer).
+    Kura,
     /// Memory sink that publishes to an in-process pub/sub topic.
     Memory,
     /// Video sink that records video frame tuples.
@@ -45,6 +47,8 @@ pub enum SinkProps {
     Nop(NopSinkProps),
     /// Kuksa sink config.
     Kuksa(KuksaSinkProps),
+    /// Kura sink config.
+    Kura(KuraSinkProps),
     /// Memory sink config.
     Memory(MemorySinkProps),
     /// Video sink config.
@@ -108,6 +112,13 @@ pub struct NopSinkProps {
 pub struct KuksaSinkProps {
     pub addr: String,
     pub vss_path: String,
+}
+
+/// Concrete Kura sink configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KuraSinkProps {
+    pub addr: String,
+    pub mapping_path: String,
 }
 
 /// Concrete memory sink configuration.

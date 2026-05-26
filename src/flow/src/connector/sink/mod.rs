@@ -50,6 +50,7 @@ pub enum SinkConnectorError {
 }
 
 pub mod kuksa;
+pub mod kura;
 pub mod memory;
 pub mod mock;
 pub mod mqtt;

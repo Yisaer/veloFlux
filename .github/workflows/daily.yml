@@ -83,6 +83,9 @@ jobs:
         working-directory: tests/sql_assert/sql_gen
         run: go run . --config ../config-test.toml
 
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 

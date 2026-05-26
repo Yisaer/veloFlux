@@ -56,7 +56,7 @@ pub use instance::{
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
     CreatePipelineRequest, CreatePipelineResult, ExplainPipelineTarget, KuksaSinkProps,
-    MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
+    KuraSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
     PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps,
     SinkType, SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
     VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,

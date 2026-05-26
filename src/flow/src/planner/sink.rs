@@ -1,4 +1,5 @@
 use crate::connector::sink::kuksa::KuksaSinkConfig;
+use crate::connector::sink::kura::KuraSinkConfig;
 use crate::connector::sink::memory::MemorySinkConfig;
 use crate::connector::sink::mqtt::MqttSinkConfig;
 use crate::connector::sink::video::VideoSinkConfig;
@@ -174,6 +175,7 @@ pub enum SinkConnectorConfig {
     Mqtt(MqttSinkConfig),
     Nop(NopSinkConfig),
     Kuksa(KuksaSinkConfig),
+    Kura(KuraSinkConfig),
     Memory(MemorySinkConfig),
     Video(VideoSinkConfig),
     Custom(CustomSinkConnectorConfig),
@@ -185,6 +187,7 @@ impl SinkConnectorConfig {
             SinkConnectorConfig::Mqtt(_) => "mqtt",
             SinkConnectorConfig::Nop(_) => "nop",
             SinkConnectorConfig::Kuksa(_) => "kuksa",
+            SinkConnectorConfig::Kura(_) => "kura",
             SinkConnectorConfig::Memory(_) => "memory",
             SinkConnectorConfig::Video(_) => "video",
             SinkConnectorConfig::Custom(custom) => custom.kind.as_str(),

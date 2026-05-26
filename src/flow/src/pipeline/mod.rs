@@ -17,11 +17,11 @@ mod internal;
 pub(crate) use api::PipelineManager;
 pub use api::{
     is_hls_video_url, is_rtsp_video_url, validate_video_filename_prefix, CreatePipelineRequest,
-    CreatePipelineResult, EventtimeOptions, ExplainPipelineTarget, KuksaSinkProps, MemorySinkProps,
-    MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError, PipelineOptions,
-    PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps, SinkType,
-    SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig, VideoCodec,
-    VideoContainer, VideoRollingConfig, VideoSinkProps,
+    CreatePipelineResult, EventtimeOptions, ExplainPipelineTarget, KuksaSinkProps, KuraSinkProps,
+    MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
+    PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps,
+    SinkType, SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
+    VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 pub(crate) use context::PipelineContext;
 
