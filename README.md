@@ -37,7 +37,6 @@ profiling:
   enabled: true
   addr: "0.0.0.0:6060"
 metrics:
-  addr: "0.0.0.0:9898"
   poll_interval_secs: 5
 server:
   manager_addr: "0.0.0.0:8080"

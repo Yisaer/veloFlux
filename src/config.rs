@@ -27,7 +27,6 @@ impl Default for AppConfig {
                 cpu_profile_freq_hz: None,
             },
             metrics: MetricsConfig {
-                addr: None,
                 poll_interval_secs: None,
             },
             server: ServerConfig::default(),
@@ -146,14 +145,12 @@ pub struct ProfilingConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct MetricsConfig {
-    pub addr: Option<String>,
     pub poll_interval_secs: Option<u64>,
 }
 
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
-            addr: Some("0.0.0.0:9898".to_string()),
             poll_interval_secs: Some(15),
         }
     }
@@ -218,9 +215,6 @@ impl AppConfig {
         if let Some(freq_hz) = self.profiling.cpu_profile_freq_hz {
             opts.cpu_profile_freq_hz = Some(freq_hz);
         }
-        if let Some(addr) = self.metrics.addr.as_ref() {
-            opts.metrics_addr = Some(addr.clone());
-        }
         if let Some(secs) = self.metrics.poll_interval_secs {
             opts.metrics_poll_interval_secs = Some(secs);
         }
@@ -255,7 +249,6 @@ mod tests {
     const ENV_LOGGING_SYSLOG_NETWORK: &str = "VELOFLUX_LOGGING__SYSLOG__NETWORK";
     const ENV_LOGGING_SYSLOG_ADDRESS: &str = "VELOFLUX_LOGGING__SYSLOG__ADDRESS";
     const ENV_PROFILING_ADDR: &str = "VELOFLUX_PROFILING__ADDR";
-    const ENV_METRICS_ADDR: &str = "VELOFLUX_METRICS__ADDR";
     const ENV_METRICS_POLL_INTERVAL_SECS: &str = "VELOFLUX_METRICS__POLL_INTERVAL_SECS";
     const ENV_SERVER_MANAGER_ADDR: &str = "VELOFLUX_SERVER__MANAGER_ADDR";
 
@@ -333,7 +326,6 @@ server:
         assert_eq!(opts.profiling_enabled, Some(true));
         assert_eq!(opts.manager_addr.as_deref(), Some("127.0.0.1:9999"));
         assert!(opts.profile_addr.is_none());
-        assert!(opts.metrics_addr.is_none());
         assert!(opts.metrics_poll_interval_secs.is_none());
 
         let _ = std::fs::remove_file(&path);
@@ -351,7 +343,6 @@ server:
         env.set(ENV_LOGGING_SYSLOG_NETWORK, "");
         env.set(ENV_LOGGING_SYSLOG_ADDRESS, "");
         env.set(ENV_PROFILING_ADDR, "127.0.0.1:16060");
-        env.set(ENV_METRICS_ADDR, "127.0.0.1:19898");
         env.set(ENV_METRICS_POLL_INTERVAL_SECS, "30");
         env.set(ENV_SERVER_MANAGER_ADDR, "127.0.0.1:18080");
 
@@ -366,7 +357,6 @@ server:
         assert!(cfg.logging.syslog.network.is_empty());
         assert!(cfg.logging.syslog.address.is_empty());
         assert_eq!(cfg.profiling.addr.as_deref(), Some("127.0.0.1:16060"));
-        assert_eq!(cfg.metrics.addr.as_deref(), Some("127.0.0.1:19898"));
         assert_eq!(cfg.metrics.poll_interval_secs, Some(30));
         assert_eq!(cfg.server.manager_addr.as_deref(), Some("127.0.0.1:18080"));
     }
@@ -378,7 +368,6 @@ server:
 profiling:
   addr: "127.0.0.1:6060"
 metrics:
-  addr: "127.0.0.1:9898"
   poll_interval_secs: 2
 "#;
         let path = unique_temp_path("addr");
@@ -387,7 +376,6 @@ metrics:
         let cfg = AppConfig::load_required(&path).unwrap();
         let opts = cfg.to_server_options();
         assert_eq!(opts.profile_addr.as_deref(), Some("127.0.0.1:6060"));
-        assert_eq!(opts.metrics_addr.as_deref(), Some("127.0.0.1:9898"));
         assert_eq!(opts.metrics_poll_interval_secs, Some(2));
 
         let _ = std::fs::remove_file(&path);
@@ -581,20 +569,16 @@ server:
         let yaml = r#"
 profiling:
   addr: "127.0.0.1:6060"
-metrics:
-  addr: "127.0.0.1:9898"
 "#;
         let path = unique_temp_path("unsupported_bind_addr_env");
         std::fs::write(&path, yaml).unwrap();
 
         let mut env = EnvTestGuard::new();
         env.set(ENV_PROFILING_ADDR, "127.0.0.1:16060");
-        env.set(ENV_METRICS_ADDR, "127.0.0.1:19898");
 
         let cfg = AppConfig::load_required(&path).unwrap();
 
         assert_eq!(cfg.profiling.addr.as_deref(), Some("127.0.0.1:16060"));
-        assert_eq!(cfg.metrics.addr.as_deref(), Some("127.0.0.1:19898"));
 
         let _ = std::fs::remove_file(&path);
     }

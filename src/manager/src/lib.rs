@@ -20,8 +20,11 @@ mod stream;
 #[cfg(feature = "wasm_udf")]
 mod udf_handler;
 use axum::Router;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use pipeline::AppState;
+use prometheus::{Encoder, TextEncoder};
 use startup::StartupPhase;
 use std::future::{Future, pending};
 use std::net::SocketAddr;
@@ -109,8 +112,31 @@ fn build_app(state: AppState) -> Router {
             get(mqtt_client::get_shared_mqtt_client_handler)
                 .delete(mqtt_client::delete_shared_mqtt_client_handler),
         )
+        .route("/metrics", get(metrics_handler))
         .layer(CorsLayer::permissive());
     add_udf_routes(app).with_state(state)
+}
+
+async fn metrics_handler() -> impl IntoResponse {
+    let encoder = TextEncoder::new();
+    let metric_families = prometheus::gather();
+    let mut buffer = vec![];
+    match encoder.encode(&metric_families, &mut buffer) {
+        Ok(()) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; version=0.0.4",
+            )],
+            buffer,
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to encode metrics: {err}"),
+        )
+            .into_response(),
+    }
 }
 
 #[cfg(feature = "wasm_udf")]

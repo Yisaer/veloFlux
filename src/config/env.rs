@@ -23,7 +23,7 @@ impl EnvBinding {
     }
 }
 
-const ENV_BINDINGS: [EnvBinding; 16] = [
+const ENV_BINDINGS: [EnvBinding; 15] = [
     EnvBinding::new(
         "VELOFLUX_LOGGING__OUTPUT",
         "logging.output",
@@ -89,7 +89,6 @@ const ENV_BINDINGS: [EnvBinding; 16] = [
         "profiling.cpu_profile_freq_hz",
         set_profiling_cpu_profile_freq_hz,
     ),
-    EnvBinding::new("VELOFLUX_METRICS__ADDR", "metrics.addr", set_metrics_addr),
     EnvBinding::new(
         "VELOFLUX_METRICS__POLL_INTERVAL_SECS",
         "metrics.poll_interval_secs",
@@ -266,11 +265,6 @@ fn set_profiling_cpu_profile_freq_hz(
     raw: &str,
 ) -> ConfigResult<()> {
     config.profiling.cpu_profile_freq_hz = Some(parse_env::<i32>(binding, raw)?);
-    Ok(())
-}
-
-fn set_metrics_addr(config: &mut AppConfig, _binding: &EnvBinding, raw: &str) -> ConfigResult<()> {
-    config.metrics.addr = Some(raw.to_string());
     Ok(())
 }
 

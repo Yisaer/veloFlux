@@ -133,7 +133,7 @@ jobs:
           python3 tests/perf_daily/perf_daily.py \
             --force \
             --base-url http://127.0.0.1:8080 \
-            --metrics-url http://127.0.0.1:9898/metrics \
+            --metrics-url http://127.0.0.1:8080/metrics \
             --broker-url tcp://127.0.0.1:1883 \
             --topic /perf/daily \
             --qos 1 \
@@ -168,7 +168,6 @@ jobs:
           source scripts/ci/veloflux_process.sh
           stop_veloflux_from_pidfile tmp/perf_daily_ci/veloflux.pid
           if ! wait_for_port_release 8080 \
-            || ! wait_for_port_release 9898 \
             || ! wait_for_port_release 6060; then
             report_port_release_failure
             exit 1
@@ -204,7 +203,7 @@ jobs:
           python3 tests/perf_daily/perf_daily.py \
             --force \
             --base-url http://127.0.0.1:8080 \
-            --metrics-url http://127.0.0.1:9898/metrics \
+            --metrics-url http://127.0.0.1:8080/metrics \
             --broker-url tcp://127.0.0.1:1883 \
             --topic /perf/daily \
             --qos 1 \

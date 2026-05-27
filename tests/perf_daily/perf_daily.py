@@ -25,7 +25,7 @@ class PerfDailyError(RuntimeError):
 DEFAULT_STREAM_NAME = "perf_daily_stream"
 DEFAULT_PIPELINE_ID = "perf_daily_pipeline"
 
-DEFAULT_METRICS_URL = "http://127.0.0.1:9898/metrics"
+DEFAULT_METRICS_URL = "http://127.0.0.1:8080/metrics"
 DEFAULT_OUT_DIR = "tmp/perf_daily"
 
 FLOW_INSTANCE_LABEL = "flow_instance"

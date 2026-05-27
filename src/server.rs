@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use std::future::Future;
 #[cfg(feature = "profiling")]
 use std::io::{Read, Write};
-#[cfg(any(feature = "metrics", feature = "profiling"))]
+#[cfg(feature = "profiling")]
 use std::net::SocketAddr;
 #[cfg(feature = "profiling")]
 use std::net::{TcpListener, TcpStream};
@@ -54,11 +54,10 @@ const DEFAULT_CPU_PROFILE_FREQUENCY_HZ: i32 = 100;
 #[cfg(feature = "profiling")]
 const DEFAULT_CPU_PROFILE_BLOCKLIST: [&str; 4] = ["libc", "libgcc", "pthread", "vdso"];
 #[cfg(feature = "metrics")]
-const DEFAULT_METRICS_ADDR: &str = "0.0.0.0:9898";
+const DEFAULT_METRICS_POLL_INTERVAL_SECS: u64 = 5;
+
 pub const DEFAULT_DATA_DIR: &str = "./tmp";
 pub const DEFAULT_MANAGER_ADDR: &str = "0.0.0.0:8080";
-#[cfg(feature = "metrics")]
-const DEFAULT_METRICS_POLL_INTERVAL_SECS: u64 = 5;
 
 #[cfg(all(
     feature = "profiling",
@@ -68,9 +67,7 @@ const DEFAULT_METRICS_POLL_INTERVAL_SECS: u64 = 5;
 static PPROF_ENDPOINT_MUTEX: Mutex<()> = Mutex::new(());
 
 #[cfg(feature = "metrics")]
-struct MetricsExporterRuntime {
-    _exporter: prometheus_exporter::Exporter,
-}
+struct MetricsExporterRuntime;
 
 #[cfg(not(feature = "metrics"))]
 struct MetricsExporterRuntime;
@@ -123,8 +120,6 @@ pub struct ServerOptions {
     pub profile_addr: Option<String>,
     /// CPU profiling sample frequency in Hz (feature-gated); if None, uses default.
     pub cpu_profile_freq_hz: Option<i32>,
-    /// Metrics exporter bind address (feature-gated); if None, uses default.
-    pub metrics_addr: Option<String>,
     /// Metrics polling interval in seconds (feature-gated); if None, uses default.
     pub metrics_poll_interval_secs: Option<u64>,
     /// Declared flow instances loaded from config.
@@ -692,18 +687,15 @@ fn suspend_jemalloc_heap_profiling<T>(f: impl FnOnce() -> Result<T, String>) -> 
 async fn init_metrics_exporter_runtime(
     opts: &ServerOptions,
 ) -> Result<Option<MetricsExporterRuntime>, Box<dyn std::error::Error + Send + Sync>> {
-    let addr: SocketAddr = opts
-        .metrics_addr
-        .clone()
-        .unwrap_or_else(|| DEFAULT_METRICS_ADDR.to_string())
-        .parse()?;
-    tracing::info!(metrics_addr = %addr, "enabling metrics exporter");
-    let exporter = prometheus_exporter::start(addr)?;
-
     let poll_interval = opts
         .metrics_poll_interval_secs
         .filter(|secs| *secs > 0)
         .unwrap_or(DEFAULT_METRICS_POLL_INTERVAL_SECS);
+
+    tracing::info!(
+        metrics_poll_interval_secs = poll_interval,
+        "enabling metrics collection"
+    );
 
     spawn_tokio_metrics_collector(StdDuration::from_secs(poll_interval));
 
@@ -725,9 +717,7 @@ async fn init_metrics_exporter_runtime(
             sleep(Duration::from_secs(poll_interval)).await;
         }
     });
-    Ok(Some(MetricsExporterRuntime {
-        _exporter: exporter,
-    }))
+    Ok(Some(MetricsExporterRuntime))
 }
 
 #[cfg(not(feature = "metrics"))]
