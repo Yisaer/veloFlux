@@ -8,6 +8,8 @@ use flow::{
 fn individual_registry_defaults_include_builtins() {
     let connector_registry = ConnectorRegistry::default();
     assert!(connector_registry.is_registered("nop"));
+    #[cfg(feature = "nng_pubsub")]
+    assert!(connector_registry.is_registered("nng_pubsub"));
 
     let encoder_registry = EncoderRegistry::default();
     assert!(encoder_registry.is_registered("json"));
@@ -35,6 +37,8 @@ fn individual_registry_defaults_include_builtins() {
 fn pipeline_registries_default_uses_builtins() {
     let registries = PipelineRegistries::default();
     assert!(registries.connector_registry().is_registered("nop"));
+    #[cfg(feature = "nng_pubsub")]
+    assert!(registries.connector_registry().is_registered("nng_pubsub"));
 
     assert!(registries.encoder_registry().is_registered("json"));
     assert!(registries.decoder_registry().is_registered("json"));

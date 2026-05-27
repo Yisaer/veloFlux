@@ -377,6 +377,9 @@ impl FlowInstance {
             StreamProps::Video(_) => Err(FlowInstanceError::Invalid(
                 "video stream props cannot be used to create shared streams".to_string(),
             )),
+            StreamProps::NngPubSub(_) => Err(FlowInstanceError::Invalid(
+                "nng_pubsub stream props cannot be used to create shared streams".to_string(),
+            )),
         }
     }
 }

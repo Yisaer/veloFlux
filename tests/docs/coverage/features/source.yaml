@@ -35,6 +35,13 @@ features:
       - docs/runtime/sources/mqtt.md
     status: active
 
+  - id: source.nng_pubsub.bytes_input
+    title: NNG pub/sub source bytes input
+    summary: Consume NNG pub/sub framed bytes through the documented source runtime contract.
+    doc_refs:
+      - docs/runtime/sources/nng_pubsub.md
+    status: active
+
   - id: source.shared.dynamic_decode
     title: Shared source dynamic decode
     summary: Adjust shared-source decoding columns according to active consumer requirements.

@@ -36,6 +36,8 @@ pub enum StreamProps {
     History(HistoryStreamProps),
     /// Stream is backed by an in-process memory pub/sub topic.
     Memory(MemoryStreamProps),
+    /// Stream is backed by an NNG pub/sub subscriber.
+    NngPubSub(NngPubSubStreamProps),
 }
 
 /// Supported stream types recognized by the catalog.
@@ -51,6 +53,8 @@ pub enum StreamType {
     History,
     /// Stream backed by a memory source.
     Memory,
+    /// Stream backed by an NNG pub/sub source.
+    NngPubSub,
 }
 
 /// Properties for MQTT-backed streams.
@@ -159,6 +163,29 @@ impl MemoryStreamProps {
     }
 }
 
+/// Properties for NNG pub/sub-backed streams.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NngPubSubStreamProps {
+    pub url: String,
+    pub topic: String,
+    pub topic_delimiter: String,
+}
+
+impl NngPubSubStreamProps {
+    pub fn new(url: impl Into<String>, topic: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            topic: topic.into(),
+            topic_delimiter: crate::connector::nng_pubsub::DEFAULT_TOPIC_DELIMITER.to_string(),
+        }
+    }
+
+    pub fn with_topic_delimiter(mut self, topic_delimiter: impl Into<String>) -> Self {
+        self.topic_delimiter = topic_delimiter.into();
+        self
+    }
+}
+
 /// Complete definition for a stream tracked by the catalog.
 #[derive(Debug, Clone)]
 pub struct StreamDefinition {
@@ -209,6 +236,7 @@ impl StreamDefinition {
             StreamProps::Mock(_) => StreamType::Mock,
             StreamProps::History(_) => StreamType::History,
             StreamProps::Memory(_) => StreamType::Memory,
+            StreamProps::NngPubSub(_) => StreamType::NngPubSub,
         };
         Self {
             id: id.into(),

@@ -36,6 +36,8 @@ pub enum SinkType {
     Memory,
     /// Video sink that records video frame tuples.
     Video,
+    /// NNG pub/sub sink.
+    NngPubSub,
 }
 
 /// Sink configuration payload.
@@ -53,6 +55,8 @@ pub enum SinkProps {
     Memory(MemorySinkProps),
     /// Video sink config.
     Video(VideoSinkProps),
+    /// NNG pub/sub sink config.
+    NngPubSub(NngPubSubSinkProps),
 }
 
 /// Runtime state for pipeline execution.
@@ -137,6 +141,14 @@ pub struct VideoSinkProps {
     pub rolling: VideoRollingConfig,
 }
 
+/// Concrete NNG pub/sub sink configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NngPubSubSinkProps {
+    pub url: String,
+    pub topic: String,
+    pub topic_delimiter: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VideoCodec {
     #[default]
@@ -160,6 +172,21 @@ impl MemorySinkProps {
         Self {
             topic: topic.into(),
         }
+    }
+}
+
+impl NngPubSubSinkProps {
+    pub fn new(url: impl Into<String>, topic: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            topic: topic.into(),
+            topic_delimiter: crate::connector::nng_pubsub::DEFAULT_TOPIC_DELIMITER.to_string(),
+        }
+    }
+
+    pub fn with_topic_delimiter(mut self, topic_delimiter: impl Into<String>) -> Self {
+        self.topic_delimiter = topic_delimiter.into();
+        self
     }
 }
 

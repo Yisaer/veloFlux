@@ -400,6 +400,16 @@ pub struct KuraSinkPropsRequest {
 
 #[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
+pub struct NngPubSubSinkPropsRequest {
+    pub url: Option<String>,
+    pub topic: Option<String>,
+    pub topic_delimiter: Option<String>,
+    #[serde(rename = "topicDelimiter")]
+    pub topic_delimiter_camel: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
 pub struct CommonSinkPropsRequest {
     #[serde(rename = "batch_count")]
     pub batch_count: Option<usize>,

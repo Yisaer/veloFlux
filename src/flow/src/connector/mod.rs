@@ -10,6 +10,7 @@ use crate::model::Collection;
 
 pub mod memory_pubsub;
 pub mod mqtt_client;
+pub mod nng_pubsub;
 pub mod registry;
 pub mod sink;
 pub mod source;
@@ -83,6 +84,7 @@ pub use memory_pubsub::{
 };
 pub(crate) use mqtt_client::MqttClientManager;
 pub use mqtt_client::SharedMqttClientConfig;
+pub use nng_pubsub::{NngPubSubSinkConfig, NngPubSubSourceConfig};
 pub use registry::ConnectorRegistry;
 pub use sink::kuksa::KuksaSinkConfig;
 pub use sink::kura::KuraSinkConfig;
@@ -99,4 +101,6 @@ pub use source::mock::{MockSourceConnector, MockSourceError, MockSourceHandle};
 /// MQTT-specific helpers and connector implementation.
 pub use source::mqtt::MqttSourceConfig;
 pub(crate) use source::mqtt::MqttSourceConnector;
+#[cfg(feature = "nng_pubsub")]
+pub(crate) use source::nng_pubsub::NngPubSubSourceConnector;
 pub use source::video::{VideoSourceConfig, VideoSourceConnector};

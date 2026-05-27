@@ -373,6 +373,9 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
         "memory" => {
             SinkConnectorConfig::Memory(memory_sink_from_ir_settings(&sink.connector_settings)?)
         }
+        "nng_pubsub" => SinkConnectorConfig::NngPubSub(nng_pubsub_sink_from_ir_settings(
+            &sink.connector_settings,
+        )?),
         "video" => {
             SinkConnectorConfig::Video(video_sink_from_ir_settings(&sink.connector_settings)?)
         }
@@ -425,6 +428,39 @@ fn memory_sink_from_ir_settings(
     Ok(crate::connector::MemorySinkConfig::new(
         sink_name, topic, kind,
     ))
+}
+
+fn nng_pubsub_sink_from_ir_settings(
+    settings: &JsonValue,
+) -> Result<crate::connector::NngPubSubSinkConfig, String> {
+    let obj = settings
+        .as_object()
+        .ok_or_else(|| "nng_pubsub sink settings must be an object".to_string())?;
+    let sink_name = obj
+        .get("sink_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("nng_pubsub_sink")
+        .to_string();
+    let url = obj
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "nng_pubsub sink settings require url".to_string())?
+        .to_string();
+    let topic = obj
+        .get("topic")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "nng_pubsub sink settings require topic".to_string())?
+        .to_string();
+    let topic_delimiter = obj
+        .get("topic_delimiter")
+        .or_else(|| obj.get("topicDelimiter"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(crate::connector::nng_pubsub::DEFAULT_TOPIC_DELIMITER)
+        .to_string();
+    let config = crate::connector::NngPubSubSinkConfig::new(sink_name, url, topic)
+        .with_topic_delimiter(topic_delimiter);
+    config.validate()?;
+    Ok(config)
 }
 
 fn video_sink_from_ir_settings(
@@ -904,6 +940,15 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
                 "kind": cfg.kind.to_string(),
             }),
         ),
+        SinkConnectorConfig::NngPubSub(cfg) => (
+            "nng_pubsub".to_string(),
+            serde_json::json!({
+                "sink_name": cfg.sink_name,
+                "url": cfg.url,
+                "topic": cfg.topic,
+                "topic_delimiter": cfg.topic_delimiter,
+            }),
+        ),
         SinkConnectorConfig::Video(cfg) => {
             let crate::connector::sink::video::VideoSinkTargetConfig::File(file) = &cfg.target;
             (
@@ -1007,5 +1052,21 @@ mod tests {
         assert_eq!(config.broker_url, "");
         assert_eq!(config.topic, "out/topic");
         assert_eq!(config.connector_key.as_deref(), Some("shared_mqtt"));
+    }
+
+    #[test]
+    fn nng_pubsub_sink_ir_decodes_topic_delimiter() {
+        let settings = serde_json::json!({
+            "sink_name": "sink_1",
+            "url": "inproc://vf-nng-ir",
+            "topic": "topic/can",
+            "topicDelimiter": "\u{0}"
+        });
+
+        let config =
+            nng_pubsub_sink_from_ir_settings(&settings).expect("decode nng pubsub sink config");
+        assert_eq!(config.url, "inproc://vf-nng-ir");
+        assert_eq!(config.topic, "topic/can");
+        assert_eq!(config.topic_delimiter, "\0");
     }
 }

@@ -62,7 +62,7 @@ Note: current implementation does not populate `shared_stream` in this endpoint.
 
 ### `StreamDefinitionSpec`
 
-- `type: string` (stream type label, e.g. `mqtt`)
+- `type: string` (stream type label, e.g. `mqtt`, `memory`, `nng_pubsub`)
 - `shared: boolean`
 - `schema: { columns: Column[] }`
 - `decoder: { type: string, props: object }`

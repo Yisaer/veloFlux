@@ -3,6 +3,7 @@ use crate::connector::sink::kura::KuraSinkConfig;
 use crate::connector::sink::memory::MemorySinkConfig;
 use crate::connector::sink::mqtt::MqttSinkConfig;
 use crate::connector::sink::video::VideoSinkConfig;
+use crate::connector::NngPubSubSinkConfig;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fmt;
 use std::time::Duration;
@@ -178,6 +179,7 @@ pub enum SinkConnectorConfig {
     Kura(KuraSinkConfig),
     Memory(MemorySinkConfig),
     Video(VideoSinkConfig),
+    NngPubSub(NngPubSubSinkConfig),
     Custom(CustomSinkConnectorConfig),
 }
 
@@ -190,6 +192,7 @@ impl SinkConnectorConfig {
             SinkConnectorConfig::Kura(_) => "kura",
             SinkConnectorConfig::Memory(_) => "memory",
             SinkConnectorConfig::Video(_) => "video",
+            SinkConnectorConfig::NngPubSub(_) => "nng_pubsub",
             SinkConnectorConfig::Custom(custom) => custom.kind.as_str(),
         }
     }

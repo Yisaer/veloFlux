@@ -135,6 +135,8 @@ Examples:
 
 - `veloflux_mqtt_source_records_in_total`
 - `veloflux_mqtt_source_records_out_total`
+- `veloflux_nng_pubsub_source_records_in_total`
+- `veloflux_nng_pubsub_source_records_out_total`
 
 Expected labels:
 
@@ -149,6 +151,8 @@ Examples:
 
 - `veloflux_mqtt_sink_records_in_total`
 - `veloflux_mqtt_sink_records_out_total`
+- `veloflux_nng_pubsub_sink_records_in_total`
+- `veloflux_nng_pubsub_sink_records_out_total`
 
 Expected labels:
 

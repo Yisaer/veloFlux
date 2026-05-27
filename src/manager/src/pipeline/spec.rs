@@ -1,9 +1,9 @@
 use crate::MQTT_QOS;
 use flow::EncoderRegistry;
 use flow::pipeline::{
-    KuksaSinkProps, KuraSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps,
-    PipelineDefinition, PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType,
-    SourceDefinition, VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
+    KuksaSinkProps, KuraSinkProps, MemorySinkProps, MqttSinkProps, NngPubSubSinkProps,
+    NopSinkProps, PipelineDefinition, PipelineOptions, PipelineStatus, SinkDefinition, SinkProps,
+    SinkType, SourceDefinition, VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
 use parser::SelectStmt;
@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use super::types::{
     CreatePipelineRequest, CreatePipelineSourceRequest, EncoderTransformRequest,
-    KuraSinkPropsRequest, MemorySinkPropsRequest, MqttSinkPropsRequest, NopSinkPropsRequest,
-    SinkOutputConfigRequest, VideoSinkPropsRequest,
+    KuraSinkPropsRequest, MemorySinkPropsRequest, MqttSinkPropsRequest, NngPubSubSinkPropsRequest,
+    NopSinkPropsRequest, SinkOutputConfigRequest, VideoSinkPropsRequest,
 };
 
 #[derive(Deserialize)]
@@ -338,6 +338,32 @@ pub(crate) fn build_pipeline_definition(
                 let props = build_video_sink_props(&sink_id, video_props)?;
                 SinkDefinition::new(sink_id.clone(), SinkType::Video, SinkProps::Video(props))
             }
+            "nng_pubsub" => {
+                let nng_props: NngPubSubSinkPropsRequest =
+                    serde_json::from_value(sink_req.props.to_value())
+                        .map_err(|err| format!("invalid nng_pubsub sink props: {err}"))?;
+                let url = nng_props
+                    .url
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "nng_pubsub sink requires url".to_string())?;
+                let topic = nng_props
+                    .topic
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| "nng_pubsub sink requires topic".to_string())?;
+                let topic_delimiter = nng_props
+                    .topic_delimiter
+                    .or(nng_props.topic_delimiter_camel)
+                    .unwrap_or_else(|| {
+                        flow::connector::nng_pubsub::DEFAULT_TOPIC_DELIMITER.to_string()
+                    });
+                let props =
+                    NngPubSubSinkProps::new(url, topic).with_topic_delimiter(topic_delimiter);
+                SinkDefinition::new(
+                    sink_id.clone(),
+                    SinkType::NngPubSub,
+                    SinkProps::NngPubSub(props),
+                )
+            }
             other => return Err(format!("unsupported sink type: {other}")),
         };
 
@@ -354,6 +380,13 @@ pub(crate) fn build_pipeline_definition(
                     return Err("video sink does not support encoder config".to_string());
                 }
                 SinkEncoderConfig::new("none", JsonMap::new())
+            }
+            SinkType::NngPubSub => {
+                let encoder_kind = sink_req.encoder.encode_type.clone();
+                if !encoder_registry.is_registered(&encoder_kind) {
+                    return Err(format!("encoder kind `{encoder_kind}` not registered"));
+                }
+                SinkEncoderConfig::new(encoder_kind, sink_req.encoder.props.clone())
             }
             SinkType::Memory if sink_req.encoder.encode_type.eq_ignore_ascii_case("none") => {
                 SinkEncoderConfig::new("none", sink_req.encoder.props.clone())
@@ -859,6 +892,47 @@ mod tests {
         assert_eq!(mqtt.broker_url, "");
         assert_eq!(mqtt.topic, "out/topic");
         assert_eq!(mqtt.connector_key.as_deref(), Some("shared_mqtt"));
+    }
+
+    #[tokio::test]
+    async fn build_pipeline_definition_accepts_nng_pubsub_sink() {
+        let instance = test_instance();
+        let request = serde_json::from_value::<CreatePipelineRequest>(json!({
+            "id": "pipe_nng_sink",
+            "sql": "SELECT 1 AS a",
+            "sinks": [
+                {
+                    "id": "sink_1",
+                    "type": "nng_pubsub",
+                    "props": {
+                        "url": "inproc://manager-nng-sink",
+                        "topic": "topic/can"
+                    }
+                }
+            ],
+            "options": {
+                "data_channel_capacity": 16,
+                "eventtime": {
+                    "enabled": false,
+                    "late_tolerance_ms": 0
+                }
+            }
+        }))
+        .expect("deserialize pipeline request");
+
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("build pipeline definition");
+        let sink = &definition.sinks()[0];
+        let flow::pipeline::SinkProps::NngPubSub(nng) = &sink.props else {
+            panic!("expected nng_pubsub sink props");
+        };
+        assert_eq!(nng.url, "inproc://manager-nng-sink");
+        assert_eq!(nng.topic, "topic/can");
+        assert_eq!(
+            nng.topic_delimiter,
+            flow::connector::nng_pubsub::DEFAULT_TOPIC_DELIMITER
+        );
     }
 
     #[tokio::test]

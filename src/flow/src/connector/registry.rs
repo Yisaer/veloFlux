@@ -2,6 +2,8 @@ use super::sink::kuksa::KuksaSinkConnector;
 use super::sink::kura::KuraSinkConnector;
 use super::sink::memory::MemorySinkConnector;
 use super::sink::mqtt::MqttSinkConnector;
+#[cfg(feature = "nng_pubsub")]
+use super::sink::nng_pubsub::NngPubSubSinkConnector;
 use super::sink::nop::NopSinkConnector;
 use super::sink::video::VideoSinkConnector;
 use super::sink::SinkConnector;
@@ -173,6 +175,22 @@ impl ConnectorRegistry {
                 ))),
                 other => Err(ConnectorError::Other(format!(
                     "connector `{sink_id}` expected Video config but received {:?}",
+                    other.kind()
+                ))),
+            }),
+        );
+
+        #[cfg(feature = "nng_pubsub")]
+        self.register_sink_factory(
+            "nng_pubsub",
+            Arc::new(|sink_id, config, flow_instance_id, _, _| match config {
+                SinkConnectorConfig::NngPubSub(cfg) => Ok(Box::new(NngPubSubSinkConnector::new(
+                    sink_id.to_string(),
+                    cfg.clone(),
+                    flow_instance_id.to_string(),
+                ))),
+                other => Err(ConnectorError::Other(format!(
+                    "connector `{sink_id}` expected NNG pubsub config but received {:?}",
                     other.kind()
                 ))),
             }),

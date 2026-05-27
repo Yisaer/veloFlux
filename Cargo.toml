@@ -61,6 +61,7 @@ deadlock_detection = ["flow/deadlock_detection", "manager/deadlock_detection", "
 gmp_force_cross = ["flow/gmp_force_cross"]
 wasm_udf = ["manager/wasm_udf", "veloflux_sdv/wasm_udf"]
 video_gstreamer = ["flow/video_gstreamer"]
+nng_pubsub = ["flow/nng_pubsub", "veloflux_sdv/nng_pubsub"]
 
 [dev-dependencies]
 bytes = "1"

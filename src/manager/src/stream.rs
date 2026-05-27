@@ -12,8 +12,8 @@ use axum::{
 use flow::DecoderRegistry;
 use flow::catalog::{
     CatalogError, EventtimeDefinition, HistoryStreamProps, MemoryStreamProps, MockStreamProps,
-    MqttStreamProps, StreamDecoderConfig, VideoReconnectConfig, VideoRtspTransport,
-    VideoStreamProps,
+    MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig, VideoReconnectConfig,
+    VideoRtspTransport, VideoStreamProps,
 };
 use flow::processor::ProcessorStatsEntry;
 use flow::processor::SamplerConfig;
@@ -242,6 +242,16 @@ pub struct HistoryStreamPropsRequest {
 #[serde(default)]
 pub struct MemoryStreamPropsRequest {
     pub topic: Option<String>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct NngPubSubStreamPropsRequest {
+    pub url: Option<String>,
+    pub topic: Option<String>,
+    pub topic_delimiter: Option<String>,
+    #[serde(rename = "topicDelimiter")]
+    pub topic_delimiter_camel: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
@@ -810,6 +820,7 @@ fn stream_type_label(stream_type: flow::catalog::StreamType) -> &'static str {
         flow::catalog::StreamType::Mock => "mock",
         flow::catalog::StreamType::History => "history",
         flow::catalog::StreamType::Memory => "memory",
+        flow::catalog::StreamType::NngPubSub => "nng_pubsub",
     }
 }
 
@@ -858,6 +869,16 @@ fn stream_props_value(props: &StreamProps) -> JsonValue {
         StreamProps::Video(video) => video_props_value(video),
         StreamProps::Mock(_) => JsonValue::Object(JsonMap::new()),
         StreamProps::History(_) => JsonValue::Object(JsonMap::new()),
+        StreamProps::NngPubSub(nng) => {
+            let mut map = JsonMap::new();
+            map.insert("url".to_string(), JsonValue::String(nng.url.clone()));
+            map.insert("topic".to_string(), JsonValue::String(nng.topic.clone()));
+            map.insert(
+                "topic_delimiter".to_string(),
+                JsonValue::String(nng.topic_delimiter.clone()),
+            );
+            JsonValue::Object(map)
+        }
     }
 }
 
@@ -1007,6 +1028,32 @@ pub(crate) fn build_stream_props(
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| "memory stream requires topic".to_string())?;
             Ok(StreamProps::Memory(MemoryStreamProps::new(topic)))
+        }
+        "nng_pubsub" => {
+            let nng_props: NngPubSubStreamPropsRequest =
+                serde_json::from_value(props.to_value())
+                    .map_err(|err| format!("invalid nng_pubsub props: {err}"))?;
+            let url = nng_props
+                .url
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "nng_pubsub stream requires url".to_string())?;
+            let topic = nng_props.topic.unwrap_or_default();
+            let topic_delimiter = nng_props
+                .topic_delimiter
+                .or(nng_props.topic_delimiter_camel)
+                .unwrap_or_else(|| {
+                    flow::connector::nng_pubsub::DEFAULT_TOPIC_DELIMITER.to_string()
+                });
+            let stream_props =
+                NngPubSubStreamProps::new(url, topic).with_topic_delimiter(topic_delimiter);
+            flow::connector::NngPubSubSourceConfig::new(
+                "nng_pubsub",
+                stream_props.url.clone(),
+                stream_props.topic.clone(),
+            )
+            .with_topic_delimiter(stream_props.topic_delimiter.clone())
+            .validate()?;
+            Ok(StreamProps::NngPubSub(stream_props))
         }
         "mock" => Ok(StreamProps::Mock(MockStreamProps::default())),
         other => Err(format!("unsupported stream type: {other}")),
@@ -1689,6 +1736,30 @@ mod tests {
 
         let err = build_stream_props("mqtt", &props).unwrap_err();
         assert_eq!(err, "mqtt stream requires broker_url");
+    }
+
+    #[test]
+    fn build_stream_props_accepts_nng_pubsub_defaults() {
+        let props = StreamPropsRequest {
+            fields: json!({
+                "url": "inproc://manager-nng-stream",
+                "topic": "topic/can"
+            })
+            .as_object()
+            .expect("nng props object")
+            .clone(),
+        };
+
+        let built = build_stream_props("nng_pubsub", &props).expect("build nng stream props");
+        let StreamProps::NngPubSub(nng) = built else {
+            panic!("expected nng_pubsub stream props");
+        };
+        assert_eq!(nng.url, "inproc://manager-nng-stream");
+        assert_eq!(nng.topic, "topic/can");
+        assert_eq!(
+            nng.topic_delimiter,
+            flow::connector::nng_pubsub::DEFAULT_TOPIC_DELIMITER
+        );
     }
 
     #[test]

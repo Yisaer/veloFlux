@@ -11,8 +11,9 @@ name = "gbf_gen"
 path = "src/bin/gbf_gen.rs"
 
 [features]
-default = ["wasm_udf"]
+default = ["wasm_udf", "nng_pubsub"]
 wasm_udf = ["manager/wasm_udf"]
+nng_pubsub = ["flow/nng_pubsub"]
 
 [dependencies]
 flow = { path = "../../src/flow" }

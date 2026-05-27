@@ -26,9 +26,9 @@ mod test_support;
 
 pub use aggregation::AggregateFunctionRegistry;
 pub use catalog::{
-    Catalog, CatalogError, EventtimeDefinition, MqttStreamProps, StreamDecoderConfig,
-    StreamDefinition, StreamProps, StreamType, VideoReconnectConfig, VideoRtspTransport,
-    VideoStreamProps,
+    Catalog, CatalogError, EventtimeDefinition, MqttStreamProps, NngPubSubStreamProps,
+    StreamDecoderConfig, StreamDefinition, StreamProps, StreamType, VideoReconnectConfig,
+    VideoRtspTransport, VideoStreamProps,
 };
 pub use codec::{
     CodecError, CollectionEncoder, CollectionEncoderStream, DecoderRegistry, EncodeError,
@@ -56,10 +56,11 @@ pub use instance::{
 pub use model::{Collection, RecordBatch};
 pub use pipeline::{
     CreatePipelineRequest, CreatePipelineResult, ExplainPipelineTarget, KuksaSinkProps,
-    KuraSinkProps, MemorySinkProps, MqttSinkProps, NopSinkProps, PipelineDefinition, PipelineError,
-    PipelineOptions, PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps,
-    SinkType, SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
-    VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
+    KuraSinkProps, MemorySinkProps, MqttSinkProps, NngPubSubSinkProps, NopSinkProps,
+    PipelineDefinition, PipelineError, PipelineOptions, PipelineSnapshot, PipelineStatus,
+    PipelineStopMode, SinkDefinition, SinkProps, SinkType, SourceDefinition, SourceInputConfig,
+    SourceInputMode, SourceOnChangeConfig, VideoCodec, VideoContainer, VideoRollingConfig,
+    VideoSinkProps,
 };
 pub use planner::create_physical_plan;
 pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};

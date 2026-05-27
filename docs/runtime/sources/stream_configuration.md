@@ -52,6 +52,8 @@ Current built-in stream types are:
 - `history`
 - `memory`
 - `mock`
+- `nng_pubsub`
+- `video`
 
 The built-in required properties are:
 
@@ -60,6 +62,9 @@ The built-in required properties are:
 - `history`: `datasource`, `topic`; optional start/end/batch/interval controls
 - `memory`: `topic`
 - `mock`: no connector props
+- `nng_pubsub`: `url`; `topic` defaults to subscribe-all when omitted; `topic_delimiter`
+  defaults to `:`
+- `video`: `url`; optional RTSP/reconnect controls
 
 The stream type decides both the connector property schema and which downstream combinations are
 valid. Validation is not purely syntactic: some combinations are rejected because they would not
@@ -127,6 +132,7 @@ For shared streams:
 Current create-time constraints are:
 
 - shared streams cannot use stream type `memory`
+- shared streams cannot use stream type `nng_pubsub` in the first implementation
 - shared streams cannot use decoder type `none`
 
 This preserves a consistent shared ingest pipeline shape: source -> optional sampler -> decoder ->
@@ -192,6 +198,9 @@ Cross-cutting constraints worth preserving in future work:
   (`bytes` for normal decoders, `collection` for `decoder.type = none`)
 - MQTT streams may optionally bind to a shared connector via `connector_key`, but the stream
   definition still owns the topic-level source identity
+- NNG pub/sub streams own a URL, topic prefix, and topic delimiter. They follow the same decode
+  boundary as other byte sources and do not support shared-stream promotion in the first
+  implementation.
 - shared MQTT client delivery is no-drop and backpressured when used through `connector_key`
 - shared MQTT runtime errors are non-terminal; explicit close/delete is the only terminal path
 - shared MQTT metadata may remain installed while the running shared connection instance is

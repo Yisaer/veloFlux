@@ -8,9 +8,11 @@ use crate::connector::source::video::{VideoReconnectRuntimeConfig, VideoRtspTran
 use crate::connector::{
     HistorySourceConfig, HistorySourceConnector, KuksaSinkConfig, KuraSinkConfig, MemorySinkConfig,
     MemorySourceConfig, MemorySourceConnector, MemoryTopicKind, MockSourceConnector,
-    MqttSinkConfig, MqttSourceConfig, MqttSourceConnector, VideoSinkConfig, VideoSourceConfig,
-    VideoSourceConnector,
+    MqttSinkConfig, MqttSourceConfig, MqttSourceConnector, NngPubSubSourceConfig, VideoSinkConfig,
+    VideoSourceConfig, VideoSourceConnector,
 };
+#[cfg(feature = "nng_pubsub")]
+use crate::connector::{NngPubSubSinkConfig, NngPubSubSourceConnector};
 use crate::expr::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use crate::planner::logical::create_logical_plan_with_source_inputs;
 use crate::planner::sink::SinkEncoderKind;
@@ -841,6 +843,45 @@ fn build_sinks_from_definition(
                     .with_output(sink.output.clone());
                 sinks.push(pipeline_sink);
             }
+            SinkType::NngPubSub => {
+                #[cfg(feature = "nng_pubsub")]
+                {
+                    let props = match &sink.props {
+                        SinkProps::NngPubSub(props) => props,
+                        other => {
+                            return Err(format!(
+                                "sink {} expected nng_pubsub props but received {other:?}",
+                                sink.sink_id
+                            ));
+                        }
+                    };
+                    let config = NngPubSubSinkConfig::new(
+                        sink.sink_id.clone(),
+                        props.url.clone(),
+                        props.topic.clone(),
+                    )
+                    .with_topic_delimiter(props.topic_delimiter.clone());
+                    config.validate().map_err(|err| {
+                        format!("invalid nng_pubsub sink {}: {err}", sink.sink_id)
+                    })?;
+                    let connector = PipelineSinkConnector::new(
+                        sink.sink_id.clone(),
+                        SinkConnectorConfig::NngPubSub(config),
+                        sink.encoder.clone(),
+                    );
+                    let pipeline_sink = PipelineSink::new(sink.sink_id.clone(), connector)
+                        .with_common_props(sink.common.clone())
+                        .with_output(sink.output.clone());
+                    sinks.push(pipeline_sink);
+                }
+                #[cfg(not(feature = "nng_pubsub"))]
+                {
+                    return Err(format!(
+                        "sink {} uses nng_pubsub but flow was built without the nng_pubsub feature",
+                        sink.sink_id
+                    ));
+                }
+            }
         }
     }
     Ok(sinks)
@@ -952,6 +993,35 @@ pub(super) fn attach_sources_from_catalog(
                         memory_pubsub_registry.clone(),
                     );
                     ds.add_connector(Box::new(connector));
+                }
+                StreamProps::NngPubSub(props) => {
+                    let config = NngPubSubSourceConfig::new(
+                        stream_name.clone(),
+                        props.url.clone(),
+                        props.topic.clone(),
+                    )
+                    .with_topic_delimiter(props.topic_delimiter.clone());
+                    config
+                        .validate()
+                        .map_err(|err| format!("invalid nng_pubsub stream {stream_name}: {err}"))?;
+                    #[cfg(feature = "nng_pubsub")]
+                    {
+                        let connector = NngPubSubSourceConnector::new(
+                            format!("{processor_id}_nng_pubsub_source_connector"),
+                            config,
+                            context.flow_instance_id(),
+                            context.spawner().clone(),
+                        )
+                        .with_channel_capacity(data_channel_capacity);
+                        ds.add_connector(Box::new(connector));
+                    }
+                    #[cfg(not(feature = "nng_pubsub"))]
+                    {
+                        let _ = config;
+                        return Err(format!(
+                            "stream {stream_name} uses nng_pubsub but flow was built without the nng_pubsub feature"
+                        ));
+                    }
                 }
             }
             continue;
