@@ -2,14 +2,8 @@ name: Video GStreamer
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - ".github/workflows/video-gstreamer.yml"
-      - "src/flow/Cargo.toml"
-      - "src/flow/src/codec/video.rs"
-      - "src/flow/src/connector/source/video.rs"
-      - "src/flow/src/connector/sink/video.rs"
-      - "src/flow/tests/video_gstreamer.rs"
+  schedule:
+    - cron: "0 6 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
