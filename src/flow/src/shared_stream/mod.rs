@@ -940,7 +940,6 @@ impl SharedStreamInner {
             self.spawner.clone(),
         )
         .map_err(|err| SharedStreamError::Internal(err.to_string()))?;
-        pipeline.set_pipeline_id(format!("shared:{}", self.name));
 
         let mut attached = false;
         for processor in &mut pipeline.middle_processors {

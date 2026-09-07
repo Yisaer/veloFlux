@@ -110,7 +110,8 @@ impl Processor for SinkEncryptProcessor {
         let metrics = TransformMetrics::new(stats.as_ref(), SINK_ENCRYPT_METRICS);
         tracing::info!(processor_id = %processor_id, "sink encrypt processor starting");
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut delivery = EncryptDelivery::default();
             let mut pending_terminal: Option<ControlSignal> = None;
             loop {
@@ -248,7 +249,7 @@ impl Processor for SinkEncryptProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

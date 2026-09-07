@@ -129,7 +129,8 @@ impl Processor for DecoderProcessor {
         let mut control_streams = fan_in_control_streams(control_receivers);
         let mut control_active = !control_streams.is_empty();
         tracing::info!(processor_id = %processor_id, "decoder processor starting");
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -267,7 +268,7 @@ impl Processor for DecoderProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

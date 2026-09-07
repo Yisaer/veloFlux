@@ -158,7 +158,8 @@ impl Processor for StreamingEosAggregationProcessor {
         let group_by_meta = self.group_by_meta.clone();
         let stats = Arc::clone(&self.stats);
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut worker = AggregationWorker::new(physical, aggregate_registry, group_by_meta);
             let mut opened_at: Option<SystemTime> = None;
             let mut last_seen_at: Option<SystemTime> = None;
@@ -258,7 +259,7 @@ impl Processor for StreamingEosAggregationProcessor {
             }
 
             Ok(())
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

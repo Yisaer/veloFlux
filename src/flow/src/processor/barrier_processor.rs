@@ -251,7 +251,8 @@ impl Processor for BarrierProcessor {
             "barrier processor starting"
         );
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             if expected_upstreams == 0 {
                 return Err(ProcessorError::InvalidConfiguration(
                     "BarrierProcessor expected_upstreams must be > 0".to_string(),
@@ -366,7 +367,7 @@ impl Processor for BarrierProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

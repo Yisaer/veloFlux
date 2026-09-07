@@ -147,55 +147,67 @@ impl Processor for SlidingWindowProcessor {
             Arc::clone(&stats),
         );
 
-        ProcessorStart::ready(spawner.spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    control_item = control_streams.next(), if control_active => {
-                        if let Some(Ok(control_signal)) = control_item {
-                            let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(
-                                &control_output,
-                                channel_capacities.control,
-                                control_signal,
-                            )
-                            .await?;
-                            if is_terminal {
-                                tracing::info!(processor_id = %id, "stopped");
-                                return Ok(());
-                            }
-                            continue;
-                        } else {
-                            control_active = false;
-                        }
-                    }
-                    item = input_streams.next() => {
-                        match item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                state.record_collection_in(collection.num_rows() as u64);
-                                let handle_start = std::time::Instant::now();
-                                let res = state.add_collection(collection).await;
-                                // For synchronous processors, handle duration includes downstream send/backpressure time.
-                                stats.record_handle_duration(handle_start.elapsed());
-                                if let Err(err) = res {
-                                    if matches!(err, ProcessorError::ChannelClosed) {
-                                        return Err(err);
-                                    }
-                                    stats.record_error_logged(
-                                        "sliding window processor error",
-                                        err.to_string(),
-                                    );
-                                }
-                            }
-                            Some(Ok(StreamData::Watermark(ts))) => {
-                                state.flush_up_to(ts).await?;
-                            }
-                            Some(Ok(StreamData::Control(signal))) => {
-                                let is_terminal = signal.is_terminal();
-                                let is_graceful = signal.is_graceful_end();
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(
+            async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        control_item = control_streams.next(), if control_active => {
+                            if let Some(Ok(control_signal)) = control_item {
+                                let is_terminal = control_signal.is_terminal();
+                                send_control_with_backpressure(
+                                    &control_output,
+                                    channel_capacities.control,
+                                    control_signal,
+                                )
+                                .await?;
                                 if is_terminal {
-                                    if is_graceful {
-                                        state.flush_all().await?;
+                                    tracing::info!(processor_id = %id, "stopped");
+                                    return Ok(());
+                                }
+                                continue;
+                            } else {
+                                control_active = false;
+                            }
+                        }
+                        item = input_streams.next() => {
+                            match item {
+                                Some(Ok(StreamData::Collection(collection))) => {
+                                    state.record_collection_in(collection.num_rows() as u64);
+                                    let handle_start = std::time::Instant::now();
+                                    let res = state.add_collection(collection).await;
+                                    // For synchronous processors, handle duration includes downstream send/backpressure time.
+                                    stats.record_handle_duration(handle_start.elapsed());
+                                    if let Err(err) = res {
+                                        if matches!(err, ProcessorError::ChannelClosed) {
+                                            return Err(err);
+                                        }
+                                        stats.record_error_logged(
+                                            "sliding window processor error",
+                                            err.to_string(),
+                                        );
+                                    }
+                                }
+                                Some(Ok(StreamData::Watermark(ts))) => {
+                                    state.flush_up_to(ts).await?;
+                                }
+                                Some(Ok(StreamData::Control(signal))) => {
+                                    let is_terminal = signal.is_terminal();
+                                    let is_graceful = signal.is_graceful_end();
+                                    if is_terminal {
+                                        if is_graceful {
+                                            state.flush_all().await?;
+                                        }
+                                        send_with_backpressure(
+                                            &output,
+                                            channel_capacities.data,
+                                            StreamData::control(signal),
+                                            Some(stats.as_ref()),
+                                        )
+                                        .await?;
+                                        tracing::info!(processor_id = %id, "stopped");
+                                        return Ok(());
                                     }
                                     send_with_backpressure(
                                         &output,
@@ -204,44 +216,36 @@ impl Processor for SlidingWindowProcessor {
                                         Some(stats.as_ref()),
                                     )
                                     .await?;
+                                }
+                                Some(Ok(other)) => {
+                                    let is_terminal = other.is_terminal();
+                                    send_with_backpressure(
+                                        &output,
+                                        channel_capacities.data,
+                                        other,
+                                        Some(stats.as_ref()),
+                                    )
+                                    .await?;
+                                    if is_terminal {
+                                        tracing::info!(processor_id = %id, "stopped");
+                                        return Ok(());
+                                    }
+                                }
+                                Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
+                                    log_broadcast_lagged(&id, skipped, "sliding window data input");
+                                    continue;
+                                }
+                                None => {
                                     tracing::info!(processor_id = %id, "stopped");
                                     return Ok(());
                                 }
-                                send_with_backpressure(
-                                    &output,
-                                    channel_capacities.data,
-                                    StreamData::control(signal),
-                                    Some(stats.as_ref()),
-                                )
-                                .await?;
-                            }
-                            Some(Ok(other)) => {
-                                let is_terminal = other.is_terminal();
-                                send_with_backpressure(
-                                    &output,
-                                    channel_capacities.data,
-                                    other,
-                                    Some(stats.as_ref()),
-                                )
-                                .await?;
-                                if is_terminal {
-                                    tracing::info!(processor_id = %id, "stopped");
-                                    return Ok(());
-                                }
-                            }
-                            Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                log_broadcast_lagged(&id, skipped, "sliding window data input");
-                                continue;
-                            }
-                            None => {
-                                tracing::info!(processor_id = %id, "stopped");
-                                return Ok(());
                             }
                         }
                     }
                 }
-            }
-        }))
+            },
+            processor_span,
+        )))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

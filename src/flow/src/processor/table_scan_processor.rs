@@ -256,19 +256,24 @@ impl Processor for TableScanProcessor {
             table = %table_name,
             "table scan processor starting"
         );
+        let processor_span = stats.processor_span();
+        let scan_span = processor_span.clone();
         let (ready_tx, ready_rx) = oneshot::channel();
-        let handle = spawner.spawn(async move {
+        let handle = spawner.spawn(tracing::Instrument::instrument(async move {
             let (scan_tx, mut scan_rx) = mpsc::channel(channel_capacities.data);
             let producer_processor_id = processor_id.clone();
             let producer_table_name = table_name.clone();
-            scan_spawner.spawn(Self::run_history_scan(
-                producer_processor_id,
-                producer_table_name,
-                props,
-                decoder,
-                scan_tx,
-                Arc::clone(&stats),
-                scan_spawner.clone(),
+            scan_spawner.spawn(tracing::Instrument::instrument(
+                Self::run_history_scan(
+                    producer_processor_id,
+                    producer_table_name,
+                    props,
+                    decoder,
+                    scan_tx,
+                    Arc::clone(&stats),
+                    scan_spawner.clone(),
+                ),
+                scan_span,
             ));
             let _ = ready_tx.send(Ok(()));
 
@@ -368,7 +373,7 @@ impl Processor for TableScanProcessor {
                     }
                 }
             }
-        });
+        }, processor_span));
         ProcessorStart::with_ready(handle, ready_rx)
     }
 

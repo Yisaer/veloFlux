@@ -12,12 +12,11 @@ use futures::stream::StreamExt;
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration, Instant};
-use uuid::Uuid;
 
 pub struct SharedStreamProcessor {
     id: String,
     stream_name: String,
-    pipeline_id: Option<String>,
+    consumer_pipeline_id: Option<String>,
     required_columns: Vec<String>,
     required_slot_version: u64,
     registry: Arc<SharedStreamRegistry>,
@@ -59,7 +58,7 @@ impl SharedStreamProcessor {
         Self {
             id,
             stream_name,
-            pipeline_id: None,
+            consumer_pipeline_id: None,
             required_columns: Vec::new(),
             required_slot_version: 0,
             registry,
@@ -72,10 +71,6 @@ impl SharedStreamProcessor {
         }
     }
 
-    pub fn set_pipeline_id(&mut self, pipeline_id: impl Into<String>) {
-        self.pipeline_id = Some(pipeline_id.into());
-    }
-
     /// Set the required columns (by name) for this pipeline's shared stream consumption.
     ///
     /// This is used to coordinate dynamic projection decode in the shared stream runtime.
@@ -85,6 +80,10 @@ impl SharedStreamProcessor {
 
     pub fn set_required_slot_version(&mut self, required_slot_version: u64) {
         self.required_slot_version = required_slot_version;
+    }
+
+    pub(crate) fn set_consumer_pipeline_id(&mut self, pipeline_id: impl Into<String>) {
+        self.consumer_pipeline_id = Some(pipeline_id.into());
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
@@ -109,23 +108,20 @@ impl Processor for SharedStreamProcessor {
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
         let stream_name = self.stream_name.clone();
+        let consumer_pipeline_id = self.consumer_pipeline_id.clone().unwrap_or_default();
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
         let required_columns = std::mem::take(&mut self.required_columns);
         let required_slot_version = self.required_slot_version;
         let registry = Arc::clone(&self.registry);
-        let pipeline_id = self
-            .pipeline_id
-            .clone()
-            .unwrap_or_else(|| format!("pipeline-{}", Uuid::new_v4()));
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             tracing::info!(
                 processor_id = %processor_id,
                 stream = %stream_name,
-                pipeline_id = %pipeline_id,
                 "subscribing to shared stream"
             );
-            let consumer_id = format!("{pipeline_id}-{processor_id}");
+            let consumer_id = format!("{stream_name}-{consumer_pipeline_id}-{processor_id}");
             let mut subscription = registry
                 .subscribe_with_requirements(
                     &stream_name,
@@ -150,7 +146,7 @@ impl Processor for SharedStreamProcessor {
                     }
                     if Instant::now() >= deadline {
                         return Err(ProcessorError::ProcessingError(format!(
-                            "shared stream decoder not ready for consumer {consumer_id}: required columns or slot version not applied"
+                            "shared stream {stream_name} decoder not ready: required columns or slot version not applied"
                         )));
                     }
                     sleep(Duration::from_millis(20)).await;
@@ -248,7 +244,7 @@ impl Processor for SharedStreamProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

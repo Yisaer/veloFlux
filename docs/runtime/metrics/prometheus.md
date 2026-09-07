@@ -279,6 +279,25 @@ Expected labels:
 - `pipeline_id`
 - `processor_id`
 
+Shared-stream processor metrics use separate metric families and do not include a
+`pipeline_id` label:
+
+- `veloflux_shared_stream_processor_records_in_total`
+- `veloflux_shared_stream_processor_records_out_total`
+- `veloflux_shared_stream_processor_errors_total`
+- `veloflux_shared_stream_processor_handle_duration_seconds`
+- `veloflux_shared_stream_processor_send_backpressure_waits_total`
+- `veloflux_shared_stream_processor_custom_gauge`
+- `veloflux_shared_stream_processor_custom_counter_total`
+
+Their labels are:
+
+- `flow_instance`
+- `stream_name`
+- `processor_id`
+
+The internal subscription `consumer_id` is not exposed in logs or metrics.
+
 ### Processor Custom Metrics
 
 Processor-specific metrics are exposed through shared metric families instead of dynamically

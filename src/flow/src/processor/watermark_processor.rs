@@ -291,7 +291,8 @@ impl Processor for TumblingWatermarkProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "watermark processor starting");
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -383,7 +384,7 @@ impl Processor for TumblingWatermarkProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
@@ -537,7 +538,8 @@ impl Processor for SlidingWatermarkProcessor {
         let mut ticker = self.ticker.take();
         let stats = Arc::clone(&self.stats);
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut pending_deadlines: BinaryHeap<Reverse<u128>> = BinaryHeap::new();
             let mut next_sleep: Option<Pin<Box<Sleep>>> = None;
             let mut last_emitted_nanos: Option<u128> = None;
@@ -690,7 +692,7 @@ impl Processor for SlidingWatermarkProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
@@ -832,7 +834,8 @@ impl Processor for EventtimeWatermarkProcessor {
         let stats = Arc::clone(&self.stats);
 
         tracing::info!(processor_id = %id, "eventtime watermark processor starting");
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -982,7 +985,7 @@ impl Processor for EventtimeWatermarkProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

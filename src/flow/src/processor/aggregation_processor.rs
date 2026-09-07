@@ -250,7 +250,8 @@ impl Processor for AggregationProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "aggregation processor starting");
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut control_streams = fan_in_control_streams(control_receivers);
             let mut stream_ended = false;
 
@@ -370,7 +371,7 @@ impl Processor for AggregationProcessor {
 
             tracing::info!(processor_id = %id, "stopped");
             Ok(())
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

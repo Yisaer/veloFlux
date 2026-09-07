@@ -757,6 +757,7 @@ pub(crate) fn build_pipeline_definition(
     };
     Ok(
         PipelineDefinition::new(req.id.clone(), req.sql.clone(), sinks)
+            .with_revision(req.revision)
             .with_sources(sources)
             .with_options(options),
     )

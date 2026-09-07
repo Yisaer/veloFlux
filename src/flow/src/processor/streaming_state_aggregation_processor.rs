@@ -208,7 +208,8 @@ impl Processor for StreamingStateAggregationProcessor {
         let stats = Arc::clone(&self.stats);
         let state_window = Arc::clone(&self.state_window);
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut partitions: HashMap<Option<String>, PartitionAggState> = HashMap::new();
             loop {
                 tokio::select! {
@@ -447,7 +448,7 @@ impl Processor for StreamingStateAggregationProcessor {
             }
 
             Ok(())
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

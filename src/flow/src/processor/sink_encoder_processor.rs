@@ -566,7 +566,8 @@ impl Processor for SinkEncoderProcessor {
         let metrics = EncoderMetrics::new(stats.as_ref());
         tracing::info!(processor_id = %processor_id, "sink encoder processor starting");
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut delivery = DeliveryEncoding::default();
             let mut timer: Option<Pin<Box<Sleep>>> = None;
             // Fixed grid origin, captured once before any sample arrives so batch
@@ -759,7 +760,7 @@ impl Processor for SinkEncoderProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

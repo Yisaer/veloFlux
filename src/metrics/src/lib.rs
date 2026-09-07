@@ -14,6 +14,7 @@ mod nng_pubsub_source;
 mod processor;
 mod runtime;
 mod shared_stream;
+mod shared_stream_processor;
 
 use prometheus::{
     Gauge, GaugeVec, Histogram, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec,
@@ -133,6 +134,34 @@ pub fn processor_handle_duration_seconds() -> &'static HistogramVec {
 
 pub fn processor_send_backpressure_waits_total() -> &'static IntCounterVec {
     processor::send_backpressure_waits_total()
+}
+
+pub fn shared_stream_processor_records_in_total() -> &'static IntCounterVec {
+    shared_stream_processor::records_in_total()
+}
+
+pub fn shared_stream_processor_records_out_total() -> &'static IntCounterVec {
+    shared_stream_processor::records_out_total()
+}
+
+pub fn shared_stream_processor_errors_total() -> &'static IntCounterVec {
+    shared_stream_processor::errors_total()
+}
+
+pub fn shared_stream_processor_custom_gauge() -> &'static IntGaugeVec {
+    shared_stream_processor::custom_gauge()
+}
+
+pub fn shared_stream_processor_custom_counter_total() -> &'static IntCounterVec {
+    shared_stream_processor::custom_counter_total()
+}
+
+pub fn shared_stream_processor_handle_duration_seconds() -> &'static HistogramVec {
+    shared_stream_processor::handle_duration_seconds()
+}
+
+pub fn shared_stream_processor_send_backpressure_waits_total() -> &'static IntCounterVec {
+    shared_stream_processor::send_backpressure_waits_total()
 }
 
 pub fn flow_instance_cpu_usage_percent() -> &'static GaugeVec {

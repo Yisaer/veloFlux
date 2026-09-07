@@ -60,18 +60,19 @@ patrol and enters `Stopped`; manual `start` re-enables schedule control and ente
 | `datetime_ranges` | array | Optional UTC timestamp ranges in milliseconds. When cron is absent, at least one range is required and the ranges define the complete run windows. |
 
 At least one scheduling mode must be present: `cron` with `duration_secs`, or one or more
-`datetime_ranges`. Each datetime range uses `(begin_timestamp_ms, end_timestamp_ms)` semantics:
+`datetime_ranges`. Each datetime range uses `[begin_timestamp_ms, end_timestamp_ms)` semantics:
 
 - `begin_timestamp_ms` must be non-negative.
 - `end_timestamp_ms` must be non-negative.
 - `begin_timestamp_ms` must be less than `end_timestamp_ms`.
+- The begin timestamp is included in the run window and the end timestamp is excluded.
 - At most 128 normalized ranges are accepted. Multiple ranges are combined with OR semantics.
 
 Cron windows also use open boundaries. The effective run window depends on the configured modes:
 
 ```text
 cron only:              (cron_fire, cron_fire + duration_secs)
-datetime ranges only:   any (begin_timestamp_ms, end_timestamp_ms)
+datetime ranges only:   any [begin_timestamp_ms, end_timestamp_ms)
 cron and ranges:        (cron_fire, cron_fire + duration_secs) intersect any datetime_range
 ```
 

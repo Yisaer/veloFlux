@@ -46,7 +46,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{timeout, Duration};
-use uuid::Uuid;
 
 const PROCESSOR_START_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -80,7 +79,8 @@ impl ProcessorTaskExit {
 
 struct ProcessorTaskMonitor {
     flow_instance_id: Arc<str>,
-    pipeline_id: String,
+    pipeline_id: Option<String>,
+    revision: Option<u64>,
     processor_id: String,
     processor_kind: &'static str,
     allow_normal_completion: bool,
@@ -175,6 +175,8 @@ pub(crate) struct ProcessorPipelineDependencies {
     eventtime: Option<EventtimePipelineContext>,
     merger_registry: Arc<MergerRegistry>,
     checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    pipeline_id: Arc<str>,
+    revision: u64,
 }
 
 impl ProcessorPipelineDependencies {
@@ -199,11 +201,23 @@ impl ProcessorPipelineDependencies {
             eventtime,
             merger_registry: registries.merger_registry(),
             checkpoint_store: None,
+            pipeline_id: Arc::from("unassigned"),
+            revision: 0,
         }
     }
 
     pub(crate) fn with_checkpoint_store(mut self, store: Option<Arc<dyn CheckpointStore>>) -> Self {
         self.checkpoint_store = store;
+        self
+    }
+
+    pub(crate) fn with_pipeline_identity(
+        mut self,
+        pipeline_id: impl Into<Arc<str>>,
+        revision: u64,
+    ) -> Self {
+        self.pipeline_id = pipeline_id.into();
+        self.revision = revision;
         self
     }
 }
@@ -245,6 +259,9 @@ impl ProcessorPipelineOptions {
 #[derive(Clone)]
 struct ProcessorBuilderContext {
     flow_instance_id: Arc<str>,
+    pipeline_id: Arc<str>,
+    shared_stream_name: Option<Arc<str>>,
+    revision: u64,
     mqtt_clients: Option<MqttClientManager>,
     connector_registry: Option<Arc<ConnectorRegistry>>,
     encoder_registry: Option<Arc<EncoderRegistry>>,
@@ -272,6 +289,15 @@ struct PipelineLinkKindCounts {
 impl ProcessorBuilderContext {
     fn flow_instance_id(&self) -> &str {
         self.flow_instance_id.as_ref()
+    }
+
+    fn configure_stats(&self, stats: &ProcessorStats) {
+        if let Some(stream_name) = &self.shared_stream_name {
+            stats.set_shared_stream_name(stream_name);
+        } else {
+            stats.set_pipeline_id(&self.pipeline_id);
+            stats.set_revision(self.revision);
+        }
     }
 
     fn spawner(&self) -> &TaskSpawner {
@@ -621,12 +647,6 @@ impl PlanProcessor {
         }
     }
 
-    pub fn set_pipeline_id(&mut self, pipeline_id: &str) {
-        if let PlanProcessor::SharedSource(proc) = self {
-            proc.set_pipeline_id(pipeline_id);
-        }
-    }
-
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         match self {
             PlanProcessor::Aggregation(p) => p.set_stats(stats),
@@ -658,6 +678,12 @@ impl PlanProcessor {
             PlanProcessor::ResultCollect(p) => p.set_stats(stats),
             PlanProcessor::Barrier(p) => p.set_stats(stats),
             PlanProcessor::Sampler(p) => p.set_stats(stats),
+        }
+    }
+
+    pub fn set_consumer_pipeline_id(&mut self, pipeline_id: &str) {
+        if let PlanProcessor::SharedSource(processor) = self {
+            processor.set_consumer_pipeline_id(pipeline_id);
         }
     }
 
@@ -864,6 +890,8 @@ pub struct ProcessorPipeline {
     supervisor_handle: Option<JoinHandle<()>>,
     /// Logical pipeline identifier used for diagnostics/subscriptions
     pipeline_id: String,
+    revision: u64,
+    shared_stream: bool,
     flow_instance_id: Arc<str>,
     /// Allows callers to wait for specific control signals to reach the tail.
     ack_manager: Arc<AckManager>,
@@ -890,6 +918,7 @@ impl ProcessorPipeline {
             let ProcessorTaskMonitor {
                 flow_instance_id,
                 pipeline_id,
+                revision,
                 processor_id,
                 processor_kind,
                 allow_normal_completion,
@@ -906,14 +935,26 @@ impl ProcessorPipeline {
                     Ok(())
                 }
                 Ok(Err(err)) => {
-                    tracing::error!(
-                        flow_instance_id = %flow_instance_id,
-                        pipeline_id = %pipeline_id,
-                        processor_id = %processor_id,
-                        processor_kind,
-                        error = %err,
-                        "processor task failed"
-                    );
+                    if let (Some(pipeline_id), Some(revision)) = (pipeline_id.as_deref(), revision)
+                    {
+                        tracing::error!(
+                            flow_instance_id = %flow_instance_id,
+                            pipeline_id,
+                            revision,
+                            processor_id = %processor_id,
+                            processor_kind,
+                            error = %err,
+                            "processor task failed"
+                        );
+                    } else {
+                        tracing::error!(
+                            flow_instance_id = %flow_instance_id,
+                            processor_id = %processor_id,
+                            processor_kind,
+                            error = %err,
+                            "processor task failed"
+                        );
+                    }
                     let _ = task_exit_tx.send(ProcessorTaskExit {
                         processor_id,
                         processor_kind,
@@ -923,14 +964,26 @@ impl ProcessorPipeline {
                 }
                 Err(join_err) => {
                     let err = join_err.to_string();
-                    tracing::error!(
-                        flow_instance_id = %flow_instance_id,
-                        pipeline_id = %pipeline_id,
-                        processor_id = %processor_id,
-                        processor_kind,
-                        error = %join_err,
-                        "processor task panicked"
-                    );
+                    if let (Some(pipeline_id), Some(revision)) = (pipeline_id.as_deref(), revision)
+                    {
+                        tracing::error!(
+                            flow_instance_id = %flow_instance_id,
+                            pipeline_id,
+                            revision,
+                            processor_id = %processor_id,
+                            processor_kind,
+                            error = %join_err,
+                            "processor task panicked"
+                        );
+                    } else {
+                        tracing::error!(
+                            flow_instance_id = %flow_instance_id,
+                            processor_id = %processor_id,
+                            processor_kind,
+                            error = %join_err,
+                            "processor task panicked"
+                        );
+                    }
                     let _ = task_exit_tx.send(ProcessorTaskExit {
                         processor_id,
                         processor_kind,
@@ -983,7 +1036,8 @@ impl ProcessorPipeline {
             &self.spawner,
             ProcessorTaskMonitor {
                 flow_instance_id: Arc::clone(&self.flow_instance_id),
-                pipeline_id: self.pipeline_id.clone(),
+                pipeline_id: (!self.shared_stream).then(|| self.pipeline_id.clone()),
+                revision: (!self.shared_stream).then_some(self.revision),
                 processor_id,
                 processor_kind,
                 allow_normal_completion,
@@ -1047,20 +1101,31 @@ impl ProcessorPipeline {
         let shutdown = Arc::clone(&self.supervisor_shutdown);
         let flow_instance_id = Arc::clone(&self.flow_instance_id);
         let pipeline_id = self.pipeline_id.clone();
+        let shared_stream = self.shared_stream;
         self.supervisor_handle = Some(self.spawner.spawn(async move {
             while let Some(exit) = task_exit_rx.recv().await {
                 if shutdown.load(Ordering::Acquire) {
                     continue;
                 }
                 let reason = exit.reason();
-                tracing::error!(
-                    flow_instance_id = %flow_instance_id,
-                    pipeline_id = %pipeline_id,
-                    processor_id = %exit.processor_id,
-                    processor_kind = exit.processor_kind,
-                    reason = %reason,
-                    "pipeline supervisor detected processor task exit"
-                );
+                if shared_stream {
+                    tracing::error!(
+                        flow_instance_id = %flow_instance_id,
+                        processor_id = %exit.processor_id,
+                        processor_kind = exit.processor_kind,
+                        reason = %reason,
+                        "shared stream supervisor detected processor task exit"
+                    );
+                } else {
+                    tracing::error!(
+                        flow_instance_id = %flow_instance_id,
+                        pipeline_id = %pipeline_id,
+                        processor_id = %exit.processor_id,
+                        processor_kind = exit.processor_kind,
+                        reason = %reason,
+                        "pipeline supervisor detected processor task exit"
+                    );
+                }
                 for handle in &abort_handles {
                     handle.abort();
                 }
@@ -1271,7 +1336,7 @@ impl ProcessorPipeline {
             stats.stats.set_pipeline_id(&id);
         }
         for processor in &mut self.middle_processors {
-            processor.set_pipeline_id(&id);
+            processor.set_consumer_pipeline_id(&id);
         }
     }
 
@@ -1805,6 +1870,7 @@ fn create_processor_from_plan_node(
                 shared_stream_registry,
                 channel_capacities,
             );
+            processor.set_consumer_pipeline_id(context.pipeline_id.to_string());
             processor.set_required_columns(shared.required_columns().to_vec());
             processor.set_required_slot_version(shared.required_slot_version());
             Ok(ProcessorBuildOutput::with_processor(
@@ -2739,6 +2805,7 @@ fn create_processor_pipeline_with_context(
         control_id.as_str(),
         "control_source",
     ));
+    context.configure_stats(&stats);
     record_pipeline_link_kind_counts(stats.as_ref(), link_kind_counts);
     control_source.set_stats(Arc::clone(&stats));
     processor_stats.push(ProcessorStatsHandle {
@@ -2758,6 +2825,7 @@ fn create_processor_pipeline_with_context(
             id.as_str(),
             processor.kind(),
         ));
+        context.configure_stats(&stats);
         processor.set_stats(Arc::clone(&stats));
         processor_stats.push(ProcessorStatsHandle {
             processor_id: id,
@@ -2779,16 +2847,12 @@ fn create_processor_pipeline_with_context(
             id.as_str(),
             "result_collect",
         ));
+        context.configure_stats(&stats);
         collector.set_stats(Arc::clone(&stats));
         processor_stats.push(ProcessorStatsHandle {
             processor_id: id,
             stats,
         });
-    }
-
-    let pipeline_id = Uuid::new_v4().to_string();
-    for processor in &mut middle_processors {
-        processor.set_pipeline_id(&pipeline_id);
     }
 
     Ok(ProcessorPipeline {
@@ -2801,7 +2865,9 @@ fn create_processor_pipeline_with_context(
         supervisor_abort_handles: Vec::new(),
         supervisor_shutdown: Arc::new(AtomicBool::new(false)),
         supervisor_handle: None,
-        pipeline_id,
+        pipeline_id: context.pipeline_id.to_string(),
+        revision: context.revision,
+        shared_stream: context.shared_stream_name.is_some(),
         flow_instance_id: Arc::clone(&context.flow_instance_id),
         ack_manager,
         checkpoint_coordinator,
@@ -2823,6 +2889,9 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
         physical_plan,
         ProcessorBuilderContext {
             flow_instance_id: Arc::clone(&options.flow_instance_id),
+            pipeline_id: Arc::from(options.stream_name.as_str()),
+            shared_stream_name: Some(Arc::from(options.stream_name.as_str())),
+            revision: 0,
             mqtt_clients: None,
             connector_registry: None,
             encoder_registry: None,
@@ -2855,6 +2924,9 @@ pub(crate) fn create_processor_pipeline(
         physical_plan,
         ProcessorBuilderContext {
             flow_instance_id: dependencies.flow_instance_id,
+            pipeline_id: dependencies.pipeline_id,
+            shared_stream_name: None,
+            revision: dependencies.revision,
             mqtt_clients: Some(dependencies.mqtt_clients),
             connector_registry: Some(dependencies.connector_registry),
             encoder_registry: Some(dependencies.encoder_registry),
@@ -2920,6 +2992,8 @@ mod tests {
             supervisor_shutdown: Arc::new(AtomicBool::new(false)),
             supervisor_handle: None,
             pipeline_id: "test_pipe".to_string(),
+            revision: 0,
+            shared_stream: false,
             flow_instance_id: Arc::<str>::from("default"),
             ack_manager,
             checkpoint_coordinator,
@@ -3196,6 +3270,9 @@ mod tests {
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let context = ProcessorBuilderContext {
             flow_instance_id: Arc::<str>::from("default"),
+            pipeline_id: Arc::<str>::from("test_pipe"),
+            shared_stream_name: None,
+            revision: 0,
             mqtt_clients: Some(MqttClientManager::new("default", spawner.clone())),
             connector_registry: Some(connector_registry),
             encoder_registry: Some(encoder_registry),

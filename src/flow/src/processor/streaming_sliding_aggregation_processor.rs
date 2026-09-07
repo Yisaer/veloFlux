@@ -240,7 +240,8 @@ impl Processor for StreamingSlidingAggregationProcessor {
         let bounds = SlidingWindowBounds { length, delay };
         let stats = Arc::clone(&self.stats);
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut triggered_partitioned_windows =
                 PartitionedTriggeredSlidingWindows::new(partition_by_scalars);
 
@@ -748,7 +749,7 @@ impl Processor for StreamingSlidingAggregationProcessor {
             }
 
             Ok(())
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

@@ -163,7 +163,8 @@ impl Processor for SourceChangeGateProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, source = %source_name, "source change gate processor starting");
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut state = SourceChangeGateState::default();
             loop {
                 tokio::select! {
@@ -265,7 +266,7 @@ impl Processor for SourceChangeGateProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

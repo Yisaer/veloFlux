@@ -468,8 +468,9 @@ impl Processor for SinkProcessor {
 
         tracing::info!(processor_id = %processor_id, "sink processor starting");
 
+        let processor_span = stats.processor_span();
         let (ready_tx, ready_rx) = oneshot::channel();
-        let handle = spawner.spawn(async move {
+        let handle = spawner.spawn(tracing::Instrument::instrument(async move {
             match Self::attempt_ready_with_timeout(&mut connector, SINK_READY_TIMEOUT).await {
                 Ok(()) => {
                     tracing::info!(processor_id = %processor_id, "sink connector ready");
@@ -714,7 +715,7 @@ impl Processor for SinkProcessor {
                     }
                 }
             }
-        });
+        }, processor_span));
         ProcessorStart::with_ready(handle, ready_rx)
     }
 

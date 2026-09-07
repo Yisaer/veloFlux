@@ -248,7 +248,8 @@ impl Processor for StreamingCountAggregationProcessor {
         let target = self.target;
         let stats = Arc::clone(&self.stats);
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut worker = AggregationWorker::new(physical, aggregate_registry, group_by_meta);
             let mut window_state = CountWindowState::new(target);
             let mut partitioned_state = PartitionedCountAggregationState::new();
@@ -363,7 +364,7 @@ impl Processor for StreamingCountAggregationProcessor {
             }
 
             Ok(())
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

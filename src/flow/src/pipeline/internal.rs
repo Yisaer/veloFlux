@@ -741,6 +741,7 @@ fn build_pipeline_runtime(
                     eventtime,
                     context.spawner().clone(),
                 )
+                .with_pipeline_identity(definition.id(), definition.revision())
                 .with_checkpoint_store(context.checkpoint_store()),
                 ProcessorPipelineOptions::default()
                     .with_data_channel_capacity(definition.options().data_channel_capacity)
@@ -748,7 +749,6 @@ fn build_pipeline_runtime(
             )
             .map_err(|err| err.to_string())
         })?;
-        pipeline.set_pipeline_id(definition.id().to_string());
         build_log.run_phase("attach_sources", || {
             attach_sources_from_catalog(&mut pipeline, &stream_definitions, context)
         })?;

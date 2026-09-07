@@ -200,7 +200,8 @@ impl Processor for ResultCollectProcessor {
             PassthroughMetrics::new(stats.as_ref(), RESULT_COLLECT_METRICS, self.input_domain);
         tracing::info!(processor_id = %processor_id, "result collect processor starting");
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let output = match output {
                 Ok(output) => output,
                 Err(e) => return Err(e),
@@ -270,7 +271,7 @@ impl Processor for ResultCollectProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

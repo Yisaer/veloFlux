@@ -75,7 +75,8 @@ impl Processor for EosWindowProcessor {
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut state = EosWindowState::new(Arc::clone(&stats));
 
             loop {
@@ -168,7 +169,7 @@ impl Processor for EosWindowProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

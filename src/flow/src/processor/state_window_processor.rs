@@ -102,7 +102,8 @@ impl Processor for StateWindowProcessor {
         let emit_expr = self.physical.emit_scalar.clone();
         let partition_by_exprs = self.physical.partition_by_scalars.clone();
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut partitions: HashMap<Option<String>, PartitionState> = HashMap::new();
 
             loop {
@@ -358,7 +359,7 @@ impl Processor for StateWindowProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

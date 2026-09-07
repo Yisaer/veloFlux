@@ -385,7 +385,8 @@ impl Processor for BatchProcessor {
                     ),
                 );
             };
-            return ProcessorStart::ready(spawner.spawn(async move {
+            let processor_span = stats.processor_span();
+            return ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
                 let mut partitions = CountPartitionBuffers::new();
                 loop {
                     tokio::select! {
@@ -491,10 +492,11 @@ impl Processor for BatchProcessor {
                         }
                     }
                 }
-            }));
+            }, processor_span)));
         }
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut buffer: Vec<Tuple> = Vec::new();
             let mut timer: Option<Pin<Box<Sleep>>> = None;
             // Fixed grid origin, captured once before any tuple so duration windows
@@ -662,7 +664,7 @@ impl Processor for BatchProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

@@ -155,7 +155,8 @@ impl Processor for ControlSourceProcessor {
         tracing::info!(processor_id = %processor_id, "control source processor starting");
         let channel_capacities = self.channel_capacities;
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let input = match input_result {
                 Ok(input) => input,
                 Err(e) => return Err(e),
@@ -218,7 +219,7 @@ impl Processor for ControlSourceProcessor {
             )
             .await?;
             Ok(())
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

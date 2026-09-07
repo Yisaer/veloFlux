@@ -111,7 +111,8 @@ impl Processor for SinkCompressProcessor {
         let metrics = TransformMetrics::new(stats.as_ref(), SINK_COMPRESS_METRICS);
         tracing::info!(processor_id = %processor_id, "sink compress processor starting");
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut delivery = CompressDelivery::default();
             // The upstream encoder always flushes (sends END to the data channel) before
             // forwarding the terminal control signal. With biased select, both branches can
@@ -261,7 +262,7 @@ impl Processor for SinkCompressProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

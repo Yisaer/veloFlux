@@ -282,7 +282,8 @@ impl Processor for RowDiffProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "row diff processor starting");
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut state = RowDiffState::default();
             loop {
                 tokio::select! {
@@ -375,7 +376,7 @@ impl Processor for RowDiffProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

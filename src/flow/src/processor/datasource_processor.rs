@@ -458,8 +458,9 @@ impl Processor for DataSourceProcessor {
             stream = %stream_name,
             "data source starting"
         );
+        let processor_span = stats.processor_span();
         let (ready_tx, ready_rx) = oneshot::channel();
-        let handle = spawner.spawn(async move {
+        let handle = spawner.spawn(tracing::Instrument::instrument(async move {
             let _ = ready_tx.send(Ok(()));
             let mut connectors = connectors;
             loop {
@@ -718,7 +719,7 @@ impl Processor for DataSourceProcessor {
                     }
                 }
             }
-        });
+        }, processor_span));
         ProcessorStart::with_ready(handle, ready_rx)
     }
 

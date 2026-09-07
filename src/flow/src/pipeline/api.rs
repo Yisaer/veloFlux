@@ -597,6 +597,7 @@ pub struct SourceOnChangeConfig {
 #[derive(Debug, Clone)]
 pub struct PipelineDefinition {
     id: String,
+    revision: u64,
     sql: String,
     sources: Vec<SourceDefinition>,
     sinks: Vec<SinkDefinition>,
@@ -607,6 +608,7 @@ impl PipelineDefinition {
     pub fn new(id: impl Into<String>, sql: impl Into<String>, sinks: Vec<SinkDefinition>) -> Self {
         Self {
             id: id.into(),
+            revision: 0,
             sql: sql.into(),
             sources: Vec::new(),
             sinks,
@@ -619,6 +621,12 @@ impl PipelineDefinition {
         self
     }
 
+    /// Set the persisted revision associated with this runtime definition.
+    pub fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = revision;
+        self
+    }
+
     pub fn with_options(mut self, options: PipelineOptions) -> Self {
         self.options = options;
         self
@@ -626,6 +634,10 @@ impl PipelineDefinition {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     pub fn sql(&self) -> &str {

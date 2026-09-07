@@ -227,7 +227,8 @@ impl Processor for FilterProcessor {
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "filter processor starting");
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             loop {
                 tokio::select! {
                     biased;
@@ -353,7 +354,7 @@ impl Processor for FilterProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

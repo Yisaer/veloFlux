@@ -220,7 +220,8 @@ impl Processor for SamplerProcessor {
         };
         let data_metrics = DataMetrics::new(stats.as_ref(), SAMPLER_METRICS, metric_domains);
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut ticker = interval(emit_interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut control_active = control_active;
@@ -346,7 +347,7 @@ impl Processor for SamplerProcessor {
                     }
                 }
             }
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {

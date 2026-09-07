@@ -74,7 +74,7 @@ fn active_cron_window_end_ms(
 }
 
 fn datetime_range_contains(range: &PipelineDatetimeRangeRequest, timestamp_ms: i64) -> bool {
-    range.begin_timestamp_ms < timestamp_ms && timestamp_ms < range.end_timestamp_ms
+    range.begin_timestamp_ms <= timestamp_ms && timestamp_ms < range.end_timestamp_ms
 }
 
 fn active_datetime_range_end_ms(
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn datetime_range_only_schedule_uses_open_boundaries() {
+    fn datetime_range_only_schedule_uses_left_closed_right_open_boundaries() {
         let begin = Utc.with_ymd_and_hms(2026, 1, 1, 10, 0, 0).unwrap();
         let end = Utc.with_ymd_and_hms(2026, 1, 1, 11, 0, 0).unwrap();
         let req = datetime_range_schedule(vec![PipelineDatetimeRangeRequest {
@@ -324,7 +324,7 @@ mod tests {
 
         for (now, expected) in [
             (begin - chrono::Duration::milliseconds(1), false),
-            (begin, false),
+            (begin, true),
             (begin + chrono::Duration::milliseconds(1), true),
             (end, false),
             (end + chrono::Duration::milliseconds(1), false),

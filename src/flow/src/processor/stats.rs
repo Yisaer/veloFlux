@@ -21,6 +21,12 @@ pub struct MetricSpec {
     pub kind: MetricKind,
 }
 
+#[derive(Debug, Clone)]
+enum ProcessorMetricScope {
+    Pipeline { pipeline_id: Arc<str> },
+    SharedStream { stream_name: Arc<str> },
+}
+
 #[derive(Debug)]
 struct MetricEntry {
     id: &'static str,
@@ -32,7 +38,7 @@ struct MetricEntry {
 #[derive(Debug, Clone)]
 pub struct GaugeHandle {
     flow_instance_id: Arc<str>,
-    pipeline_id: Arc<OnceLock<Arc<str>>>,
+    metric_scope: Arc<OnceLock<ProcessorMetricScope>>,
     processor_id: Arc<str>,
     entry: Arc<MetricEntry>,
     /// Cached prometheus child gauge, resolved once on first `set()`.
@@ -50,9 +56,9 @@ impl GaugeHandle {
     }
 
     fn resolved_gauge(&self) -> Option<&ChildGauge> {
-        let pipeline_id = self.pipeline_id.get()?;
-        Some(self.gauge.get_or_init(|| {
-            ChildGauge::bind(
+        let scope = self.metric_scope.get()?;
+        Some(self.gauge.get_or_init(|| match scope {
+            ProcessorMetricScope::Pipeline { pipeline_id } => ChildGauge::bind(
                 veloflux_metrics::processor_custom_gauge(),
                 &[
                     self.flow_instance_id.as_ref(),
@@ -60,7 +66,16 @@ impl GaugeHandle {
                     self.processor_id.as_ref(),
                     self.entry.id,
                 ],
-            )
+            ),
+            ProcessorMetricScope::SharedStream { stream_name } => ChildGauge::bind(
+                veloflux_metrics::shared_stream_processor_custom_gauge(),
+                &[
+                    self.flow_instance_id.as_ref(),
+                    stream_name.as_ref(),
+                    self.processor_id.as_ref(),
+                    self.entry.id,
+                ],
+            ),
         }))
     }
 }
@@ -76,17 +91,42 @@ struct BoundMetrics {
 }
 
 impl BoundMetrics {
-    fn new(labels: &[&str; 3]) -> Self {
-        Self {
-            error_counter: ChildCounter::bind(veloflux_metrics::processor_errors_total(), labels),
-            handle_duration: ChildHistogram::bind(
-                veloflux_metrics::processor_handle_duration_seconds(),
-                labels,
-            ),
-            backpressure_counter: ChildCounter::bind(
-                veloflux_metrics::processor_send_backpressure_waits_total(),
-                labels,
-            ),
+    fn new(scope: &ProcessorMetricScope, flow_instance_id: &str, processor_id: &str) -> Self {
+        match scope {
+            ProcessorMetricScope::Pipeline { pipeline_id } => {
+                let labels = [flow_instance_id, pipeline_id.as_ref(), processor_id];
+                Self {
+                    error_counter: ChildCounter::bind(
+                        veloflux_metrics::processor_errors_total(),
+                        &labels,
+                    ),
+                    handle_duration: ChildHistogram::bind(
+                        veloflux_metrics::processor_handle_duration_seconds(),
+                        &labels,
+                    ),
+                    backpressure_counter: ChildCounter::bind(
+                        veloflux_metrics::processor_send_backpressure_waits_total(),
+                        &labels,
+                    ),
+                }
+            }
+            ProcessorMetricScope::SharedStream { stream_name } => {
+                let labels = [flow_instance_id, stream_name.as_ref(), processor_id];
+                Self {
+                    error_counter: ChildCounter::bind(
+                        veloflux_metrics::shared_stream_processor_errors_total(),
+                        &labels,
+                    ),
+                    handle_duration: ChildHistogram::bind(
+                        veloflux_metrics::shared_stream_processor_handle_duration_seconds(),
+                        &labels,
+                    ),
+                    backpressure_counter: ChildCounter::bind(
+                        veloflux_metrics::shared_stream_processor_send_backpressure_waits_total(),
+                        &labels,
+                    ),
+                }
+            }
         }
     }
 }
@@ -94,7 +134,7 @@ impl BoundMetrics {
 #[derive(Debug, Clone)]
 pub struct CounterHandle {
     flow_instance_id: Arc<str>,
-    pipeline_id: Arc<OnceLock<Arc<str>>>,
+    metric_scope: Arc<OnceLock<ProcessorMetricScope>>,
     processor_id: Arc<str>,
     entry: Arc<MetricEntry>,
     /// Cached prometheus child counter, resolved once on first `inc_by()`.
@@ -111,9 +151,9 @@ impl CounterHandle {
     }
 
     fn resolved_counter(&self) -> Option<&ChildCounter> {
-        let pipeline_id = self.pipeline_id.get()?;
-        Some(self.counter.get_or_init(|| {
-            ChildCounter::bind(
+        let scope = self.metric_scope.get()?;
+        Some(self.counter.get_or_init(|| match scope {
+            ProcessorMetricScope::Pipeline { pipeline_id } => ChildCounter::bind(
                 veloflux_metrics::processor_custom_counter_total(),
                 &[
                     self.flow_instance_id.as_ref(),
@@ -121,7 +161,16 @@ impl CounterHandle {
                     self.processor_id.as_ref(),
                     self.entry.id,
                 ],
-            )
+            ),
+            ProcessorMetricScope::SharedStream { stream_name } => ChildCounter::bind(
+                veloflux_metrics::shared_stream_processor_custom_counter_total(),
+                &[
+                    self.flow_instance_id.as_ref(),
+                    stream_name.as_ref(),
+                    self.processor_id.as_ref(),
+                    self.entry.id,
+                ],
+            ),
         }))
     }
 }
@@ -132,6 +181,9 @@ pub struct ProcessorStats {
     processor_id: Arc<str>,
     kind: Arc<str>,
     pipeline_id: Arc<OnceLock<Arc<str>>>,
+    stream_name: Arc<OnceLock<Arc<str>>>,
+    revision: Arc<OnceLock<u64>>,
+    metric_scope: Arc<OnceLock<ProcessorMetricScope>>,
     records_in: AtomicU64,
     records_out: AtomicU64,
     records_in_enabled: AtomicBool,
@@ -168,6 +220,9 @@ impl ProcessorStats {
             processor_id: processor_id.into(),
             kind: kind.into(),
             pipeline_id: Arc::new(OnceLock::new()),
+            stream_name: Arc::new(OnceLock::new()),
+            revision: Arc::new(OnceLock::new()),
+            metric_scope: Arc::new(OnceLock::new()),
             records_in: AtomicU64::new(0),
             records_out: AtomicU64::new(0),
             records_in_enabled: AtomicBool::new(false),
@@ -183,50 +238,103 @@ impl ProcessorStats {
         }
     }
 
-    /// Labels for this processor's prometheus child metrics, available once the
-    /// pipeline id is assigned. Returns `None` before then (metrics are skipped).
-    fn metric_labels(&self) -> Option<[&str; 3]> {
-        let pipeline_id = self.pipeline_id.get()?;
-        Some([
-            self.flow_instance_id.as_ref(),
-            pipeline_id.as_ref(),
-            self.processor_id.as_ref(),
-        ])
-    }
-
-    /// Returns the cached `BoundMetrics` handle, resolving it once when
-    /// `pipeline_id` is first observed.
     fn bound_metrics(&self) -> Option<&BoundMetrics> {
-        let labels = self.metric_labels()?;
+        let scope = self.metric_scope.get()?;
         Some(
-            self.bound_metrics
-                .get_or_init(|| BoundMetrics::new(&labels)),
+            self.bound_metrics.get_or_init(|| {
+                BoundMetrics::new(scope, &self.flow_instance_id, &self.processor_id)
+            }),
         )
     }
 
     fn records_in_counter(&self) -> Option<&ChildCounter> {
-        let labels = self.metric_labels()?;
-        Some(self.records_in_counter.get_or_init(|| {
-            ChildCounter::bind(veloflux_metrics::processor_records_in_total(), &labels)
+        let scope = self.metric_scope.get()?;
+        Some(self.records_in_counter.get_or_init(|| match scope {
+            ProcessorMetricScope::Pipeline { pipeline_id } => ChildCounter::bind(
+                veloflux_metrics::processor_records_in_total(),
+                &[
+                    self.flow_instance_id.as_ref(),
+                    pipeline_id.as_ref(),
+                    self.processor_id.as_ref(),
+                ],
+            ),
+            ProcessorMetricScope::SharedStream { stream_name } => ChildCounter::bind(
+                veloflux_metrics::shared_stream_processor_records_in_total(),
+                &[
+                    self.flow_instance_id.as_ref(),
+                    stream_name.as_ref(),
+                    self.processor_id.as_ref(),
+                ],
+            ),
         }))
     }
 
     fn records_out_counter(&self) -> Option<&ChildCounter> {
-        let labels = self.metric_labels()?;
-        Some(self.records_out_counter.get_or_init(|| {
-            ChildCounter::bind(veloflux_metrics::processor_records_out_total(), &labels)
+        let scope = self.metric_scope.get()?;
+        Some(self.records_out_counter.get_or_init(|| match scope {
+            ProcessorMetricScope::Pipeline { pipeline_id } => ChildCounter::bind(
+                veloflux_metrics::processor_records_out_total(),
+                &[
+                    self.flow_instance_id.as_ref(),
+                    pipeline_id.as_ref(),
+                    self.processor_id.as_ref(),
+                ],
+            ),
+            ProcessorMetricScope::SharedStream { stream_name } => ChildCounter::bind(
+                veloflux_metrics::shared_stream_processor_records_out_total(),
+                &[
+                    self.flow_instance_id.as_ref(),
+                    stream_name.as_ref(),
+                    self.processor_id.as_ref(),
+                ],
+            ),
         }))
     }
 
     pub fn set_pipeline_id(&self, pipeline_id: &str) {
         let _ = self.pipeline_id.set(Arc::<str>::from(pipeline_id));
+        let _ = self.metric_scope.set(ProcessorMetricScope::Pipeline {
+            pipeline_id: Arc::<str>::from(pipeline_id),
+        });
+    }
+
+    pub fn set_shared_stream_name(&self, stream_name: &str) {
+        let _ = self.stream_name.set(Arc::<str>::from(stream_name));
+        let _ = self.metric_scope.set(ProcessorMetricScope::SharedStream {
+            stream_name: Arc::<str>::from(stream_name),
+        });
+    }
+
+    pub fn set_revision(&self, revision: u64) {
+        let _ = self.revision.set(revision);
+    }
+
+    pub fn processor_span(&self) -> tracing::Span {
+        if let Some(stream_name) = self.stream_name.get() {
+            tracing::info_span!(
+                "processor",
+                flow_instance_id = %self.flow_instance_id,
+                stream_name = %stream_name,
+                processor_id = %self.processor_id,
+                processor_kind = %self.kind,
+            )
+        } else {
+            tracing::info_span!(
+                "processor",
+                flow_instance_id = %self.flow_instance_id,
+                pipeline_id = self.pipeline_id_label(),
+                revision = self.revision.get().copied().unwrap_or_default(),
+                processor_id = %self.processor_id,
+                processor_kind = %self.kind,
+            )
+        }
     }
 
     pub fn register_gauge(&self, spec: MetricSpec) -> GaugeHandle {
         let entry = self.register_metric(spec, MetricKind::Gauge);
         GaugeHandle {
             flow_instance_id: Arc::clone(&self.flow_instance_id),
-            pipeline_id: Arc::clone(&self.pipeline_id),
+            metric_scope: Arc::clone(&self.metric_scope),
             processor_id: Arc::clone(&self.processor_id),
             entry,
             gauge: OnceLock::new(),
@@ -237,7 +345,7 @@ impl ProcessorStats {
         let entry = self.register_metric(spec, MetricKind::Counter);
         CounterHandle {
             flow_instance_id: Arc::clone(&self.flow_instance_id),
-            pipeline_id: Arc::clone(&self.pipeline_id),
+            metric_scope: Arc::clone(&self.metric_scope),
             processor_id: Arc::clone(&self.processor_id),
             entry,
             counter: OnceLock::new(),
@@ -362,16 +470,30 @@ impl ProcessorStats {
         message: impl Into<String>,
     ) {
         let message = message.into();
-        tracing::error!(
-            flow_instance_id = %self.flow_instance_id,
-            pipeline_id = self.pipeline_id_label(),
-            processor_id = %self.processor_id,
-            processor_kind = %self.kind,
-            context,
-            error = %message,
-            error_count = count,
-            "processor runtime error"
-        );
+        if let Some(stream_name) = self.stream_name.get() {
+            tracing::error!(
+                flow_instance_id = %self.flow_instance_id,
+                stream_name = %stream_name,
+                processor_id = %self.processor_id,
+                processor_kind = %self.kind,
+                context,
+                error = %message,
+                error_count = count,
+                "shared stream processor runtime error"
+            );
+        } else {
+            tracing::error!(
+                flow_instance_id = %self.flow_instance_id,
+                pipeline_id = self.pipeline_id_label(),
+                revision = self.revision.get().copied().unwrap_or_default(),
+                processor_id = %self.processor_id,
+                processor_kind = %self.kind,
+                context,
+                error = %message,
+                error_count = count,
+                "processor runtime error"
+            );
+        }
         self.record_error_count(count, message);
     }
 

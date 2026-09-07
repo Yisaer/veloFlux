@@ -132,7 +132,8 @@ impl Processor for StreamingTumblingAggregationProcessor {
         let stats = Arc::clone(&self.stats);
         let window_length = self.window_length;
 
-        ProcessorStart::ready(spawner.spawn(async move {
+        let processor_span = stats.processor_span();
+        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut window_state = PartitionedProcessingWindowState::new(
                 window_length,
                 Arc::clone(&physical),
@@ -260,7 +261,7 @@ impl Processor for StreamingTumblingAggregationProcessor {
             }
 
             Ok(())
-        }))
+        }, processor_span)))
     }
 
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
