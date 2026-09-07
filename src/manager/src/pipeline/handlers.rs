@@ -1330,6 +1330,7 @@ mod tests {
     use crate::stream::{
         CreateStreamRequest, MqttStreamPropsRequest, SchemaConfigRequest, StreamPropsRequest,
     };
+    use crate::table::{CreateTableRequest, create_table_handler};
     use axum::{
         body::to_bytes,
         extract::{Path, Query, State},
@@ -1476,6 +1477,29 @@ mod tests {
             ]
         }))
         .expect("decode nop pipeline request")
+    }
+
+    fn history_table_request(name: &str) -> CreateTableRequest {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "revision": 1,
+            "type": "history",
+            "schema": {
+                "type": "json",
+                "props": {
+                    "columns": [
+                        { "name": "ts", "data_type": "int64" },
+                        { "name": "speed", "data_type": "int64" }
+                    ]
+                }
+            },
+            "props": {
+                "datasource": "/var/lib/nanomq/history",
+                "topic": "can0"
+            },
+            "decoder": { "type": "json", "props": {} }
+        }))
+        .expect("decode history table request")
     }
 
     fn seed_failed_marker(state: &AppState, pipeline_id: &str, revision: u64) {
@@ -1881,6 +1905,53 @@ mod tests {
                 .is_none(),
             "invalid id must not persist",
         );
+    }
+
+    #[tokio::test]
+    async fn create_pipeline_accepts_history_table_with_kura_sink() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            0,
+        )
+        .expect("build app state");
+
+        let table_response = create_table_handler(
+            State(state.clone()),
+            axum::Json(history_table_request("vehicle_history")),
+        )
+        .await
+        .into_response();
+        assert_eq!(table_response.status(), StatusCode::CREATED);
+
+        let pipeline_req = serde_json::from_value(serde_json::json!({
+            "id": "vehicle_history_kura_pipeline",
+            "revision": 1,
+            "flow_instance_id": "default",
+            "sql": "SELECT speed FROM vehicle_history",
+            "sinks": [
+                {
+                    "id": "viss_output",
+                    "type": "kura",
+                    "props": {
+                        "addr": "http://127.0.0.1:50053",
+                        "mapping_path": "/etc/veloflux/kura_mapping.json"
+                    }
+                }
+            ]
+        }))
+        .expect("decode history pipeline request");
+        let pipeline_response = create_pipeline_handler(
+            State(state),
+            Query(types::CreatePipelineQuery::default()),
+            axum::Json(pipeline_req),
+        )
+        .await
+        .into_response();
+        assert_eq!(pipeline_response.status(), StatusCode::CREATED);
     }
 
     #[tokio::test]

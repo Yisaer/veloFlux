@@ -93,6 +93,21 @@ pub(super) fn shared_mqtt_connector_keys_from_pipeline_request(
     })?;
 
     for stream_name in stream_names {
+        // Table sources do not require connector keys — skip them.
+        match storage.get_table(&stream_name) {
+            Ok(Some(_)) => continue,
+            Ok(None) => {}
+            Err(err) => {
+                return Err(Box::new(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to read table {stream_name} from storage: {err}"),
+                    )
+                        .into_response(),
+                ));
+            }
+        }
+
         let stored_stream = match storage.get_stream(&stream_name) {
             Ok(Some(stream)) => stream,
             Ok(None) => {
