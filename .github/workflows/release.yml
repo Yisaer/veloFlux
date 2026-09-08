@@ -242,14 +242,21 @@ jobs:
             -e HOST_GID="$(id -g)" \
             -v "$PWD:/workspace" \
             --workdir /workspace \
-            rust:1-bullseye \
+            rust:1.97.1-bullseye@sha256:02d78ca3f928195c2a907543de778adfd728ad7e2a24fdc6aef582b7c77842e0 \
             bash -euc '
               export DEBIAN_FRONTEND=noninteractive
+              debian_snapshot="20260831T230000Z"
               video_gstreamer_packages=""
               if [ "${{ matrix.video_feature }}" = "true" ]; then
                 video_gstreamer_packages="libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev"
               fi
-              apt-get update
+              rm -f /etc/apt/sources.list.d/debian.sources
+              printf "%s\n" \
+                "deb https://snapshot.debian.org/archive/debian/$debian_snapshot bullseye main" \
+                "deb https://snapshot.debian.org/archive/debian/$debian_snapshot bullseye-updates main" \
+                "deb https://snapshot.debian.org/archive/debian-security/$debian_snapshot bullseye-security main" \
+                > /etc/apt/sources.list
+              apt-get -o Acquire::Check-Valid-Until=false update
               apt-get install -y --no-install-recommends \
                 binutils \
                 build-essential \
