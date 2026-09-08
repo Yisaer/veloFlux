@@ -33,7 +33,27 @@ through the first delimiter occurrence and preserves any later delimiter bytes i
 The source follows normal VeloFlux connector behavior. Starting a pipeline does not wait
 indefinitely for the external peer. The connector worker attempts to connect in the background,
 emits connector errors on connection failures, and retries with bounded backoff until the
-pipeline stops.
+pipeline stops. For `inproc://`, each connection attempt has a five-second retry deadline;
+when dialing cannot be established before the deadline, the source emits a terminal connection
+error and ends the stream. After dialing succeeds, the source remains alive while waiting for
+messages; application data is not used as a connection readiness signal.
 
 NNG pub/sub is best-effort and lossy. Messages published before the subscriber connects or while
 subscriber queues overflow can be dropped by the protocol.
+
+## Embedded `inproc` deployments
+
+When veloFlux is embedded as a shared library, the same connector can use an
+`inproc://` URL to communicate with an NNG peer owned by the host process. The
+URL scheme is the only transport selector; do not add a separate `inproc` or
+`transport` property to the stream request.
+
+The host must create and listen on its `pub0` socket before starting the
+embedded veloFlux runtime. The source uses an NNG `sub0` socket and dials the
+configured URL. The source may retry while the host peer is starting, but the
+host should wait for pipeline readiness before publishing data because NNG
+pub/sub does not acknowledge delivery and early messages may be lost.
+
+The complete embedded design, including the Manager boundary, transport
+parsing, connection retry behavior, and shared `libnng` requirement, is documented in
+[NNG In-Process Integration](../../integrations/ffi/nng_inproc.md).

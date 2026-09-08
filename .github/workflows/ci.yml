@@ -86,7 +86,14 @@ jobs:
           df -h
 
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential \
+            cmake \
+            curl \
+            libprotobuf-dev \
+            protobuf-compiler
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -103,6 +110,9 @@ jobs:
 
       - name: Run tests
         run: make test
+
+      - name: Verify FFI NNG inproc host integration
+        run: bash scripts/ci/ffi_nng_inproc.sh
 
   coverage:
     name: Coverage

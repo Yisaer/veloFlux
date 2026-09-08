@@ -1,15 +1,18 @@
-use crate::connector::nng_pubsub::{strip_topic_prefix, NngPubSubSourceConfig};
+use crate::connector::nng_pubsub::{
+    parse_nng_transport, strip_topic_prefix, NngPubSubSourceConfig, NngTransport,
+    INPROC_RETRY_INTERVAL, INPROC_RETRY_TIMEOUT,
+};
 use crate::connector::{
     mask_url_userinfo, ConnectorError, ConnectorEvent, ConnectorStream, SourceConnector,
 };
 use crate::processor::base::normalize_channel_capacity;
 use crate::runtime::TaskSpawner;
-use anng::protocols::pubsub0;
+use anng::{protocols::pubsub0, Message};
 use std::ffi::CString;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::sleep;
+use tokio::time::{sleep, sleep_until, Instant};
 use tokio_stream::wrappers::ReceiverStream;
 
 pub(crate) struct NngPubSubSourceConnector {
@@ -101,8 +104,18 @@ async fn run_nng_source_loop(
     };
     let topic = config.topic.into_bytes();
     let delimiter = config.topic_delimiter.into_bytes();
+    let transport = match parse_nng_transport(&config.url) {
+        Ok(transport) => transport,
+        Err(err) => {
+            let _ = sender.send(Err(ConnectorError::Connection(err))).await;
+            let _ = sender.send(Ok(ConnectorEvent::EndOfStream)).await;
+            return;
+        }
+    };
     let mut backoff = Duration::from_millis(100);
     let max_backoff = Duration::from_secs(5);
+    let mut retry_deadline =
+        matches!(transport, NngTransport::Inproc).then(|| Instant::now() + INPROC_RETRY_TIMEOUT);
 
     loop {
         let socket = match pubsub0::Sub0::socket() {
@@ -113,6 +126,8 @@ async fn run_nng_source_loop(
                     &mut shutdown_rx,
                     &mut backoff,
                     max_backoff,
+                    transport,
+                    retry_deadline,
                     ConnectorError::Connection(format!("nng sub socket open failed: {err}")),
                 )
                 .await
@@ -123,12 +138,25 @@ async fn run_nng_source_loop(
             }
         };
 
-        if let Err(err) = socket.dial(url.as_c_str()).await {
+        let dial_result = if matches!(transport, NngTransport::Inproc) {
+            match tokio::time::timeout(INPROC_RETRY_INTERVAL, socket.dial(url.as_c_str())).await {
+                Ok(result) => result,
+                Err(_) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "inproc dial timed out",
+                )),
+            }
+        } else {
+            socket.dial(url.as_c_str()).await
+        };
+        if let Err(err) = dial_result {
             if !report_and_wait(
                 &sender,
                 &mut shutdown_rx,
                 &mut backoff,
                 max_backoff,
+                transport,
+                retry_deadline,
                 ConnectorError::Connection(format!(
                     "nng sub dial `{}` failed: {err}",
                     mask_url_userinfo(&config.url)
@@ -140,6 +168,7 @@ async fn run_nng_source_loop(
             }
             continue;
         }
+        retry_deadline = None;
 
         let mut sub = socket.context();
         if topic.is_empty() {
@@ -158,27 +187,21 @@ async fn run_nng_source_loop(
                 result = sub.next() => {
                     match result {
                         Ok(message) => {
-                            veloflux_metrics::nng_pubsub_source_messages_in_total()
-                                .with_label_values(&[flow_instance_id.as_ref(), connector_id.as_str()])
-                                .inc();
-                            let Some(payload) = strip_topic_prefix(message.as_slice(), &delimiter, &topic) else {
-                                tracing::warn!(
-                                    connector_id = %connector_id,
-                                    len = message.len(),
-                                    "nng pubsub source dropped message with mismatched topic framing"
-                                );
-                                continue;
-                            };
-                            match sender.send(Ok(ConnectorEvent::Payload(payload.to_vec()))).await {
-                                Ok(_) => {
-                                    veloflux_metrics::nng_pubsub_source_messages_out_total()
-                                        .with_label_values(&[flow_instance_id.as_ref(), connector_id.as_str()])
-                                        .inc();
-                                }
-                                Err(_) => return,
+                            if !forward_message(
+                                &sender,
+                                &flow_instance_id,
+                                &connector_id,
+                                &delimiter,
+                                &topic,
+                                message,
+                            ).await {
+                                return;
                             }
                         }
                         Err(err) => {
+                            if matches!(transport, NngTransport::Inproc) {
+                                retry_deadline = Some(Instant::now() + INPROC_RETRY_TIMEOUT);
+                            }
                             let _ = sender
                                 .send(Err(ConnectorError::Connection(format!(
                                     "nng sub recv failed: {err}"
@@ -195,19 +218,76 @@ async fn run_nng_source_loop(
     let _ = sender.send(Ok(ConnectorEvent::EndOfStream)).await;
 }
 
+async fn forward_message(
+    sender: &mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
+    flow_instance_id: &str,
+    connector_id: &str,
+    delimiter: &[u8],
+    topic: &[u8],
+    message: Message,
+) -> bool {
+    veloflux_metrics::nng_pubsub_source_messages_in_total()
+        .with_label_values(&[flow_instance_id, connector_id])
+        .inc();
+    let Some(payload) = strip_topic_prefix(message.as_slice(), delimiter, topic) else {
+        tracing::warn!(
+            connector_id,
+            len = message.len(),
+            "nng pubsub source dropped message with mismatched topic framing"
+        );
+        return true;
+    };
+    match sender
+        .send(Ok(ConnectorEvent::Payload(payload.to_vec())))
+        .await
+    {
+        Ok(_) => {
+            veloflux_metrics::nng_pubsub_source_messages_out_total()
+                .with_label_values(&[flow_instance_id, connector_id])
+                .inc();
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 async fn report_and_wait(
     sender: &mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
     shutdown_rx: &mut oneshot::Receiver<()>,
     backoff: &mut Duration,
     max_backoff: Duration,
+    transport: NngTransport,
+    retry_deadline: Option<Instant>,
     err: ConnectorError,
 ) -> bool {
     let _ = sender.send(Err(err)).await;
-    tokio::select! {
-        _ = shutdown_rx => false,
-        _ = sleep(*backoff) => {
-            *backoff = std::cmp::min(*backoff * 2, max_backoff);
-            true
+    let delay = if matches!(transport, NngTransport::Inproc) {
+        INPROC_RETRY_INTERVAL
+    } else {
+        *backoff
+    };
+
+    if let Some(deadline) = retry_deadline {
+        tokio::select! {
+            _ = shutdown_rx => false,
+            _ = sleep_until(deadline) => {
+                let _ = sender.send(Err(ConnectorError::Connection(format!(
+                    "nng inproc source retry timeout after {} seconds",
+                    INPROC_RETRY_TIMEOUT.as_secs(),
+                )))).await;
+                false
+            }
+            _ = sleep(delay) => true,
+        }
+    } else {
+        tokio::select! {
+            _ = shutdown_rx => false,
+            _ = sleep(delay) => {
+                if !matches!(transport, NngTransport::Inproc) {
+                    *backoff = std::cmp::min(*backoff * 2, max_backoff);
+                }
+                true
+            }
         }
     }
 }
@@ -250,6 +330,42 @@ mod tests {
             .expect("source event");
         match event {
             ConnectorEvent::Payload(payload) => assert_eq!(payload, br#"{"v":1}"#),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        connector.close().expect("close source");
+    }
+
+    #[tokio::test]
+    async fn source_remains_alive_while_inproc_peer_is_idle() {
+        let url = format!("inproc://vf-nng-source-idle-{}", uuid::Uuid::new_v4());
+        let c_url = std::ffi::CString::new(url.clone()).expect("valid url");
+        let mut publisher = pubsub0::Pub0::listen(c_url.as_c_str())
+            .await
+            .expect("start publisher");
+
+        let config = NngPubSubSourceConfig::new("source", url, "topic/can");
+        let mut connector = NngPubSubSourceConnector::new(
+            "nng_source",
+            config,
+            "test",
+            TaskSpawner::from_handle(tokio::runtime::Handle::current()),
+        );
+        let mut stream = connector.subscribe().expect("subscribe");
+        sleep(Duration::from_secs(6)).await;
+
+        publisher
+            .publish(Message::from(&b"topic/can:{\"v\":2}"[..]))
+            .await
+            .expect("publish");
+
+        let event = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("receive timeout")
+            .expect("stream item")
+            .expect("source event");
+        match event {
+            ConnectorEvent::Payload(payload) => assert_eq!(payload, br#"{"v":2}"#),
             other => panic!("unexpected event: {other:?}"),
         }
 

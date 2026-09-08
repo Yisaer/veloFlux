@@ -1,6 +1,17 @@
 use url::Url;
 
 pub const DEFAULT_TOPIC_DELIMITER: &str = ":";
+#[cfg(feature = "nng_pubsub")]
+pub(crate) const INPROC_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+#[cfg(feature = "nng_pubsub")]
+pub(crate) const INPROC_RETRY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NngTransport {
+    Tcp,
+    Ipc,
+    Inproc,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NngPubSubSourceConfig {
@@ -72,12 +83,18 @@ impl NngPubSubSinkConfig {
 }
 
 pub fn validate_nng_url(raw_url: &str) -> Result<(), String> {
+    parse_nng_transport(raw_url).map(|_| ())
+}
+
+pub fn parse_nng_transport(raw_url: &str) -> Result<NngTransport, String> {
     if raw_url.trim().is_empty() {
         return Err("url is required".to_string());
     }
     let parsed = Url::parse(raw_url).map_err(|err| format!("invalid url `{raw_url}`: {err}"))?;
     match parsed.scheme() {
-        "tcp" | "ipc" | "inproc" => Ok(()),
+        "tcp" => Ok(NngTransport::Tcp),
+        "ipc" => Ok(NngTransport::Ipc),
+        "inproc" => Ok(NngTransport::Inproc),
         scheme => Err(format!(
             "unsupported nng url scheme `{scheme}`; supported schemes are tcp, ipc, and inproc"
         )),
@@ -123,7 +140,9 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_frame, strip_topic_prefix, validate_nng_url};
+    use super::{
+        build_frame, parse_nng_transport, strip_topic_prefix, validate_nng_url, NngTransport,
+    };
 
     #[test]
     fn strip_topic_prefix_handles_exact_topic_without_delimiter() {
@@ -183,8 +202,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_nng_transport_classifies_supported_schemes() {
+        assert_eq!(
+            parse_nng_transport("tcp://127.0.0.1:5563"),
+            Ok(NngTransport::Tcp)
+        );
+        assert_eq!(
+            parse_nng_transport("ipc:///tmp/veloflux-nng.ipc"),
+            Ok(NngTransport::Ipc)
+        );
+        assert_eq!(
+            parse_nng_transport("inproc://veloflux-nng"),
+            Ok(NngTransport::Inproc)
+        );
+    }
+
+    #[test]
     fn validate_nng_url_rejects_unsupported_schemes() {
         let err = validate_nng_url("file:///tmp/data").expect_err("reject file scheme");
+        assert!(err.contains("unsupported nng url scheme"));
+    }
+
+    #[test]
+    fn parse_nng_transport_rejects_unsupported_schemes() {
+        let err = parse_nng_transport("file:///tmp/data").expect_err("reject file scheme");
         assert!(err.contains("unsupported nng url scheme"));
     }
 }

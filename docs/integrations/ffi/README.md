@@ -19,6 +19,12 @@ it is not the right direct boundary for FFI embedding:
 
 This document defines the initial embedded runtime design for veloFlux FFI.
 
+For NNG pub/sub integration, the host process owns the NNG peer sockets and
+uses the existing HTTP/REST Manager API to create and start pipelines. The NNG
+transport is selected by the connector URL (`tcp://`, `ipc://`, or
+`inproc://`), not by an additional FFI or pipeline flag. See
+[NNG In-Process Integration](nng_inproc.md) for the detailed contract.
+
 ## Goals
 
 - Allow a host process written in C to start veloFlux in-process.
@@ -35,6 +41,7 @@ This document defines the initial embedded runtime design for veloFlux FFI.
   version.
 - This design does not support CLI-driven startup when used through FFI.
 - This design does not define dynamic plugin loading.
+- This design does not expose a second FFI data plane for NNG send/receive.
 
 ## Design Summary
 
@@ -49,6 +56,10 @@ invokes the embedded API, and maps failures to a small ABI-safe error contract.
 
 The embedded runtime still serves the existing HTTP/REST manager endpoints. The
 host process uses FFI only for lifecycle control.
+
+For an embedded NNG deployment, the host creates its `pub0`/`sub0` peer sockets
+and the veloFlux connectors create their own `sub0`/`pub0` sockets. The two
+sides communicate through matching `inproc://` URLs.
 
 ## Why Not Wrap `main()`
 
@@ -95,6 +106,11 @@ HTTP/REST APIs. Examples include:
 - pipeline start and stop;
 - explain and stats endpoints;
 - import and export endpoints.
+
+NNG endpoint configuration remains part of the stream and pipeline API. The
+host should start publishing only after the relevant pipeline reports that its
+NNG source and sink connectors are ready. `running` alone does not guarantee
+that an NNG peer is connected.
 
 The FFI layer is not a second manager API. It is only a lifecycle bridge for
 embedding.
@@ -143,6 +159,11 @@ The C-facing API surface is intentionally small:
 - `veloflux_stop(...)`
 
 No manager operations are exposed directly through this shim.
+
+Pipeline creation, start, stop, and readiness inspection remain Manager HTTP
+operations. A future convenience operation may wait for pipeline readiness,
+but it must not duplicate the NNG configuration or provide a second transport
+selector.
 
 ## Proposed C ABI Shape
 
@@ -224,6 +245,8 @@ Typical startup failures include:
 - invalid listen address;
 - port bind failure;
 - runtime initialization failure.
+- an `inproc://` endpoint without a peer in the host process;
+- incompatible or separately linked NNG library instances.
 
 The initial implementation should prioritize deterministic lifecycle behavior
 over a large error taxonomy.
@@ -277,18 +300,36 @@ The implementation must account for the following existing runtime assumptions:
 - standalone bootstrap currently reads CLI flags directly;
 - standalone startup currently owns signal-based shutdown handling;
 
+NNG-specific implementation constraints are documented in
+[NNG In-Process Integration](nng_inproc.md). In particular, the shared-library
+build must use the same compatible `libnng` runtime as the host process when an
+`inproc://` endpoint is used.
+
+The FFI crate exposes NNG support through an explicit Cargo feature:
+
+```bash
+NNG_NO_VENDOR=1 NNG_STATIC=0 \
+  cargo build --release -p veloflux-ffi --features nng_pubsub
+```
+
+The build environment must provide a compatible shared `libnng` and its
+headers. The resulting shared library must resolve to the same `libnng` used by
+the host process.
+
 The embedded API should factor around those assumptions instead of duplicating
 startup logic.
 
 ## Initial Rollout Plan
 
-The first implementation step should be:
+The initial embedded implementation consists of:
 
 1. extract an embedded manager startup path inside `veloflux`;
 2. add a runtime handle with explicit shutdown;
 3. reject non-`in_process` flow instance configurations;
 4. add a dedicated `cdylib` FFI shim crate exposing `start` and `stop`;
-5. document build and linking instructions once the ABI is in place.
+5. enable NNG support with the `nng_pubsub` FFI feature;
+6. build against the host-compatible shared `libnng` for `inproc://` deployments;
+7. validate the host-process round trip with an embedded integration test.
 
 This keeps the first version narrow, testable, and aligned with the existing
 HTTP/REST-centric runtime model.
