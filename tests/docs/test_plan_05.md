@@ -155,16 +155,10 @@
 
 ---
 
-### Alias resolution, wildcard expansion, and projection constraints
+### Projection aliases, wildcard expansion, and projection constraints
 
 - Validates:
-  - left-to-right alias resolution semantics in SELECT
-  - no forward reference to SELECT aliases
-  - alias visibility limited to supported clauses (SELECT / WHERE / ORDER BY)
-  - rejection of alias usage in:
-    - HAVING
-    - GROUP BY
-    - window definitions
+  - SELECT aliases are preserved as output names only
   - alias name constraints:
     - no duplicates
     - no collision with input column names

@@ -850,22 +850,17 @@ fn plan_explain_window_group_by_and_over_partition_by_table_driven() {
             sql: "SELECT ndv(a) FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN a > 1)",
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none","trigger=a > 1"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[ndv(a) -> col_1]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as ndv(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalSlidingWindow_3","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none","trigger=a > 1"],"operator":"PhysicalSlidingWindow"}],"id":"PhysicalAggregation_4","info":["calls=[ndv(a) -> col_1]"],"operator":"PhysicalAggregation"}],"id":"PhysicalProject_5","info":["fields=[col_1 as ndv(a)]"],"operator":"PhysicalProject"}}"##,
         },
+        Case {
+            name: "count_window_named_expression_in_over_partition_by",
+            sql: "WITH NAMED EXPRESSIONS k AS (k1) SELECT k, sum(a) FROM stream GROUP BY countwindow(4) OVER (PARTITION BY k), k",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, k1]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4","partition_by=(k1)"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[(k1)]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[(k1) as k; col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, k1]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, k1]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[(k1)]","window=count","count=4","partition_by=(k1)"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_4","info":["fields=[(k1) as k; col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
     ];
 
     for case in cases {
         let got = explain_json_string(case.sql);
         assert_eq!(got, case.expected, "case={}", case.name);
     }
-
-    let sql = "SELECT k1 AS k, sum(a) FROM stream GROUP BY countwindow(4) OVER (PARTITION BY k)";
-    let err =
-        explain_json_result(sql, vec![]).expect_err("window partition alias must be rejected");
-    println!("{sql}");
-    println!("{err}");
-    assert!(
-        err.contains("aliases in window definitions are not supported yet"),
-        "unexpected error: {err}"
-    );
 }
 
 #[test]
@@ -1198,28 +1193,28 @@ fn plan_explain_table_driven() {
             expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Order_1","info":["keys=[a ASC]"],"operator":"Order"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalOrder_2","info":["keys=[a ASC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_3","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
-            name: "order_by_projection_alias_non_aggregate",
-            sql: "SELECT a + 1 AS x FROM stream ORDER BY x DESC",
+            name: "order_by_named_expression_non_aggregate",
+            sql: "WITH NAMED EXPRESSIONS incremented AS (a + 1) SELECT incremented AS x FROM stream ORDER BY incremented DESC",
             options: PipelineOptions::default(),
-            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Order_1","info":["keys=[(a + 1) DESC]"],"operator":"Order"}],"id":"Project_2","info":["fields=[a + 1 as x]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalOrder_2","info":["keys=[(a + 1) DESC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_3","info":["fields=[a + 1 as x]"],"operator":"PhysicalProject"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Order_1","info":["keys=[(a + 1) DESC]"],"operator":"Order"}],"id":"Project_2","info":["fields=[(a + 1) as x]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalOrder_2","info":["keys=[(a + 1) DESC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_3","info":["fields=[(a + 1) as x]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "order_by_named_group_key_with_countwindow",
+            sql: "WITH NAMED EXPRESSIONS key AS (b) SELECT key AS k, sum(a) AS s FROM stream_ab GROUP BY countwindow(4), key ORDER BY key",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[(b)]"],"operator":"Aggregation"}],"id":"Order_3","info":["keys=[(b) ASC]"],"operator":"Order"}],"id":"Project_4","info":["fields=[(b) as k; col_1 as s]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[(b)]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalOrder_4","info":["keys=[(b) ASC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_5","info":["fields=[(b) as k; col_1 as s]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "order_by_named_aggregate_with_countwindow",
+            sql: "WITH NAMED EXPRESSIONS total AS (sum(a)) SELECT b, total AS s FROM stream_ab GROUP BY countwindow(4), b ORDER BY total DESC",
+            options: PipelineOptions::default(),
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Order_3","info":["keys=[(col_1) DESC]"],"operator":"Order"}],"id":"Project_4","info":["fields=[b; (col_1) as s]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalOrder_4","info":["keys=[(col_1) DESC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_5","info":["fields=[b; (col_1) as s]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "order_by_implicit_aggregate_key",
             sql: "SELECT sum(a) FROM stream_ab ORDER BY sum(b)",
             options: PipelineOptions::default(),
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Aggregation_1","info":["aggregates=[sum(a) -> col_1; sum(b) -> col_2]"],"operator":"Aggregation"}],"id":"Order_2","info":["keys=[col_2 ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalAggregation_2","info":["calls=[sum(a) -> col_1; sum(b) -> col_2]"],"operator":"PhysicalAggregation"}],"id":"PhysicalOrder_3","info":["keys=[col_2 ASC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_4","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}}"##,
-        },
-        Case {
-            name: "order_by_group_key_alias_with_countwindow",
-            sql: "SELECT b AS k, sum(a) AS s FROM stream_ab GROUP BY countwindow(4), b ORDER BY k",
-            options: PipelineOptions::default(),
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Order_3","info":["keys=[(b) ASC]"],"operator":"Order"}],"id":"Project_4","info":["fields=[b as k; col_1 as s]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalOrder_4","info":["keys=[(b) ASC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_5","info":["fields=[b as k; col_1 as s]"],"operator":"PhysicalProject"}}"##,
-        },
-        Case {
-            name: "order_by_aggregate_alias_with_countwindow",
-            sql: "SELECT b, sum(a) AS s FROM stream_ab GROUP BY countwindow(4), b ORDER BY s DESC",
-            options: PipelineOptions::default(),
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Order_3","info":["keys=[(col_1) DESC]"],"operator":"Order"}],"id":"Project_4","info":["fields=[b; col_1 as s]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalOrder_4","info":["keys=[(col_1) DESC]"],"operator":"PhysicalOrder"}],"id":"PhysicalProject_5","info":["fields=[b; col_1 as s]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "select_with_sampler_inserts_sampler_before_decoder",
@@ -1965,7 +1960,7 @@ fn plan_explain_row_diff_table_driven() {
             sql: "SELECT a AS x FROM stream",
             sinks: vec![build_nop_json_delta_sink("test_sink", None)],
             covers: &[
-                "parser.select.alias_computing",
+                "parser.select.projection_alias",
                 "planner.physical.output_layout_fixed_slots",
             ],
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as x]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","output.mode=delta"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a as x]"],"operator":"PhysicalProject"}],"id":"PhysicalRowDiff_4","info":["sink_id=test_sink","mode=delta","columns=[x]"],"operator":"PhysicalRowDiff"}],"id":"PhysicalSinkEncoder_5","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,

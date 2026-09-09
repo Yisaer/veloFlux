@@ -14,11 +14,11 @@ features:
       - docs/syntax/language/README.md
     status: active
 
-  - id: parser.select.alias_computing
-    title: Alias computing
-    summary: Parse alias-computing expressions and preserve their SQL-visible semantics.
+  - id: parser.select.projection_alias
+    title: Projection aliases
+    summary: Parse SELECT projection aliases and preserve their output names.
     doc_refs:
-      - docs/syntax/language/alias_computing.md
+      - docs/syntax/language/README.md
     status: active
 
   - id: parser.function.aggregate_rewrite

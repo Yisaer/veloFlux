@@ -46,6 +46,8 @@ pub struct SelectStmt {
     pub acc_mappings: Vec<AccMappingEntry>,
     /// Information about the data sources (tables) accessed
     pub source_infos: Vec<SourceInfo>,
+    /// Names declared by WITH NAMED EXPRESSIONS, retained for planner validation.
+    pub named_expression_names: Vec<String>,
 }
 
 /// Represents a single select field/expression
@@ -73,6 +75,7 @@ impl SelectStmt {
             stateful_mappings: Vec::new(),
             acc_mappings: Vec::new(),
             source_infos: Vec::new(),
+            named_expression_names: Vec::new(),
         }
     }
 
@@ -89,6 +92,7 @@ impl SelectStmt {
             stateful_mappings: Vec::new(),
             acc_mappings: Vec::new(),
             source_infos: Vec::new(),
+            named_expression_names: Vec::new(),
         }
     }
 
@@ -109,6 +113,7 @@ impl SelectStmt {
             stateful_mappings: Vec::new(),
             acc_mappings: Vec::new(),
             source_infos: Vec::new(),
+            named_expression_names: Vec::new(),
         }
     }
 }

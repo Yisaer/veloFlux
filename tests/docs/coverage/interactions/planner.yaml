@@ -4,7 +4,7 @@ interactions:
     title: Alias fixed output layout
     summary: Validate that planner-fixed value references preserve SQL-visible aliases.
     features:
-      - parser.select.alias_computing
+      - parser.select.projection_alias
       - planner.physical.output_layout_fixed_slots
     status: active
 

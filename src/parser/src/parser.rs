@@ -14,6 +14,7 @@ use crate::stateful_registry::{StatefulRegistry, default_stateful_registry};
 use crate::stateful_transformer::transform_stateful_functions;
 use crate::visitor::TableInfoVisitor;
 use crate::window::Window;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// SQL Parser based on StreamDialect
@@ -21,6 +22,12 @@ pub struct StreamSqlParser {
     dialect: StreamDialect,
     aggregate_registry: Arc<dyn AggregateRegistry>,
     stateful_registry: Arc<dyn StatefulRegistry>,
+}
+
+#[derive(Debug, Clone)]
+struct RawNamedExpression {
+    name: String,
+    expr: Expr,
 }
 
 impl StreamSqlParser {
@@ -49,7 +56,10 @@ impl StreamSqlParser {
     /// This is the main entry point for parsing SQL with StreamDialect
     /// Automatically transforms aggregate functions during parsing
     pub fn parse(&self, sql: &str) -> Result<SelectStmt, String> {
-        let sliding_over = preprocess_sliding_window_over(sql, &self.dialect)?;
+        let (sql_without_named_expressions, named_expressions) =
+            self.extract_named_expressions(sql)?;
+        let sliding_over =
+            preprocess_sliding_window_over(&sql_without_named_expressions, &self.dialect)?;
 
         // Create a parser with StreamDialect
         let parser = Parser::parse_sql(&self.dialect, &sliding_over.sql)
@@ -89,6 +99,14 @@ impl StreamSqlParser {
         let mut select_stmt = self.extract_select_fields(statement)?;
         select_stmt.window = window;
         select_stmt.group_by_exprs = group_by_exprs;
+
+        // Expand named expressions exactly once before any parser transformer runs.
+        // All subsequent transformations only receive the rewritten SelectStmt and
+        // never inspect the original WITH NAMED EXPRESSIONS text.
+        let named_expression_env = self.expand_named_expression_declarations(named_expressions)?;
+        validate_named_expression_alias_collisions(&select_stmt, &named_expression_env)?;
+        select_stmt.named_expression_names = named_expression_env.keys().cloned().collect();
+        rewrite_named_expressions(&mut select_stmt, &named_expression_env);
         lower_null_predicates(&mut select_stmt);
 
         let mut allocator = ColPlaceholderAllocator::new();
@@ -112,12 +130,206 @@ impl StreamSqlParser {
         Ok(transformed_stmt)
     }
 
+    fn extract_named_expressions(
+        &self,
+        sql: &str,
+    ) -> Result<(String, Vec<RawNamedExpression>), String> {
+        let leading = sql.len() - sql.trim_start().len();
+        let trimmed = &sql[leading..];
+        let prefix = "WITH NAMED EXPRESSIONS";
+        if !trimmed
+            .get(..prefix.len())
+            .is_some_and(|value| value.eq_ignore_ascii_case(prefix))
+        {
+            return Ok((sql.to_string(), Vec::new()));
+        }
+
+        let mut cursor = prefix.len();
+        let mut declarations = Vec::new();
+        loop {
+            cursor = Self::skip_ascii_whitespace(trimmed, cursor);
+            let name_start = cursor;
+            while trimmed
+                .as_bytes()
+                .get(cursor)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                cursor += 1;
+            }
+            if name_start == cursor {
+                return Err("expected named expression identifier".to_string());
+            }
+            let name = trimmed[name_start..cursor].to_string();
+
+            cursor = Self::skip_ascii_whitespace(trimmed, cursor);
+            cursor = Self::consume_keyword(trimmed, cursor, "AS")
+                .ok_or_else(|| format!("expected AS after named expression `{name}`"))?;
+            cursor = Self::skip_ascii_whitespace(trimmed, cursor);
+            if trimmed.as_bytes().get(cursor) != Some(&b'(') {
+                return Err(format!(
+                    "expected `(` before named expression `{name}` expression"
+                ));
+            }
+
+            let expression_start = cursor + 1;
+            let expression_end = Self::find_matching_parenthesis(trimmed, cursor)
+                .ok_or_else(|| format!("unclosed expression for named expression `{name}`"))?;
+            let expression_sql = trimmed[expression_start..expression_end].trim();
+            if expression_sql.is_empty() {
+                return Err(format!("named expression `{name}` must not be empty"));
+            }
+            let expr = self.parse_named_expression_expr(expression_sql, &name)?;
+            declarations.push(RawNamedExpression { name, expr });
+
+            cursor = Self::skip_ascii_whitespace(trimmed, expression_end + 1);
+            if trimmed.as_bytes().get(cursor) == Some(&b',') {
+                cursor += 1;
+                continue;
+            }
+            break;
+        }
+
+        cursor = Self::skip_ascii_whitespace(trimmed, cursor);
+        if Self::consume_keyword(trimmed, cursor, "SELECT").is_none() {
+            return Err("WITH NAMED EXPRESSIONS must be followed by SELECT".to_string());
+        }
+
+        Ok((trimmed[cursor..].to_string(), declarations))
+    }
+
+    fn parse_named_expression_expr(
+        &self,
+        expression_sql: &str,
+        name: &str,
+    ) -> Result<Expr, String> {
+        let sql = format!("SELECT {expression_sql}");
+        let statements = Parser::parse_sql(&self.dialect, &sql)
+            .map_err(|err| format!("invalid named expression `{name}`: {err}"))?;
+        if statements.len() != 1 {
+            return Err(format!(
+                "invalid named expression `{name}`: expected one expression"
+            ));
+        }
+
+        match &statements[0] {
+            Statement::Query(query) => match &*query.body {
+                SetExpr::Select(select) if select.projection.len() == 1 => {
+                    match &select.projection[0] {
+                        SelectItem::UnnamedExpr(expr) => Ok(expr.clone()),
+                        SelectItem::ExprWithAlias { .. } => Err(format!(
+                            "invalid named expression `{name}`: aliases are not allowed"
+                        )),
+                        _ => Err(format!(
+                            "invalid named expression `{name}`: expected a scalar expression"
+                        )),
+                    }
+                }
+                _ => Err(format!(
+                    "invalid named expression `{name}`: expected a scalar expression"
+                )),
+            },
+            _ => Err(format!(
+                "invalid named expression `{name}`: expected a scalar expression"
+            )),
+        }
+    }
+
+    fn expand_named_expression_declarations(
+        &self,
+        declarations: Vec<RawNamedExpression>,
+    ) -> Result<HashMap<String, Expr>, String> {
+        let all_names: HashSet<String> = declarations
+            .iter()
+            .map(|declaration| declaration.name.clone())
+            .collect();
+        if all_names.len() != declarations.len() {
+            return Err("duplicate named expression declaration".to_string());
+        }
+
+        let mut environment = HashMap::with_capacity(declarations.len());
+        for declaration in declarations {
+            let mut expander = NamedExpressionExpander {
+                environment: &environment,
+                all_names: &all_names,
+            };
+            let mut expr = declaration.expr;
+            if let std::ops::ControlFlow::Break(error) = VisitMut::visit(&mut expr, &mut expander) {
+                return Err(error);
+            }
+            environment.insert(declaration.name, expr);
+        }
+        Ok(environment)
+    }
+
     /// Extract select fields from a parsed SQL statement
     fn extract_select_fields(&self, statement: &Statement) -> Result<SelectStmt, String> {
         match statement {
             Statement::Query(query) => self.extract_from_query(query),
             _ => Err("Expected a SELECT query".to_string()),
         }
+    }
+
+    fn skip_ascii_whitespace(input: &str, mut offset: usize) -> usize {
+        while input
+            .as_bytes()
+            .get(offset)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            offset += 1;
+        }
+        offset
+    }
+
+    fn consume_keyword(input: &str, offset: usize, keyword: &str) -> Option<usize> {
+        let end = offset.checked_add(keyword.len())?;
+        let value = input.get(offset..end)?;
+        if !value.eq_ignore_ascii_case(keyword) {
+            return None;
+        }
+        if input
+            .as_bytes()
+            .get(end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            return None;
+        }
+        Some(end)
+    }
+
+    fn find_matching_parenthesis(input: &str, opening: usize) -> Option<usize> {
+        let bytes = input.as_bytes();
+        let mut depth = 0usize;
+        let mut quote = None;
+        let mut offset = opening;
+
+        while let Some(byte) = bytes.get(offset).copied() {
+            if let Some(quote_byte) = quote {
+                if byte == quote_byte {
+                    if bytes.get(offset + 1) == Some(&quote_byte) {
+                        offset += 2;
+                        continue;
+                    }
+                    quote = None;
+                }
+                offset += 1;
+                continue;
+            }
+
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'(' => depth += 1,
+                b')' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return Some(offset);
+                    }
+                }
+                _ => {}
+            }
+            offset += 1;
+        }
+
+        None
     }
 
     /// Extract select fields from a query
@@ -195,6 +407,48 @@ impl StreamSqlParser {
 
 struct NullPredicateLowerer;
 
+struct NamedExpressionExpander<'a> {
+    environment: &'a HashMap<String, Expr>,
+    all_names: &'a HashSet<String>,
+}
+
+struct NamedExpressionRewriter<'a> {
+    environment: &'a HashMap<String, Expr>,
+}
+
+impl VisitorMut for NamedExpressionRewriter<'_> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &mut Expr) -> std::ops::ControlFlow<Self::Break> {
+        if let Expr::Identifier(identifier) = expr
+            && let Some(replacement) = self.environment.get(identifier.value.as_str())
+        {
+            *expr = Expr::Nested(Box::new(replacement.clone()));
+        }
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
+impl VisitorMut for NamedExpressionExpander<'_> {
+    type Break = String;
+
+    fn pre_visit_expr(&mut self, expr: &mut Expr) -> std::ops::ControlFlow<Self::Break> {
+        let Expr::Identifier(identifier) = expr else {
+            return std::ops::ControlFlow::Continue(());
+        };
+
+        if let Some(replacement) = self.environment.get(identifier.value.as_str()) {
+            *expr = Expr::Nested(Box::new(replacement.clone()));
+        } else if self.all_names.contains(identifier.value.as_str()) {
+            return std::ops::ControlFlow::Break(format!(
+                "forward reference to named expression `{}` is not allowed",
+                identifier.value
+            ));
+        }
+        std::ops::ControlFlow::Continue(())
+    }
+}
+
 impl VisitorMut for NullPredicateLowerer {
     type Break = ();
 
@@ -212,6 +466,85 @@ impl VisitorMut for NullPredicateLowerer {
         }
         std::ops::ControlFlow::Continue(())
     }
+}
+
+fn rewrite_named_expressions(select_stmt: &mut SelectStmt, environment: &HashMap<String, Expr>) {
+    if environment.is_empty() {
+        return;
+    }
+
+    let mut rewriter = NamedExpressionRewriter { environment };
+    for field in &mut select_stmt.select_fields {
+        let _ = VisitMut::visit(&mut field.expr, &mut rewriter);
+    }
+    let _ = VisitMut::visit(&mut select_stmt.where_condition, &mut rewriter);
+    let _ = VisitMut::visit(&mut select_stmt.having, &mut rewriter);
+    for item in &mut select_stmt.order_by {
+        let _ = VisitMut::visit(&mut item.expr, &mut rewriter);
+    }
+    let _ = VisitMut::visit(&mut select_stmt.group_by_exprs, &mut rewriter);
+
+    let Some(window) = select_stmt.window.as_mut() else {
+        return;
+    };
+    match window {
+        Window::Tumbling {
+            partition_by,
+            filter,
+            ..
+        }
+        | Window::Count {
+            partition_by,
+            filter,
+            ..
+        } => {
+            let _ = VisitMut::visit(partition_by, &mut rewriter);
+            let _ = VisitMut::visit(filter, &mut rewriter);
+        }
+        Window::Sliding {
+            partition_by,
+            trigger_condition,
+            filter,
+            ..
+        } => {
+            let _ = VisitMut::visit(partition_by, &mut rewriter);
+            let _ = VisitMut::visit(trigger_condition, &mut rewriter);
+            let _ = VisitMut::visit(filter, &mut rewriter);
+        }
+        Window::State {
+            open,
+            emit,
+            partition_by,
+            filter,
+        } => {
+            let _ = VisitMut::visit(open, &mut rewriter);
+            let _ = VisitMut::visit(emit, &mut rewriter);
+            let _ = VisitMut::visit(partition_by, &mut rewriter);
+            let _ = VisitMut::visit(filter, &mut rewriter);
+        }
+        Window::Eos { filter } => {
+            let _ = VisitMut::visit(filter, &mut rewriter);
+        }
+    }
+}
+
+fn validate_named_expression_alias_collisions(
+    select_stmt: &SelectStmt,
+    environment: &HashMap<String, Expr>,
+) -> Result<(), String> {
+    for field in &select_stmt.select_fields {
+        let Some(alias) = field.alias.as_ref() else {
+            continue;
+        };
+
+        if environment.contains_key(alias) {
+            return Err(format!(
+                "SELECT alias `{alias}` collides with named expression `{alias}`"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn isnull_call(expr: Expr) -> Expr {
@@ -594,6 +927,604 @@ mod tests {
         let field = &select_stmt.select_fields[0];
         assert!(field.alias.is_none());
         assert_eq!(field.field_name, "a + b".to_string());
+    }
+
+    #[test]
+    fn test_extract_named_expressions_basic() {
+        let parser = StreamSqlParser::new();
+        let (query_sql, expressions) = parser
+            .extract_named_expressions(
+                "WITH NAMED EXPRESSIONS b AS (a + 1), c AS (b + 1) SELECT c FROM stream",
+            )
+            .expect("named expressions should parse");
+
+        assert_eq!(query_sql, "SELECT c FROM stream");
+        assert_eq!(expressions.len(), 2);
+        assert_eq!(expressions[0].name, "b");
+        assert_eq!(expressions[0].expr.to_string(), "a + 1");
+        assert_eq!(expressions[1].name, "c");
+        assert_eq!(expressions[1].expr.to_string(), "b + 1");
+    }
+
+    #[test]
+    fn test_extract_named_expressions_is_case_insensitive_and_allows_newlines() {
+        let parser = StreamSqlParser::new();
+        let (query_sql, expressions) = parser
+            .extract_named_expressions(
+                "with named expressions\n    b as (\n        a + 1\n    )\nselect b from stream",
+            )
+            .expect("named expressions should parse");
+
+        assert_eq!(query_sql, "select b from stream");
+        assert_eq!(expressions.len(), 1);
+        assert_eq!(expressions[0].name, "b");
+        assert_eq!(expressions[0].expr.to_string(), "a + 1");
+    }
+
+    #[test]
+    fn test_extract_named_expressions_ignores_function_argument_commas() {
+        let parser = StreamSqlParser::new();
+        let (_, expressions) = parser
+            .extract_named_expressions(
+                "WITH NAMED EXPRESSIONS b AS (coalesce(a, 1)), c AS (concat('x,y', a)) SELECT c FROM stream",
+            )
+            .expect("function argument commas should not split declarations");
+
+        assert_eq!(expressions.len(), 2);
+        assert_eq!(expressions[0].expr.to_string(), "coalesce(a, 1)");
+        assert_eq!(expressions[1].expr.to_string(), "concat('x,y', a)");
+    }
+
+    #[test]
+    fn test_extract_named_expressions_preserves_nested_parentheses() {
+        let parser = StreamSqlParser::new();
+        let (_, expressions) = parser
+            .extract_named_expressions(
+                "WITH NAMED EXPRESSIONS b AS (abs((a + 1) * 2)) SELECT b FROM stream",
+            )
+            .expect("nested parentheses should parse");
+
+        assert_eq!(expressions.len(), 1);
+        assert_eq!(expressions[0].expr.to_string(), "abs((a + 1) * 2)");
+    }
+
+    #[test]
+    fn test_extract_named_expressions_preserves_quoted_parentheses_and_commas() {
+        let parser = StreamSqlParser::new();
+        let (_, expressions) = parser
+            .extract_named_expressions(
+                "WITH NAMED EXPRESSIONS b AS (concat('(', a, ')')) SELECT b FROM stream",
+            )
+            .expect("quoted punctuation should not affect scanning");
+
+        assert_eq!(expressions.len(), 1);
+        assert_eq!(expressions[0].expr.to_string(), "concat('(', a, ')')");
+    }
+
+    #[test]
+    fn test_extract_named_expressions_leaves_regular_sql_unchanged() {
+        let parser = StreamSqlParser::new();
+        let (query_sql, expressions) = parser
+            .extract_named_expressions("SELECT a FROM stream")
+            .expect("regular SQL should remain supported");
+
+        assert_eq!(query_sql, "SELECT a FROM stream");
+        assert!(expressions.is_empty());
+    }
+
+    fn named_expression(
+        parser: &StreamSqlParser,
+        name: &str,
+        expression: &str,
+    ) -> RawNamedExpression {
+        RawNamedExpression {
+            name: name.to_string(),
+            expr: parser
+                .parse_named_expression_expr(expression, name)
+                .expect("named expression should parse"),
+        }
+    }
+
+    #[test]
+    fn test_expand_named_expressions_empty() {
+        let parser = StreamSqlParser::new();
+        let environment = parser
+            .expand_named_expression_declarations(Vec::new())
+            .expect("empty declarations should succeed");
+
+        assert!(environment.is_empty());
+    }
+
+    #[test]
+    fn test_expand_named_expression_single_level() {
+        let parser = StreamSqlParser::new();
+        let environment = parser
+            .expand_named_expression_declarations(vec![named_expression(&parser, "b", "a + 1")])
+            .expect("single declaration should succeed");
+
+        assert_eq!(environment["b"].to_string(), "a + 1");
+    }
+
+    #[test]
+    fn test_expand_named_expressions_two_level_dependency() {
+        let parser = StreamSqlParser::new();
+        let environment = parser
+            .expand_named_expression_declarations(vec![
+                named_expression(&parser, "b", "a + 1"),
+                named_expression(&parser, "c", "b + 1"),
+            ])
+            .expect("ordered declarations should succeed");
+
+        assert_eq!(environment["b"].to_string(), "a + 1");
+        assert_eq!(environment["c"].to_string(), "(a + 1) + 1");
+    }
+
+    #[test]
+    fn test_expand_named_expressions_multi_level_dependency() {
+        let parser = StreamSqlParser::new();
+        let environment = parser
+            .expand_named_expression_declarations(vec![
+                named_expression(&parser, "b", "a + 1"),
+                named_expression(&parser, "c", "b + 1"),
+                named_expression(&parser, "d", "c + 1"),
+            ])
+            .expect("multi-level declarations should succeed");
+
+        assert_eq!(environment["b"].to_string(), "a + 1");
+        assert_eq!(environment["c"].to_string(), "(a + 1) + 1");
+        assert_eq!(environment["d"].to_string(), "((a + 1) + 1) + 1");
+    }
+
+    #[test]
+    fn test_expand_named_expression_replaces_multiple_references() {
+        let parser = StreamSqlParser::new();
+        let environment = parser
+            .expand_named_expression_declarations(vec![
+                named_expression(&parser, "b", "a + 1"),
+                named_expression(&parser, "c", "b + b"),
+            ])
+            .expect("multiple references should succeed");
+
+        assert_eq!(environment["c"].to_string(), "(a + 1) + (a + 1)");
+    }
+
+    #[test]
+    fn test_expand_named_expression_replaces_function_arguments() {
+        let parser = StreamSqlParser::new();
+        let environment = parser
+            .expand_named_expression_declarations(vec![
+                named_expression(&parser, "b", "a + 1"),
+                named_expression(&parser, "c", "coalesce(b, 0)"),
+            ])
+            .expect("function argument references should succeed");
+
+        assert_eq!(environment["c"].to_string(), "coalesce((a + 1), 0)");
+    }
+
+    #[test]
+    fn test_expand_named_expression_preserves_operator_precedence() {
+        let parser = StreamSqlParser::new();
+        let environment = parser
+            .expand_named_expression_declarations(vec![
+                named_expression(&parser, "b", "a + 1"),
+                named_expression(&parser, "c", "b * 2"),
+            ])
+            .expect("precedence-preserving expansion should succeed");
+
+        assert_eq!(environment["c"].to_string(), "(a + 1) * 2");
+    }
+
+    #[test]
+    fn test_expand_named_expression_rejects_forward_reference() {
+        let parser = StreamSqlParser::new();
+        let result = parser.expand_named_expression_declarations(vec![
+            named_expression(&parser, "c", "b + 1"),
+            named_expression(&parser, "b", "a + 1"),
+        ]);
+
+        assert!(matches!(
+            result,
+            Err(error) if error == "forward reference to named expression `b` is not allowed"
+        ));
+    }
+
+    #[test]
+    fn test_expand_named_expression_rejects_self_reference() {
+        let parser = StreamSqlParser::new();
+        let result = parser
+            .expand_named_expression_declarations(vec![named_expression(&parser, "b", "b + 1")]);
+
+        assert_eq!(
+            result,
+            Err("forward reference to named expression `b` is not allowed".to_string())
+        );
+    }
+
+    #[test]
+    fn test_expand_named_expressions_rejects_duplicate_declarations() {
+        let parser = StreamSqlParser::new();
+        let result = parser.expand_named_expression_declarations(vec![
+            named_expression(&parser, "b", "a + 1"),
+            named_expression(&parser, "b", "a + 2"),
+        ]);
+
+        assert_eq!(
+            result,
+            Err("duplicate named expression declaration".to_string())
+        );
+    }
+
+    #[test]
+    fn test_expand_named_expression_preserves_regular_input_identifiers() {
+        let parser = StreamSqlParser::new();
+        let environment = parser
+            .expand_named_expression_declarations(vec![
+                named_expression(&parser, "b", "a + 1"),
+                named_expression(&parser, "c", "input_column + 1"),
+            ])
+            .expect("regular input identifiers should remain valid");
+
+        assert_eq!(environment["c"].to_string(), "input_column + 1");
+    }
+
+    #[test]
+    fn test_expand_named_expression_preserves_qualified_identifiers() {
+        let parser = StreamSqlParser::new();
+        let environment = parser
+            .expand_named_expression_declarations(vec![
+                named_expression(&parser, "b", "a + 1"),
+                named_expression(&parser, "c", "stream.b + 1"),
+            ])
+            .expect("qualified identifiers should remain valid");
+
+        assert_eq!(environment["c"].to_string(), "stream.b + 1");
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_select() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS b AS (a + 1) SELECT b FROM stream")
+            .expect("named expression should be replaced in SELECT");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "(a + 1)");
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_select_with_nested_dependency() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS b AS (a + 1), c AS (b * 2) SELECT c FROM stream")
+            .expect("nested named expression should be replaced in SELECT");
+
+        assert_eq!(
+            select_stmt.select_fields[0].expr.to_string(),
+            "((a + 1) * 2)"
+        );
+    }
+
+    #[test]
+    fn test_parse_named_expression_three_level_dependency() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse(
+                "WITH NAMED EXPRESSIONS b AS (a + 1), c AS (b + 1), d AS (c + 1) SELECT d FROM stream",
+            )
+            .expect("three-level named expression should parse");
+
+        assert_eq!(
+            select_stmt.select_fields[0].expr.to_string(),
+            "(((a + 1) + 1) + 1)"
+        );
+    }
+
+    #[test]
+    fn test_parse_named_expression_rejects_forward_reference() {
+        let parser = StreamSqlParser::new();
+        let result =
+            parser.parse("WITH NAMED EXPRESSIONS c AS (b + 1), b AS (a + 1) SELECT c FROM stream");
+
+        assert!(matches!(
+            result,
+            Err(error) if error == "forward reference to named expression `b` is not allowed"
+        ));
+    }
+
+    #[test]
+    fn test_parse_named_expression_replaces_bare_but_not_qualified_identifier() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS d AS (a + 1) SELECT d, stream.d FROM stream")
+            .expect("named expression and qualified input should parse");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "(a + 1)");
+        assert_eq!(select_stmt.select_fields[1].expr.to_string(), "stream.d");
+    }
+
+    #[test]
+    fn test_unused_named_expressions_do_not_trigger_rewrites() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse(
+                "WITH NAMED EXPRESSIONS unused_stateful AS (lag(a)), unused_aggregate AS (sum(a)) SELECT b FROM stream",
+            )
+            .expect("unused named expressions should not affect parsing");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "b");
+        assert!(select_stmt.stateful_mappings.is_empty());
+        assert!(select_stmt.aggregate_mappings.is_empty());
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_multiple_select_fields() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS b AS (a + 1) SELECT b, b + 2 FROM stream")
+            .expect("named expression should be replaced in every SELECT field");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "(a + 1)");
+        assert_eq!(select_stmt.select_fields[1].expr.to_string(), "(a + 1) + 2");
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_where() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS b AS (a + 1) SELECT a FROM stream WHERE b > 10")
+            .expect("named expression should be replaced in WHERE");
+
+        assert_eq!(
+            select_stmt
+                .where_condition
+                .expect("WHERE should exist")
+                .to_string(),
+            "(a + 1) > 10"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_group_by() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS b AS (a + 1) SELECT count(a) FROM stream GROUP BY b")
+            .expect("named expression should be replaced in GROUP BY");
+
+        assert_eq!(select_stmt.group_by_exprs[0].to_string(), "(a + 1)");
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_having() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS b AS (a + 1) SELECT count(a) FROM stream HAVING b > 10")
+            .expect("named expression should be replaced in HAVING");
+
+        assert_eq!(
+            select_stmt.having.expect("HAVING should exist").to_string(),
+            "(a + 1) > 10"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_order_by() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS b AS (a + 1) SELECT a FROM stream ORDER BY b")
+            .expect("named expression should be replaced in ORDER BY");
+
+        assert_eq!(select_stmt.order_by[0].expr.to_string(), "(a + 1)");
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_window_partition_by() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse(
+                "WITH NAMED EXPRESSIONS b AS (a + 1) SELECT * FROM stream GROUP BY tumblingwindow('ss', 10) OVER (PARTITION BY b)",
+            )
+            .expect("named expression should be replaced in window partition");
+
+        match select_stmt.window.expect("window should exist") {
+            Window::Tumbling { partition_by, .. } => {
+                assert_eq!(partition_by[0].to_string(), "(a + 1)");
+            }
+            other => panic!("expected tumbling window, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_window_filter() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse(
+                "WITH NAMED EXPRESSIONS b AS (a + 1) SELECT * FROM stream GROUP BY tumblingwindow('ss', 10) FILTER (WHERE b > 0)",
+            )
+            .expect("named expression should be replaced in window filter");
+
+        match select_stmt.window.expect("window should exist") {
+            Window::Tumbling { filter, .. } => {
+                assert_eq!(
+                    filter.expect("window filter should exist").to_string(),
+                    "(a + 1) > 0"
+                );
+            }
+            other => panic!("expected tumbling window, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_sliding_window_when() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse(
+                "WITH NAMED EXPRESSIONS b AS (a + 1) SELECT * FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN b > 0)",
+            )
+            .expect("named expression should be replaced in sliding window trigger");
+
+        match select_stmt.window.expect("window should exist") {
+            Window::Sliding {
+                trigger_condition, ..
+            } => {
+                assert_eq!(
+                    trigger_condition
+                        .expect("trigger condition should exist")
+                        .to_string(),
+                    "(a + 1) > 0"
+                );
+            }
+            other => panic!("expected sliding window, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_in_state_window() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse(
+                "WITH NAMED EXPRESSIONS b AS (a + 1) SELECT * FROM stream GROUP BY statewindow(b > 0, b < 10) OVER (PARTITION BY b)",
+            )
+            .expect("named expression should be replaced in state window");
+
+        match select_stmt.window.expect("window should exist") {
+            Window::State {
+                open,
+                emit,
+                partition_by,
+                ..
+            } => {
+                assert_eq!(open.to_string(), "(a + 1) > 0");
+                assert_eq!(emit.to_string(), "(a + 1) < 10");
+                assert_eq!(partition_by[0].to_string(), "(a + 1)");
+            }
+            other => panic!("expected state window, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_preserves_qualified_identifier() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS b AS (a + 1) SELECT stream.b FROM stream")
+            .expect("qualified identifier should remain valid");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "stream.b");
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_preserves_undeclared_identifier() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS b AS (a + 1) SELECT c FROM stream")
+            .expect("undeclared input identifier should remain valid");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "c");
+    }
+
+    #[test]
+    fn test_rejects_named_expression_and_select_alias_collision() {
+        let parser = StreamSqlParser::new();
+        let result =
+            parser.parse("WITH NAMED EXPRESSIONS b AS (a + 1) SELECT a AS b, b FROM stream");
+
+        assert!(matches!(
+            result,
+            Err(error) if error == "SELECT alias `b` collides with named expression `b`"
+        ));
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_enters_stateful_rewrite() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS previous AS (lag(a)) SELECT previous + 1 FROM stream")
+            .expect("named expression should enter stateful rewrite");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "(col_1) + 1");
+        assert_eq!(select_stmt.stateful_mappings.len(), 1);
+        assert_eq!(
+            select_stmt.stateful_mappings[0]
+                .spec
+                .original_expr
+                .to_string(),
+            "lag(a)"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_enters_aggregate_rewrite() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS total AS (sum(a)) SELECT total FROM stream")
+            .expect("named expression should enter aggregate rewrite");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "(col_1)");
+        assert_eq!(select_stmt.aggregate_mappings.len(), 1);
+        assert_eq!(
+            select_stmt.aggregate_mappings["col_1"].to_string(),
+            "sum(a)"
+        );
+    }
+
+    #[test]
+    fn test_named_expression_is_expanded_before_null_predicate_lowering() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS nullable AS (a IS NULL) SELECT nullable FROM stream")
+            .expect("named expression should be expanded before null predicate lowering");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "(isnull(a))");
+    }
+
+    #[test]
+    fn test_named_expression_is_expanded_before_analytic_function_rewrite() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse(
+                "WITH NAMED EXPRESSIONS previous AS (lag(a) OVER (PARTITION BY k)) SELECT previous + 1 FROM stream",
+            )
+            .expect("named expression should be expanded before analytic rewrite");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "(col_1) + 1");
+        assert_eq!(select_stmt.stateful_mappings.len(), 1);
+        assert_eq!(
+            select_stmt.stateful_mappings[0]
+                .spec
+                .original_expr
+                .to_string(),
+            "lag(a) OVER (PARTITION BY k)"
+        );
+        assert_eq!(
+            select_stmt.stateful_mappings[0]
+                .spec
+                .partition_by
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["k"]
+        );
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_does_not_expand_replacement_again() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("WITH NAMED EXPRESSIONS b AS (a + 1), c AS (b + 1) SELECT c FROM stream")
+            .expect("named expression should be expanded once");
+
+        assert_eq!(
+            select_stmt.select_fields[0].expr.to_string(),
+            "((a + 1) + 1)"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_named_expression_without_environment_preserves_ast() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("SELECT a + 1 FROM stream")
+            .expect("regular SQL should remain valid");
+
+        assert_eq!(select_stmt.select_fields[0].expr.to_string(), "a + 1");
     }
 
     #[test]

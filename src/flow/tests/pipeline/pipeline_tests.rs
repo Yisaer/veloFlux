@@ -1128,7 +1128,7 @@ async fn pipeline_outputs_bound_schema_version() {
         .expect("delete pipeline");
 }
 
-// coverage-covers: parser.select.alias_computing, planner.physical.output_layout_fixed_slots, sink.connector.memory_output
+// coverage-covers: parser.select.projection_alias, planner.physical.output_layout_fixed_slots, sink.connector.memory_output
 #[tokio::test]
 async fn pipeline_table_driven_queries() {
     let test_cases = vec![
@@ -1401,9 +1401,12 @@ async fn pipeline_table_driven_queries() {
             }],
         },
         TestCase {
-            name: "alias_can_be_used_in_select_and_where",
-            sql: "SELECT a + 1 AS b1, b1 + 1 AS c1 FROM stream WHERE b1 > 1 AND c1 > 1",
-            input_data: vec![("a".to_string(), vec![Value::Int64(0), Value::Int64(1), Value::Int64(2)])],
+            name: "named_expression_can_be_used_in_select_and_where",
+            sql: "WITH NAMED EXPRESSIONS b1 AS (a + 1), c1 AS (b1 + 1) SELECT b1, c1 FROM stream WHERE b1 > 1 AND c1 > 1",
+            input_data: vec![(
+                "a".to_string(),
+                vec![Value::Int64(0), Value::Int64(1), Value::Int64(2)],
+            )],
             expected_rows: 2,
             expected_columns: 2,
             column_checks: vec![
@@ -1418,9 +1421,12 @@ async fn pipeline_table_driven_queries() {
             ],
         },
         TestCase {
-            name: "order_by_projection_alias_non_aggregate",
-            sql: "SELECT a + 1 AS b FROM stream ORDER BY b DESC",
-            input_data: vec![("a".to_string(), vec![Value::Int64(0), Value::Int64(2), Value::Int64(1)])],
+            name: "order_by_named_expression_non_aggregate",
+            sql: "WITH NAMED EXPRESSIONS b AS (a + 1) SELECT b FROM stream ORDER BY b DESC",
+            input_data: vec![(
+                "a".to_string(),
+                vec![Value::Int64(0), Value::Int64(2), Value::Int64(1)],
+            )],
             expected_rows: 3,
             expected_columns: 1,
             column_checks: vec![ColumnCheck {
@@ -1429,8 +1435,8 @@ async fn pipeline_table_driven_queries() {
             }],
         },
         TestCase {
-            name: "order_by_group_key_alias_with_countwindow",
-            sql: "SELECT b AS k, sum(a) AS s FROM stream GROUP BY countwindow(4), b ORDER BY k",
+            name: "order_by_named_group_key_with_countwindow",
+            sql: "WITH NAMED EXPRESSIONS k AS (b) SELECT k, sum(a) AS s FROM stream GROUP BY countwindow(4), k ORDER BY k",
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1465,8 +1471,8 @@ async fn pipeline_table_driven_queries() {
             ],
         },
         TestCase {
-            name: "order_by_aggregate_alias_with_countwindow",
-            sql: "SELECT b, sum(a) AS s FROM stream GROUP BY countwindow(4), b ORDER BY s DESC",
+            name: "order_by_named_aggregate_with_countwindow",
+            sql: "WITH NAMED EXPRESSIONS total AS (sum(a)) SELECT b, total FROM stream GROUP BY countwindow(4), b ORDER BY total DESC",
             input_data: vec![
                 (
                     "a".to_string(),
@@ -1495,7 +1501,7 @@ async fn pipeline_table_driven_queries() {
                     expected_values: vec![Value::Int64(2), Value::Int64(1)],
                 },
                 ColumnCheck {
-                    expected_name: "s".to_string(),
+                    expected_name: "total".to_string(),
                     expected_values: vec![Value::Int64(3), Value::Int64(1)],
                 },
             ],
@@ -2175,7 +2181,7 @@ async fn pipeline_row_diff_json_table_driven() {
             sql: "SELECT a AS x, b AS y, flag AS z FROM stream",
             covers: &[
                 "sink.output.row_diff",
-                "parser.select.alias_computing",
+                "parser.select.projection_alias",
                 "planner.physical.output_layout_fixed_slots",
             ],
             input_data: vec![
@@ -2292,7 +2298,7 @@ async fn pipeline_row_diff_json_table_driven() {
     }
 }
 
-// coverage-covers: parser.select.alias_computing, sink.encoder.transform
+// coverage-covers: parser.select.projection_alias, sink.encoder.transform
 #[tokio::test]
 async fn transform_template_with_alias_projection_keeps_output_correct() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -3228,7 +3234,7 @@ async fn memory_source_collection_topic_with_non_none_decoder_is_rejected() {
     );
 }
 
-// coverage-covers: source.memory.collection_input, source.memory.layout_normalize, sink.memory_collection.materialize, sink.connector.memory_output, parser.select.alias_computing
+// coverage-covers: source.memory.collection_input, source.memory.layout_normalize, sink.memory_collection.materialize, sink.connector.memory_output, parser.select.projection_alias
 #[tokio::test]
 async fn memory_collection_source_layout_normalize_then_collection_sink_materialize_aliases() {
     let case_name =
@@ -3559,7 +3565,7 @@ async fn run_mixed_consumers_json_case(case: MixedConsumersJsonCase) {
         .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
 }
 
-// coverage-covers: planner.physical.output_layout_fixed_slots, sink.connector.memory_output, sink.output.row_diff, parser.select.alias_computing
+// coverage-covers: planner.physical.output_layout_fixed_slots, sink.connector.memory_output, sink.output.row_diff, parser.select.projection_alias
 #[tokio::test]
 async fn pipeline_mixed_consumers_json_table_driven() {
     let cases = vec![
@@ -3863,7 +3869,7 @@ async fn pipeline_table_driven_memory_collection_sources_layout_normalize() {
     }
 }
 
-// coverage-covers: source.memory.collection_input, sink.memory_collection.materialize, sink.connector.memory_output, parser.select.alias_computing
+// coverage-covers: source.memory.collection_input, sink.memory_collection.materialize, sink.connector.memory_output, parser.select.projection_alias
 #[tokio::test]
 async fn pipeline_table_driven_collection_sinks() {
     let test_cases = vec![
@@ -3906,7 +3912,7 @@ async fn pipeline_table_driven_collection_sinks() {
             name: "alias_order_and_derived_columns_materialize_from_output_layout",
             sql: "SELECT b AS second, a + 1 AS plus_one, a AS first FROM stream",
             covers: &[
-                "parser.select.alias_computing",
+                "parser.select.projection_alias",
                 "sink.memory_collection.materialize",
                 "sink.connector.memory_output",
             ],

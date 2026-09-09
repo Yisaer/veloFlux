@@ -1137,7 +1137,7 @@ async fn stateful_function_table_driven() {
         },
         StatefulCase {
             name: "stateful_projection_with_repeated_visible_expr_keeps_runtime_semantics",
-            sql: "SELECT lag(a) + 1 AS x, x + 1 AS y FROM stream",
+            sql: "WITH NAMED EXPRESSIONS x AS (lag(a) + 1), y AS (x + 1) SELECT x, y FROM stream",
             input_data: vec![(
                 "a".to_string(),
                 vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],

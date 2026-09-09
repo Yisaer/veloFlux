@@ -21,7 +21,7 @@ interactions:
     title: Alias projection encoder transform
     summary: Validate that encoder transforms observe SQL-visible alias output after projection.
     features:
-      - parser.select.alias_computing
+      - parser.select.projection_alias
       - sink.encoder.transform
     status: active
 
@@ -95,7 +95,7 @@ interactions:
     title: Alias memory collection output
     summary: Validate SQL-visible aliases when materializing memory collection sink output.
     features:
-      - parser.select.alias_computing
+      - parser.select.projection_alias
       - sink.connector.memory_output
     status: active
 
@@ -166,7 +166,7 @@ interactions:
       - source.memory.layout_normalize
       - sink.memory_collection.materialize
       - sink.connector.memory_output
-      - parser.select.alias_computing
+      - parser.select.projection_alias
     status: active
 
   - id: runtime.memory.collection_row_diff_omit_if_empty
@@ -183,7 +183,7 @@ interactions:
     title: Alias memory collection materialize
     summary: Validate SQL-visible aliases and derived columns when materializing memory collection sink output.
     features:
-      - parser.select.alias_computing
+      - parser.select.projection_alias
       - sink.memory_collection.materialize
     status: active
 
@@ -233,7 +233,7 @@ interactions:
     title: Fixed output alias memory output pairing
     summary: Validate planner-fixed output references with SQL-visible aliases through memory output.
     features:
-      - parser.select.alias_computing
+      - parser.select.projection_alias
       - planner.physical.output_layout_fixed_slots
       - sink.connector.memory_output
     status: active
@@ -333,7 +333,7 @@ interactions:
       - source.memory.collection_input
       - sink.memory_collection.materialize
       - sink.connector.memory_output
-      - parser.select.alias_computing
+      - parser.select.projection_alias
     status: active
 
   - id: runtime.shared_tail.barrier_alignment

@@ -218,7 +218,7 @@ fn test_stream_dialect_expression_fields() {
     }
 }
 
-// coverage-covers: parser.select.alias_computing
+// coverage-covers: parser.select.projection_alias
 #[test]
 fn test_stream_dialect_alias_support() {
     let sql = "SELECT a + b AS total, CONCAT(name, '_test') AS full_name, 42 AS answer";

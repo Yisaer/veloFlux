@@ -413,8 +413,8 @@ fn logical_optimizer_table_driven() {
             expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[*][struct{c, d}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[\"a\"]]"],"operator":"Project"}"##,
         },
         LogicalOptimizerCase {
-            name: "logical_optimizer_inserts_compute_for_repeated_subexpr_in_project_and_filter",
-            sql: "SELECT a + 1 AS x, x + 1 AS y FROM stream WHERE x > 1 AND y > 1",
+            name: "logical_optimizer_inserts_compute_for_repeated_named_expression_in_project_and_filter",
+            sql: "WITH NAMED EXPRESSIONS x AS (a + 1), y AS (x + 1) SELECT x, y FROM stream WHERE x > 1 AND y > 1",
             covers: &["planner.logical.common_subexpression_elimination"],
             expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Compute_3","info":["temps=[__vf_cse_1 = a + 1; __vf_cse_2 = __vf_cse_1 + 1]"],"operator":"Compute"}],"id":"Filter_1","info":["predicate=__vf_cse_1 > 1 AND __vf_cse_2 > 1"],"operator":"Filter"}],"id":"Project_2","info":["fields=[__vf_cse_1 as x; __vf_cse_2 as y]"],"operator":"Project"}"##,
         },
@@ -450,9 +450,9 @@ fn logical_optimizer_table_driven() {
         },
         LogicalOptimizerCase {
             name: "logical_optimizer_cse_keeps_stateful_dependency_boundary",
-            sql: "SELECT lag(a) + 1 AS x, x + 1 AS y FROM stream",
+            sql: "WITH NAMED EXPRESSIONS x AS (lag(a) + 1), y AS (x + 1) SELECT x, y FROM stream",
             covers: &["planner.logical.common_subexpression_elimination"],
-            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Compute_3","info":["temps=[__vf_cse_1 = col_1 + 1]"],"operator":"Compute"}],"id":"Project_2","info":["fields=[__vf_cse_1 as x; __vf_cse_1 + 1 as y]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Compute_3","info":["temps=[__vf_cse_1 = col_1 + 1]"],"operator":"Compute"}],"id":"Project_2","info":["fields=[__vf_cse_1 as x; (__vf_cse_1 + 1) as y]"],"operator":"Project"}"##,
         },
     ];
 
@@ -838,6 +838,11 @@ fn create_logical_plan_error_table_driven() {
             name: "test_reject_relation_alias",
             sql: "SELECT a FROM users AS u",
             expected_contains: &["relation alias `u` for `users` is not supported yet"],
+        },
+        ErrorCase {
+            name: "test_reject_named_expression_input_column_collision",
+            sql: "WITH NAMED EXPRESSIONS a AS (b + 1) SELECT a FROM stream",
+            expected_contains: &["named expression `a` collides with an input column name"],
         },
     ];
 
