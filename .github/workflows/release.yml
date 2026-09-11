@@ -14,6 +14,7 @@ on:
         options:
           - cross-release
           - native-release
+          - qnx71
           - ffi
           - all
 
@@ -330,6 +331,195 @@ jobs:
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: veloflux-${{ matrix.asset_suffix }}.tar.gz
+
+  build-and-upload-qnx71-release:
+    if: github.event_name == 'release' || github.event.inputs.package_group == 'qnx71' || github.event.inputs.package_group == 'all'
+    permissions:
+      contents: read
+      packages: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      QNX_SDP_IMAGE: ghcr.io/emqx/veloflux-qnx-sdp:7.1-try
+      QNX_INSTALL_DIR: /opt/qnx710
+      QNX_QSC_DIR: /opt/qnxsoftwarecenter
+      QNX_RUST_TOOLCHAIN: qnx7
+      QNX_TARGET_TRIPLE: aarch64-unknown-nto-qnx710
+      QNX_ASSET_SUFFIX: qnx71-aarch64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Pull QNX 7.1 SDP image
+        run: docker pull "$QNX_SDP_IMAGE"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: .cargo-cache
+          key: qnx71-release-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            qnx71-release-cargo-${{ runner.os }}-
+
+      - name: Build QNX 7.1 release binary
+        env:
+          QNX_71_LICENSE_KEY: ${{ secrets.QNX_71_LICENSE_KEY }}
+          QNX_71_MYQNX_USER: ${{ secrets.QNX_71_MYQNX_USER }}
+          QNX_71_MYQNX_PASSWORD: ${{ secrets.QNX_71_MYQNX_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          test -n "$QNX_71_LICENSE_KEY"
+          test -n "$QNX_71_MYQNX_USER"
+          test -n "$QNX_71_MYQNX_PASSWORD"
+          mkdir -p "$PWD/.cargo-cache/registry" "$PWD/.cargo-cache/git"
+
+          docker run --rm \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e CARGO_TERM_COLOR=always \
+            -e CARGO_BUILD_JOBS=2 \
+            -e CARGO_INCREMENTAL=0 \
+            -e CARGO_NET_GIT_FETCH_WITH_CLI=true \
+            -e CARGO_HOME=/workspace/.cargo-cache \
+            -e QNX_INSTALL_DIR \
+            -e QNX_QSC_DIR \
+            -e QNX_RUST_TOOLCHAIN \
+            -e QNX_TARGET_TRIPLE \
+            -e QNX_71_LICENSE_KEY \
+            -e QNX_71_MYQNX_USER \
+            -e QNX_71_MYQNX_PASSWORD \
+            "$QNX_SDP_IMAGE" \
+            bash -lc '
+              set -euo pipefail
+
+              qnx_license_active=false
+              cleanup() {
+                status=$?
+                set +e
+
+                if [ "$qnx_license_active" = true ]; then
+                  deactivated=false
+                  for attempt in $(seq 1 20); do
+                    echo "Attempt $attempt/20 to deactivate QNX 7.1 licenses"
+                    if timeout 180s "$QNX_QSC_DIR/qnxsoftwarecenter/qnxsoftwarecenter_clt" \
+                      -deactivateAll \
+                      -myqnx.user "$QNX_71_MYQNX_USER" \
+                      -myqnx.password "$QNX_71_MYQNX_PASSWORD"; then
+                      deactivated=true
+                      break
+                    fi
+                    if [ "$attempt" -lt 20 ]; then
+                      sleep 10
+                    fi
+                  done
+                  if [ "$deactivated" != true ]; then
+                    echo "QNX 7.1 license deactivation failed after 20 attempts" >&2
+                    status=1
+                  fi
+                fi
+
+                exit "$status"
+              }
+              trap cleanup EXIT
+
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                build-essential \
+                curl \
+                git \
+                libprotobuf-dev \
+                m4 \
+                pkg-config \
+                protobuf-compiler
+
+              qsc_bin="$QNX_QSC_DIR/qnxsoftwarecenter/qnxsoftwarecenter_clt"
+              test -x "$qsc_bin"
+              "$qsc_bin" \
+                -addLicenseKey "$QNX_71_LICENSE_KEY" \
+                -myqnx.user "$QNX_71_MYQNX_USER" \
+                -myqnx.password "$QNX_71_MYQNX_PASSWORD" \
+                -listLicenseKeys
+              qnx_license_active=true
+
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable
+              source "$CARGO_HOME/env"
+
+              QNX_RUST_TC_DIR="/opt/qnx-rust-toolchain"
+              curl -fsSL \
+                https://github.com/qorix-group/rust-lang-qnx8/releases/download/1.3.0/qnx7_rust_toolchain.tar.gz \
+                -o /tmp/qnx7_rust_toolchain.tar.gz
+              mkdir -p "$QNX_RUST_TC_DIR"
+              tar -xzf /tmp/qnx7_rust_toolchain.tar.gz -C "$QNX_RUST_TC_DIR" --strip-components=1
+              rm -f /tmp/qnx7_rust_toolchain.tar.gz
+
+              if [ ! -x "$QNX_RUST_TC_DIR/bin/rustc" ]; then
+                inner="$(find "$QNX_RUST_TC_DIR" -maxdepth 3 -type f -name rustc -perm -111 | head -n 1)"
+                test -n "$inner"
+                QNX_RUST_TC_DIR="$(dirname "$(dirname "$inner")")"
+              fi
+
+              rustup toolchain link "$QNX_RUST_TOOLCHAIN" "$QNX_RUST_TC_DIR"
+              cargo +"$QNX_RUST_TOOLCHAIN" -V
+              rustc +"$QNX_RUST_TOOLCHAIN" -Vv
+
+              source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
+              qcc -Vgcc_ntoaarch64le_cxx -E -xc /dev/null >/dev/null
+
+              cargo +"$QNX_RUST_TOOLCHAIN" build \
+                --release \
+                --target "$QNX_TARGET_TRIPLE" \
+                --no-default-features \
+                --features allocator-system,metrics
+            '
+
+      - name: Prepare QNX 7.1 release asset
+        run: |
+          set -euo pipefail
+          asset_name="veloflux-${QNX_ASSET_SUFFIX}"
+          binary="target/${QNX_TARGET_TRIPLE}/release/veloflux"
+          test -x "$binary"
+          cp "$binary" "$asset_name"
+          cp etc/config.example.yaml "${asset_name}.config.example.yaml"
+          tar -czf "${asset_name}.tar.gz" \
+            "$asset_name" \
+            "${asset_name}.config.example.yaml"
+          rm "$asset_name" "${asset_name}.config.example.yaml"
+
+      - name: Upload QNX 7.1 release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: veloflux-${{ env.QNX_ASSET_SUFFIX }}
+          path: veloflux-${{ env.QNX_ASSET_SUFFIX }}.tar.gz
+          if-no-files-found: error
+
+  upload-qnx71-release-assets:
+    if: github.event_name == 'release'
+    needs: build-and-upload-qnx71-release
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download QNX 7.1 release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: veloflux-qnx71-aarch64
+          path: .
+
+      - name: Upload QNX 7.1 release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: veloflux-qnx71-aarch64.tar.gz
 
   build-and-upload-ffi:
     if: github.event_name == 'release' || github.event.inputs.package_group == 'ffi' || github.event.inputs.package_group == 'all'
