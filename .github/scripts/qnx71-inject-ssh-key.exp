@@ -1,0 +1,26 @@
+#!/usr/bin/expect -f
+
+set timeout 300
+set serial_log "/workspace/qnx710-aarch64-serial.log"
+set ready_file "/workspace/qnx710-ssh-ready"
+set pubkey [string trim $env(QNX_VM_SSH_PUB_KEY)]
+
+log_file -a $serial_log
+spawn /workspace/qnx71-start-vm-ci.sh
+
+expect {
+    "Startup complete" {}
+    timeout { exit 1 }
+    eof { exit 1 }
+}
+
+send -- "mkdir -p /data/home/root/.ssh; chmod 700 /data/home/root/.ssh; echo '$pubkey' >> /data/home/root/.ssh/authorized_keys; chmod 600 /data/home/root/.ssh/authorized_keys; echo __QNX_CI_SSH_READY__\r"
+
+expect {
+    -re {(^|\r\n|\r|\n)__QNX_CI_SSH_READY__(\r\n|\r|\n|$)} {}
+    timeout { exit 1 }
+    eof { exit 1 }
+}
+
+exec sh -c "touch $ready_file"
+interact
