@@ -51,7 +51,7 @@ impl Serialize for MqttUserProperty {
         property.serialize_field("key", &self.key)?;
         match &self.value {
             crate::ConnectorString::Plain(value) => property.serialize_field("value", value)?,
-            crate::ConnectorString::Sensitive(_) => {
+            crate::ConnectorString::Sensitive(_) | crate::ConnectorString::Dynamic(_) => {
                 property.serialize_field("value", &serde_json::json!({ "sensitive": true }))?
             }
         }

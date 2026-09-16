@@ -11,7 +11,7 @@ use crate::eventtime::EventtimeTypeRegistry;
 use crate::expr::custom_func::CustomFuncRegistry;
 use crate::pipeline::PipelineManager;
 use crate::planner::sink::SinkConnectorConfig;
-use crate::property::PropertyContext;
+use crate::property::{PropertyContext, PropertyRegistry};
 use crate::runtime::TaskSpawner;
 use crate::secret::SecretContext;
 use crate::shared_stream::{SharedStreamError, SharedStreamInfo, SharedStreamRegistry};
@@ -120,8 +120,8 @@ pub struct FlowInstance {
     // Secret store + policy for resolving `SecretRef` config (VF-51). Installed
     // at startup; defaults to an empty store so inline configs keep working.
     secret_ctx: Arc<parking_lot::RwLock<SecretContext>>,
-    // Process-wide immutable properties used while applying connector configs.
-    property_ctx: Arc<parking_lot::RwLock<PropertyContext>>,
+    // Process-wide property registry used while applying and running pipelines.
+    property_registry: Arc<parking_lot::RwLock<PropertyRegistry>>,
     cpu_metrics_state: Option<FlowInstanceCpuMetricsState>,
 }
 
@@ -250,7 +250,7 @@ impl FlowInstance {
             memory_pubsub_registry.clone(),
             spawner.clone(),
         );
-        let property_ctx = context.property_context_handle();
+        let property_registry = context.property_registry_handle();
         let pipeline_manager = Arc::new(PipelineManager::new(
             Arc::clone(&catalog),
             context,
@@ -278,7 +278,7 @@ impl FlowInstance {
             eventtime_type_registry: registries.eventtime_type_registry,
             merger_registry: registries.merger_registry,
             secret_ctx: Arc::new(parking_lot::RwLock::new(SecretContext::empty())),
-            property_ctx,
+            property_registry,
             cpu_metrics_state: None,
         }
     }
@@ -299,14 +299,24 @@ impl FlowInstance {
         *self.secret_ctx.write() = ctx;
     }
 
-    /// Snapshot of the process-wide static properties.
+    /// Snapshot of the current process-wide effective properties.
     pub fn property_context(&self) -> PropertyContext {
-        self.property_ctx.read().clone()
+        self.property_registry.read().snapshot()
     }
 
     /// Install the process-wide static property snapshot during startup.
     pub fn set_property_context(&self, ctx: PropertyContext) {
-        *self.property_ctx.write() = ctx;
+        *self.property_registry.write() = PropertyRegistry::from_context(ctx);
+    }
+
+    /// Return the shared process-wide property registry.
+    pub fn property_registry(&self) -> PropertyRegistry {
+        self.property_registry.read().clone()
+    }
+
+    /// Install the process-wide property registry during startup.
+    pub fn set_property_registry(&self, registry: PropertyRegistry) {
+        *self.property_registry.write() = registry;
     }
 
     /// Install the durable checkpoint store used by subsequently built pipelines.

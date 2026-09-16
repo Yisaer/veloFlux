@@ -12,7 +12,13 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier --version 0.67.0
+          cargo kani setup
+
       - name: Run Kani
-        uses: model-checking/kani-github-action@v1
-        with:
-          args: --no-default-features --features deadlock_detection
+        run: cargo kani --no-default-features --features deadlock_detection

@@ -47,6 +47,7 @@ The subsystem identifies a stable observability domain:
 
 - `mqtt_source`
 - `mqtt_sink`
+- `property_registry_mqtt`
 - `shared_stream`
 - `processor`
 - `runtime`
@@ -205,6 +206,20 @@ It must not be used to describe:
 - process-wide runtime state
 
 Those concerns belong to `mqtt_source`, `mqtt_sink`, and `runtime` respectively.
+
+### `property_registry_mqtt`
+
+This process-wide subsystem describes the local MQTT property provider. It is
+not labeled by property key, topic, client id, or flow instance.
+
+Metrics:
+
+- `veloflux_property_registry_mqtt_connected`
+- `veloflux_property_registry_mqtt_updates_total{kind="changed|noop|rejected"}`
+- `veloflux_property_registry_mqtt_errors_total{kind="connection_error|invalid_topic_key|empty_payload|payload_too_large|invalid_utf8|unknown_property"}`
+- `veloflux_property_registry_mqtt_reconnects_total`
+
+No metric contains a property value.
 
 ### `shared_stream`
 

@@ -17,10 +17,10 @@ use crate::processor::{
     ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
+use crate::{PropertyContext, PropertyRegistry};
 use bytes::Bytes;
 use futures::stream::StreamExt;
-use std::collections::VecDeque;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -146,6 +146,7 @@ impl DeliveryAccumulator {
 struct PendingDelivery {
     payload: Bytes,
     forward_events: Vec<(EncodedDeliveryFlags, Bytes)>,
+    properties: Option<PropertyContext>,
     attempt: usize,
     retry_at: Option<Instant>,
     backoff_ms: u64,
@@ -154,10 +155,15 @@ struct PendingDelivery {
 }
 
 impl PendingDelivery {
-    fn new(completed: CompletedDelivery, retry_config: &SinkRetryConfig) -> Self {
+    fn new(
+        completed: CompletedDelivery,
+        properties: PropertyContext,
+        retry_config: &SinkRetryConfig,
+    ) -> Self {
         Self {
             payload: completed.payload,
             forward_events: completed.forward_events,
+            properties: Some(properties),
             attempt: 0,
             retry_at: None,
             backoff_ms: retry_config.initial_backoff_ms,
@@ -210,9 +216,13 @@ impl ConnectorBinding {
 
     /// Attempt a full single-shot delivery: start → write_chunk(payload) → finish.
     /// On any error, aborts the delivery and returns the classified error.
-    async fn attempt_delivery(&mut self, payload: &[u8]) -> Result<u64, SinkConnectorError> {
+    async fn attempt_delivery(
+        &mut self,
+        payload: &[u8],
+        properties: &PropertyContext,
+    ) -> Result<u64, SinkConnectorError> {
         self.active_delivery = true;
-        if let Err(err) = self.connector.start_delivery().await {
+        if let Err(err) = self.connector.start_delivery(properties).await {
             self.connector.abort_delivery().await;
             self.active_delivery = false;
             return Err(err);
@@ -264,6 +274,7 @@ pub struct SinkProcessor {
     restored_delivery_cache: VecDeque<PendingDelivery>,
 
     retry_config: SinkRetryConfig,
+    property_registry: PropertyRegistry,
 }
 
 impl SinkProcessor {
@@ -296,6 +307,7 @@ impl SinkProcessor {
             checkpoint_snapshot_collector: None,
             restored_delivery_cache: VecDeque::new(),
             retry_config: SinkRetryConfig::default(),
+            property_registry: PropertyRegistry::default(),
         }
         .with_default_checkpoint_key()
     }
@@ -338,6 +350,11 @@ impl SinkProcessor {
     /// Set the retry configuration for this sink processor.
     pub fn set_retry_config(&mut self, config: SinkRetryConfig) {
         self.retry_config = config;
+    }
+
+    /// Set the process property registry used to snapshot encoded deliveries.
+    pub fn set_property_registry(&mut self, registry: PropertyRegistry) {
+        self.property_registry = registry;
     }
 
     /// Maximum number of delivery attempts including the first one.
@@ -448,6 +465,7 @@ impl SinkProcessor {
                         EncodedDeliveryFlags::START | EncodedDeliveryFlags::END,
                         payload,
                     )],
+                    properties: None,
                     attempt: 0,
                     retry_at: None,
                     backoff_ms: retry_config.initial_backoff_ms,
@@ -664,6 +682,7 @@ impl Processor for SinkProcessor {
         let checkpoint_key = self.checkpoint_key.clone();
         let checkpoint_snapshot_collector = self.checkpoint_snapshot_collector.clone();
         let restored_delivery_cache = std::mem::take(&mut self.restored_delivery_cache);
+        let property_registry = self.property_registry.clone();
 
         let Some(mut connector) = self.connector.take() else {
             return ProcessorStart::failed(
@@ -743,6 +762,16 @@ impl Processor for SinkProcessor {
                     .filter(|_| attempt_ready)
                     .map(|delivery| delivery.payload.clone())
                     .unwrap_or_default();
+                let attempt_properties = pending_delivery
+                    .as_mut()
+                    .filter(|_| attempt_ready)
+                    .map(|delivery| {
+                        delivery
+                            .properties
+                            .get_or_insert_with(|| property_registry.snapshot())
+                            .clone()
+                    })
+                    .unwrap_or_default();
                 let next_attempt = pending_delivery
                     .as_ref()
                     .map_or(0, |delivery| delivery.attempt.saturating_add(1));
@@ -805,7 +834,7 @@ impl Processor for SinkProcessor {
 	                    }
 
                     // ── ② active connector attempt ──
-                    attempt_result = connector.attempt_delivery(attempt_payload.as_ref()), if attempt_ready => {
+                    attempt_result = connector.attempt_delivery(attempt_payload.as_ref(), &attempt_properties), if attempt_ready => {
                         stats.record_handle_duration(attempt_start.elapsed());
                         let delivery = pending_delivery
                             .as_mut()
@@ -896,7 +925,11 @@ impl Processor for SinkProcessor {
                                                 stats.record_handle_duration(handle_start.elapsed());
                                                 metrics.record_encoded_message_in();
                                                 connector.connector.record_message_in();
-                                                let delivery = PendingDelivery::new(completed, &retry_config);
+                                                let delivery = PendingDelivery::new(
+                                                    completed,
+                                                    property_registry.snapshot(),
+                                                    &retry_config,
+                                                );
                                                 if delivery_mode == SinkDeliveryMode::Capturing {
                                                     delivery_cache.push_back(delivery);
                                                 } else {

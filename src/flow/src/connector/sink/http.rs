@@ -211,6 +211,7 @@ pub(crate) struct HttpSinkConnector {
     client: Option<Client>,
     buffer: Vec<u8>,
     delivery_active: bool,
+    delivery_config: Option<HttpSinkConfig>,
 }
 
 impl HttpSinkConnector {
@@ -222,7 +223,29 @@ impl HttpSinkConnector {
             client: None,
             buffer: Vec::new(),
             delivery_active: false,
+            delivery_config: None,
         }
+    }
+
+    fn resolve_delivery_config(
+        &self,
+        properties: &crate::PropertyContext,
+    ) -> Result<HttpSinkConfig, SinkConnectorError> {
+        let mut config = self.config.clone();
+        for value in config.headers.values_mut() {
+            *value = value
+                .resolve(properties)
+                .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
+        }
+        if let HttpBodyConfig::Multipart(multipart) = &mut config.body {
+            for value in multipart.fields.values_mut() {
+                *value = value
+                    .resolve(properties)
+                    .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
+            }
+        }
+        config.validate().map_err(SinkConnectorError::Permanent)?;
+        Ok(config)
     }
 
     fn validate_url(url: &str) -> Result<(), SinkConnectorError> {
@@ -339,13 +362,17 @@ impl SinkConnector for HttpSinkConnector {
         Ok(())
     }
 
-    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(
+        &mut self,
+        properties: &crate::PropertyContext,
+    ) -> Result<(), SinkConnectorError> {
         if self.delivery_active {
             return Err(SinkConnectorError::Other(format!(
                 "http sink `{}` already has an active delivery",
                 self.id
             )));
         }
+        self.delivery_config = Some(self.resolve_delivery_config(properties)?);
         self.buffer.clear();
         self.delivery_active = true;
         Ok(())
@@ -391,9 +418,15 @@ impl SinkConnector for HttpSinkConnector {
 
         let body_bytes: bytes::Bytes = std::mem::take(&mut self.buffer).into();
         let bytes_written = body_bytes.len() as u64;
+        let delivery_config = self.delivery_config.take().ok_or_else(|| {
+            SinkConnectorError::Other(format!(
+                "http sink `{}` has no config for active delivery",
+                self.id
+            ))
+        })?;
 
         // Single attempt — retry is managed by the SinkProcessor.
-        Self::send_single_request(&self.id, client, &self.config, body_bytes).await?;
+        Self::send_single_request(&self.id, client, &delivery_config, body_bytes).await?;
 
         Ok(DeliveryResult { bytes_written })
     }
@@ -401,11 +434,13 @@ impl SinkConnector for HttpSinkConnector {
     async fn abort_delivery(&mut self) {
         self.buffer.clear();
         self.delivery_active = false;
+        self.delivery_config = None;
     }
 
     async fn close(&mut self) -> Result<(), SinkConnectorError> {
         self.buffer.clear();
         self.delivery_active = false;
+        self.delivery_config = None;
         self.client = None;
         Ok(())
     }
@@ -448,6 +483,47 @@ mod tests {
         );
         assert_eq!(cfg.content_type.as_deref(), Some("application/json"));
         assert_eq!(cfg.max_body_size, 1024);
+    }
+
+    #[test]
+    fn delivery_config_resolves_all_dynamic_values_from_one_snapshot() {
+        let registry = crate::PropertyRegistry::new(
+            BTreeMap::from([(
+                "vin".to_string(),
+                crate::secret::SecretString::new("VIN-INITIAL"),
+            )]),
+            true,
+        );
+        let value = registry
+            .bind(r#"{{ prop("vin") }}"#)
+            .expect("bind property");
+        let config = HttpSinkConfig::new("https://example.com/api")
+            .with_header("x-vehicle-id", value.clone())
+            .with_body(HttpBodyConfig::Multipart(HttpMultipartConfig {
+                file_field_name: "d".to_string(),
+                file_name: "payload.bin".to_string(),
+                fields: BTreeMap::from([("rid".to_string(), value)]),
+            }));
+        let connector = HttpSinkConnector::new("http", config);
+        registry
+            .apply_override("vin", crate::secret::SecretString::new("VIN-UPDATED"))
+            .expect("update vin");
+
+        let resolved = connector
+            .resolve_delivery_config(&registry.snapshot())
+            .expect("resolve delivery config");
+        assert_eq!(
+            resolved
+                .headers
+                .get("x-vehicle-id")
+                .expect("header")
+                .expose(),
+            "VIN-UPDATED"
+        );
+        let HttpBodyConfig::Multipart(multipart) = resolved.body else {
+            panic!("expected multipart body");
+        };
+        assert_eq!(multipart.fields["rid"].expose(), "VIN-UPDATED");
     }
 
     #[test]
@@ -601,7 +677,10 @@ mod tests {
             }));
         let mut connector = HttpSinkConnector::new("multipart-test", config);
         connector.ready().await.unwrap();
-        connector.start_delivery().await.unwrap();
+        connector
+            .start_delivery(&crate::PropertyContext::default())
+            .await
+            .unwrap();
         connector.write_chunk(b"encoded-").await.unwrap();
         connector.write_chunk(b"payload").await.unwrap();
         let result = connector.finish_delivery().await.unwrap();

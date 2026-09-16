@@ -103,6 +103,8 @@ pub(crate) struct MqttSinkConnector {
     config: MqttSinkConfig,
     client: Option<SinkClient>,
     buffer: Option<Vec<u8>>,
+    delivery_topic: Option<ConnectorString>,
+    delivery_user_properties: Vec<crate::connector::MqttUserProperty>,
     mqtt_clients: MqttClientManager,
     spawner: TaskSpawner,
 }
@@ -287,6 +289,8 @@ impl MqttSinkConnector {
             config,
             client: None,
             buffer: None,
+            delivery_topic: None,
+            delivery_user_properties: Vec::new(),
             mqtt_clients,
             spawner,
         }
@@ -368,8 +372,33 @@ impl SinkConnector for MqttSinkConnector {
         self.config.max_packet_size
     }
 
-    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(
+        &mut self,
+        properties: &crate::PropertyContext,
+    ) -> Result<(), SinkConnectorError> {
         self.ensure_client().await?;
+        let topic = self
+            .config
+            .topic
+            .resolve(properties)
+            .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
+        crate::validate_mqtt_publish_topic(&topic).map_err(SinkConnectorError::Permanent)?;
+        let user_properties = self
+            .config
+            .user_properties
+            .iter()
+            .map(|property| {
+                property
+                    .value
+                    .resolve(properties)
+                    .map(|value| crate::connector::MqttUserProperty::new(&property.key, value))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
+        crate::connector::validate_mqtt_user_properties(&user_properties)
+            .map_err(SinkConnectorError::Permanent)?;
+        self.delivery_topic = Some(topic);
+        self.delivery_user_properties = user_properties;
         self.buffer = Some(Vec::new());
         Ok(())
     }
@@ -394,14 +423,21 @@ impl SinkConnector for MqttSinkConnector {
         })?;
         let bytes_written = payload.len() as u64;
         let qos = self.publish_qos()?;
+        let topic = self.delivery_topic.take().ok_or_else(|| {
+            SinkConnectorError::Permanent(format!(
+                "mqtt sink `{}` has no topic for active delivery",
+                self.id
+            ))
+        })?;
+        let user_properties = std::mem::take(&mut self.delivery_user_properties);
         if let Some(client) = &self.client {
             client
                 .publish(
-                    self.config.topic.expose(),
+                    topic.expose(),
                     qos,
                     self.config.retain,
                     payload,
-                    &self.config.user_properties,
+                    &user_properties,
                 )
                 .await?;
             Ok(DeliveryResult { bytes_written })
@@ -415,6 +451,8 @@ impl SinkConnector for MqttSinkConnector {
 
     async fn abort_delivery(&mut self) {
         self.buffer = None;
+        self.delivery_topic = None;
+        self.delivery_user_properties.clear();
     }
 
     async fn ready(&mut self) -> Result<(), SinkConnectorError> {
@@ -556,10 +594,19 @@ mod tests {
 
     // coverage-covers: sink.connector.mqtt_output
     #[tokio::test]
-    async fn mqtt_sink_connector_publishes_bytes_to_embedded_broker() {
+    async fn mqtt_sink_connector_publishes_to_dynamic_topic() {
         let broker = EmbeddedMqttBroker::start().await;
-        let topic = broker.scoped_topic("sink/out");
-        let expected_topic = topic.clone();
+        let expected_topic = broker.scoped_topic("sink/VIN-UPDATED");
+        let registry = crate::PropertyRegistry::new(
+            std::collections::BTreeMap::from([(
+                "vin".to_string(),
+                crate::secret::SecretString::new("VIN-INITIAL"),
+            )]),
+            true,
+        );
+        let topic = registry
+            .bind(&broker.scoped_topic(r#"sink/{{ prop("vin") }}"#))
+            .expect("bind MQTT topic");
 
         let mut options = V3Options::new(
             "mqtt_sink_output_subscriber",
@@ -609,7 +656,7 @@ mod tests {
             .expect("subscriber connack timeout")
             .expect("subscriber connack channel");
         subscriber
-            .subscribe(topic.clone(), V3Qos::AtLeastOnce)
+            .subscribe(expected_topic.clone(), V3Qos::AtLeastOnce)
             .await
             .expect("subscribe embedded broker topic");
         timeout(Duration::from_secs(5), suback_rx)
@@ -620,23 +667,22 @@ mod tests {
         let spawner = TaskSpawner::from_handle(Handle::current());
         let mut connector = MqttSinkConnector::new(
             "mqtt_sink_output",
-            MqttSinkConfig::new(
-                "mqtt_sink_output",
-                broker.broker_url(),
-                ConnectorString::sensitive(topic),
-                1,
-            ),
+            MqttSinkConfig::new("mqtt_sink_output", broker.broker_url(), topic, 1),
             Arc::<str>::from("default"),
             MqttClientManager::new("default", spawner.clone()),
             spawner,
         );
         connector.ready().await.expect("mqtt sink ready");
+        registry
+            .apply_override("vin", crate::secret::SecretString::new("VIN-UPDATED"))
+            .expect("update vin");
+        let properties = registry.snapshot();
 
         let expected_payload = br#"{"a":1}"#;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             match async {
-                connector.start_delivery().await?;
+                connector.start_delivery(&properties).await?;
                 connector.write_chunk(expected_payload).await?;
                 connector.finish_delivery().await.map(|_| ())
             }
@@ -760,7 +806,9 @@ mod tests {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             match async {
-                connector.start_delivery().await?;
+                connector
+                    .start_delivery(&crate::PropertyContext::default())
+                    .await?;
                 connector.write_chunk(expected_payload).await?;
                 connector.finish_delivery().await.map(|_| ())
             }

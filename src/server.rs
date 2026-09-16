@@ -128,8 +128,10 @@ pub struct ServerOptions {
     pub pipeline_patrol_interval_secs: Option<u64>,
     /// Declared flow instances loaded from config.
     pub flow_instances: Vec<manager::FlowInstanceSpec>,
-    /// Process-wide static properties shared by every flow instance.
-    pub property_context: flow::PropertyContext,
+    /// Process-wide properties shared by every flow instance.
+    pub property_registry: flow::PropertyRegistry,
+    /// Optional local MQTT property subscription filter.
+    pub property_mqtt_topic: Option<String>,
 }
 
 /// Runtime context returned by [`init`] and consumed by [`start`].
@@ -141,6 +143,7 @@ pub struct ServerContext {
     manager_addr: String,
     flow_instances: Vec<manager::FlowInstanceSpec>,
     pipeline_patrol_interval_secs: u64,
+    property_mqtt_topic: Option<String>,
     runtime_guards: ServerRuntimeGuards,
 }
 
@@ -168,7 +171,7 @@ pub async fn init(
 ) -> Result<ServerContext, Box<dyn std::error::Error + Send + Sync>> {
     let init_phase = StartupPhase::new("manager", "default", "server_init", None);
     flow::init_process_once();
-    instance.set_property_context(opts.property_context.clone());
+    instance.set_property_registry(opts.property_registry.clone());
     veloflux_metrics::set_default_flow_instance_id("default");
     log_allocator();
 
@@ -240,6 +243,7 @@ pub async fn init(
         manager_addr,
         flow_instances: opts.flow_instances,
         pipeline_patrol_interval_secs,
+        property_mqtt_topic: opts.property_mqtt_topic,
         runtime_guards: ServerRuntimeGuards {
             #[cfg(feature = "metrics")]
             _metrics_exporter: metrics_exporter,
@@ -278,6 +282,15 @@ where
     let init_dir = ctx.init_dir.map(std::path::PathBuf::from);
     let manager_addr = ctx.manager_addr;
     let patrol_interval_secs = ctx.pipeline_patrol_interval_secs;
+    let property_mqtt_topic = ctx.property_mqtt_topic;
+
+    let property_provider = match property_mqtt_topic {
+        Some(topic) => Some(flow::PropertyMqttProvider::start(
+            instance.property_registry(),
+            topic,
+        )?),
+        None => None,
+    };
 
     tracing::info!(manager_addr = %manager_addr, "starting manager");
     let (manager_shutdown_tx, manager_shutdown_rx) = tokio::sync::oneshot::channel();
@@ -300,6 +313,9 @@ where
 
     tokio::select! {
         result = &mut manager_future => {
+            if let Some(provider) = property_provider {
+                provider.shutdown().await;
+            }
             if let Err(err) = result {
                 tracing::error!(error = %err, "manager server exited with error");
                 return Err(err);
@@ -309,7 +325,11 @@ where
         _ = &mut shutdown => {
             tracing::info!("shutdown signal received, shutting down");
             let _ = manager_shutdown_tx.send(());
-            match manager_future.await {
+            let result = manager_future.await;
+            if let Some(provider) = property_provider {
+                provider.shutdown().await;
+            }
+            match result {
                 Ok(()) => Ok(()),
                 Err(err) => {
                     tracing::error!(error = %err, "manager server exited with error during shutdown");

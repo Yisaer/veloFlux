@@ -10,8 +10,9 @@ mod tests {
     };
     use crate::runtime::TaskSpawner;
     use async_trait::async_trait;
+    use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use tokio::sync::mpsc;
     use tokio::time::{timeout, Duration};
 
@@ -30,10 +31,13 @@ mod tests {
         fail_with_kind: &'static str, // "transient" or "permanent"
         sender: mpsc::Sender<Vec<u8>>,
         buffer: Option<Vec<u8>>,
+        observed_properties: Arc<Mutex<Vec<String>>>,
+        update_registry_after_failure: Option<crate::PropertyRegistry>,
     }
 
     struct RetryMockHandle {
         receiver: mpsc::Receiver<Vec<u8>>,
+        observed_properties: Arc<Mutex<Vec<String>>>,
     }
 
     struct PendingStartConnector {
@@ -44,15 +48,26 @@ mod tests {
     impl RetryMockConnector {
         fn new(fail_count: usize, fail_with_kind: &'static str) -> (Self, RetryMockHandle) {
             let (sender, receiver) = mpsc::channel(16);
+            let observed_properties = Arc::new(Mutex::new(Vec::new()));
             (
                 Self {
                     fail_count: Arc::new(AtomicUsize::new(fail_count)),
                     fail_with_kind,
                     sender,
                     buffer: None,
+                    observed_properties: Arc::clone(&observed_properties),
+                    update_registry_after_failure: None,
                 },
-                RetryMockHandle { receiver },
+                RetryMockHandle {
+                    receiver,
+                    observed_properties,
+                },
             )
+        }
+
+        fn update_registry_after_failure(mut self, registry: crate::PropertyRegistry) -> Self {
+            self.update_registry_after_failure = Some(registry);
+            self
         }
 
         fn build_error(&self) -> SinkConnectorError {
@@ -76,7 +91,10 @@ mod tests {
             "pending_start"
         }
 
-        async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+        async fn start_delivery(
+            &mut self,
+            _properties: &crate::PropertyContext,
+        ) -> Result<(), SinkConnectorError> {
             self.started
                 .send(())
                 .await
@@ -102,7 +120,8 @@ mod tests {
             active_delivery: false,
         };
 
-        let mut attempt = Box::pin(binding.attempt_delivery(b"payload"));
+        let properties = crate::PropertyContext::default();
+        let mut attempt = Box::pin(binding.attempt_delivery(b"payload", &properties));
         tokio::select! {
             result = &mut attempt => panic!("delivery start unexpectedly completed: {result:?}"),
             started = started_rx.recv() => assert_eq!(started, Some(())),
@@ -124,7 +143,18 @@ mod tests {
             Ok(())
         }
 
-        async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+        async fn start_delivery(
+            &mut self,
+            properties: &crate::PropertyContext,
+        ) -> Result<(), SinkConnectorError> {
+            let value = properties
+                .get("vin")
+                .map(|value| value.expose().to_string())
+                .unwrap_or_default();
+            self.observed_properties
+                .lock()
+                .expect("lock observed properties")
+                .push(value);
             self.buffer = Some(Vec::new());
             Ok(())
         }
@@ -145,6 +175,11 @@ mod tests {
             let bytes_written = payload.len() as u64;
 
             if self.fail_count.fetch_sub(1, Ordering::Relaxed) > 0 {
+                if let Some(registry) = &self.update_registry_after_failure {
+                    registry
+                        .apply_override("vin", crate::secret::SecretString::new("VIN-UPDATED"))
+                        .expect("update vin after failed attempt");
+                }
                 return Err(self.build_error());
             }
 
@@ -310,5 +345,56 @@ mod tests {
         // no data received because all attempts failed.
         drive_and_assert(start.handle, handle, false).await;
         assert_message_metrics(stats.as_ref(), 0, 1, 0);
+    }
+
+    #[tokio::test]
+    async fn retry_reuses_the_original_property_snapshot() {
+        let registry = crate::PropertyRegistry::new(
+            BTreeMap::from([(
+                "vin".to_string(),
+                crate::secret::SecretString::new("VIN-INITIAL"),
+            )]),
+            true,
+        );
+        let (connector, handle) = RetryMockConnector::new(1, "transient");
+        let connector = connector.update_registry_after_failure(registry.clone());
+        let observed = Arc::clone(&handle.observed_properties);
+
+        let mut processor = SinkProcessor::new("retry_sink");
+        processor.set_property_registry(registry.clone());
+        processor.set_retry_config(SinkRetryConfig {
+            max_attempts: Some(2),
+            initial_backoff_ms: 10,
+            max_backoff_ms: 10,
+            ..Default::default()
+        });
+        processor.add_connector(Box::new(connector));
+
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        processor.add_input(rx);
+        let mut start = processor.start(&test_spawner());
+        start
+            .take_ready()
+            .expect("ready")
+            .await
+            .expect("ready ok")
+            .expect("processor ready");
+        for data in make_encoded_delivery(br#"[{"a":42}]"#) {
+            let _ = tx.send(data);
+        }
+        let _ = tx.send(StreamData::stream_end());
+
+        drive_and_assert(start.handle, handle, true).await;
+        assert_eq!(
+            observed
+                .lock()
+                .expect("lock observed properties")
+                .as_slice(),
+            ["VIN-INITIAL", "VIN-INITIAL"]
+        );
+        assert_eq!(
+            registry.snapshot().get("vin").expect("vin exists").expose(),
+            "VIN-UPDATED"
+        );
     }
 }

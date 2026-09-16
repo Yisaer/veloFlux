@@ -92,7 +92,7 @@ fn build_video_sink_props(
 
 fn build_file_sink_props(
     req: FileSinkPropsRequest,
-    properties: &flow::PropertyContext,
+    properties: &flow::PropertyRegistry,
     pipeline_id: &str,
     sink_id: &str,
 ) -> Result<FileSinkProps, String> {
@@ -125,19 +125,19 @@ fn normalized_optional_string(value: Option<String>) -> Option<String> {
 }
 
 fn render_connector_string(
-    properties: &flow::PropertyContext,
+    properties: &flow::PropertyRegistry,
     raw: &str,
     pipeline_id: &str,
     sink_id: &str,
     field: &str,
 ) -> Result<flow::ConnectorString, String> {
-    properties.render(raw).map_err(|err| {
+    properties.bind(raw).map_err(|err| {
         format!("pipeline `{pipeline_id}` sink `{sink_id}` failed to resolve {field}: {err}")
     })
 }
 
 fn render_mqtt_user_properties(
-    properties: &flow::PropertyContext,
+    properties: &flow::PropertyRegistry,
     mut user_properties: Vec<flow::MqttUserProperty>,
     pipeline_id: &str,
     sink_id: &str,
@@ -156,7 +156,7 @@ fn render_mqtt_user_properties(
 
 fn render_http_body(
     body: flow::HttpBodyConfig,
-    properties: &flow::PropertyContext,
+    properties: &flow::PropertyRegistry,
     pipeline_id: &str,
     sink_id: &str,
 ) -> Result<flow::HttpBodyConfig, String> {
@@ -376,7 +376,7 @@ pub(crate) fn build_pipeline_definition(
     let select_stmt = parse_pipeline_select_stmt(req, instance)?;
     let sources = build_source_definitions(req, instance, &select_stmt)?;
     let secret_ctx = instance.secret_context();
-    let property_ctx = instance.property_context();
+    let property_registry = instance.property_registry();
     let mut sinks = Vec::with_capacity(req.sinks.len());
     for (index, sink_req) in req.sinks.iter().enumerate() {
         let sink_id = sink_req
@@ -410,7 +410,7 @@ pub(crate) fn build_pipeline_definition(
                     .filter(|value| !value.trim().is_empty())
                     .ok_or_else(|| "mqtt sink requires topic".to_string())?;
                 let topic = render_connector_string(
-                    &property_ctx,
+                    &property_registry,
                     &raw_topic,
                     &req.id,
                     &sink_id,
@@ -425,7 +425,7 @@ pub(crate) fn build_pipeline_definition(
                 let qos = mqtt_props.qos.unwrap_or(MQTT_QOS);
                 let retain = mqtt_props.retain.unwrap_or(false);
                 let user_properties = render_mqtt_user_properties(
-                    &property_ctx,
+                    &property_registry,
                     mqtt_props.user_properties,
                     &req.id,
                     &sink_id,
@@ -546,7 +546,8 @@ pub(crate) fn build_pipeline_definition(
                 let file_props: FileSinkPropsRequest =
                     serde_json::from_value(sink_req.props.to_value())
                         .map_err(|err| format!("invalid file sink props: {err}"))?;
-                let props = build_file_sink_props(file_props, &property_ctx, &req.id, &sink_id)?;
+                let props =
+                    build_file_sink_props(file_props, &property_registry, &req.id, &sink_id)?;
                 SinkDefinition::new(sink_id.clone(), SinkType::File, SinkProps::File(props))
             }
             "video" => {
@@ -590,7 +591,7 @@ pub(crate) fn build_pipeline_definition(
                 let resolved_secret_headers = http_props.resolve_secret_headers(&secret_ctx)?;
                 let body = render_http_body(
                     http_props.to_body_config()?,
-                    &property_ctx,
+                    &property_registry,
                     &req.id,
                     &sink_id,
                 )?;
@@ -608,7 +609,7 @@ pub(crate) fn build_pipeline_definition(
                 if let Some(ref headers) = http_props.headers {
                     for (key, value) in headers {
                         let value = render_connector_string(
-                            &property_ctx,
+                            &property_registry,
                             value,
                             &req.id,
                             &sink_id,

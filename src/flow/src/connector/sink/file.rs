@@ -41,6 +41,7 @@ struct FileDeliveryState {
     file: Option<File>,
     bytes_written: u64,
     write_start_ms: u128,
+    filename_pattern: crate::ConnectorString,
 }
 
 impl Drop for FileDeliveryState {
@@ -220,8 +221,9 @@ impl FileSinkConnector {
         tmp_path: &Path,
         write_start_ms: u128,
         write_end_ms: u128,
+        filename_pattern: &crate::ConnectorString,
     ) -> Result<PathBuf, SinkConnectorError> {
-        let pattern = compile_filename_pattern(self.config.filename_pattern.expose())
+        let pattern = compile_filename_pattern(filename_pattern.expose())
             .map_err(SinkConnectorError::Other)?;
         if pattern.has_seq() {
             for seq in 1..=MAX_SEQUENCE {
@@ -296,14 +298,17 @@ impl FileSinkConnector {
         }
     }
 
-    fn apply_retention(&self) -> Result<(), SinkConnectorError> {
+    fn apply_retention(
+        &self,
+        filename_pattern: &crate::ConnectorString,
+    ) -> Result<(), SinkConnectorError> {
         let retention = &self.config.retention;
         if retention.max_file_count == 0 && retention.max_file_age_days == 0 {
             return Ok(());
         }
 
         let output_dir = self.output_dir();
-        let pattern = compile_filename_pattern(self.config.filename_pattern.expose())
+        let pattern = compile_filename_pattern(filename_pattern.expose())
             .map_err(SinkConnectorError::Other)?;
         let mut files = Vec::new();
         for entry in fs::read_dir(&output_dir).map_err(|err| {
@@ -446,6 +451,7 @@ impl FileSinkConnector {
             file: Some(file),
             bytes_written: 0,
             write_start_ms,
+            filename_pattern: self.config.filename_pattern.clone(),
         });
         Ok(())
     }
@@ -495,9 +501,13 @@ impl FileSinkConnector {
             })?;
             let write_end_ms = current_epoch_millis()?;
             drop(state.file.take());
-            let _final_path =
-                self.finalize_tmp_file(&state.tmp_path, state.write_start_ms, write_end_ms)?;
-            self.apply_retention()?;
+            let _final_path = self.finalize_tmp_file(
+                &state.tmp_path,
+                state.write_start_ms,
+                write_end_ms,
+                &state.filename_pattern,
+            )?;
+            self.apply_retention(&state.filename_pattern)?;
             Ok(DeliveryResult {
                 bytes_written: state.bytes_written,
             })
@@ -539,10 +549,17 @@ impl FileSinkConnector {
 
     async fn start_delivery_with_hook(
         &mut self,
+        properties: &crate::PropertyContext,
         after_start: impl FnOnce(&Path) + Send + 'static,
     ) -> Result<(), SinkConnectorError> {
         let connector_id = self.id.clone();
         let mut connector = self.blocking_view();
+        connector.config.filename_pattern =
+            connector
+                .config
+                .filename_pattern
+                .resolve(properties)
+                .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
         let state = Self::run_blocking(connector_id.clone(), move || {
             connector.start_delivery_blocking()?;
             let state = connector.current.take().ok_or_else(|| {
@@ -571,8 +588,11 @@ impl SinkConnector for FileSinkConnector {
         Self::run_blocking(connector_id, move || connector.prepare_blocking()).await
     }
 
-    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
-        self.start_delivery_with_hook(|_| {}).await
+    async fn start_delivery(
+        &mut self,
+        properties: &crate::PropertyContext,
+    ) -> Result<(), SinkConnectorError> {
+        self.start_delivery_with_hook(properties, |_| {}).await
     }
 
     async fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), SinkConnectorError> {
@@ -937,7 +957,10 @@ mod tests {
     }
 
     async fn deliver(connector: &mut FileSinkConnector, bytes: &[u8]) {
-        connector.start_delivery().await.expect("start delivery");
+        connector
+            .start_delivery(&crate::PropertyContext::default())
+            .await
+            .expect("start delivery");
         connector.write_chunk(bytes).await.expect("write chunk");
         connector.finish_delivery().await.expect("finish delivery");
     }
@@ -952,7 +975,7 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let start_task = tokio::spawn(async move {
             connector
-                .start_delivery_with_hook(move |tmp_path| {
+                .start_delivery_with_hook(&crate::PropertyContext::default(), move |tmp_path| {
                     created_tx
                         .send(tmp_path.to_path_buf())
                         .expect("report created tmp file");
@@ -998,6 +1021,41 @@ mod tests {
         assert!(name.ends_with(".json"));
         assert_eq!(fs::read(&files[0]).expect("read file"), br#"{"speed":42}"#);
         assert!(connector.tmp_dir().exists());
+    }
+
+    #[tokio::test]
+    async fn file_sink_resolves_dynamic_pattern_for_each_delivery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let registry = crate::PropertyRegistry::new(
+            std::collections::BTreeMap::from([(
+                "vin".to_string(),
+                crate::secret::SecretString::new("VIN-INITIAL"),
+            )]),
+            true,
+        );
+        let mut cfg = config(dir.path());
+        cfg.filename_pattern = registry
+            .bind(r#"{{ prop("vin") }}_{seq}.json"#)
+            .expect("bind filename pattern");
+        let mut connector = FileSinkConnector::new("sink_1", cfg);
+        connector.ready().await.expect("ready");
+
+        registry
+            .apply_override("vin", crate::secret::SecretString::new("VIN-UPDATED"))
+            .expect("update vin");
+        connector
+            .start_delivery(&registry.snapshot())
+            .await
+            .expect("start delivery");
+        connector.write_chunk(b"payload").await.expect("write");
+        connector.finish_delivery().await.expect("finish");
+
+        let files = final_files(dir.path());
+        assert_eq!(files.len(), 1);
+        assert_eq!(
+            files[0].file_name().and_then(|name| name.to_str()),
+            Some("VIN-UPDATED_000001.json")
+        );
     }
 
     #[tokio::test]
@@ -1125,7 +1183,12 @@ mod tests {
         drop(tmp);
 
         let final_path = connector
-            .finalize_tmp_file(&tmp_path, write_start_ms, write_end_ms)
+            .finalize_tmp_file(
+                &tmp_path,
+                write_start_ms,
+                write_end_ms,
+                &connector.config.filename_pattern,
+            )
             .expect("finalize");
 
         assert!(final_path.ends_with(format!("speed_{write_start_ms}_000002.json")));
@@ -1147,7 +1210,7 @@ mod tests {
         drop(tmp);
 
         let err = connector
-            .finalize_tmp_file(&tmp_path, 1, 2)
+            .finalize_tmp_file(&tmp_path, 1, 2, &connector.config.filename_pattern)
             .expect_err("existing static name must fail");
 
         assert!(err.to_string().contains("already exists"), "{err}");
@@ -1194,7 +1257,12 @@ mod tests {
         drop(tmp);
 
         let err = connector
-            .finalize_tmp_file(&tmp_path, write_start_ms, write_start_ms + 1)
+            .finalize_tmp_file(
+                &tmp_path,
+                write_start_ms,
+                write_start_ms + 1,
+                &connector.config.filename_pattern,
+            )
             .expect_err("collision without seq must fail");
         assert!(err.to_string().contains("already exists"), "{err}");
         assert_eq!(fs::read(&existing).expect("read existing"), b"existing");
@@ -1212,7 +1280,9 @@ mod tests {
         fs::write(dir.path().join("speed_1002_000001.json"), b"new").expect("new");
         fs::write(dir.path().join("other_1000_000001.json"), b"other").expect("other");
 
-        connector.apply_retention().expect("retention");
+        connector
+            .apply_retention(&connector.config.filename_pattern)
+            .expect("retention");
 
         assert!(!dir.path().join("speed_1000_000001.json").exists());
         assert!(dir.path().join("speed_1001_000001.json").exists());
@@ -1252,7 +1322,9 @@ mod tests {
             .set_modified(mid_mtime)
             .expect("set mid mtime");
 
-        connector.apply_retention().expect("retention");
+        connector
+            .apply_retention(&connector.config.filename_pattern)
+            .expect("retention");
 
         assert!(!older.exists());
         assert!(newer.exists());

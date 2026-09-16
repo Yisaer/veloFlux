@@ -2,13 +2,16 @@
 
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
+use flow::connector::sink::file::{FileRetentionConfig, FileSinkConfig};
 use flow::planner::sink::{
     CommonSinkProps, NopSinkConfig, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
     SinkEncoderConfig,
 };
 use flow::processor::{EncodedDeliveryFlags, SamplerConfig, StreamData};
-use flow::FlowInstance;
+use flow::{FlowInstance, PropertyRegistry};
 use serde_json::Value as JsonValue;
+use std::collections::BTreeMap;
+use std::fs;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
@@ -308,4 +311,80 @@ async fn shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutd
         assert!(!stats.custom.contains_key("bytes_in"));
         assert!(!stats.custom.contains_key("bytes_out"));
     }
+}
+
+#[tokio::test]
+async fn direct_pipeline_uses_instance_property_registry_for_delivery() {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    create_mock_stream(&instance, "property_stream", &["x"]).await;
+
+    let registry = PropertyRegistry::new(
+        BTreeMap::from([(
+            "vin".to_string(),
+            flow::secret::SecretString::new("VIN-INITIAL"),
+        )]),
+        true,
+    );
+    instance.set_property_registry(registry.clone());
+
+    let output_dir = tempfile::tempdir().expect("create output directory");
+    let filename_pattern = registry
+        .bind(r#"{{ prop("vin") }}.json"#)
+        .expect("bind dynamic filename");
+    let connector = PipelineSinkConnector::new(
+        "property_file_connector",
+        SinkConnectorConfig::File(FileSinkConfig {
+            sink_name: "property_file_sink".to_string(),
+            pipeline_id: "direct_property_pipeline".to_string(),
+            path: output_dir.path().to_string_lossy().into_owned(),
+            filename_pattern,
+            retention: FileRetentionConfig::default(),
+        }),
+        SinkEncoderConfig::json_with_transform_template(
+            r#"{"vin":{{ prop("vin") | json }},"x":{{ json(.row.x) }} }"#,
+        ),
+    );
+    let sink = PipelineSink::new("property_file_sink", connector);
+    let mut pipeline = instance
+        .build_pipeline("SELECT x FROM property_stream", vec![sink])
+        .expect("build direct pipeline");
+
+    registry
+        .apply_override("vin", flow::secret::SecretString::new("VIN-UPDATED"))
+        .expect("update property");
+    pipeline.start().await.expect("start pipeline");
+    pipeline
+        .send_stream_data(
+            "property_stream",
+            StreamData::bytes(br#"{"x": 1}"#.to_vec()),
+        )
+        .await
+        .expect("send pipeline input");
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if output_dir.path().join("VIN-UPDATED.json").is_file() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("dynamic output filename");
+    assert!(!output_dir.path().join("VIN-INITIAL.json").exists());
+    assert_eq!(
+        serde_json::from_slice::<JsonValue>(
+            &fs::read(output_dir.path().join("VIN-UPDATED.json")).expect("read output file")
+        )
+        .expect("decode output JSON"),
+        serde_json::json!([{"vin": "VIN-UPDATED", "x": 1}])
+    );
+
+    pipeline
+        .close(Duration::from_secs(1))
+        .await
+        .expect("close pipeline");
 }

@@ -4,8 +4,8 @@ use crate::pipeline::{
     CreatePipelineRequest, CreatePipelineResult, ExplainPipelineTarget, PipelineError,
     PipelineRuntimeFailure, PipelineSnapshot, PipelineStopMode,
 };
-use crate::processor::ProcessorPipeline;
 use crate::processor::ProcessorStatsEntry;
+use crate::processor::{ProcessorPipeline, ProcessorPipelineDependencies};
 use crate::{PipelineExplain, PipelineSink};
 use std::sync::Arc;
 
@@ -78,14 +78,34 @@ impl FlowInstance {
         sinks: Vec<PipelineSink>,
     ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
         let registries = self.pipeline_registries();
+        let property_registry = self.property_registry();
+        let sinks = sinks
+            .into_iter()
+            .map(|mut sink| {
+                sink.connector.encoder = sink
+                    .connector
+                    .encoder
+                    .clone()
+                    .with_property_registry(property_registry.clone());
+                sink
+            })
+            .collect();
+        let dependencies = ProcessorPipelineDependencies::new(
+            veloflux_metrics::default_flow_instance_id(),
+            self.mqtt_client_manager.clone(),
+            self.shared_stream_registry.clone(),
+            &registries,
+            None,
+            self.spawner.clone(),
+            property_registry,
+        );
         crate::create_pipeline(
             sql,
             sinks,
             &self.catalog,
             self.shared_stream_registry.clone(),
-            self.mqtt_client_manager.clone(),
-            self.spawner.clone(),
             &registries,
+            dependencies,
         )
     }
 }

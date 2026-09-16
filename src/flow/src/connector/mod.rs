@@ -12,7 +12,7 @@ use crate::model::Collection;
 
 pub mod memory_pubsub;
 pub mod mqtt_client;
-mod mqtt_protocol;
+pub(crate) mod mqtt_protocol;
 pub mod nng_pubsub;
 pub mod redact;
 pub mod registry;

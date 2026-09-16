@@ -66,7 +66,10 @@ impl SinkConnector for MockSinkConnector {
         Ok(())
     }
 
-    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(
+        &mut self,
+        _properties: &crate::PropertyContext,
+    ) -> Result<(), SinkConnectorError> {
         self.buffer = Some(Vec::new());
         Ok(())
     }

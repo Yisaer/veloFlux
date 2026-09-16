@@ -149,7 +149,7 @@ LF so template whitespace cannot create extra record boundaries.
 The runtime template engine is `upon`. The encoder profile exposes:
 
 - `json(value)`: render a value as a JSON literal inside the template output
-- `prop("key")`: read one process-wide static property
+- `prop("key")`: read one process-wide property
 
 For example:
 
@@ -158,9 +158,11 @@ For example:
 ```
 
 The template is compiled while the pipeline is built. `.row` is supplied for
-each encoded item, while the property snapshot is fixed for that pipeline
-build. A missing property is reported as an encoder error under the current
-sink error policy.
+each encoded item. With the local MQTT property provider enabled, the property
+snapshot is fixed at encoder delivery start and reused for every row in that
+delivery; a later delivery observes a newer revision. Without the provider, the
+initial compiled template remains fixed. A missing property is reported as an
+encoder error under the current sink error policy.
 
 ## Execution Semantics
 

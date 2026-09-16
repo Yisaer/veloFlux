@@ -12,6 +12,7 @@ mod mqtt_source;
 mod nng_pubsub_sink;
 mod nng_pubsub_source;
 mod processor;
+mod property_registry;
 mod runtime;
 mod shared_stream;
 mod shared_stream_processor;
@@ -82,6 +83,22 @@ pub fn mqtt_shared_client_errors_total() -> &'static IntCounterVec {
 
 pub fn mqtt_shared_client_reconnects_total() -> &'static IntCounterVec {
     mqtt_shared_client::reconnects_total()
+}
+
+pub fn property_registry_mqtt_connected() -> &'static IntGauge {
+    property_registry::connected()
+}
+
+pub fn property_registry_mqtt_updates_total() -> &'static IntCounterVec {
+    property_registry::updates_total()
+}
+
+pub fn property_registry_mqtt_errors_total() -> &'static IntCounterVec {
+    property_registry::errors_total()
+}
+
+pub fn property_registry_mqtt_reconnects_total() -> &'static IntCounter {
+    property_registry::reconnects_total()
 }
 
 pub fn shared_stream_running() -> &'static IntGaugeVec {

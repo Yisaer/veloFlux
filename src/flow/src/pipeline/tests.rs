@@ -80,14 +80,22 @@ fn create_pipeline_with_log_sink(
         SinkEncoderConfig::json(),
     );
     let sink = PipelineSink::new("log_sink", connector).with_forward_to_result(forward_to_result);
+    let dependencies = crate::processor::ProcessorPipelineDependencies::new(
+        veloflux_metrics::default_flow_instance_id(),
+        mqtt_client_manager,
+        Arc::clone(&shared_stream_registry),
+        registries,
+        None,
+        spawner,
+        crate::PropertyRegistry::default(),
+    );
     crate::create_pipeline(
         sql,
         vec![sink],
         catalog,
         shared_stream_registry,
-        mqtt_client_manager,
-        spawner,
         registries,
+        dependencies,
     )
 }
 

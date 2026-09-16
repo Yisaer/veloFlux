@@ -50,6 +50,10 @@ impl EmbeddedMqttBroker {
         format!("tcp://127.0.0.1:{}", self.v5_port)
     }
 
+    pub(crate) fn port(&self) -> u16 {
+        self.port
+    }
+
     pub(crate) fn scoped_filter(&self, filter: &str) -> String {
         self.scoped_topic(filter)
     }
@@ -64,6 +68,18 @@ impl EmbeddedMqttBroker {
         topic: &str,
         payload: impl Into<Vec<u8>>,
     ) -> Result<(), String> {
+        self.publish_v4(topic, payload.into(), false).await
+    }
+
+    pub(crate) async fn publish_retained(
+        &self,
+        topic: &str,
+        payload: impl Into<Vec<u8>>,
+    ) -> Result<(), String> {
+        self.publish_v4(topic, payload.into(), true).await
+    }
+
+    async fn publish_v4(&self, topic: &str, payload: Vec<u8>, retain: bool) -> Result<(), String> {
         let scoped_topic = self.scoped_topic(topic);
         let mut options = MqttOptions::new(
             format!("publisher-{}", Uuid::new_v4()),
@@ -119,7 +135,7 @@ impl EmbeddedMqttBroker {
             }
 
             client
-                .publish(scoped_topic, QoS::AtLeastOnce, false, payload.into())
+                .publish(scoped_topic, QoS::AtLeastOnce, retain, payload)
                 .await
                 .map_err(|err| err.to_string())?;
 

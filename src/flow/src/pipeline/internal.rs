@@ -283,8 +283,8 @@ impl PipelineManager {
             ExplainPipelineTarget::Definition(definition) => Arc::new(definition.clone()),
         };
 
-        let property_context = self.context.property_context();
-        let sinks = build_sinks_from_definition(definition.as_ref(), &property_context)
+        let property_registry = self.context.property_registry_handle().read().clone();
+        let sinks = build_sinks_from_definition(definition.as_ref(), &property_registry)
             .map_err(PipelineError::BuildFailure)?;
 
         let registries_snapshot = self.registries.read();
@@ -621,9 +621,9 @@ fn build_pipeline_runtime(
             Ok((stream_definitions, table_definitions, binding_entries))
         })?;
 
-        let property_context = context.property_context();
+        let property_registry = context.property_registry_handle().read().clone();
         let sinks = build_log.run_phase("build_sinks", || {
-            build_sinks_from_definition(definition, &property_context)
+            build_sinks_from_definition(definition, &property_registry)
         })?;
         let source_inputs: HashMap<String, crate::pipeline::SourceInputConfig> = definition
             .sources()
@@ -740,6 +740,7 @@ fn build_pipeline_runtime(
                     registries,
                     eventtime,
                     context.spawner().clone(),
+                    property_registry,
                 )
                 .with_pipeline_identity(definition.id(), definition.revision())
                 .with_checkpoint_store(context.checkpoint_store()),
@@ -770,14 +771,14 @@ fn build_pipeline_runtime(
 
 fn build_sinks_from_definition(
     definition: &PipelineDefinition,
-    property_context: &crate::PropertyContext,
+    property_registry: &crate::PropertyRegistry,
 ) -> Result<Vec<PipelineSink>, String> {
     let mut sinks = Vec::with_capacity(definition.sinks().len());
     for sink in definition.sinks() {
         let encoder = sink
             .encoder
             .clone()
-            .with_property_context(property_context.clone());
+            .with_property_registry(property_registry.clone());
         match sink.sink_type {
             SinkType::Mqtt => {
                 let props = match &sink.props {
@@ -1354,7 +1355,7 @@ mod file_sink_tests {
     fn file_sink_lowering_preserves_config_and_common_props() {
         let definition = file_sink_definition(SinkEncoderConfig::json());
 
-        let sinks = build_sinks_from_definition(&definition, &crate::PropertyContext::default())
+        let sinks = build_sinks_from_definition(&definition, &crate::PropertyRegistry::default())
             .expect("build sinks");
 
         assert_eq!(sinks.len(), 1);
@@ -1384,7 +1385,7 @@ mod file_sink_tests {
             JsonMap::new(),
         ));
 
-        let err = build_sinks_from_definition(&definition, &crate::PropertyContext::default())
+        let err = build_sinks_from_definition(&definition, &crate::PropertyRegistry::default())
             .expect_err("encoder none should fail");
 
         assert!(

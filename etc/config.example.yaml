@@ -2,6 +2,12 @@ properties:
   vin: "L123456789"
   site_code: "cn"
 
+# Optional runtime overrides from the local MQTT broker at 127.0.0.1:1883.
+# The final topic level is the declared property key.
+# property_registry:
+#   mqtt:
+#     topic: "$local/notification/+"
+
 logging:
   output: stdout
   level: info

@@ -37,9 +37,9 @@ and shared `libnng` requirement.
 
 ## MQTT 5 Sink Properties
 
-An MQTT sink may set `props.protocol_version` to `v5` and provide static User Properties as an
-ordered array. MQTT 3.1.1 remains the default when the version is omitted. Each value may use a
-process property template that is rendered once during pipeline apply.
+An MQTT sink may set `props.protocol_version` to `v5` and provide User Properties as an ordered
+array. MQTT 3.1.1 remains the default when the version is omitted. Each value may use a process
+property template.
 
 ```json
 {
@@ -58,11 +58,15 @@ process property template that is rendered once during pipeline apply.
 }
 ```
 
-Each item must contain string `key` and `value` fields. Keys are literal. Values support the static
+Each item must contain string `key` and `value` fields. Keys are literal. Values support the
 connector template profile, where `prop()` reads process-wide properties; `.row` and incoming MQTT
 5 User Properties are not available. Order and duplicate keys are preserved. With `connector_key`,
 omit connector-local `protocol_version`; the referenced shared MQTT client owns the version. User
 Properties require that effective shared version to be `v5`.
+
+When the local MQTT property provider is enabled, template values are resolved
+once per delivery and retries preserve that snapshot. Otherwise they are fixed
+when the pipeline is applied.
 
 ## Schedule Options
 

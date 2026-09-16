@@ -356,7 +356,7 @@ pub struct SinkEncoderConfig {
     props: JsonMap<String, JsonValue>,
     transform: Option<SinkEncoderTransformConfig>,
     proto_bundle: Option<Arc<crate::codec::ProtoDescriptorBundle>>,
-    property_context: crate::PropertyContext,
+    property_registry: Arc<crate::PropertyRegistry>,
 }
 
 impl PartialEq for SinkEncoderConfig {
@@ -447,7 +447,7 @@ impl SinkEncoderConfig {
             props,
             transform: None,
             proto_bundle: None,
-            property_context: crate::PropertyContext::default(),
+            property_registry: Arc::new(crate::PropertyRegistry::default()),
         }
     }
 
@@ -551,15 +551,15 @@ impl SinkEncoderConfig {
         self
     }
 
-    pub(crate) fn property_context(&self) -> &crate::PropertyContext {
-        &self.property_context
+    pub(crate) fn property_registry(&self) -> &crate::PropertyRegistry {
+        self.property_registry.as_ref()
     }
 
-    pub(crate) fn with_property_context(
+    pub(crate) fn with_property_registry(
         mut self,
-        property_context: crate::PropertyContext,
+        property_registry: crate::PropertyRegistry,
     ) -> Self {
-        self.property_context = property_context;
+        self.property_registry = Arc::new(property_registry);
         self
     }
 

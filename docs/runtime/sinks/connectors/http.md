@@ -51,7 +51,7 @@ Manager validates `url` as required and rejects `encoder.type=none`. Legacy HTTP
 `retry_max_attempts`, `retry_backoff_ms`, and `retry_max_backoff_ms` are still accepted as
 compatibility input and are converted to the common sink-level retry config.
 
-Ordinary header values may use static property templates:
+Ordinary header values may use process property templates:
 
 ```json
 {
@@ -100,8 +100,8 @@ parts:
 | `fields` | no | `{}` | Static text field name/value pairs |
 
 Field names and the filename are trimmed. Empty names and names containing CR, LF, or NUL are
-rejected. A text field cannot use the file field name. Text values are preserved exactly after one
-static property-template pass. Property values are not expanded recursively.
+rejected. A text field cannot use the file field name. Text values are preserved exactly after
+property-template rendering. Property values are not expanded recursively.
 
 The file part media type is always `application/octet-stream`. Multipart mode rejects both
 `props.content_type` and a `Content-Type` entry in `props.headers`; reqwest generates the request
@@ -111,6 +111,11 @@ Only header values and multipart text-field values support connector property
 templates. URL, method, content type, header names, file names, and field names
 remain static. See
 [connector property templates](../../../syntax/connectors/property_templates.md).
+
+With the local MQTT property provider enabled, all template-enabled values are
+resolved from one snapshot after the complete encoded delivery is available and
+before the first HTTP attempt. Retries preserve that snapshot. Without the
+provider, values remain fixed at pipeline apply time.
 
 ## Delivery Lifecycle
 

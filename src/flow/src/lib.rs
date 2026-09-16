@@ -20,6 +20,7 @@ pub mod pipeline;
 pub mod planner;
 pub mod processor;
 pub mod property;
+mod property_mqtt;
 mod runtime;
 pub mod secret;
 pub mod shared_stream;
@@ -94,8 +95,11 @@ pub use planner::sink::{
 };
 pub use processor::{ControlSignal, ProcessorError, StreamData};
 pub use property::{
-    validate_mqtt_publish_topic, validate_property_key, PropertyContext, PropertyTemplateError,
+    validate_mqtt_publish_topic, validate_property_key, validate_property_subscription_topic,
+    PropertyContext, PropertyRegistry, PropertyTemplateError, PropertyUpdateError,
+    PropertyUpdateResult,
 };
+pub use property_mqtt::PropertyMqttProvider;
 pub use shared_stream::{
     SharedSourceConnectorConfig, SharedStreamConfig, SharedStreamError, SharedStreamInfo,
     SharedStreamProcessorStats, SharedStreamStatus, SharedStreamSubscription,
@@ -116,7 +120,7 @@ pub fn collect_flow_instance_cpu_metrics_once() {
     instance::collect_registered_flow_instance_cpu_metrics();
 }
 
-use connector::{ConnectorRegistry, MqttClientManager};
+use connector::ConnectorRegistry;
 use explain_shared_stream::shared_stream_decode_applied_snapshot;
 use planner::logical::create_logical_plan_with_table_defs_and_source_inputs;
 use processor::processor_builder::{
@@ -348,9 +352,8 @@ pub(crate) fn create_pipeline(
     sinks: Vec<PipelineSink>,
     catalog: &Catalog,
     shared_stream_registry: Arc<SharedStreamRegistry>,
-    mqtt_client_manager: MqttClientManager,
-    spawner: crate::runtime::TaskSpawner,
     registries: &PipelineRegistries,
+    dependencies: ProcessorPipelineDependencies,
 ) -> Result<ProcessorPipeline, Box<dyn std::error::Error>> {
     tracing::info!(sql = sql, "create pipeline");
     let physical_plan = build_physical_plan_from_sql(
@@ -362,14 +365,7 @@ pub(crate) fn create_pipeline(
     )?;
     let pipeline = create_processor_pipeline(
         physical_plan,
-        ProcessorPipelineDependencies::new(
-            veloflux_metrics::default_flow_instance_id(),
-            mqtt_client_manager,
-            Arc::clone(&shared_stream_registry),
-            registries,
-            None,
-            spawner,
-        ),
+        dependencies,
         ProcessorPipelineOptions::default(),
     )?;
     Ok(pipeline)

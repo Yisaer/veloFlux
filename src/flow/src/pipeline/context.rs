@@ -27,7 +27,7 @@ pub(crate) struct PipelineContext {
     memory_pubsub_registry: MemoryPubSubRegistry,
     mock_source_handle_registry: MockSourceHandleRegistry,
     spawner: crate::runtime::TaskSpawner,
-    property_context: Arc<RwLock<crate::PropertyContext>>,
+    property_registry: Arc<RwLock<crate::PropertyRegistry>>,
     pipeline_failure_reporter: Arc<RwLock<Option<PipelineFailureReporter>>>,
     checkpoint_store: Arc<RwLock<Option<Arc<dyn CheckpointStore>>>>,
 }
@@ -47,7 +47,7 @@ impl PipelineContext {
             memory_pubsub_registry,
             mock_source_handle_registry: MockSourceHandleRegistry::default(),
             spawner,
-            property_context: Arc::new(RwLock::new(crate::PropertyContext::default())),
+            property_registry: Arc::new(RwLock::new(crate::PropertyRegistry::default())),
             pipeline_failure_reporter: Arc::new(RwLock::new(None)),
             checkpoint_store: Arc::new(RwLock::new(None)),
         }
@@ -77,12 +77,8 @@ impl PipelineContext {
         &self.spawner
     }
 
-    pub(crate) fn property_context(&self) -> crate::PropertyContext {
-        self.property_context.read().clone()
-    }
-
-    pub(crate) fn property_context_handle(&self) -> Arc<RwLock<crate::PropertyContext>> {
-        Arc::clone(&self.property_context)
+    pub(crate) fn property_registry_handle(&self) -> Arc<RwLock<crate::PropertyRegistry>> {
+        Arc::clone(&self.property_registry)
     }
 
     pub(crate) fn set_pipeline_failure_reporter(&self, reporter: PipelineFailureReporter) {

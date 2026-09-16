@@ -15,7 +15,7 @@ pub struct JsonEncoder {
     props: JsonMap<String, JsonValue>,
     output_format: JsonOutputFormat,
     omit_null_columns: bool,
-    transform: Option<Arc<JsonTemplateTransform>>,
+    transform: Option<Arc<JsonTemplateBinding>>,
     output_layout: Option<Arc<OutputLayout>>,
 }
 
@@ -77,6 +77,8 @@ struct JsonEncoderRuntime {
     is_first_row: bool,
     omit_null_columns: bool,
     transform: Option<Arc<JsonTemplateTransform>>,
+    transform_binding: Option<Arc<JsonTemplateBinding>>,
+    transform_revision: Option<u64>,
     output_layout: Option<Arc<OutputLayout>>,
 }
 
@@ -84,14 +86,24 @@ impl JsonEncoderRuntime {
     fn new(
         output_format: JsonOutputFormat,
         omit_null_columns: bool,
-        transform: Option<Arc<JsonTemplateTransform>>,
+        transform_binding: Option<Arc<JsonTemplateBinding>>,
         output_layout: Option<Arc<OutputLayout>>,
     ) -> Self {
+        let transform = transform_binding
+            .as_ref()
+            .map(|binding| Arc::clone(&binding.initial));
+        let transform_revision = transform_binding
+            .as_ref()
+            .map(|binding| binding.initial_revision);
+        let transform_binding =
+            transform_binding.filter(|binding| binding.property_registry.runtime_updates_enabled());
         Self {
             output_format,
             is_first_row: true,
             omit_null_columns,
             transform,
+            transform_binding,
+            transform_revision,
             output_layout,
         }
     }
@@ -136,6 +148,16 @@ enum NullColumnPolicy {
 
 impl SinkEncoder for JsonEncoderRuntime {
     fn begin_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
+        if let Some(binding) = &self.transform_binding {
+            let properties = binding.property_registry.snapshot();
+            if self.transform_revision != Some(properties.revision()) {
+                self.transform = Some(Arc::new(JsonTemplateTransform::compile(
+                    &binding.template,
+                    properties.clone(),
+                )?));
+                self.transform_revision = Some(properties.revision());
+            }
+        }
         self.is_first_row = true;
         match self.output_format {
             JsonOutputFormat::Array => Ok(Some(bytes::Bytes::from_static(b"["))),
@@ -336,15 +358,29 @@ fn append_tuple_json(
 
 fn json_template_transform_from_config(
     config: &SinkEncoderConfig,
-) -> Result<Option<Arc<JsonTemplateTransform>>, EncodeError> {
+) -> Result<Option<Arc<JsonTemplateBinding>>, EncodeError> {
     match config.transform() {
         Some(SinkEncoderTransformConfig::Template { template }) => {
-            JsonTemplateTransform::compile(template, config.property_context().clone())
-                .map(Arc::new)
-                .map(Some)
+            let property_registry = config.property_registry().clone();
+            let properties = property_registry.snapshot();
+            let initial_revision = properties.revision();
+            let initial = Arc::new(JsonTemplateTransform::compile(template, properties)?);
+            Ok(Some(Arc::new(JsonTemplateBinding {
+                template: template.clone(),
+                property_registry,
+                initial,
+                initial_revision,
+            })))
         }
         None => Ok(None),
     }
+}
+
+struct JsonTemplateBinding {
+    template: String,
+    property_registry: crate::PropertyRegistry,
+    initial: Arc<JsonTemplateTransform>,
+    initial_revision: u64,
 }
 
 fn number_from_f64(value: f64) -> JsonValue {
@@ -927,7 +963,7 @@ mod tests {
         let config = SinkEncoderConfig::json_with_transform_template(
             r#"{"vin":{{ prop("vin") | json }},"amount":{{ json(.row.amount) }} }"#,
         )
-        .with_property_context(properties);
+        .with_property_registry(crate::PropertyRegistry::from_context(properties));
 
         let encoder = JsonEncoder::new("json", &config).expect("encoder");
         let payload = encode_collection(&encoder, &batch);
@@ -935,6 +971,89 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<JsonValue>(&payload).expect("valid JSON"),
             serde_json::json!([{"vin": "VIN-123", "amount": 10}])
+        );
+    }
+
+    #[test]
+    fn json_encoder_transform_snapshots_properties_at_delivery_start() {
+        let batch = batch_from_columns_simple(vec![(
+            "orders".to_string(),
+            "amount".to_string(),
+            vec![Value::Int64(10)],
+        )])
+        .expect("valid batch");
+        let registry = crate::PropertyRegistry::new(
+            BTreeMap::from([(
+                "vin".to_string(),
+                SecretString::new("VIN-INITIAL".to_string()),
+            )]),
+            true,
+        );
+        let config =
+            SinkEncoderConfig::json_with_transform_template(r#"{"vin":{{ prop("vin") | json }} }"#)
+                .with_property_registry(registry.clone());
+        let encoder = JsonEncoder::new("json", &config).expect("encoder");
+        let mut runtime = test_runtime(&encoder, &batch);
+
+        runtime.begin_delivery().expect("begin first delivery");
+        registry
+            .apply_override("vin", SecretString::new("VIN-UPDATED"))
+            .expect("update vin");
+        let first = runtime
+            .append(&batch)
+            .expect("append first delivery")
+            .expect("first payload");
+        runtime.finish_delivery().expect("finish first delivery");
+
+        runtime.begin_delivery().expect("begin second delivery");
+        let second = runtime
+            .append(&batch)
+            .expect("append second delivery")
+            .expect("second payload");
+
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&first).expect("first JSON"),
+            serde_json::json!({"vin": "VIN-INITIAL"})
+        );
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&second).expect("second JSON"),
+            serde_json::json!({"vin": "VIN-UPDATED"})
+        );
+    }
+
+    #[test]
+    fn json_encoder_transform_is_fixed_for_static_registry() {
+        let batch = batch_from_columns_simple(vec![(
+            "orders".to_string(),
+            "amount".to_string(),
+            vec![Value::Int64(10)],
+        )])
+        .expect("valid batch");
+        let registry = crate::PropertyRegistry::new(
+            BTreeMap::from([(
+                "vin".to_string(),
+                SecretString::new("VIN-INITIAL".to_string()),
+            )]),
+            false,
+        );
+        let config =
+            SinkEncoderConfig::json_with_transform_template(r#"{"vin":{{ prop("vin") | json }} }"#)
+                .with_property_registry(registry.clone());
+        let encoder = JsonEncoder::new("json", &config).expect("encoder");
+        let mut runtime = test_runtime(&encoder, &batch);
+
+        registry
+            .apply_override("vin", SecretString::new("VIN-UPDATED"))
+            .expect("update registry snapshot");
+        runtime.begin_delivery().expect("begin delivery");
+        let payload = runtime
+            .append(&batch)
+            .expect("append delivery")
+            .expect("payload");
+
+        assert_eq!(
+            serde_json::from_slice::<JsonValue>(&payload).expect("valid JSON"),
+            serde_json::json!({"vin": "VIN-INITIAL"})
         );
     }
 

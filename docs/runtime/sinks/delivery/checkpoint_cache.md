@@ -73,6 +73,9 @@ Each sink records an `OperatorSnapshot` with the stable checkpoint key `sink:<si
 kind `sink`, and sink delivery-cache state version `1`. The state contains the FIFO `deliveries`
 array. Each entry contains the final payload bytes and uncertain flag. Retry progress is explicitly
 not checkpointed: attempt counts, retry deadlines, and backoff state are runtime-only information.
+Property snapshots are not checkpointed either. A restored delivery captures the current process
+properties immediately before its first connector attempt and reuses that snapshot for retries.
+The encoded payload itself is preserved unchanged and may already contain rendered property values.
 An empty cache is recorded as an empty array so the sink still participates in the final checkpoint
 generation.
 

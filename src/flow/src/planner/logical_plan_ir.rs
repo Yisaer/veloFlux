@@ -1156,7 +1156,7 @@ fn connector_to_ir(connector: &SinkConnectorConfig) -> (String, JsonValue) {
 fn connector_string_to_ir(value: &crate::ConnectorString) -> JsonValue {
     match value {
         crate::ConnectorString::Plain(value) => JsonValue::String(value.clone()),
-        crate::ConnectorString::Sensitive(_) => {
+        crate::ConnectorString::Sensitive(_) | crate::ConnectorString::Dynamic(_) => {
             serde_json::json!({ "sensitive": true })
         }
     }

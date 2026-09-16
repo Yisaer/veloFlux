@@ -102,7 +102,10 @@ impl SinkConnector for MemoryBytesSinkConnector {
         Ok(())
     }
 
-    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(
+        &mut self,
+        _properties: &crate::PropertyContext,
+    ) -> Result<(), SinkConnectorError> {
         let _ = self.ensure_publisher()?;
         self.buffer = Some(Vec::new());
         Ok(())
@@ -232,10 +235,13 @@ impl SinkConnector for MemorySinkConnector {
         }
     }
 
-    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(
+        &mut self,
+        properties: &crate::PropertyContext,
+    ) -> Result<(), SinkConnectorError> {
         match self {
-            MemorySinkConnector::Bytes(inner) => inner.start_delivery().await,
-            MemorySinkConnector::Collection(inner) => inner.start_delivery().await,
+            MemorySinkConnector::Bytes(inner) => inner.start_delivery(properties).await,
+            MemorySinkConnector::Collection(inner) => inner.start_delivery(properties).await,
         }
     }
 
@@ -297,7 +303,10 @@ mod tests {
     }
 
     async fn deliver(connector: &mut MemorySinkConnector, bytes: &[u8]) {
-        connector.start_delivery().await.expect("start delivery");
+        connector
+            .start_delivery(&crate::PropertyContext::default())
+            .await
+            .expect("start delivery");
         connector.write_chunk(bytes).await.expect("write chunk");
         connector.finish_delivery().await.expect("finish delivery");
     }
@@ -374,7 +383,7 @@ mod tests {
             .expect("collection send should succeed without subscribers");
 
         let err = connector
-            .start_delivery()
+            .start_delivery(&crate::PropertyContext::default())
             .await
             .expect_err("collection connector should reject bytes payloads");
         assert!(

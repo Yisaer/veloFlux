@@ -39,7 +39,7 @@ use crate::processor::{MetricKind, MetricSpec, ProcessorStats, ProcessorStatsHan
 use crate::runtime::TaskSpawner;
 use crate::shared_stream::{AppliedDecodeState, SharedStreamRegistry};
 use crate::stateful::StatefulFunctionRegistry;
-use crate::PipelineRegistries;
+use crate::{PipelineRegistries, PropertyRegistry};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -171,6 +171,7 @@ pub(crate) struct ProcessorPipelineDependencies {
     stateful_registry: Arc<StatefulFunctionRegistry>,
     shared_stream_registry: Arc<SharedStreamRegistry>,
     spawner: TaskSpawner,
+    property_registry: PropertyRegistry,
 
     eventtime: Option<EventtimePipelineContext>,
     merger_registry: Arc<MergerRegistry>,
@@ -187,6 +188,7 @@ impl ProcessorPipelineDependencies {
         registries: &PipelineRegistries,
         eventtime: Option<EventtimePipelineContext>,
         spawner: TaskSpawner,
+        property_registry: PropertyRegistry,
     ) -> Self {
         Self {
             flow_instance_id: flow_instance_id.into(),
@@ -198,6 +200,7 @@ impl ProcessorPipelineDependencies {
             stateful_registry: registries.stateful_registry(),
             shared_stream_registry,
             spawner,
+            property_registry,
             eventtime,
             merger_registry: registries.merger_registry(),
             checkpoint_store: None,
@@ -278,6 +281,7 @@ struct ProcessorBuilderContext {
     checkpoint_keys: HashMap<String, String>,
     output_link_kinds: HashMap<i64, LinkKind>,
     spawner: TaskSpawner,
+    property_registry: PropertyRegistry,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2233,6 +2237,7 @@ fn create_processor_from_plan_node(
                 .validate()
                 .map_err(ProcessorError::InvalidConfiguration)?;
             processor.set_retry_config(sink_plan.connector.retry.clone());
+            processor.set_property_registry(context.property_registry.clone());
             Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Sink(
                 processor,
             )))
@@ -2956,6 +2961,7 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
             checkpoint_store: None,
             checkpoint_keys: HashMap::new(),
             spawner,
+            property_registry: PropertyRegistry::default(),
         },
     )
 }
@@ -2988,6 +2994,7 @@ pub(crate) fn create_processor_pipeline(
             checkpoint_store: dependencies.checkpoint_store,
             checkpoint_keys: HashMap::new(),
             spawner: dependencies.spawner,
+            property_registry: dependencies.property_registry,
         },
     )
 }
@@ -3337,6 +3344,7 @@ mod tests {
             checkpoint_store: None,
             checkpoint_keys: HashMap::new(),
             spawner,
+            property_registry: PropertyRegistry::default(),
         };
         let result = create_processor_from_plan_node(&physical_project, &context)
             .expect("processor creation failed");

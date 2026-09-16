@@ -1,6 +1,6 @@
 use crate::server::ServerOptions;
 use flow::secret::SecretString;
-use flow::{validate_property_key, PropertyContext};
+use flow::{validate_property_key, validate_property_subscription_topic, PropertyRegistry};
 use manager::FlowInstanceSpec;
 use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
@@ -16,6 +16,7 @@ type ConfigResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 #[serde(default)]
 pub struct AppConfig {
     pub properties: PropertiesConfig,
+    pub property_registry: PropertyRegistryConfig,
     pub logging: LoggingConfig,
     pub profiling: ProfilingConfig,
     pub metrics: MetricsConfig,
@@ -26,6 +27,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             properties: PropertiesConfig::default(),
+            property_registry: PropertyRegistryConfig::default(),
             logging: LoggingConfig::default(),
             profiling: ProfilingConfig {
                 enabled: None,
@@ -51,9 +53,23 @@ impl PropertiesConfig {
         self.values.insert(key, SecretString::new(value));
     }
 
-    fn context(&self) -> PropertyContext {
-        PropertyContext::new(self.values.clone())
+    fn registry(&self, runtime_updates_enabled: bool) -> PropertyRegistry {
+        PropertyRegistry::new(self.values.clone(), runtime_updates_enabled)
     }
+}
+
+/// Optional runtime property providers.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct PropertyRegistryConfig {
+    pub mqtt: Option<PropertyRegistryMqttConfig>,
+}
+
+/// Local MQTT property provider configuration.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PropertyRegistryMqttConfig {
+    pub topic: String,
 }
 
 impl fmt::Debug for PropertiesConfig {
@@ -236,6 +252,13 @@ impl Default for ServerConfig {
 }
 
 impl AppConfig {
+    fn validate(&self) -> ConfigResult<()> {
+        if let Some(mqtt) = &self.property_registry.mqtt {
+            validate_property_subscription_topic(&mqtt.topic)?;
+        }
+        Ok(())
+    }
+
     pub fn load_required(path: impl AsRef<Path>) -> ConfigResult<Self> {
         let path = path.as_ref();
         let raw = fs::read_to_string(path)
@@ -243,6 +266,7 @@ impl AppConfig {
         let mut cfg: AppConfig = serde_yaml::from_str(&raw)
             .map_err(|err| format!("failed to parse yaml config {}: {}", path.display(), err))?;
         env::apply_env_overrides(&mut cfg)?;
+        cfg.validate()?;
         Ok(cfg)
     }
 
@@ -257,6 +281,7 @@ impl AppConfig {
     pub fn load_default_with_env() -> ConfigResult<Self> {
         let mut cfg = Self::default();
         env::apply_env_overrides(&mut cfg)?;
+        cfg.validate()?;
         Ok(cfg)
     }
 
@@ -278,7 +303,14 @@ impl AppConfig {
             opts.manager_addr = Some(addr.clone());
         }
         opts.flow_instances = self.server.flow_instances.clone();
-        opts.property_context = self.properties.context();
+        opts.property_registry = self
+            .properties
+            .registry(self.property_registry.mqtt.is_some());
+        opts.property_mqtt_topic = self
+            .property_registry
+            .mqtt
+            .as_ref()
+            .map(|mqtt| mqtt.topic.clone());
     }
 
     pub fn to_server_options(&self) -> ServerOptions {
@@ -649,5 +681,49 @@ profiling:
         assert!(err
             .to_string()
             .contains("failed to parse environment variable"));
+    }
+
+    #[test]
+    fn loads_local_mqtt_property_registry_config() {
+        let _env = EnvTestGuard::new();
+        let yaml = r#"
+properties:
+  vin: "VIN-STATIC"
+property_registry:
+  mqtt:
+    topic: "$local/notification/+"
+"#;
+        let path = unique_temp_path("property_registry_mqtt");
+        std::fs::write(&path, yaml).unwrap();
+
+        let cfg = AppConfig::load_required(&path).expect("load property registry config");
+        let opts = cfg.to_server_options();
+        assert_eq!(
+            opts.property_mqtt_topic.as_deref(),
+            Some("$local/notification/+")
+        );
+        assert!(opts.property_registry.runtime_updates_enabled());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rejects_invalid_or_excess_property_registry_config() {
+        let _env = EnvTestGuard::new();
+        for (name, yaml) in [
+            (
+                "exact_topic",
+                "property_registry:\n  mqtt:\n    topic: '$local/notification/vin'\n",
+            ),
+            (
+                "unknown_field",
+                "property_registry:\n  mqtt:\n    topic: '$local/notification/+'\n    broker: localhost\n",
+            ),
+        ] {
+            let path = unique_temp_path(name);
+            std::fs::write(&path, yaml).unwrap();
+            assert!(AppConfig::load_required(&path).is_err(), "case `{name}`");
+            let _ = std::fs::remove_file(&path);
+        }
     }
 }

@@ -99,7 +99,10 @@ impl SinkConnector for NngPubSubSinkConnector {
         self.ensure_socket().await
     }
 
-    async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+    async fn start_delivery(
+        &mut self,
+        _properties: &crate::PropertyContext,
+    ) -> Result<(), SinkConnectorError> {
         self.ensure_socket().await?;
         self.buffer = Some(Vec::new());
         Ok(())
@@ -192,7 +195,10 @@ mod tests {
         connector.ready().await.expect("ready");
         sleep(Duration::from_millis(100)).await;
 
-        connector.start_delivery().await.expect("start delivery");
+        connector
+            .start_delivery(&crate::PropertyContext::default())
+            .await
+            .expect("start delivery");
         connector
             .write_chunk(br#"{"v":1}"#)
             .await

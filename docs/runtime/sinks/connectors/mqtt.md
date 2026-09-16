@@ -39,14 +39,13 @@ MQTT sink definitions currently accept:
 - sink output config (`full` / `delta`, `omit_if_empty`, encoder transform, batching, common sink
   props)
 
-Manager validates `topic` as required. The topic may use static property
-templates such as `vehicle/{{ prop("vin") }}/telemetry`; it is rendered once
-during pipeline apply and validated as an MQTT publish topic. `broker_url` is required only when `connector_key` is
+Manager validates `topic` as required. The topic may use property templates
+such as `vehicle/{{ prop("vin") }}/telemetry`. `broker_url` is required only when `connector_key` is
 absent. `retain` defaults to `false`, and `qos` falls back to the manager default when omitted.
 
-`protocol_version` defaults to `v3`, meaning MQTT 3.1.1. Static User Properties require effective
+`protocol_version` defaults to `v3`, meaning MQTT 3.1.1. User Properties require effective
 protocol `v5`. Each entry has a literal string `key` and a string `value`. The value may use a
-process property template and is rendered once during pipeline apply:
+process property template:
 
 ```json
 {
@@ -61,8 +60,13 @@ process property template and is rendered once during pipeline apply:
 
 The array preserves declaration order and permits duplicate keys, matching MQTT 5 wire semantics.
 Keys and rendered values must satisfy MQTT UTF-8 String limits. Values use the connector property
-profile: `prop()` reads process-wide static properties, while `.row` and incoming MQTT 5 User
+profile: `prop()` reads process-wide properties, while `.row` and incoming MQTT 5 User
 Properties are unavailable. Literal values without template expressions remain unchanged.
+
+With the local MQTT property provider enabled, the topic and all User Property
+values are resolved from one snapshot after the complete payload is encoded and
+before the first publish attempt. Retries preserve that snapshot. Without the
+provider, they remain fixed at pipeline apply time.
 
 No other MQTT sink property supports connector templates. See
 [connector property templates](../../../syntax/connectors/property_templates.md).
@@ -204,7 +208,7 @@ the connector becomes ready again.
   through upstream sink-output stages.
 - Verify runtime errors are surfaced when MQTT sink is used without a bytes-producing encoder path.
 - Verify disconnect/reconnect behavior eventually restores readiness for standalone clients.
-- Verify MQTT 5 renders process property templates once and publishes User Properties in
+- Verify MQTT 5 resolves process property templates at the delivery boundary and publishes User Properties in
   declaration order, including duplicate keys.
 - Verify MQTT 3.1.1 sinks reject non-empty User Properties without changing normal v3 delivery.
 

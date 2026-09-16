@@ -32,7 +32,7 @@ the connector does not inspect rows, schema, output mode, or encoder format.
 |----------|------|----------|---------|-------------|
 | `type` | string | Yes | - | Must be `file`. |
 | `props.path` | string | Yes | - | Local output directory. |
-| `props.filename_pattern` | string | No | `"{write_start_ms}_{seq}"` | Complete final filename pattern. It may use static property templates and the runtime placeholders described below. Runtime placeholders are optional. |
+| `props.filename_pattern` | string | No | `"{write_start_ms}_{seq}"` | Complete final filename pattern. It may use property templates and the runtime placeholders described below. Runtime placeholders are optional. |
 | `props.retention.max_file_count` | integer | No | `0` | Maximum generated files to keep for this filename pattern scope. `0` disables count pruning. |
 | `props.retention.max_file_age_days` | integer | No | `0` | Maximum generated file age in days. `0` disables age pruning. |
 | `encoder.type` | string | No | `json` | Encoder kind. `none` is rejected for file sinks. |
@@ -165,7 +165,7 @@ Example of a customer-defined pattern without `{seq}`:
 }
 ```
 
-The pattern also supports process-wide static property templates:
+The pattern also supports process-wide property templates:
 
 ```json
 {
@@ -173,9 +173,13 @@ The pattern also supports process-wide static property templates:
 }
 ```
 
-Static property expressions are rendered once when the pipeline is applied. The remaining runtime
-filename pattern is validated and compiled after static rendering. `props.path` remains literal and
-is not template-enabled.
+Without a runtime property provider, property expressions are rendered when the
+pipeline is applied. With the local MQTT provider enabled, the file sink
+resolves them after the upstream batch or roll has produced a complete encoded
+delivery and before the first connector attempt. Retries preserve that value;
+the next delivery uses the latest property snapshot. The remaining runtime
+filename pattern is validated after property rendering. `props.path` remains
+literal and is not template-enabled.
 
 Rendered property values remain redacted in internal configuration,
 diagnostics, and planner IR. The resulting filename is necessarily plaintext
