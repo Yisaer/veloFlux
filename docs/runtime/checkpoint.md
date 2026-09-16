@@ -4,7 +4,8 @@
 
 The runtime barrier injection, in-memory snapshot collection, durable manifest commit, and
 independent redb-backed `CheckpointStorage` are available. File datasource snapshot and restore are
-available; concrete state support for other processors, retention, public checkpoint APIs, and
+available. Final-checkpoint sink delivery-cache snapshot, restore, and ordered replay are
+available. Concrete state support for other processors, retention, public checkpoint APIs, and
 periodic scheduling remain deferred.
 
 The current manifest uses sparse operator snapshots. Only processors that actually report state
@@ -122,8 +123,9 @@ The signal modes have the following protocol semantics:
 | `Final` | Forward the terminal barrier and exit | Pipeline terminates after checkpoint commit |
 
 When checkpointing is disabled, graceful shutdown uses one `StreamGracefulEnd` signal. When
-checkpointing is enabled, graceful shutdown uses one `Final` checkpoint barrier; it must not send
-a normal checkpoint followed by a separate `StreamGracefulEnd`.
+checkpointing is enabled, graceful shutdown prepares sources and sinks with control-channel
+barriers before sending one `Final` checkpoint barrier. It must not send a normal checkpoint
+followed by a separate `StreamGracefulEnd`.
 
 The current implementation treats checkpoint barriers as data-channel control items. Stateless
 processors forward the barrier unchanged. `Final` follows the terminal-signal behavior, causing
@@ -205,19 +207,24 @@ request is asynchronous: the connector establishes a production boundary, emits 
 `ConnectorEvent::CheckpointFence` after all payloads produced before the boundary, and returns an
 owned in-memory `CheckpointState`. The fence is an internal connector event and is not forwarded as
 a pipeline data-channel checkpoint signal. The current `FileSourceConnector` implements this
-protocol and records the source path, file mode, and each file's canonical absolute path, last
-emitted byte offset, and physical file fingerprint. Runtime read offsets and pending partial-line
-bytes are not persisted. After emitting the
-fence, the file worker may resume producing post-fence payloads. Those payloads remain ordered after
-the fence in the connector event stream.
 
-When a `DataSourceProcessor` receives a checkpoint on its data input, it stops polling its ordinary
-inputs, requests the connector boundary, and continues forwarding connector payloads. The processor
-consumes the connector event stream directly so the fence is ordered after every pre-fence payload.
-After receiving the matching fence, it records an `OperatorSnapshot` with kind `datasource` and
-state version `2`, then forwards the checkpoint. For `Continue`, it returns to its ordinary event
-loop and consumes post-fence payloads after the barrier. For `Final`, it closes the connector and
-exits. If the request, snapshot, or fence fails, the checkpoint is not forwarded.
+protocol and records the source path, file mode, and each file's last emitted byte offset and file
+identity. Runtime read offsets and pending partial-line bytes are not persisted. After emitting a
+continuing fence, the file worker may resume producing post-fence payloads. Those payloads remain
+ordered after the fence in the connector event stream. A quiescing fence stops the worker after the
+fence and state response are emitted.
+
+During graceful shutdown, `DataSourceProcessor` handles `SourceQuiesce` on the control channel by
+requesting a quiescing connector boundary and forwarding connector payloads until the matching
+fence arrives. It stages the returned state before forwarding `SourceQuiesce`. When the final
+checkpoint later arrives on the data channel, the processor records an `OperatorSnapshot` with kind
+`datasource` and state version `2` under the final checkpoint ID, forwards the checkpoint, closes
+the connector, and exits.
+
+For a continuing checkpoint, the datasource establishes and records the boundary while handling
+the data-channel checkpoint, then returns to its ordinary event loop. A direct final checkpoint
+without staged source state uses the same combined path with a quiescing fence. If the request,
+snapshot, or fence fails, the relevant barrier is not forwarded.
 
 Connectors without checkpoint-fence support reject `request_checkpoint`. A connector may return no
 snapshot only after still emitting a matching fence; this represents a fenced stateless source, not
@@ -250,6 +257,14 @@ For graceful shutdown with checkpointing enabled:
 ```text
 enter stopping state
     ↓
+inject SourceQuiesce through the control channel
+    ↓
+wait for the pipeline-tail acknowledgement
+    ↓
+inject SinkCapture through the control channel
+    ↓
+wait for the pipeline-tail acknowledgement
+    ↓
 inject Checkpoint(mode=Final)
     ↓
 processors forward the final barrier and exit
@@ -260,6 +275,21 @@ atomically commit the final checkpoint
     ↓
 finish pipeline shutdown
 ```
+
+The control-channel `SourceQuiesce` barrier first stops source ingestion, drains connector payloads
+up to a stable source fence, and stages connector-owned source state. The final data-channel barrier
+records that staged state under the final checkpoint ID. A direct final-checkpoint request without
+staged source state retains the existing combined fence-and-snapshot path.
+
+See [Source Checkpoint Quiesce](sources/checkpoint_quiesce.md).
+
+The control-channel `SinkCapture` barrier switches every sink from direct connector delivery to an
+in-memory cache. Existing control fan-in alignment and the pipeline-tail acknowledgement provide
+the synchronization point for entering capture mode. The final data-channel barrier then flushes
+all upstream encoded output into the cache. Sink snapshot and restore support are covered by the
+sink delivery checkpoint-cache design.
+
+See [Sink Delivery Checkpoint Cache](sinks/delivery/checkpoint_cache.md).
 
 The pipeline collects snapshots produced by checkpoint-aware participants before committing the
 manifest. Ordinary processors still use the default passthrough behavior. A datasource backed by

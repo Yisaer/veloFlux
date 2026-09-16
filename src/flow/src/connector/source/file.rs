@@ -1,7 +1,8 @@
 use crate::catalog::FileSourceFraming;
 use crate::checkpoint::CheckpointState;
 use crate::connector::{
-    ConnectorError, ConnectorEvent, ConnectorStream, SourceCheckpointRequest, SourceConnector,
+    ConnectorError, ConnectorEvent, ConnectorStream, SourceCheckpointMode, SourceCheckpointRequest,
+    SourceConnector,
 };
 use crate::processor::base::normalize_channel_capacity;
 use crate::runtime::TaskSpawner;
@@ -63,6 +64,7 @@ struct FileSourceRestoreState {
 enum FileSourceCommand {
     Checkpoint {
         checkpoint_id: u64,
+        mode: SourceCheckpointMode,
         response: oneshot::Sender<Result<Option<CheckpointState>, ConnectorError>>,
     },
 }
@@ -124,6 +126,7 @@ impl SourceConnector for FileSourceConnector {
     fn request_checkpoint(
         &mut self,
         checkpoint_id: u64,
+        mode: SourceCheckpointMode,
     ) -> Result<SourceCheckpointRequest, ConnectorError> {
         let checkpoint_tx = self.checkpoint_tx.as_ref().ok_or_else(|| {
             ConnectorError::Other(format!("file source `{}` is not active", self.id))
@@ -132,6 +135,7 @@ impl SourceConnector for FileSourceConnector {
         checkpoint_tx
             .send(FileSourceCommand::Checkpoint {
                 checkpoint_id,
+                mode,
                 response: response_tx,
             })
             .map_err(|_| {
@@ -434,6 +438,7 @@ fn run_file_source(
         match checkpoint_rx.try_recv() {
             Ok(FileSourceCommand::Checkpoint {
                 checkpoint_id,
+                mode,
                 response,
             }) => {
                 let result = state.snapshot();
@@ -442,6 +447,9 @@ fn run_file_source(
                         let _ = sender
                             .blocking_send(Ok(ConnectorEvent::CheckpointFence { checkpoint_id }));
                         let _ = response.send(Ok(Some(snapshot)));
+                        if mode == SourceCheckpointMode::Quiesce {
+                            return;
+                        }
                     }
                     Err(err) => {
                         let _ = sender.blocking_send(Err(err.clone()));

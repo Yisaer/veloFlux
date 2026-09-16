@@ -1258,10 +1258,10 @@ pub(super) fn attach_sources_from_catalog(
                     .with_channel_capacity(data_channel_capacity);
                     ds.add_connector(Box::new(connector));
                 }
-                StreamProps::Mock(_) => {
-                    let (connector, handle) = MockSourceConnector::new_with_channel_capacity(
+                StreamProps::Mock(props) => {
+                    let (connector, handle) = MockSourceConnector::new_scripted(
                         format!("{processor_id}_mock_source_connector"),
-                        data_channel_capacity,
+                        props.payloads.clone(),
                     );
                     let key = format!("{pipeline_id}:{stream_name}:{processor_id}");
                     context.mock_source_handle_registry().register(key, handle);

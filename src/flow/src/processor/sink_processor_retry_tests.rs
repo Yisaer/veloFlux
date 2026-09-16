@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 mod tests {
+    use super::super::ConnectorBinding;
     use crate::connector::sink::{DeliveryResult, SinkConnector, SinkConnectorError};
     use crate::planner::sink::SinkRetryConfig;
     use crate::processor::{
@@ -35,6 +36,11 @@ mod tests {
         receiver: mpsc::Receiver<Vec<u8>>,
     }
 
+    struct PendingStartConnector {
+        started: mpsc::Sender<()>,
+        abort_count: Arc<AtomicUsize>,
+    }
+
     impl RetryMockConnector {
         fn new(fail_count: usize, fail_with_kind: &'static str) -> (Self, RetryMockHandle) {
             let (sender, receiver) = mpsc::channel(16);
@@ -62,6 +68,50 @@ mod tests {
         async fn recv(&mut self) -> Option<Vec<u8>> {
             self.receiver.recv().await
         }
+    }
+
+    #[async_trait]
+    impl SinkConnector for PendingStartConnector {
+        fn id(&self) -> &str {
+            "pending_start"
+        }
+
+        async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
+            self.started
+                .send(())
+                .await
+                .map_err(|err| permanent(&err.to_string()))?;
+            std::future::pending().await
+        }
+
+        async fn abort_delivery(&mut self) {
+            self.abort_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_start_is_aborted_after_capture_cancels_attempt() {
+        let (started_tx, mut started_rx) = mpsc::channel(1);
+        let abort_count = Arc::new(AtomicUsize::new(0));
+        let connector = PendingStartConnector {
+            started: started_tx,
+            abort_count: abort_count.clone(),
+        };
+        let mut binding = ConnectorBinding {
+            connector: Box::new(connector),
+            active_delivery: false,
+        };
+
+        let mut attempt = Box::pin(binding.attempt_delivery(b"payload"));
+        tokio::select! {
+            result = &mut attempt => panic!("delivery start unexpectedly completed: {result:?}"),
+            started = started_rx.recv() => assert_eq!(started, Some(())),
+        }
+        drop(attempt);
+
+        binding.abort_active_delivery().await;
+
+        assert_eq!(abort_count.load(Ordering::Relaxed), 1);
     }
 
     #[async_trait]

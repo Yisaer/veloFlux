@@ -38,9 +38,16 @@ pub(crate) struct FileSinkConnector {
 
 struct FileDeliveryState {
     tmp_path: PathBuf,
-    file: File,
+    file: Option<File>,
     bytes_written: u64,
     write_start_ms: u128,
+}
+
+impl Drop for FileDeliveryState {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _ = fs::remove_file(&self.tmp_path);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -436,7 +443,7 @@ impl FileSinkConnector {
         let (tmp_path, file) = self.begin_tmp_file()?;
         self.current = Some(FileDeliveryState {
             tmp_path,
-            file,
+            file: Some(file),
             bytes_written: 0,
             write_start_ms,
         });
@@ -450,7 +457,13 @@ impl FileSinkConnector {
                 self.id
             )));
         };
-        state.file.write_all(bytes).map_err(|err| {
+        let file = state.file.as_mut().ok_or_else(|| {
+            SinkConnectorError::Other(format!(
+                "file sink `{}` active delivery has no temporary file",
+                self.id
+            ))
+        })?;
+        file.write_all(bytes).map_err(|err| {
             SinkConnectorError::Other(format!(
                 "file sink `{}` failed to write payload: {err}",
                 self.id
@@ -461,21 +474,27 @@ impl FileSinkConnector {
     }
 
     fn finish_delivery_blocking(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
-        let Some(state) = self.current.take() else {
+        let Some(mut state) = self.current.take() else {
             return Err(SinkConnectorError::Other(format!(
                 "file sink `{}` finished without active delivery",
                 self.id
             )));
         };
         let result = (|| {
-            state.file.sync_all().map_err(|err| {
+            let file = state.file.as_ref().ok_or_else(|| {
+                SinkConnectorError::Other(format!(
+                    "file sink `{}` active delivery has no temporary file",
+                    self.id
+                ))
+            })?;
+            file.sync_all().map_err(|err| {
                 SinkConnectorError::Other(format!(
                     "file sink `{}` failed to flush payload: {err}",
                     self.id
                 ))
             })?;
             let write_end_ms = current_epoch_millis()?;
-            drop(state.file);
+            drop(state.file.take());
             let _final_path =
                 self.finalize_tmp_file(&state.tmp_path, state.write_start_ms, write_end_ms)?;
             self.apply_retention()?;
@@ -490,10 +509,7 @@ impl FileSinkConnector {
     }
 
     fn abort_delivery_blocking(&mut self) {
-        if let Some(state) = self.current.take() {
-            drop(state.file);
-            self.abort_tmp_file(&state.tmp_path);
-        }
+        drop(self.current.take());
     }
 
     fn blocking_view(&self) -> Self {
@@ -520,6 +536,27 @@ impl FileSinkConnector {
                 ))
             })?
     }
+
+    async fn start_delivery_with_hook(
+        &mut self,
+        after_start: impl FnOnce(&Path) + Send + 'static,
+    ) -> Result<(), SinkConnectorError> {
+        let connector_id = self.id.clone();
+        let mut connector = self.blocking_view();
+        let state = Self::run_blocking(connector_id.clone(), move || {
+            connector.start_delivery_blocking()?;
+            let state = connector.current.take().ok_or_else(|| {
+                SinkConnectorError::Other(format!(
+                    "file sink `{connector_id}` started without active delivery"
+                ))
+            })?;
+            after_start(&state.tmp_path);
+            Ok(state)
+        })
+        .await?;
+        self.current = Some(state);
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -535,19 +572,7 @@ impl SinkConnector for FileSinkConnector {
     }
 
     async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
-        let connector_id = self.id.clone();
-        let mut connector = self.blocking_view();
-        let state = Self::run_blocking(connector_id.clone(), move || {
-            connector.start_delivery_blocking()?;
-            connector.current.take().ok_or_else(|| {
-                SinkConnectorError::Other(format!(
-                    "file sink `{connector_id}` started without active delivery"
-                ))
-            })
-        })
-        .await?;
-        self.current = Some(state);
-        Ok(())
+        self.start_delivery_with_hook(|_| {}).await
     }
 
     async fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), SinkConnectorError> {
@@ -915,6 +940,47 @@ mod tests {
         connector.start_delivery().await.expect("start delivery");
         connector.write_chunk(bytes).await.expect("write chunk");
         connector.finish_delivery().await.expect("finish delivery");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_start_delivery_cleans_temporary_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut connector = FileSinkConnector::new("sink_1", config(dir.path()));
+        connector.ready().await.expect("ready");
+
+        let (created_tx, created_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let start_task = tokio::spawn(async move {
+            connector
+                .start_delivery_with_hook(move |tmp_path| {
+                    created_tx
+                        .send(tmp_path.to_path_buf())
+                        .expect("report created tmp file");
+                    release_rx.recv().expect("release blocked start");
+                })
+                .await
+        });
+
+        let tmp_path = tokio::task::spawn_blocking(move || {
+            created_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("wait for tmp file creation")
+        })
+        .await
+        .expect("join tmp file wait");
+        assert!(tmp_path.exists());
+
+        start_task.abort();
+        release_tx.send(()).expect("release blocked start");
+        let _ = start_task.await;
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while tmp_path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled start should clean tmp file");
     }
 
     #[tokio::test]

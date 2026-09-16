@@ -29,6 +29,13 @@ pub type ConnectorStream =
 pub type SourceCheckpointRequest =
     Pin<Box<dyn Future<Output = Result<Option<CheckpointState>, ConnectorError>> + Send>>;
 
+/// Controls whether a source resumes production after establishing a checkpoint fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceCheckpointMode {
+    Continue,
+    Quiesce,
+}
+
 /// Events emitted by an upstream connector.
 pub enum ConnectorEvent {
     /// Binary payload received from the source.
@@ -65,14 +72,16 @@ pub trait SourceConnector: Send + Sync + 'static {
     /// Subscribe to the underlying source and obtain an async payload stream.
     fn subscribe(&mut self) -> Result<ConnectorStream, ConnectorError>;
 
-    /// Request a checkpoint boundary without stopping the connector immediately.
+    /// Request a continuing or quiescing checkpoint boundary.
     ///
-    /// The returned future resolves when the connector has stopped producing new payloads and
-    /// emitted a [`ConnectorEvent::CheckpointFence`] after all payloads produced before the
-    /// boundary.
+    /// The returned future resolves after the connector has emitted a
+    /// [`ConnectorEvent::CheckpointFence`] following all payloads produced before the boundary.
+    /// A continuing request may resume production after the fence; a quiescing request must stop
+    /// production after the fence.
     fn request_checkpoint(
         &mut self,
         _checkpoint_id: u64,
+        _mode: SourceCheckpointMode,
     ) -> Result<SourceCheckpointRequest, ConnectorError> {
         Err(ConnectorError::Other(format!(
             "source connector `{}` does not support checkpoint fences",

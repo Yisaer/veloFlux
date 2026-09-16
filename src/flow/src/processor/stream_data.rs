@@ -54,6 +54,8 @@ pub enum ControlSignal {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum BarrierControlSignalKind {
     Checkpoint { mode: CheckpointMode },
+    SourceQuiesce,
+    SinkCapture,
     StreamGracefulEnd,
     SyncTest,
 }
@@ -65,6 +67,12 @@ impl BarrierControlSignalKind {
                 checkpoint_id: barrier_id,
                 mode,
             },
+            BarrierControlSignalKind::SourceQuiesce => {
+                BarrierControlSignal::SourceQuiesce { barrier_id }
+            }
+            BarrierControlSignalKind::SinkCapture => {
+                BarrierControlSignal::SinkCapture { barrier_id }
+            }
             BarrierControlSignalKind::StreamGracefulEnd => {
                 BarrierControlSignal::StreamGracefulEnd { barrier_id }
             }
@@ -78,6 +86,12 @@ pub enum BarrierControlSignal {
     Checkpoint {
         checkpoint_id: u64,
         mode: CheckpointMode,
+    },
+    SourceQuiesce {
+        barrier_id: u64,
+    },
+    SinkCapture {
+        barrier_id: u64,
     },
     StreamGracefulEnd {
         barrier_id: u64,
@@ -95,6 +109,8 @@ impl BarrierControlSignal {
     pub fn barrier_id(&self) -> u64 {
         match self {
             BarrierControlSignal::Checkpoint { checkpoint_id, .. } => *checkpoint_id,
+            BarrierControlSignal::SourceQuiesce { barrier_id } => *barrier_id,
+            BarrierControlSignal::SinkCapture { barrier_id } => *barrier_id,
             BarrierControlSignal::StreamGracefulEnd { barrier_id } => *barrier_id,
             BarrierControlSignal::SyncTest { barrier_id } => *barrier_id,
         }
@@ -105,6 +121,8 @@ impl BarrierControlSignal {
             BarrierControlSignal::Checkpoint { mode, .. } => {
                 BarrierControlSignalKind::Checkpoint { mode: *mode }
             }
+            BarrierControlSignal::SourceQuiesce { .. } => BarrierControlSignalKind::SourceQuiesce,
+            BarrierControlSignal::SinkCapture { .. } => BarrierControlSignalKind::SinkCapture,
             BarrierControlSignal::StreamGracefulEnd { .. } => {
                 BarrierControlSignalKind::StreamGracefulEnd
             }
@@ -149,6 +167,20 @@ impl ControlSignal {
 
     pub fn is_checkpoint(&self) -> bool {
         self.checkpoint_mode().is_some()
+    }
+
+    pub fn is_sink_capture(&self) -> bool {
+        matches!(
+            self,
+            ControlSignal::Barrier(BarrierControlSignal::SinkCapture { .. })
+        )
+    }
+
+    pub fn is_source_quiesce(&self) -> bool {
+        matches!(
+            self,
+            ControlSignal::Barrier(BarrierControlSignal::SourceQuiesce { .. })
+        )
     }
 
     pub fn is_graceful_end(&self) -> bool {

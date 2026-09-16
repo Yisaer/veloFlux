@@ -8,6 +8,7 @@ This directory documents sink-side behavior in veloFlux:
 - how sink encoders are attached
 - which sink-level common properties are applied before delivery
 - how sink-level retry is handled
+- how pending encoded deliveries are captured during checkpoint-enabled graceful shutdown
 - how planner/physical plan stages are ordered near the sink boundary
 - where future sink-side output features should live
 
@@ -97,9 +98,20 @@ See also:
 - [JSON Encoder Options](encoders/json_encoder_options.md)
 - [Delivery Compression](delivery/compress.md)
 - [Delivery Encryption](delivery/encrypt.md)
+- [Sink Delivery Checkpoint Cache](delivery/checkpoint_cache.md)
 - [JSON Null Field Omission](encoders/json_null_column_omit.md)
 - [Omit If Empty](output/omit_if_empty.md)
 - [Row Diff Output](output/row_diff_output.md)
+
+## Checkpoint Capture Design
+
+The sink delivery-cache design keeps the normal delivery path unchanged. During a
+checkpoint-enabled graceful shutdown, a control-channel capture barrier first switches every
+`SinkProcessor` to an in-memory capture mode. The subsequent final data-channel checkpoint barrier
+flushes upstream encoded output into that cache, which is then included in the checkpoint and
+replayed before new sink data after restart.
+
+See [Sink Delivery Checkpoint Cache](delivery/checkpoint_cache.md).
 
 ## Current Common Sink Properties
 

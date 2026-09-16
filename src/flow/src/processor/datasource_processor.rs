@@ -3,9 +3,12 @@
 //! This processor reads data from a data source and sends it downstream as
 //! `StreamData::Bytes`. Decoding is handled by a dedicated decoder processor.
 
-use crate::checkpoint::{CheckpointMode, CheckpointSnapshotCollector, OperatorSnapshot};
+use crate::checkpoint::{
+    CheckpointMode, CheckpointSnapshotCollector, CheckpointState, OperatorSnapshot,
+};
 use crate::connector::{
-    ConnectorError, ConnectorEvent, ConnectorStream, SourceCheckpointRequest, SourceConnector,
+    ConnectorError, ConnectorEvent, ConnectorStream, SourceCheckpointMode, SourceCheckpointRequest,
+    SourceConnector,
 };
 use crate::planner::physical::DataDomain;
 use crate::processor::base::{
@@ -69,6 +72,11 @@ struct CheckpointContext<'a> {
     collector: Option<Arc<CheckpointSnapshotCollector>>,
 }
 
+struct StagedSourceCheckpoint {
+    quiesce_id: u64,
+    state: Option<CheckpointState>,
+}
+
 impl ConnectorBinding {
     fn activate(&mut self, processor_id: &str) -> Result<ConnectorStream, ProcessorError> {
         let processor_id = processor_id.to_string();
@@ -108,9 +116,10 @@ impl ConnectorBinding {
     fn request_checkpoint(
         &mut self,
         checkpoint_id: u64,
+        mode: SourceCheckpointMode,
     ) -> Result<SourceCheckpointRequest, ProcessorError> {
         self.connector
-            .request_checkpoint(checkpoint_id)
+            .request_checkpoint(checkpoint_id, mode)
             .map_err(|err| Self::connector_error(self.connector.id(), err))
     }
 
@@ -214,28 +223,14 @@ impl DataSourceProcessor {
         self.connectors.push(ConnectorBinding { connector });
     }
 
-    async fn finish_checkpoint(
-        context: CheckpointContext<'_>,
-        checkpoint_id: u64,
-        checkpoint_mode: CheckpointMode,
+    async fn finish_source_fence(
+        context: &mut CheckpointContext<'_>,
+        fence_id: u64,
         checkpoint_request: SourceCheckpointRequest,
-        checkpoint_data: StreamData,
-    ) -> Result<(), ProcessorError> {
-        let CheckpointContext {
-            processor_id,
-            checkpoint_key,
-            output,
-            channel_capacity,
-            stats,
-            data_metrics,
-            connectors,
-            connector_streams,
-            collector,
-        } = context;
+    ) -> Result<Option<CheckpointState>, ProcessorError> {
         let mut checkpoint_request = Box::pin(checkpoint_request);
         let mut snapshot = None;
         let mut snapshot_ready = false;
-        let connector_active = true;
 
         loop {
             tokio::select! {
@@ -248,35 +243,37 @@ impl DataSourceProcessor {
                     );
                     snapshot_ready = true;
                 }
-                event = connector_streams.next(), if connector_active => {
+                event = context.connector_streams.next() => {
                     match event {
                         Some(Ok(ConnectorEvent::Payload(bytes))) => {
                             Self::forward_data(
-                                processor_id,
-                                output,
-                                channel_capacity,
-                                stats,
-                                data_metrics,
+                                context.processor_id,
+                                context.output,
+                                context.channel_capacity,
+                                context.stats,
+                                context.data_metrics,
                                 StreamData::bytes(bytes),
                             )
                             .await?;
                         }
                         Some(Ok(ConnectorEvent::Collection(collection))) => {
                             Self::forward_data(
-                                processor_id,
-                                output,
-                                channel_capacity,
-                                stats,
-                                data_metrics,
+                                context.processor_id,
+                                context.output,
+                                context.channel_capacity,
+                                context.stats,
+                                context.data_metrics,
                                 StreamData::collection(collection),
                             )
                             .await?;
                         }
-                        Some(Ok(ConnectorEvent::CheckpointFence { checkpoint_id: fence_id })) => {
-                            if fence_id != checkpoint_id {
+                        Some(Ok(ConnectorEvent::CheckpointFence {
+                            checkpoint_id: received_fence_id,
+                        })) => {
+                            if received_fence_id != fence_id {
                                 return Err(ProcessorError::ProcessingError(format!(
                                     "source connector checkpoint fence mismatch: expected {}, got {}",
-                                    checkpoint_id, fence_id
+                                    fence_id, received_fence_id
                                 )));
                             }
                             let state = match snapshot.take() {
@@ -287,37 +284,7 @@ impl DataSourceProcessor {
                                         ConnectorBinding::connector_error("checkpoint", err)
                                     })?,
                             };
-                            if let Some(state) = state {
-                                let collector = collector.as_ref().ok_or_else(|| {
-                                    ProcessorError::InvalidConfiguration(
-                                        "checkpoint snapshot collector is not configured".to_string(),
-                                    )
-                                })?;
-                                collector
-                                    .record(
-                                        checkpoint_id,
-                                        OperatorSnapshot::new(
-                                            checkpoint_key,
-                                            "datasource",
-                                            DATASOURCE_CHECKPOINT_STATE_VERSION,
-                                            state,
-                                        ),
-                                    )
-                                    .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
-                            }
-                            Self::forward_data(
-                                processor_id,
-                                output,
-                                channel_capacity,
-                                stats,
-                                data_metrics,
-                                checkpoint_data,
-                            )
-                            .await?;
-                            if checkpoint_mode == CheckpointMode::Final {
-                                Self::shutdown_connectors(connectors).await?;
-                            }
-                            return Ok(());
+                            return Ok(state);
                         }
                         Some(Ok(ConnectorEvent::EndOfStream)) | None => {
                             return Err(ProcessorError::ProcessingError(
@@ -332,6 +299,57 @@ impl DataSourceProcessor {
                 }
             }
         }
+    }
+
+    fn record_checkpoint_state(
+        context: &CheckpointContext<'_>,
+        checkpoint_id: u64,
+        state: Option<CheckpointState>,
+    ) -> Result<(), ProcessorError> {
+        let Some(state) = state else {
+            return Ok(());
+        };
+        let collector = context.collector.as_ref().ok_or_else(|| {
+            ProcessorError::InvalidConfiguration(
+                "checkpoint snapshot collector is not configured".to_string(),
+            )
+        })?;
+        collector
+            .record(
+                checkpoint_id,
+                OperatorSnapshot::new(
+                    context.checkpoint_key,
+                    "datasource",
+                    DATASOURCE_CHECKPOINT_STATE_VERSION,
+                    state,
+                ),
+            )
+            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))
+    }
+
+    async fn finish_checkpoint(
+        mut context: CheckpointContext<'_>,
+        checkpoint_id: u64,
+        checkpoint_mode: CheckpointMode,
+        checkpoint_request: SourceCheckpointRequest,
+        checkpoint_data: StreamData,
+    ) -> Result<(), ProcessorError> {
+        let state =
+            Self::finish_source_fence(&mut context, checkpoint_id, checkpoint_request).await?;
+        Self::record_checkpoint_state(&context, checkpoint_id, state)?;
+        Self::forward_data(
+            context.processor_id,
+            context.output,
+            context.channel_capacity,
+            context.stats,
+            context.data_metrics,
+            checkpoint_data,
+        )
+        .await?;
+        if checkpoint_mode == CheckpointMode::Final {
+            Self::shutdown_connectors(context.connectors).await?;
+        }
+        Ok(())
     }
 
     fn activate_connectors(
@@ -463,11 +481,65 @@ impl Processor for DataSourceProcessor {
         let handle = spawner.spawn(tracing::Instrument::instrument(async move {
             let _ = ready_tx.send(Ok(()));
             let mut connectors = connectors;
+            let mut staged_source_checkpoint: Option<StagedSourceCheckpoint> = None;
             loop {
                 tokio::select! {
                     biased;
                     control_item = control_streams.next(), if control_active => {
                         if let Some(Ok(control_signal)) = control_item {
+                            if control_signal.is_source_quiesce() {
+                                if staged_source_checkpoint.is_some() {
+                                    return Err(ProcessorError::ProcessingError(
+                                        "source received duplicate SourceQuiesce"
+                                            .to_string(),
+                                    ));
+                                }
+                                if connectors.len() != 1 {
+                                    return Err(ProcessorError::InvalidConfiguration(
+                                        "data source quiesce requires exactly one connector"
+                                            .to_string(),
+                                    ));
+                                }
+                                let quiesce_id = control_signal.id();
+                                let checkpoint_request = connectors[0].request_checkpoint(
+                                    quiesce_id,
+                                    SourceCheckpointMode::Quiesce,
+                                )?;
+                                let mut context = CheckpointContext {
+                                    processor_id: &processor_id,
+                                    checkpoint_key: &checkpoint_key,
+                                    output: &output,
+                                    channel_capacity: channel_capacities.data,
+                                    stats: stats.as_ref(),
+                                    data_metrics: &data_metrics,
+                                    connectors: &mut connectors,
+                                    connector_streams: &mut connector_streams,
+                                    collector: checkpoint_snapshot_collector.clone(),
+                                };
+                                let state = Self::finish_source_fence(
+                                    &mut context,
+                                    quiesce_id,
+                                    checkpoint_request,
+                                )
+                                .await?;
+                                staged_source_checkpoint = Some(StagedSourceCheckpoint {
+                                    quiesce_id,
+                                    state,
+                                });
+                                connector_active = false;
+                                send_control_with_backpressure(
+                                    &control_output,
+                                    channel_capacities.control,
+                                    control_signal,
+                                )
+                                .await?;
+                                tracing::info!(
+                                    processor_id = %processor_id,
+                                    quiesce_id,
+                                    "source entered quiesced state"
+                                );
+                                continue;
+                            }
                             let is_terminal = control_signal.is_terminal();
                             send_control_with_backpressure(
                                 &control_output,
@@ -517,8 +589,54 @@ impl Processor for DataSourceProcessor {
                                                 .to_string(),
                                         ));
                                     }
+                                    if checkpoint_mode == CheckpointMode::Final {
+                                        if let Some(staged) = staged_source_checkpoint.take() {
+                                            let context = CheckpointContext {
+                                                processor_id: &processor_id,
+                                                checkpoint_key: &checkpoint_key,
+                                                output: &output,
+                                                channel_capacity: channel_capacities.data,
+                                                stats: stats.as_ref(),
+                                                data_metrics: &data_metrics,
+                                                connectors: &mut connectors,
+                                                connector_streams: &mut connector_streams,
+                                                collector: checkpoint_snapshot_collector.clone(),
+                                            };
+                                            Self::record_checkpoint_state(
+                                                &context,
+                                                checkpoint_id,
+                                                staged.state,
+                                            )?;
+                                            Self::forward_data(
+                                                &processor_id,
+                                                &output,
+                                                channel_capacities.data,
+                                                stats.as_ref(),
+                                                &data_metrics,
+                                                data,
+                                            )
+                                            .await?;
+                                            Self::shutdown_connectors(&mut connectors).await?;
+                                            tracing::info!(
+                                                processor_id = %processor_id,
+                                                quiesce_id = staged.quiesce_id,
+                                                checkpoint_id,
+                                                "final checkpoint completed from staged source state"
+                                            );
+                                            return Ok(());
+                                        }
+                                    } else if staged_source_checkpoint.is_some() {
+                                        return Err(ProcessorError::ProcessingError(
+                                            "source received continue checkpoint after SourceQuiesce"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    let source_mode = match checkpoint_mode {
+                                        CheckpointMode::Continue => SourceCheckpointMode::Continue,
+                                        CheckpointMode::Final => SourceCheckpointMode::Quiesce,
+                                    };
                                     let checkpoint_request = connectors[0]
-                                        .request_checkpoint(checkpoint_id)?;
+                                        .request_checkpoint(checkpoint_id, source_mode)?;
                                     Self::finish_checkpoint(
                                         CheckpointContext {
                                             processor_id: &processor_id,

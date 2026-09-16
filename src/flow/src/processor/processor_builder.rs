@@ -1612,16 +1612,42 @@ impl ProcessorPipeline {
         self.graceful_close(timeout_duration).await
     }
 
-    /// Gracefully close the pipeline by sending one final checkpoint via the data channel.
+    /// Gracefully close the pipeline by quiescing sources, capturing sinks, and sending one final
+    /// checkpoint through the data channel.
     pub async fn graceful_close(
         &mut self,
         timeout_duration: std::time::Duration,
     ) -> Result<(), ProcessorError> {
+        self.drain_unclaimed_output();
         self.supervisor_shutdown.store(true, Ordering::Release);
         let terminal_result = if self.checkpoint_enabled {
-            self.request_final_checkpoint(timeout_duration)
+            match self
+                .send_barrier_via_control_with_ack(
+                    BarrierControlSignalKind::SourceQuiesce,
+                    timeout_duration,
+                )
                 .await
-                .map(|_| ())
+            {
+                Ok(_) => {}
+                Err(err) => {
+                    self.replace_ingress_sender();
+                    self.abort_started_processors().await;
+                    return Err(err);
+                }
+            }
+            match self
+                .send_barrier_via_control_with_ack(
+                    BarrierControlSignalKind::SinkCapture,
+                    timeout_duration,
+                )
+                .await
+            {
+                Ok(_) => self
+                    .request_final_checkpoint(timeout_duration)
+                    .await
+                    .map(|_| ()),
+                Err(err) => Err(err),
+            }
         } else {
             self.send_barrier_via_data_with_ack(
                 BarrierControlSignalKind::StreamGracefulEnd,
@@ -1643,6 +1669,7 @@ impl ProcessorPipeline {
         &mut self,
         timeout_duration: std::time::Duration,
     ) -> Result<(), ProcessorError> {
+        self.drain_unclaimed_output();
         self.supervisor_shutdown.store(true, Ordering::Release);
         let _ = self
             .send_quick_end_via_control_with_ack(timeout_duration)
@@ -1655,6 +1682,14 @@ impl ProcessorPipeline {
         let (dummy_tx, _) = mpsc::channel(self.channel_capacities.control);
         let old = std::mem::replace(&mut self.ingress, dummy_tx);
         drop(old);
+    }
+
+    fn drain_unclaimed_output(&mut self) {
+        let Some(mut output) = self.output.take() else {
+            return;
+        };
+        self.spawner
+            .spawn(async move { while output.recv().await.is_some() {} });
     }
 
     async fn await_all_handles(&mut self) -> Result<(), ProcessorError> {
@@ -2165,6 +2200,12 @@ fn create_processor_from_plan_node(
                 processor_id.clone(),
                 channel_capacities,
             );
+            let checkpoint_key = context.checkpoint_keys.get(&plan_name).ok_or_else(|| {
+                ProcessorError::InvalidConfiguration(format!(
+                    "missing checkpoint key for sink `{plan_name}`"
+                ))
+            })?;
+            processor.set_checkpoint_key(checkpoint_key);
             processor.set_input_domain(plan_input_domain(
                 plan,
                 context.merger_registry()?.as_ref(),
@@ -2473,6 +2514,10 @@ fn build_checkpoint_keys(physical_plan: &Arc<PhysicalPlan>) -> HashMap<String, S
                 format!("datasource:{}:{}", source.source_name(), *occurrence),
             );
             *occurrence += 1;
+        } else if let PhysicalPlan::DataSink(sink) | PhysicalPlan::SinkConnector(sink) =
+            plan.as_ref()
+        {
+            checkpoint_keys.insert(plan_name, format!("sink:{}", sink.connector.sink_id));
         }
         for child in plan.children() {
             visit(child, visited, source_occurrences, checkpoint_keys);

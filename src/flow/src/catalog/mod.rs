@@ -251,7 +251,10 @@ impl Default for VideoReconnectConfig {
 
 /// Properties for mock-backed streams.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct MockStreamProps {}
+pub struct MockStreamProps {
+    /// Raw payloads emitted in order when the connector is subscribed.
+    pub payloads: Vec<Vec<u8>>,
+}
 
 /// Properties for history-backed streams.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

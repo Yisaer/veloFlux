@@ -1,4 +1,7 @@
 //! SinkProcessor - routes collections to SinkConnectors and forwards results.
+use crate::checkpoint::{
+    CheckpointMode, CheckpointSnapshotCollector, CheckpointState, OperatorSnapshot,
+};
 use crate::connector::{SinkConnector, SinkConnectorError};
 use crate::model::Collection;
 use crate::planner::physical::DataDomain;
@@ -10,12 +13,14 @@ use crate::processor::base::{
 };
 use crate::processor::data_metrics::SinkMetrics;
 use crate::processor::{
-    ControlSignal, EncodedDeliveryFlags, Processor, ProcessorError, ProcessorStart, ProcessorStats,
-    StreamData,
+    BarrierControlSignal, ControlSignal, EncodedDeliveryFlags, Processor, ProcessorError,
+    ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
 use bytes::Bytes;
 use futures::stream::StreamExt;
+use std::collections::VecDeque;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -27,11 +32,21 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 mod sink_processor_retry_tests;
 
 const SINK_READY_TIMEOUT: Duration = Duration::from_secs(2);
+const SINK_CHECKPOINT_OPERATOR_KIND: &str = "sink";
+const SINK_CHECKPOINT_STATE_VERSION: u32 = 1;
 
 enum ControlAction {
     Continue,
+    Capture(ControlSignal),
     Deactivate,
     Terminal(ControlSignal),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SinkDeliveryMode {
+    Running,
+    Replaying,
+    Capturing,
 }
 
 struct CompletedDelivery {
@@ -134,6 +149,8 @@ struct PendingDelivery {
     attempt: usize,
     retry_at: Option<Instant>,
     backoff_ms: u64,
+    uncertain: bool,
+    from_checkpoint: bool,
 }
 
 impl PendingDelivery {
@@ -144,6 +161,8 @@ impl PendingDelivery {
             attempt: 0,
             retry_at: None,
             backoff_ms: retry_config.initial_backoff_ms,
+            uncertain: false,
+            from_checkpoint: false,
         }
     }
 }
@@ -152,6 +171,7 @@ enum DeliveryAttemptOutcome {
     Delivered,
     RetryPending,
     Dropped,
+    ReplayFailed(String),
 }
 
 struct ConnectorBinding {
@@ -191,8 +211,12 @@ impl ConnectorBinding {
     /// Attempt a full single-shot delivery: start → write_chunk(payload) → finish.
     /// On any error, aborts the delivery and returns the classified error.
     async fn attempt_delivery(&mut self, payload: &[u8]) -> Result<u64, SinkConnectorError> {
-        self.connector.start_delivery().await?;
         self.active_delivery = true;
+        if let Err(err) = self.connector.start_delivery().await {
+            self.connector.abort_delivery().await;
+            self.active_delivery = false;
+            return Err(err);
+        }
         if let Err(err) = self.connector.write_chunk(payload).await {
             self.connector.abort_delivery().await;
             self.active_delivery = false;
@@ -226,6 +250,7 @@ impl ConnectorBinding {
 /// backoff. Exhausted retries drop the delivery and processing continues.
 pub struct SinkProcessor {
     id: String,
+    checkpoint_key: String,
     inputs: Vec<LinkReceiver<StreamData>>,
     control_inputs: Vec<LinkReceiver<ControlSignal>>,
     output: LinkOutput<StreamData>,
@@ -235,6 +260,8 @@ pub struct SinkProcessor {
     forward_to_result: bool,
     stats: Arc<ProcessorStats>,
     input_domain: DataDomain,
+    checkpoint_snapshot_collector: Option<Arc<CheckpointSnapshotCollector>>,
+    restored_delivery_cache: VecDeque<PendingDelivery>,
 
     retry_config: SinkRetryConfig,
 }
@@ -256,6 +283,7 @@ impl SinkProcessor {
         );
         Self {
             id: id.into(),
+            checkpoint_key: String::new(),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -265,8 +293,20 @@ impl SinkProcessor {
             forward_to_result: false,
             stats: Arc::new(ProcessorStats::default()),
             input_domain: DataDomain::Message,
+            checkpoint_snapshot_collector: None,
+            restored_delivery_cache: VecDeque::new(),
             retry_config: SinkRetryConfig::default(),
         }
+        .with_default_checkpoint_key()
+    }
+
+    fn with_default_checkpoint_key(mut self) -> Self {
+        self.checkpoint_key.clone_from(&self.id);
+        self
+    }
+
+    pub(crate) fn set_checkpoint_key(&mut self, checkpoint_key: impl Into<String>) {
+        self.checkpoint_key = checkpoint_key.into();
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
@@ -305,6 +345,119 @@ impl SinkProcessor {
         retry_config.max_attempts.unwrap_or(1).max(1)
     }
 
+    fn checkpoint_state(deliveries: &VecDeque<PendingDelivery>) -> CheckpointState {
+        let deliveries = deliveries
+            .iter()
+            .map(|delivery| {
+                CheckpointState::Map(BTreeMap::from([
+                    (
+                        "payload".to_string(),
+                        CheckpointState::Bytes(delivery.payload.to_vec()),
+                    ),
+                    (
+                        "uncertain".to_string(),
+                        CheckpointState::Bool(delivery.uncertain),
+                    ),
+                ]))
+            })
+            .collect();
+        CheckpointState::Map(BTreeMap::from([(
+            "deliveries".to_string(),
+            CheckpointState::Array(deliveries),
+        )]))
+    }
+
+    fn validate_checkpoint_state(state: &CheckpointState) -> Result<(), ProcessorError> {
+        let CheckpointState::Map(root) = state else {
+            return Err(ProcessorError::InvalidConfiguration(
+                "sink delivery cache checkpoint state must be a map".to_string(),
+            ));
+        };
+        if root.len() != 1 {
+            return Err(ProcessorError::InvalidConfiguration(
+                "sink delivery cache checkpoint state has invalid fields".to_string(),
+            ));
+        }
+        let Some(CheckpointState::Array(deliveries)) = root.get("deliveries") else {
+            return Err(ProcessorError::InvalidConfiguration(
+                "sink delivery cache checkpoint state must contain a deliveries array".to_string(),
+            ));
+        };
+        for (index, delivery) in deliveries.iter().enumerate() {
+            let CheckpointState::Map(delivery) = delivery else {
+                return Err(ProcessorError::InvalidConfiguration(format!(
+                    "sink delivery cache entry {index} must be a map"
+                )));
+            };
+            let fields = delivery.keys().map(String::as_str).collect::<HashSet<_>>();
+            let expected = HashSet::from(["payload", "uncertain"]);
+            if fields != expected {
+                return Err(ProcessorError::InvalidConfiguration(format!(
+                    "sink delivery cache entry {index} has invalid fields"
+                )));
+            }
+            if !matches!(delivery.get("payload"), Some(CheckpointState::Bytes(_)))
+                || !matches!(delivery.get("uncertain"), Some(CheckpointState::Bool(_)))
+            {
+                return Err(ProcessorError::InvalidConfiguration(format!(
+                    "sink delivery cache entry {index} has invalid field types"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn restore_checkpoint_state(
+        state: &CheckpointState,
+        retry_config: &SinkRetryConfig,
+    ) -> Result<VecDeque<PendingDelivery>, ProcessorError> {
+        Self::validate_checkpoint_state(state)?;
+        let CheckpointState::Map(root) = state else {
+            return Err(ProcessorError::InvalidConfiguration(
+                "sink delivery cache checkpoint state must be a map".to_string(),
+            ));
+        };
+        let Some(CheckpointState::Array(deliveries)) = root.get("deliveries") else {
+            return Err(ProcessorError::InvalidConfiguration(
+                "sink delivery cache checkpoint state must contain a deliveries array".to_string(),
+            ));
+        };
+        deliveries
+            .iter()
+            .enumerate()
+            .map(|(index, delivery)| {
+                let CheckpointState::Map(delivery) = delivery else {
+                    return Err(ProcessorError::InvalidConfiguration(format!(
+                        "sink delivery cache entry {index} must be a map"
+                    )));
+                };
+                let Some(CheckpointState::Bytes(payload)) = delivery.get("payload") else {
+                    return Err(ProcessorError::InvalidConfiguration(format!(
+                        "sink delivery cache entry {index} payload must be bytes"
+                    )));
+                };
+                let Some(CheckpointState::Bool(uncertain)) = delivery.get("uncertain") else {
+                    return Err(ProcessorError::InvalidConfiguration(format!(
+                        "sink delivery cache entry {index} uncertain must be boolean"
+                    )));
+                };
+                let payload = Bytes::copy_from_slice(payload);
+                Ok(PendingDelivery {
+                    payload: payload.clone(),
+                    forward_events: vec![(
+                        EncodedDeliveryFlags::START | EncodedDeliveryFlags::END,
+                        payload,
+                    )],
+                    attempt: 0,
+                    retry_at: None,
+                    backoff_ms: retry_config.initial_backoff_ms,
+                    uncertain: *uncertain,
+                    from_checkpoint: true,
+                })
+            })
+            .collect()
+    }
+
     async fn forward_encoded_events(
         output: &LinkOutput<StreamData>,
         data_channel_capacity: usize,
@@ -335,24 +488,20 @@ impl SinkProcessor {
         Self::handle_terminal(connector).await
     }
 
-    /// Attempt to send the current payload to the connector and handle the result.
-    async fn handle_delivery_attempt(
+    /// Classify a completed connector attempt and update its retry state.
+    fn handle_delivery_attempt_result(
         processor_id: &str,
         stats: &ProcessorStats,
         connector: &mut ConnectorBinding,
         retry_config: &SinkRetryConfig,
         pending: &mut PendingDelivery,
         metrics: &SinkMetrics,
+        result: Result<u64, SinkConnectorError>,
     ) -> DeliveryAttemptOutcome {
-        pending.attempt += 1;
-        pending.retry_at = None;
-
-        let handle_start = Instant::now();
-        match connector.attempt_delivery(&pending.payload).await {
+        match result {
             Ok(bytes_written) => {
                 metrics.record_encoded_output(bytes_written);
                 connector.connector.record_message_out();
-                stats.record_handle_duration(handle_start.elapsed());
                 DeliveryAttemptOutcome::Delivered
             }
             Err(err) if pending.attempt < Self::effective_max_attempts(retry_config) => {
@@ -372,10 +521,20 @@ impl SinkProcessor {
                         .max_backoff_ms
                         .max(retry_config.initial_backoff_ms),
                 );
-                stats.record_handle_duration(handle_start.elapsed());
                 DeliveryAttemptOutcome::RetryPending
             }
             Err(err) => {
+                if pending.from_checkpoint {
+                    tracing::error!(
+                        processor_id = %processor_id,
+                        attempt = %pending.attempt,
+                        max_attempts = %Self::effective_max_attempts(retry_config),
+                        error = %err,
+                        "restored sink delivery failed, stopping replay"
+                    );
+                    stats.record_error(err.to_string());
+                    return DeliveryAttemptOutcome::ReplayFailed(err.to_string());
+                }
                 tracing::error!(
                     processor_id = %processor_id,
                     attempt = %pending.attempt,
@@ -383,7 +542,6 @@ impl SinkProcessor {
                     error = %err,
                     "sink delivery failed, dropping delivery"
                 );
-                stats.record_handle_duration(handle_start.elapsed());
                 stats.record_error(err.to_string());
                 metrics.record_dropped();
                 DeliveryAttemptOutcome::Dropped
@@ -433,6 +591,9 @@ impl SinkProcessor {
             tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
             return Ok(ControlAction::Terminal(control_signal));
         }
+        if control_signal.is_sink_capture() {
+            return Ok(ControlAction::Capture(control_signal));
+        }
         send_control_with_backpressure(control_output, control_channel_capacity, control_signal)
             .await?;
         Ok(ControlAction::Continue)
@@ -442,6 +603,50 @@ impl SinkProcessor {
 impl Processor for SinkProcessor {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn checkpoint_key(&self) -> &str {
+        &self.checkpoint_key
+    }
+
+    fn set_checkpoint_snapshot_collector(
+        &mut self,
+        collector: Option<Arc<CheckpointSnapshotCollector>>,
+    ) {
+        self.checkpoint_snapshot_collector = collector;
+    }
+
+    fn validate_checkpoint(&self, snapshot: &OperatorSnapshot) -> Result<(), ProcessorError> {
+        if snapshot.checkpoint_key != self.checkpoint_key {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "sink checkpoint key mismatch: expected {}, got {}",
+                self.checkpoint_key, snapshot.checkpoint_key
+            )));
+        }
+        if snapshot.operator_kind != SINK_CHECKPOINT_OPERATOR_KIND {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "sink checkpoint operator kind mismatch: expected {SINK_CHECKPOINT_OPERATOR_KIND}, got {}",
+                snapshot.operator_kind
+            )));
+        }
+        if snapshot.state_version != SINK_CHECKPOINT_STATE_VERSION {
+            return Err(ProcessorError::InvalidConfiguration(format!(
+                "unsupported sink delivery cache checkpoint state version: {}",
+                snapshot.state_version
+            )));
+        }
+        Self::validate_checkpoint_state(&snapshot.state)
+    }
+
+    fn restore_checkpoint(&mut self, snapshot: &OperatorSnapshot) -> Result<(), ProcessorError> {
+        self.validate_checkpoint(snapshot)?;
+        self.restored_delivery_cache =
+            Self::restore_checkpoint_state(&snapshot.state, &self.retry_config)?;
+        Ok(())
+    }
+
+    fn clear_checkpoint_restore(&mut self) {
+        self.restored_delivery_cache.clear();
     }
 
     fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
@@ -456,6 +661,9 @@ impl Processor for SinkProcessor {
         let stats = Arc::clone(&self.stats);
         let metrics = SinkMetrics::new(stats.as_ref(), self.input_domain);
         let retry_config = self.retry_config.clone();
+        let checkpoint_key = self.checkpoint_key.clone();
+        let checkpoint_snapshot_collector = self.checkpoint_snapshot_collector.clone();
+        let restored_delivery_cache = std::mem::take(&mut self.restored_delivery_cache);
 
         let Some(mut connector) = self.connector.take() else {
             return ProcessorStart::failed(
@@ -489,7 +697,22 @@ impl Processor for SinkProcessor {
                 }
             }
             let mut accumulator = DeliveryAccumulator::new();
-            let mut pending_delivery: Option<PendingDelivery> = None;
+            let mut delivery_cache = restored_delivery_cache;
+            let mut delivery_mode = if delivery_cache.is_empty() {
+                SinkDeliveryMode::Running
+            } else {
+                tracing::info!(
+                    processor_id = %processor_id,
+                    restored_deliveries = delivery_cache.len(),
+                    "sink starting checkpoint delivery replay"
+                );
+                SinkDeliveryMode::Replaying
+            };
+            let mut pending_delivery = if delivery_mode == SinkDeliveryMode::Replaying {
+                delivery_cache.pop_front()
+            } else {
+                None
+            };
             let mut parked_control_terminal: Option<ControlSignal> = None;
 
             loop {
@@ -509,7 +732,21 @@ impl Processor for SinkProcessor {
 
                 let retry_deadline = pending_delivery
                     .as_ref()
-                    .and_then(|delivery| delivery.retry_at);
+                    .and_then(|delivery| delivery.retry_at)
+                    .filter(|_| delivery_mode != SinkDeliveryMode::Capturing);
+                let attempt_ready = delivery_mode != SinkDeliveryMode::Capturing
+                    && pending_delivery
+                        .as_ref()
+                        .is_some_and(|delivery| delivery.retry_at.is_none());
+                let attempt_payload = pending_delivery
+                    .as_ref()
+                    .filter(|_| attempt_ready)
+                    .map(|delivery| delivery.payload.clone())
+                    .unwrap_or_default();
+                let next_attempt = pending_delivery
+                    .as_ref()
+                    .map_or(0, |delivery| delivery.attempt.saturating_add(1));
+                let attempt_start = Instant::now();
 
                 tokio::select! {
                     biased;
@@ -525,6 +762,28 @@ impl Processor for SinkProcessor {
 	                        .await?
 	                        {
 	                            ControlAction::Continue => {}
+	                            ControlAction::Capture(control_signal) => {
+                                    if delivery_mode != SinkDeliveryMode::Capturing {
+                                        if let Some(mut delivery) = pending_delivery.take() {
+                                            delivery.uncertain = attempt_ready || connector.active_delivery;
+                                            delivery.retry_at = None;
+                                            delivery_cache.push_front(delivery);
+                                        }
+                                        connector.abort_active_delivery().await;
+                                        delivery_mode = SinkDeliveryMode::Capturing;
+                                        tracing::info!(
+                                            processor_id = %processor_id,
+                                            cached_deliveries = delivery_cache.len(),
+                                            "sink entered delivery capture mode"
+                                        );
+                                    }
+                                    send_control_with_backpressure(
+                                        &control_output,
+                                        channel_capacities.control,
+                                        control_signal,
+                                    )
+                                    .await?;
+                                }
 	                            ControlAction::Deactivate => control_active = false,
 	                            ControlAction::Terminal(control_signal) => {
                                     control_active = false;
@@ -545,21 +804,23 @@ impl Processor for SinkProcessor {
 	                        };
 	                    }
 
-                    // ── ② retry timer — active when backoff is pending ──
-                    _ = sleep_until(retry_deadline.unwrap_or_else(Instant::now)), if retry_deadline.is_some() => {
-                        let Some(delivery) = pending_delivery.as_mut() else {
-                            continue;
-                        };
-                        match Self::handle_delivery_attempt(
+                    // ── ② active connector attempt ──
+                    attempt_result = connector.attempt_delivery(attempt_payload.as_ref()), if attempt_ready => {
+                        stats.record_handle_duration(attempt_start.elapsed());
+                        let delivery = pending_delivery
+                            .as_mut()
+                            .expect("pending delivery exists while attempt is active");
+                        delivery.attempt = next_attempt;
+                        delivery.retry_at = None;
+                        match Self::handle_delivery_attempt_result(
                             &processor_id,
                             stats.as_ref(),
                             &mut connector,
                             &retry_config,
                             delivery,
                             &metrics,
-                        )
-                        .await
-                        {
+                            attempt_result,
+                        ) {
                             DeliveryAttemptOutcome::Delivered => {
                                 let delivery = pending_delivery.take().expect("pending delivery exists");
                                 if forward_data {
@@ -571,15 +832,38 @@ impl Processor for SinkProcessor {
                                     )
                                     .await?;
                                 }
+                                if delivery_mode == SinkDeliveryMode::Replaying {
+                                    pending_delivery = delivery_cache.pop_front();
+                                    if pending_delivery.is_none() {
+                                        delivery_mode = SinkDeliveryMode::Running;
+                                        tracing::info!(
+                                            processor_id = %processor_id,
+                                            "sink checkpoint delivery replay completed"
+                                        );
+                                    }
+                                }
                             }
                             DeliveryAttemptOutcome::RetryPending => {}
                             DeliveryAttemptOutcome::Dropped => {
                                 pending_delivery = None;
                             }
+                            DeliveryAttemptOutcome::ReplayFailed(error) => {
+                                return Err(ProcessorError::ProcessingError(format!(
+                                    "restored sink delivery replay failed: {error}"
+                                )));
+                            }
                         }
                     }
 
-                    // ── ③ data — only when no delivery is pending or retrying ──
+                    // ── ③ retry timer — active when backoff is pending ──
+                    _ = sleep_until(retry_deadline.unwrap_or_else(Instant::now)), if retry_deadline.is_some() => {
+                        let Some(delivery) = pending_delivery.as_mut() else {
+                            continue;
+                        };
+                        delivery.retry_at = None;
+                    }
+
+                    // ── ④ data — only when no delivery is pending or retrying ──
                     item = input_streams.next(), if pending_delivery.is_none() => {
                         match item {
                             Some(Ok(data)) => {
@@ -612,37 +896,22 @@ impl Processor for SinkProcessor {
                                                 stats.record_handle_duration(handle_start.elapsed());
                                                 metrics.record_encoded_message_in();
                                                 connector.connector.record_message_in();
-                                                let mut delivery = PendingDelivery::new(completed, &retry_config);
-                                                match Self::handle_delivery_attempt(
-                                                    &processor_id,
-                                                    stats.as_ref(),
-                                                    &mut connector,
-                                                    &retry_config,
-                                                    &mut delivery,
-                                                    &metrics,
-                                                )
-                                                .await
-                                                {
-                                                    DeliveryAttemptOutcome::Delivered => {
-                                                        if forward_data {
-                                                            Self::forward_encoded_events(
-                                                                &output,
-                                                                channel_capacities.data,
-                                                                stats.as_ref(),
-                                                                delivery.forward_events,
-                                                            )
-                                                            .await?;
-                                                        }
-                                                    }
-                                                    DeliveryAttemptOutcome::RetryPending => {
-                                                        pending_delivery = Some(delivery);
-                                                    }
-                                                    DeliveryAttemptOutcome::Dropped => {}
+                                                let delivery = PendingDelivery::new(completed, &retry_config);
+                                                if delivery_mode == SinkDeliveryMode::Capturing {
+                                                    delivery_cache.push_back(delivery);
+                                                } else {
+                                                    pending_delivery = Some(delivery);
                                                 }
                                             }
                                         }
                                     }
                                     StreamData::Collection(collection) => {
+                                        if delivery_mode == SinkDeliveryMode::Capturing {
+                                            return Err(ProcessorError::ProcessingError(
+                                                "collection-native sink delivery cannot be captured"
+                                                    .to_string(),
+                                            ));
+                                        }
                                         connector.connector.record_message_in();
                                         let handle_start = Instant::now();
                                         if let Err(err) = Self::handle_collection(&mut connector, collection.as_ref()).await {
@@ -679,6 +948,41 @@ impl Processor for SinkProcessor {
                                                 "encoded delivery protocol error: terminal received while delivery is active"
                                                     .to_string(),
                                             ));
+                                        }
+                                        if let StreamData::Control(ControlSignal::Barrier(
+                                            BarrierControlSignal::Checkpoint {
+                                                checkpoint_id,
+                                                mode: CheckpointMode::Final,
+                                            },
+                                        )) = &data
+                                        {
+                                            if delivery_mode != SinkDeliveryMode::Capturing {
+                                                return Err(ProcessorError::ProcessingError(
+                                                    "sink received final checkpoint before entering capture mode"
+                                                        .to_string(),
+                                                ));
+                                            }
+                                            let collector = checkpoint_snapshot_collector
+                                                .as_ref()
+                                                .ok_or_else(|| {
+                                                    ProcessorError::InvalidConfiguration(
+                                                        "checkpoint snapshot collector is not configured"
+                                                            .to_string(),
+                                                    )
+                                                })?;
+                                            collector
+                                                .record(
+                                                    *checkpoint_id,
+                                                    OperatorSnapshot::new(
+                                                        &checkpoint_key,
+                                                        SINK_CHECKPOINT_OPERATOR_KIND,
+                                                        SINK_CHECKPOINT_STATE_VERSION,
+                                                        Self::checkpoint_state(&delivery_cache),
+                                                    ),
+                                                )
+                                                .map_err(|err| {
+                                                    ProcessorError::ProcessingError(err.to_string())
+                                                })?;
                                         }
                                         send_with_backpressure(
                                             &output,

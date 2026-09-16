@@ -29,6 +29,9 @@ pub trait SinkConnector: Send + Sync + 'static {
     }
 
     /// Start a new encoded delivery.
+    ///
+    /// Implementations must clean up connector-owned resources if this future is dropped before it
+    /// completes. The sink processor may cancel it when a capture barrier interrupts delivery.
     async fn start_delivery(&mut self) -> Result<(), SinkConnectorError> {
         Err(SinkConnectorError::Other(format!(
             "connector `{}` does not support encoded delivery",

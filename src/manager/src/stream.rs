@@ -746,6 +746,12 @@ pub struct FileFramingRequest {
 
 #[derive(Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
+pub struct MockStreamPropsRequest {
+    pub payloads: Vec<String>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
 pub struct NngPubSubStreamPropsRequest {
     pub url: Option<String>,
     pub topic: Option<String>,
@@ -1793,7 +1799,19 @@ fn stream_props_value(props: &StreamProps) -> JsonValue {
             map.insert("framing".to_string(), JsonValue::Object(framing));
             JsonValue::Object(map)
         }
-        StreamProps::Mock(_) => JsonValue::Object(JsonMap::new()),
+        StreamProps::Mock(mock) => {
+            let mut map = JsonMap::new();
+            map.insert(
+                "payloads".to_string(),
+                JsonValue::Array(
+                    mock.payloads
+                        .iter()
+                        .map(|payload| JsonValue::String(String::from_utf8_lossy(payload).into()))
+                        .collect(),
+                ),
+            );
+            JsonValue::Object(map)
+        }
         StreamProps::History(_) => JsonValue::Object(JsonMap::new()),
         StreamProps::NngPubSub(nng) => {
             let mut map = JsonMap::new();
@@ -2081,7 +2099,17 @@ pub(crate) fn build_stream_props(
             .validate()?;
             Ok(StreamProps::NngPubSub(stream_props))
         }
-        "mock" => Ok(StreamProps::Mock(MockStreamProps::default())),
+        "mock" => {
+            let mock_props: MockStreamPropsRequest = serde_json::from_value(props.to_value())
+                .map_err(|err| format!("invalid mock props: {err}"))?;
+            Ok(StreamProps::Mock(MockStreamProps {
+                payloads: mock_props
+                    .payloads
+                    .into_iter()
+                    .map(String::into_bytes)
+                    .collect(),
+            }))
+        }
         other => Err(format!("unsupported stream type: {other}")),
     }
 }
