@@ -446,8 +446,7 @@ jobs:
               "$qsc_bin" \
                 -addLicenseKey "$QNX_71_LICENSE_KEY" \
                 -myqnx.user "$QNX_71_MYQNX_USER" \
-                -myqnx.password "$QNX_71_MYQNX_PASSWORD" \
-                -listLicenseKeys
+                -myqnx.password "$QNX_71_MYQNX_PASSWORD"
               qnx_license_active=true
 
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \

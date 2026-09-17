@@ -175,7 +175,7 @@ jobs:
                 exit 1
               fi
 
-              "$qsc_bin" -addLicenseKey "$QNX_LICENSE_KEY" -listLicenseKeys
+              "$qsc_bin" -addLicenseKey "$QNX_LICENSE_KEY"
               qcc -Vgcc_ntoaarch64le_cxx -E -xc /dev/null >/dev/null
 
               echo "Target cfg:"

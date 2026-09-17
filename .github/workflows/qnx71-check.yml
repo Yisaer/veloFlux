@@ -130,8 +130,7 @@ jobs:
               "$qsc_bin" \
                 -addLicenseKey "$QNX_71_LICENSE_KEY" \
                 -myqnx.user "$QNX_71_MYQNX_USER" \
-                -myqnx.password "$QNX_71_MYQNX_PASSWORD" \
-                -listLicenseKeys
+                -myqnx.password "$QNX_71_MYQNX_PASSWORD"
 
               curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
                 | sh -s -- -y --default-toolchain stable
@@ -189,7 +188,6 @@ jobs:
           set -euo pipefail
           binary="target/${QNX_TARGET_TRIPLE}/release/veloflux"
           test -x "$binary"
-          chmod +x "$binary"
           cp "$binary" tmp/veloflux-bin
           file tmp/veloflux-bin
 
