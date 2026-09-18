@@ -2,9 +2,10 @@
 
 This document describes the **Manager** REST API for managing tables.
 
-Tables are SQL relations used for finite scans. They are different from streams: a stream continuously
-subscribes to new data, while a table scan reads the available table data once and then ends the
-pipeline's data path.
+Tables are SQL relations backed by a runtime `TableProvider`. They are different from streams: a
+stream continuously subscribes to new data, while a table scan reads the available table data once
+and then ends the pipeline's data path. A provider may also expose parameterized lookup capability
+for stream-table lookup joins.
 
 > **Resource IDs.** The table `name` and a referenced `schema.ref` must match
 > `` `[A-Za-z][A-Za-z0-9_]{0,127}` ``: start with an ASCII letter, then ASCII
@@ -55,7 +56,8 @@ Notes:
 - `schema.type` selects the schema declaration format. Built-in: `json`, `proto`.
 - `schema.props` is schema-format specific (see stream schema documentation for the full type mapping).
 - Alternatively, use `schema.ref` to reference a pre-defined named schema (see `user_docs/api/schema.md`). When `schema.ref` is set, `schema.type` and `schema.props` are ignored.
-- `decoder.type` must be registered in the runtime decoder registry.
+- `decoder` is used by `history` tables to decode the Parquet payload. It is optional for
+  `memory_mock` tables, which convert the declared JSON rows directly into collection data.
 
 Response:
 
@@ -112,10 +114,10 @@ curl -s -XDELETE http://127.0.0.1:8080/tables/history_table
 |-------|------|----------|---------|-------------|
 | `name` | string | yes | - | SQL-visible table name. |
 | `revision` | number | yes | - | Positive JSON-safe resource revision. |
-| `type` | string | yes | - | Table provider type. Supported: `history`. |
+| `type` | string | yes | - | Table type. Supported: `history` and `memory_mock`. |
 | `schema` | object | yes | - | Decoded row schema. Shape matches stream schema declarations. |
 | `props` | object | no | `{}` | Table-provider configuration. |
-| `decoder` | object | no | `{"type":"json","props":{}}` | Payload decoder. Shape matches stream decoder declarations. |
+| `decoder` | object | no | `{"type":"json","props":{}}` | History payload decoder. Not required for `memory_mock`. |
 
 Unlike streams, tables do not support `shared`, `sampler`, or `eventtime`.
 
@@ -149,6 +151,38 @@ nanomq_{topic}-{start_ts}~{end_ts}_{seq}_{hash}.parquet
 The table scan reads the Parquet `data` column as bytes and decodes those bytes with the table
 decoder. The table schema must describe the decoded payload, not the raw Parquet wrapper.
 
+`type == "memory_mock"`:
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `rows` | array of objects | no | `[]` | Initial table rows converted directly into collection rows according to `schema`. |
+
+Example:
+
+```json
+{
+  "name": "vehicle_table",
+  "revision": 1,
+  "type": "memory_mock",
+  "schema": {
+    "type": "json",
+    "props": {
+      "columns": [
+        { "name": "vehicle_id", "data_type": "string" },
+        { "name": "model", "data_type": "string" },
+        { "name": "updated_at", "data_type": "int64" }
+      ]
+    }
+  },
+  "props": {
+    "rows": [
+      { "vehicle_id": "v1", "model": "sedan", "updated_at": 100 },
+      { "vehicle_id": "v2", "model": "suv", "updated_at": 200 }
+    ]
+  }
+}
+```
+
 ## Response Shapes
 
 ### `TableInfo`
@@ -181,7 +215,14 @@ Current table-scan limitations:
 - table aliases are not supported
 - stream-table joins are not supported
 - aggregate functions over table scans require `GROUP BY eoswindow()`
-- a table scan reads all matching history input currently visible to the datasource and then ends
+- a table scan reads the rows currently visible from the provider and then ends
+
+Provider note:
+
+- `TableProvider` is the only provider abstraction.
+- `HistoryTableProvider` implements `type == "history"`.
+- `MemoryMockTableProvider` implements `type == "memory_mock"` and is persisted as part of the table
+  definition, including its initial rows.
 
 ## Export / Import
 

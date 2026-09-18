@@ -1,4 +1,5 @@
 use crate::processor::SamplerConfig;
+use crate::table::provider::TableProvider;
 use datatypes::Schema;
 use parking_lot::RwLock;
 use serde_json::{Map as JsonMap, Value as JsonValue};
@@ -41,6 +42,12 @@ pub enum CatalogError {
     TableNotFound(String),
     #[error("relation name is ambiguous between stream and table: {0}")]
     AmbiguousRelation(String),
+    #[error("table provider already exists: {0}")]
+    TableProviderAlreadyExists(String),
+    #[error("table provider not found: {0}")]
+    TableProviderNotFound(String),
+    #[error("table provider schema mismatch for table: {0}")]
+    TableProviderSchemaMismatch(String),
 }
 
 /// Additional metadata associated with a stream definition.
@@ -86,6 +93,8 @@ pub enum StreamType {
 pub enum TableProps {
     /// Table backed by historical Parquet files.
     History(HistoryTableProps),
+    /// Table backed by rows declared in memory for deterministic tests.
+    MemoryMock(MemoryMockTableProps),
 }
 
 /// Supported table types recognized by the catalog.
@@ -93,18 +102,34 @@ pub enum TableProps {
 pub enum TableType {
     /// Table backed by historical Parquet files.
     History,
+    /// Table backed by rows declared in memory for deterministic tests.
+    MemoryMock,
 }
 
 /// Capabilities advertised by a table provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableCapabilities {
     pub scan: Option<TableScanCapability>,
+    pub lookup: Option<TableLookupCapability>,
 }
 
 impl TableCapabilities {
     pub fn history() -> Self {
         Self {
             scan: Some(TableScanCapability {}),
+            lookup: None,
+        }
+    }
+
+    pub fn memory_mock(equality_keys: Vec<String>) -> Self {
+        Self {
+            scan: Some(TableScanCapability {}),
+            lookup: Some(TableLookupCapability {
+                equality_keys,
+                supports_projection: true,
+                supports_predicates: true,
+                supports_time_range: true,
+            }),
         }
     }
 }
@@ -113,6 +138,15 @@ impl TableCapabilities {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableScanCapability {}
 
+/// Lookup capability metadata for a table provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableLookupCapability {
+    pub equality_keys: Vec<String>,
+    pub supports_projection: bool,
+    pub supports_predicates: bool,
+    pub supports_time_range: bool,
+}
+
 /// Properties for history-backed tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryTableProps {
@@ -120,6 +154,12 @@ pub struct HistoryTableProps {
     pub topic: String,
     pub time_column: String,
     pub batch_size: Option<usize>,
+}
+
+/// Properties for tables whose rows are declared directly in the manager API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryMockTableProps {
+    pub rows: Vec<JsonValue>,
 }
 
 impl HistoryTableProps {
@@ -443,9 +483,17 @@ impl TableDefinition {
     ) -> Self {
         let table_type = match props {
             TableProps::History(_) => TableType::History,
+            TableProps::MemoryMock(_) => TableType::MemoryMock,
         };
         let capabilities = match table_type {
             TableType::History => TableCapabilities::history(),
+            TableType::MemoryMock => TableCapabilities::memory_mock(
+                schema
+                    .column_schemas()
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect(),
+            ),
         };
         Self {
             id: id.into(),
@@ -560,6 +608,7 @@ impl StreamDecoderConfig {
 pub struct Catalog {
     streams: RwLock<HashMap<String, Arc<StreamDefinition>>>,
     tables: RwLock<HashMap<String, Arc<TableDefinition>>>,
+    table_providers: RwLock<HashMap<String, Arc<dyn TableProvider>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -573,6 +622,7 @@ impl Catalog {
         Self {
             streams: RwLock::new(HashMap::new()),
             tables: RwLock::new(HashMap::new()),
+            table_providers: RwLock::new(HashMap::new()),
         }
     }
 
@@ -650,10 +700,49 @@ impl Catalog {
 
     pub fn remove_table(&self, table_id: &str) -> Result<(), CatalogError> {
         let mut guard = self.tables.write();
-        guard
+        let result = guard
             .remove(table_id)
             .map(|_| ())
-            .ok_or_else(|| CatalogError::TableNotFound(table_id.to_string()))
+            .ok_or_else(|| CatalogError::TableNotFound(table_id.to_string()));
+        if result.is_ok() {
+            self.table_providers.write().remove(table_id);
+        }
+        result
+    }
+
+    pub fn register_table_provider(
+        &self,
+        table_id: &str,
+        provider: Arc<dyn TableProvider>,
+    ) -> Result<(), CatalogError> {
+        let table = self
+            .get_table(table_id)
+            .ok_or_else(|| CatalogError::TableNotFound(table_id.to_string()))?;
+        if table.schema().as_ref() != provider.schema().as_ref() {
+            return Err(CatalogError::TableProviderSchemaMismatch(
+                table_id.to_string(),
+            ));
+        }
+        let mut providers = self.table_providers.write();
+        if providers.contains_key(table_id) {
+            return Err(CatalogError::TableProviderAlreadyExists(
+                table_id.to_string(),
+            ));
+        }
+        providers.insert(table_id.to_string(), provider);
+        Ok(())
+    }
+
+    pub fn get_table_provider(&self, table_id: &str) -> Option<Arc<dyn TableProvider>> {
+        self.table_providers.read().get(table_id).cloned()
+    }
+
+    pub fn remove_table_provider(&self, table_id: &str) -> Result<(), CatalogError> {
+        self.table_providers
+            .write()
+            .remove(table_id)
+            .map(|_| ())
+            .ok_or_else(|| CatalogError::TableProviderNotFound(table_id.to_string()))
     }
 
     pub fn resolve_relation(&self, name: &str) -> Result<Option<CatalogRelation>, CatalogError> {
@@ -665,5 +754,143 @@ impl Catalog {
             (None, Some(table)) => Ok(Some(CatalogRelation::Table(table))),
             (None, None) => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Tuple;
+    use crate::table::provider::{
+        LookupRequest, LookupResponse, ScanOutput, ScanRequest, ScanResponse, TableProviderError,
+    };
+    use async_trait::async_trait;
+
+    struct TestTableProvider {
+        schema: Arc<Schema>,
+        capabilities: TableCapabilities,
+    }
+
+    #[async_trait]
+    impl TableProvider for TestTableProvider {
+        fn schema(&self) -> Arc<Schema> {
+            Arc::clone(&self.schema)
+        }
+
+        fn capabilities(&self) -> &TableCapabilities {
+            &self.capabilities
+        }
+
+        async fn scan(
+            &self,
+            _request: ScanRequest,
+            _output: ScanOutput,
+        ) -> Result<ScanResponse, TableProviderError> {
+            Ok(ScanResponse { snapshot_id: None })
+        }
+
+        async fn lookup(
+            &self,
+            _request: LookupRequest,
+        ) -> Result<LookupResponse, TableProviderError> {
+            Ok(LookupResponse {
+                rows: Vec::<Tuple>::new(),
+                snapshot_id: None,
+            })
+        }
+    }
+
+    fn table_definition(name: &str, schema: Arc<Schema>) -> TableDefinition {
+        TableDefinition::new(
+            name,
+            schema,
+            TableProps::History(HistoryTableProps::new("/tmp/history", "topic")),
+            StreamDecoderConfig::json(),
+        )
+    }
+
+    fn provider(schema: Arc<Schema>) -> Arc<dyn TableProvider> {
+        Arc::new(TestTableProvider {
+            schema,
+            capabilities: TableCapabilities {
+                scan: None,
+                lookup: Some(TableLookupCapability {
+                    equality_keys: vec!["id".to_string()],
+                    supports_projection: true,
+                    supports_predicates: true,
+                    supports_time_range: true,
+                }),
+            },
+        })
+    }
+
+    #[test]
+    fn table_provider_registration_requires_existing_table_and_matching_schema() {
+        let catalog = Catalog::new();
+        let schema = Arc::new(Schema::new(Vec::new()));
+
+        assert_eq!(
+            catalog
+                .register_table_provider("missing", provider(Arc::clone(&schema)))
+                .unwrap_err(),
+            CatalogError::TableNotFound("missing".to_string())
+        );
+
+        catalog
+            .insert_table(table_definition("table", Arc::clone(&schema)))
+            .unwrap();
+
+        let other_schema = Arc::new(Schema::new(vec![datatypes::ColumnSchema::new(
+            "table".to_string(),
+            "id".to_string(),
+            datatypes::ConcreteDatatype::Int64(datatypes::Int64Type),
+        )]));
+        assert_eq!(
+            catalog
+                .register_table_provider("table", provider(other_schema))
+                .unwrap_err(),
+            CatalogError::TableProviderSchemaMismatch("table".to_string())
+        );
+    }
+
+    #[test]
+    fn table_provider_registration_rejects_duplicates_and_removal_is_explicit() {
+        let catalog = Catalog::new();
+        let schema = Arc::new(Schema::new(Vec::new()));
+        catalog
+            .insert_table(table_definition("table", Arc::clone(&schema)))
+            .unwrap();
+        catalog
+            .register_table_provider("table", provider(Arc::clone(&schema)))
+            .unwrap();
+
+        assert_eq!(
+            catalog
+                .register_table_provider("table", provider(schema))
+                .unwrap_err(),
+            CatalogError::TableProviderAlreadyExists("table".to_string())
+        );
+        assert!(catalog.get_table_provider("table").is_some());
+        catalog.remove_table_provider("table").unwrap();
+        assert!(catalog.get_table_provider("table").is_none());
+        assert_eq!(
+            catalog.remove_table_provider("table").unwrap_err(),
+            CatalogError::TableProviderNotFound("table".to_string())
+        );
+    }
+
+    #[test]
+    fn removing_table_also_removes_its_runtime_provider() {
+        let catalog = Catalog::new();
+        let schema = Arc::new(Schema::new(Vec::new()));
+        catalog
+            .insert_table(table_definition("table", Arc::clone(&schema)))
+            .unwrap();
+        catalog
+            .register_table_provider("table", provider(schema))
+            .unwrap();
+
+        catalog.remove_table("table").unwrap();
+        assert!(catalog.get_table_provider("table").is_none());
     }
 }

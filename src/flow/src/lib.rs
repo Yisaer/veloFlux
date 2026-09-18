@@ -34,9 +34,10 @@ mod test_support;
 pub use aggregation::AggregateFunctionRegistry;
 pub use catalog::{
     Catalog, CatalogError, CatalogRelation, EventtimeDefinition, FileSourceFraming,
-    FileStreamProps, HistoryTableProps, MqttStreamProps, NngPubSubStreamProps, StreamDecoderConfig,
-    StreamDefinition, StreamProps, StreamType, TableCapabilities, TableDefinition, TableProps,
-    TableScanCapability, TableType, VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
+    FileStreamProps, HistoryTableProps, MemoryMockTableProps, MqttStreamProps,
+    NngPubSubStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps, StreamType,
+    TableCapabilities, TableDefinition, TableLookupCapability, TableProps, TableScanCapability,
+    TableType, VideoReconnectConfig, VideoRtspTransport, VideoStreamProps,
 };
 pub use checkpoint::{
     CheckpointError, CheckpointManifest, CheckpointMode, CheckpointSnapshotCollector,
@@ -105,6 +106,11 @@ pub use shared_stream::{
     SharedStreamProcessorStats, SharedStreamStatus, SharedStreamSubscription,
 };
 pub use stateful::StatefulFunctionRegistry;
+pub use table::memory::{MemoryMockTableProvider, MemoryTableBehavior};
+pub use table::provider::{
+    HistoryTableProvider, LookupFilter, LookupKey, LookupLimits, LookupRequest, LookupResponse,
+    LookupTimeRange, ScanOutput, ScanRequest, ScanResponse, TableProvider, TableProviderError,
+};
 pub use template::ConnectorString;
 
 /// Initialize process-global utilities used by the `flow` crate.
@@ -350,7 +356,7 @@ fn build_schema_binding(
 pub(crate) fn create_pipeline(
     sql: &str,
     sinks: Vec<PipelineSink>,
-    catalog: &Catalog,
+    catalog: Arc<Catalog>,
     shared_stream_registry: Arc<SharedStreamRegistry>,
     registries: &PipelineRegistries,
     dependencies: ProcessorPipelineDependencies,
@@ -359,7 +365,7 @@ pub(crate) fn create_pipeline(
     let physical_plan = build_physical_plan_from_sql(
         sql,
         sinks,
-        catalog,
+        catalog.as_ref(),
         shared_stream_registry.as_ref(),
         registries,
     )?;

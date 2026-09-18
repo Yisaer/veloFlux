@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::catalog::{TableDefinition, TableProps};
+use crate::table::provider::TableProvider;
 
 use super::{FlowInstance, FlowInstanceError};
 
@@ -10,9 +11,35 @@ impl FlowInstance {
         definition: TableDefinition,
     ) -> Result<Arc<TableDefinition>, FlowInstanceError> {
         self.validate_table_definition(&definition)?;
-        self.catalog
+        let decoder = self
+            .decoder_registry
+            .instantiate(definition.decoder(), definition.id(), definition.schema())
+            .map_err(|err| FlowInstanceError::Invalid(err.to_string()))?;
+        let provider = crate::table::create_table_provider(
+            definition.id(),
+            definition.schema(),
+            definition.props(),
+            decoder,
+        )
+        .map_err(|err| FlowInstanceError::Invalid(err.to_string()))?;
+        self.create_table_with_provider(definition, provider).await
+    }
+
+    async fn create_table_with_provider(
+        &self,
+        definition: TableDefinition,
+        provider: Arc<dyn TableProvider>,
+    ) -> Result<Arc<TableDefinition>, FlowInstanceError> {
+        self.validate_table_definition(&definition)?;
+        let created = self
+            .catalog
             .insert_table(definition)
-            .map_err(FlowInstanceError::from)
+            .map_err(FlowInstanceError::from)?;
+        if let Err(err) = self.catalog.register_table_provider(created.id(), provider) {
+            let _ = self.catalog.remove_table(created.id());
+            return Err(FlowInstanceError::from(err));
+        }
+        Ok(created)
     }
 
     pub async fn get_table(
@@ -53,6 +80,14 @@ impl FlowInstance {
                 if props.batch_size == Some(0) {
                     return Err(FlowInstanceError::Invalid(format!(
                         "table '{}' history batch_size must be greater than 0",
+                        definition.id()
+                    )));
+                }
+            }
+            TableProps::MemoryMock(props) => {
+                if props.rows.iter().any(|row| !row.is_object()) {
+                    return Err(FlowInstanceError::Invalid(format!(
+                        "table '{}' memory_mock rows must be JSON objects",
                         definition.id()
                     )));
                 }

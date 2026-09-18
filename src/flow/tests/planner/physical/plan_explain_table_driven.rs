@@ -33,7 +33,7 @@ use flow::{
     SinkConnectorConfig, SinkEncoderConfig, SinkOutputConfig, StreamDecoderConfig,
     StreamDefinition, StreamProps,
 };
-use flow::{HistoryTableProps, TableDefinition, TableProps};
+use flow::{HistoryTableProps, MemoryMockTableProps, TableDefinition, TableProps};
 use parser::parse_sql;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
@@ -44,6 +44,12 @@ use flow::pipeline::{
     EventtimeOptions, HttpBodyConfig, HttpMultipartConfig, PipelineOptions, SourceInputConfig,
 };
 use serde_json::Map as JsonMap;
+
+struct TableScanExplainCase {
+    name: &'static str,
+    sql: &'static str,
+    expected: &'static str,
+}
 
 fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     let stream_schema = Arc::new(Schema::new(vec![
@@ -319,7 +325,7 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs
 }
 
-fn setup_tables() -> HashMap<String, Arc<TableDefinition>> {
+fn setup_tables(props: TableProps) -> HashMap<String, Arc<TableDefinition>> {
     let table_name = "history_table";
     let table_schema = Arc::new(Schema::new(vec![
         ColumnSchema::new(
@@ -341,9 +347,7 @@ fn setup_tables() -> HashMap<String, Arc<TableDefinition>> {
     let table_def = TableDefinition::new(
         table_name,
         Arc::clone(&table_schema),
-        TableProps::History(
-            HistoryTableProps::new("/tmp/veloflux-history", "vehicle").with_batch_size(128),
-        ),
+        props,
         StreamDecoderConfig::json(),
     );
 
@@ -695,10 +699,14 @@ fn explain_json_result(sql: &str, sinks: Vec<PipelineSink>) -> Result<String, St
     Ok(explain.to_json().to_string())
 }
 
-fn explain_json_result_with_tables(sql: &str, sinks: Vec<PipelineSink>) -> Result<String, String> {
+fn explain_json_result_with_tables(
+    sql: &str,
+    sinks: Vec<PipelineSink>,
+    table_props: TableProps,
+) -> Result<String, String> {
     let registries = PipelineRegistries::new_with_builtin();
     let stream_defs = setup_streams();
-    let table_defs = setup_tables();
+    let table_defs = setup_tables(table_props);
 
     let select_stmt = parse_sql(sql).map_err(|err| err.to_string())?;
 
@@ -863,58 +871,92 @@ fn plan_explain_window_group_by_and_over_partition_by_table_driven() {
     }
 }
 
-#[test]
-fn plan_explain_table_scan_table_driven() {
-    struct Case {
-        name: &'static str,
-        sql: &'static str,
-        expected: &'static str,
-    }
-
+fn table_scan_explain_cases() -> Vec<TableScanExplainCase> {
     let cases = vec![
-        Case {
+        TableScanExplainCase {
             name: "select wildcard from history table",
             sql: "SELECT * FROM history_table",
             expected: r##"{"logical":{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalProject_1","info":["fields=[*]"],"operator":"PhysicalProject"}}"##,
         },
-        Case {
+        TableScanExplainCase {
             name: "select expression from filtered history table",
             sql: "SELECT speed + 1 AS next_speed FROM history_table WHERE ts > 0",
             expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Filter_1","info":["predicate=ts > 0"],"operator":"Filter"}],"id":"Project_2","info":["fields=[speed + 1 as next_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalFilter_1","info":["predicate=ts > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_2","info":["fields=[speed + 1 as next_speed]"],"operator":"PhysicalProject"}}"##,
         },
-        Case {
+        TableScanExplainCase {
             name: "eos global aggregate from history table",
             sql: "SELECT avg(speed) AS avg_speed FROM history_table GROUP BY eoswindow()",
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Window_1","info":["kind=eos"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[avg(speed) -> col_1]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as avg_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalStreamingAggregation_2","info":["calls=[avg(speed) -> col_1]","window=eos"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_3","info":["fields=[col_1 as avg_speed]"],"operator":"PhysicalProject"}}"##,
         },
-        Case {
+        TableScanExplainCase {
             name: "eos aggregate from history table with group key",
             sql: "SELECT vehicle_id, avg(speed) AS avg_speed FROM history_table GROUP BY vehicle_id, eoswindow()",
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Window_1","info":["kind=eos"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[avg(speed) -> col_1]","group_by=[vehicle_id]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[vehicle_id; col_1 as avg_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalStreamingAggregation_2","info":["calls=[avg(speed) -> col_1]","group_by=[vehicle_id]","window=eos"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_3","info":["fields=[vehicle_id; col_1 as avg_speed]"],"operator":"PhysicalProject"}}"##,
         },
-        Case {
+        TableScanExplainCase {
             name: "where and eos window filter keep separate filter stages",
             sql: "SELECT avg(speed) AS avg_speed FROM history_table WHERE ts > 0 GROUP BY eoswindow() FILTER (WHERE speed > 0)",
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Filter_1","info":["predicate=speed > 0"],"operator":"Filter"}],"id":"Window_2","info":["kind=eos"],"operator":"Window"}],"id":"Aggregation_3","info":["aggregates=[avg(speed) -> col_1]"],"operator":"Aggregation"}],"id":"Filter_4","info":["predicate=ts > 0"],"operator":"Filter"}],"id":"Project_5","info":["fields=[col_1 as avg_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalFilter_1","info":["predicate=speed > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[avg(speed) -> col_1]","window=eos"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFilter_4","info":["predicate=ts > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_5","info":["fields=[col_1 as avg_speed]"],"operator":"PhysicalProject"}}"##,
         },
-        Case {
+        TableScanExplainCase {
             name: "eos aggregate from history table with having",
             sql: "SELECT avg(speed) AS avg_speed FROM history_table GROUP BY eoswindow() HAVING avg(speed) > 0",
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"TableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"TableScan"}],"id":"Window_1","info":["kind=eos"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[avg(speed) -> col_1]"],"operator":"Aggregation"}],"id":"Filter_3","info":["predicate=col_1 > 0"],"operator":"Filter"}],"id":"Project_4","info":["fields=[col_1 as avg_speed]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalTableScan_0","info":["table=history_table","type=History","decoder=json","schema=[ts, vehicle_id, speed]","batch_size=128"],"operator":"PhysicalTableScan"}],"id":"PhysicalStreamingAggregation_2","info":["calls=[avg(speed) -> col_1]","window=eos"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFilter_3","info":["predicate=col_1 > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_4","info":["fields=[col_1 as avg_speed]"],"operator":"PhysicalProject"}}"##,
         },
     ];
 
-    for case in cases {
-        let actual = explain_json_result_with_tables(case.sql, vec![])
-            .unwrap_or_else(|err| panic!("case `{}` failed: {err}", case.name));
+    cases
+}
+
+#[test]
+fn plan_explain_table_scan_table_driven() {
+    for case in table_scan_explain_cases() {
+        let actual = explain_json_result_with_tables(
+            case.sql,
+            vec![],
+            TableProps::History(
+                HistoryTableProps::new("/tmp/veloflux-history", "vehicle").with_batch_size(128),
+            ),
+        )
+        .unwrap_or_else(|err| panic!("case `{}` failed: {err}", case.name));
         assert_eq!(actual, case.expected, "case `{}`", case.name);
+    }
+}
+
+#[test]
+fn plan_explain_memory_mock_table_scan_table_driven() {
+    for case in table_scan_explain_cases() {
+        let actual = explain_json_result_with_tables(
+            case.sql,
+            vec![],
+            TableProps::MemoryMock(MemoryMockTableProps {
+                rows: vec![json!({
+                    "ts": 1,
+                    "vehicle_id": "v1",
+                    "speed": 10,
+                })],
+            }),
+        )
+        .unwrap_or_else(|err| panic!("case `{}` failed: {err}", case.name));
+        let expected = case
+            .expected
+            .replace("type=History", "type=MemoryMock")
+            .replace(",\"batch_size=128\"", "");
+        assert_eq!(actual, expected, "case `{}`", case.name);
     }
 }
 
 #[test]
 fn plan_explain_table_scan_rejects_aggregates() {
     let sql = "SELECT vehicle_id, avg(speed) AS avg_speed FROM history_table GROUP BY vehicle_id";
-    let err = explain_json_result_with_tables(sql, vec![]).expect_err("table agg should fail");
+    let err = explain_json_result_with_tables(
+        sql,
+        vec![],
+        TableProps::History(
+            HistoryTableProps::new("/tmp/veloflux-history", "vehicle").with_batch_size(128),
+        ),
+    )
+    .expect_err("table agg should fail");
     println!("{sql}");
     println!("{err}");
     assert!(

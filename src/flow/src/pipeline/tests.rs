@@ -68,7 +68,7 @@ fn sample_pipeline(id: &str, stream: &str) -> PipelineDefinition {
 fn create_pipeline_with_log_sink(
     sql: &str,
     forward_to_result: bool,
-    catalog: &Catalog,
+    catalog: Arc<Catalog>,
     shared_stream_registry: Arc<SharedStreamRegistry>,
     mqtt_client_manager: MqttClientManager,
     spawner: TaskSpawner,
@@ -82,6 +82,7 @@ fn create_pipeline_with_log_sink(
     let sink = PipelineSink::new("log_sink", connector).with_forward_to_result(forward_to_result);
     let dependencies = crate::processor::ProcessorPipelineDependencies::new(
         veloflux_metrics::default_flow_instance_id(),
+        Arc::clone(&catalog),
         mqtt_client_manager,
         Arc::clone(&shared_stream_registry),
         registries,
@@ -223,7 +224,7 @@ fn shared_stream_two_pipelines_project_different_columns() {
         let mut pipeline_ab = create_pipeline_with_log_sink(
             &format!("SELECT a, b FROM {stream_name}"),
             true,
-            catalog.as_ref(),
+            Arc::clone(&catalog),
             Arc::clone(&shared_stream_registry),
             mqtt_manager.clone(),
             spawner.clone(),
@@ -235,7 +236,7 @@ fn shared_stream_two_pipelines_project_different_columns() {
         let mut pipeline_bc = create_pipeline_with_log_sink(
             &format!("SELECT b, c FROM {stream_name}"),
             true,
-            catalog.as_ref(),
+            Arc::clone(&catalog),
             Arc::clone(&shared_stream_registry),
             mqtt_manager.clone(),
             spawner.clone(),
@@ -442,7 +443,7 @@ fn attach_sources_accepts_shared_stream_only_pipeline() {
         let mut pipeline = create_pipeline_with_log_sink(
             &format!("SELECT sum(value) FROM {stream_name} GROUP BY slidingwindow('ss',10)"),
             false,
-            &catalog,
+            Arc::clone(&catalog),
             Arc::clone(&registry),
             mqtt_manager.clone(),
             spawner.clone(),
@@ -516,7 +517,7 @@ fn shared_stream_pipeline_uses_full_schema_for_column_indices() {
         let mut pipeline = create_pipeline_with_log_sink(
             &format!("SELECT sum(b) FROM {stream_name} GROUP BY slidingwindow('ss',10)"),
             false,
-            &catalog,
+            Arc::clone(&catalog),
             Arc::clone(&registry),
             mqtt_manager.clone(),
             spawner.clone(),

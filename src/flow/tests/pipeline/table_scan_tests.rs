@@ -2,7 +2,7 @@ use arrow::array::{BinaryArray, Int64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch as ArrowRecordBatch;
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema, StringType, Value};
-use flow::catalog::{HistoryTableProps, StreamDecoderConfig, TableProps};
+use flow::catalog::{HistoryTableProps, MemoryMockTableProps, StreamDecoderConfig, TableProps};
 use flow::connector::{MemoryData, MemoryTopicKind, DEFAULT_MEMORY_PUBSUB_CAPACITY};
 use flow::pipeline::{MemorySinkProps, PipelineDefinition};
 use flow::{
@@ -11,8 +11,8 @@ use flow::{
 use flow::{SinkType, TableDefinition as FlowTableDefinition};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
-use serde_json::Value as JsonValue;
-use std::fs::File;
+use serde_json::{json, Value as JsonValue};
+use std::fs::{self, File};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
@@ -33,6 +33,12 @@ struct TableScanCase {
     expected_rows: usize,
     column_checks: Vec<ColumnCheck>,
     sort_by: Option<&'static str>,
+}
+
+#[derive(Clone, Copy)]
+enum TableBackend {
+    History,
+    MemoryMock,
 }
 
 fn history_table_schema(table_name: &str) -> Arc<Schema> {
@@ -86,6 +92,13 @@ fn write_history_parquet_file(dir: &TempDir, topic: &str, seq: u64, rows: &[Hist
     writer.close().expect("close history parquet writer");
 }
 
+fn write_corrupt_history_file(dir: &TempDir, topic: &str, seq: u64) {
+    let path = dir
+        .path()
+        .join(format!("nanomq_{topic}-1~1_{seq}_corrupt.parquet"));
+    fs::write(path, b"not a parquet file").expect("write corrupt history file");
+}
+
 async fn create_history_table(
     instance: &FlowInstance,
     table_name: &str,
@@ -105,6 +118,27 @@ async fn create_history_table(
         .create_table(definition)
         .await
         .expect("create history table");
+}
+
+async fn create_memory_mock_table(
+    instance: &FlowInstance,
+    table_name: &str,
+    rows: &[HistoryPayloadRow],
+) {
+    let rows = rows
+        .iter()
+        .map(|row| serde_json::from_str(row.json).expect("parse memory mock row"))
+        .collect();
+    let definition = FlowTableDefinition::new(
+        table_name.to_string(),
+        history_table_schema(table_name),
+        TableProps::MemoryMock(MemoryMockTableProps { rows }),
+        StreamDecoderConfig::json(),
+    );
+    instance
+        .create_table(definition)
+        .await
+        .expect("create memory mock table");
 }
 
 async fn collect_json_rows(
@@ -208,7 +242,7 @@ fn parse_rfc3339_epoch_micros(value: &JsonValue, field: &str) -> i128 {
     )
 }
 
-async fn run_table_scan_case(case: TableScanCase) {
+async fn run_table_scan_case(case: TableScanCase, backend: TableBackend) {
     println!("Running test: {}", case.name);
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
@@ -225,10 +259,19 @@ async fn run_table_scan_case(case: TableScanCase) {
         .expect("declare output memory topic");
 
     let table_name = "history_table";
-    let topic = "vehicle";
-    let dir = tempfile::tempdir().expect("create temp history dir");
-    write_history_parquet_file(&dir, topic, 1, &case.rows);
-    create_history_table(&instance, table_name, &dir, topic).await;
+    let _history_dir = match backend {
+        TableBackend::History => {
+            let topic = "vehicle";
+            let dir = tempfile::tempdir().expect("create temp history dir");
+            write_history_parquet_file(&dir, topic, 1, &case.rows);
+            create_history_table(&instance, table_name, &dir, topic).await;
+            Some(dir)
+        }
+        TableBackend::MemoryMock => {
+            create_memory_mock_table(&instance, table_name, &case.rows).await;
+            None
+        }
+    };
 
     let mut output = instance
         .open_memory_subscribe_bytes(&output_topic)
@@ -470,7 +513,87 @@ async fn pipeline_table_scan_table_driven() {
     ];
 
     for case in cases {
-        run_table_scan_case(case).await;
+        run_table_scan_case(case, TableBackend::History).await;
+    }
+}
+
+#[tokio::test]
+async fn pipeline_table_scan_memory_mock_table_driven() {
+    let cases = vec![
+        TableScanCase {
+            name: "select_wildcard_from_memory_mock_table",
+            sql: "SELECT * FROM history_table",
+            rows: vec![
+                HistoryPayloadRow {
+                    ts: 1,
+                    json: r#"{"ts":1,"vehicle_id":"v1","speed":10}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 2,
+                    json: r#"{"ts":2,"vehicle_id":"v2","speed":20}"#,
+                },
+            ],
+            expected_rows: 2,
+            sort_by: None,
+            column_checks: vec![
+                ColumnCheck {
+                    expected_name: "ts".to_string(),
+                    expected_values: vec![Value::Int64(1), Value::Int64(2)],
+                },
+                ColumnCheck {
+                    expected_name: "vehicle_id".to_string(),
+                    expected_values: vec![Value::String("v1".into()), Value::String("v2".into())],
+                },
+                ColumnCheck {
+                    expected_name: "speed".to_string(),
+                    expected_values: vec![Value::Int64(10), Value::Int64(20)],
+                },
+            ],
+        },
+        TableScanCase {
+            name: "select_expr_from_filtered_memory_mock_table",
+            sql: "SELECT speed + 1 AS next_speed FROM history_table WHERE ts > 1",
+            rows: vec![
+                HistoryPayloadRow {
+                    ts: 1,
+                    json: r#"{"ts":1,"vehicle_id":"v1","speed":10}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 2,
+                    json: r#"{"ts":2,"vehicle_id":"v2","speed":20}"#,
+                },
+            ],
+            expected_rows: 1,
+            sort_by: None,
+            column_checks: vec![ColumnCheck {
+                expected_name: "next_speed".to_string(),
+                expected_values: vec![Value::Int64(21)],
+            }],
+        },
+        TableScanCase {
+            name: "eos_global_incremental_avg_from_memory_mock_table",
+            sql: "SELECT avg(speed) AS avg_speed FROM history_table GROUP BY eoswindow()",
+            rows: vec![
+                HistoryPayloadRow {
+                    ts: 1,
+                    json: r#"{"ts":1,"vehicle_id":"v1","speed":10}"#,
+                },
+                HistoryPayloadRow {
+                    ts: 2,
+                    json: r#"{"ts":2,"vehicle_id":"v2","speed":20}"#,
+                },
+            ],
+            expected_rows: 1,
+            sort_by: None,
+            column_checks: vec![ColumnCheck {
+                expected_name: "avg_speed".to_string(),
+                expected_values: vec![Value::Float64(15.0)],
+            }],
+        },
+    ];
+
+    for case in cases {
+        run_table_scan_case(case, TableBackend::MemoryMock).await;
     }
 }
 
@@ -563,6 +686,87 @@ async fn table_scan_eos_window_projects_lifecycle_metadata() {
 
     match instance
         .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+    {
+        Ok(()) => {}
+        Err(PipelineError::Runtime(err)) if err.contains("Timeout waiting for data") => {}
+        Err(err) => panic!("stop table scan pipeline: {err}"),
+    }
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete table scan pipeline");
+}
+
+#[tokio::test]
+async fn table_scan_skips_corrupt_history_file_and_continues() {
+    let case_name = "table_scan_skips_corrupt_history_file_and_continues";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (_, output_topic) = make_memory_topics("pipeline_table_scan", case_name);
+    instance
+        .declare_memory_topic(
+            &output_topic,
+            MemoryTopicKind::Bytes,
+            DEFAULT_MEMORY_PUBSUB_CAPACITY,
+        )
+        .expect("declare output memory topic");
+
+    let table_name = "history_table";
+    let topic = "vehicle";
+    let dir = tempfile::tempdir().expect("create temp history dir");
+    write_corrupt_history_file(&dir, topic, 1);
+    write_history_parquet_file(
+        &dir,
+        topic,
+        2,
+        &[HistoryPayloadRow {
+            ts: 2,
+            json: r#"{"ts":2,"vehicle_id":"v2","speed":20}"#,
+        }],
+    );
+    create_history_table(&instance, table_name, &dir, topic).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+    let pipeline_id = format!("pipe_{output_topic}");
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT * FROM history_table",
+        vec![SinkDefinition::new(
+            "mem_sink",
+            SinkType::Memory,
+            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+        )],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .expect("create table scan pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .expect("start table scan pipeline");
+
+    let actual = collect_json_rows(&mut output, 1, Duration::from_secs(5)).await;
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(json!([{
+            "ts": 2,
+            "vehicle_id": "v2",
+            "speed": 20,
+        }])),
+    );
+    assert_no_extra_json_output(&mut output, Duration::from_millis(200)).await;
+
+    match instance
+        .stop_pipeline(
+            &pipeline_id,
+            PipelineStopMode::Quick,
+            Duration::from_secs(5),
+        )
         .await
     {
         Ok(()) => {}

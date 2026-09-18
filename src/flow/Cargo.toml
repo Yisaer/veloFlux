@@ -13,6 +13,7 @@ serde = { version = "1", features = ["derive"] }
 sqlparser = { version = "0.40", features = ["serde", "visitor"] }
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-stream = { version = "0.1", default-features = false, features = ["sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 async-trait = "0.1"
 futures = "0.3"
 bytes = "1"

@@ -244,9 +244,13 @@ impl PipelineManager {
     ) -> Result<PipelineSnapshot, PipelineError> {
         let pipeline_id = definition.id().to_string();
         let registries = self.registries.read();
-        let (pipeline, streams) =
-            build_pipeline_runtime(&definition, &self.catalog, &self.context, &registries)
-                .map_err(PipelineError::BuildFailure)?;
+        let (pipeline, streams) = build_pipeline_runtime(
+            &definition,
+            Arc::clone(&self.catalog),
+            &self.context,
+            &registries,
+        )
+        .map_err(PipelineError::BuildFailure)?;
         let mut guard = self.pipelines.write();
         if guard.contains_key(&pipeline_id) {
             return Err(PipelineError::AlreadyExists(pipeline_id));
@@ -318,9 +322,13 @@ impl PipelineManager {
             if entry.pipeline.is_none() {
                 let definition = Arc::clone(&entry.definition);
                 let registries = self.registries.read().clone();
-                let (pipeline, streams) =
-                    build_pipeline_runtime(&definition, &self.catalog, &self.context, &registries)
-                        .map_err(PipelineError::BuildFailure)?;
+                let (pipeline, streams) = build_pipeline_runtime(
+                    &definition,
+                    Arc::clone(&self.catalog),
+                    &self.context,
+                    &registries,
+                )
+                .map_err(PipelineError::BuildFailure)?;
                 entry.pipeline = Some(pipeline);
                 entry.streams = streams;
             }
@@ -508,7 +516,7 @@ async fn close_pipeline(
 
 fn build_pipeline_runtime(
     definition: &PipelineDefinition,
-    catalog: &Catalog,
+    catalog: Arc<Catalog>,
     context: &PipelineContext,
     registries: &PipelineRegistries,
 ) -> Result<(ProcessorPipeline, Vec<String>), String> {
@@ -735,6 +743,7 @@ fn build_pipeline_runtime(
                 optimized_plan,
                 ProcessorPipelineDependencies::new(
                     context.flow_instance_id(),
+                    Arc::clone(&catalog),
                     mqtt_client_manager.clone(),
                     Arc::clone(&shared_stream_registry),
                     registries,

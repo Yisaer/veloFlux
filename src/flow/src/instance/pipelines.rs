@@ -92,6 +92,7 @@ impl FlowInstance {
             .collect();
         let dependencies = ProcessorPipelineDependencies::new(
             veloflux_metrics::default_flow_instance_id(),
+            Arc::clone(&self.catalog),
             self.mqtt_client_manager.clone(),
             self.shared_stream_registry.clone(),
             &registries,
@@ -102,7 +103,7 @@ impl FlowInstance {
         crate::create_pipeline(
             sql,
             sinks,
-            &self.catalog,
+            Arc::clone(&self.catalog),
             self.shared_stream_registry.clone(),
             &registries,
             dependencies,

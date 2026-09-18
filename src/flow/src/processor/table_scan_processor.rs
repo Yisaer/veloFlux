@@ -1,7 +1,5 @@
 //! TableScanProcessor - bounded table scan source processor.
 
-use crate::catalog::HistoryTableProps;
-use crate::codec::RecordDecoder;
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
@@ -11,12 +9,8 @@ use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
-use crate::table::history::{
-    discover_history_files, extract_history_payloads, prune_history_files,
-    read_history_parquet_file, DEFAULT_HISTORY_BATCH_SIZE,
-};
+use crate::table::provider::{ScanOutput, ScanRequest, TableProvider};
 use futures::StreamExt;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
@@ -32,8 +26,8 @@ enum TableScanEvent {
 pub struct TableScanProcessor {
     id: String,
     table_name: String,
-    props: HistoryTableProps,
-    decoder: Arc<dyn RecordDecoder>,
+    provider: Arc<dyn TableProvider>,
+    scan_request: ScanRequest,
     inputs: Vec<LinkReceiver<StreamData>>,
     control_inputs: Vec<LinkReceiver<ControlSignal>>,
     output: LinkOutput<StreamData>,
@@ -46,8 +40,8 @@ impl TableScanProcessor {
     pub(crate) fn new_with_channel_capacities(
         id: impl Into<String>,
         table_name: impl Into<String>,
-        props: HistoryTableProps,
-        decoder: Arc<dyn RecordDecoder>,
+        provider: Arc<dyn TableProvider>,
+        scan_request: ScanRequest,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
         let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
@@ -58,8 +52,8 @@ impl TableScanProcessor {
         Self {
             id: id.into(),
             table_name: table_name.into(),
-            props,
-            decoder,
+            provider,
+            scan_request,
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -73,14 +67,13 @@ impl TableScanProcessor {
     pub(crate) fn new(
         id: impl Into<String>,
         table_name: impl Into<String>,
-        props: HistoryTableProps,
-        decoder: Arc<dyn RecordDecoder>,
+        provider: Arc<dyn TableProvider>,
     ) -> Self {
         Self::new_with_channel_capacities(
             id,
             table_name,
-            props,
-            decoder,
+            provider,
+            ScanRequest::default(),
             default_channel_capacities(),
         )
     }
@@ -91,24 +84,39 @@ impl TableScanProcessor {
     }
 
     async fn run_history_scan(
-        processor_id: String,
-        table_name: String,
-        props: HistoryTableProps,
-        decoder: Arc<dyn RecordDecoder>,
+        provider: Arc<dyn TableProvider>,
         scan_tx: mpsc::Sender<TableScanEvent>,
-        stats: Arc<ProcessorStats>,
-        spawner: TaskSpawner,
+        scan_request: ScanRequest,
     ) {
-        let result = Self::run_history_scan_inner(
-            &processor_id,
-            &table_name,
-            props,
-            decoder,
-            scan_tx.clone(),
-            Arc::clone(&stats),
-            spawner,
-        )
-        .await;
+        let (batch_tx, mut batch_rx) = mpsc::channel(1);
+        let mut scan = Box::pin(provider.scan(scan_request, ScanOutput::new(batch_tx)));
+        let mut scan_result = None;
+        let result = loop {
+            if let Some(result) = scan_result.take() {
+                while let Some(batch) = batch_rx.recv().await {
+                    if scan_tx
+                        .send(TableScanEvent::Collection(batch))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                break result;
+            }
+            tokio::select! {
+                result = &mut scan => {
+                    scan_result = Some(result.map(|_| ()).map_err(|err| err.to_string()));
+                }
+                batch = batch_rx.recv() => {
+                    if let Some(batch) = batch {
+                        if scan_tx.send(TableScanEvent::Collection(batch)).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        };
         match result {
             Ok(()) => {
                 let _ = scan_tx.send(TableScanEvent::Done).await;
@@ -117,98 +125,6 @@ impl TableScanProcessor {
                 let _ = scan_tx.send(TableScanEvent::Error(err)).await;
             }
         }
-    }
-
-    async fn run_history_scan_inner(
-        processor_id: &str,
-        table_name: &str,
-        props: HistoryTableProps,
-        decoder: Arc<dyn RecordDecoder>,
-        scan_tx: mpsc::Sender<TableScanEvent>,
-        stats: Arc<ProcessorStats>,
-        spawner: TaskSpawner,
-    ) -> Result<(), String> {
-        let datasource = PathBuf::from(&props.datasource);
-        let batch_size = props.batch_size.unwrap_or(DEFAULT_HISTORY_BATCH_SIZE);
-        let mut files = discover_history_files(&datasource, &props.topic)
-            .map_err(|err| format!("discover history files for table `{table_name}`: {err}"))?;
-        files.sort_by_key(|file| file.seq);
-        let files = prune_history_files(files, None, None);
-
-        tracing::info!(
-            processor_id,
-            table = table_name,
-            topic = %props.topic,
-            files = files.len(),
-            "table scan discovered history files"
-        );
-
-        for file in files {
-            tracing::info!(
-                processor_id,
-                table = table_name,
-                file = %file.path.display(),
-                "table scan reading history file"
-            );
-            let path = file.path.clone();
-            let batches_result = spawner
-                .spawn_blocking(move || read_history_parquet_file(path, batch_size))
-                .await
-                .map_err(|err| format!("history parquet read task join error: {err}"))?
-                .map_err(|err| {
-                    format!("read history parquet file `{}`: {err}", file.path.display())
-                });
-            let batches = match batches_result {
-                Ok(batches) => batches,
-                Err(err) => {
-                    stats.record_error_logged("table scan processor error", err);
-                    continue;
-                }
-            };
-
-            for batch in batches {
-                let payloads =
-                    match extract_history_payloads(&batch, &props.time_column, None, None) {
-                        Ok(payloads) => payloads,
-                        Err(err) => {
-                            stats.record_error_logged(
-                                "table scan processor error",
-                                format!("extract history payloads for table `{table_name}`: {err}"),
-                            );
-                            continue;
-                        }
-                    };
-                for payload in payloads {
-                    let decoded = match decoder.decode(payload.as_slice()) {
-                        Ok(decoded) => decoded,
-                        Err(err) => {
-                            stats.record_error_logged(
-                                "table scan processor error",
-                                format!("decode table `{table_name}` payload: {err}"),
-                            );
-                            continue;
-                        }
-                    };
-                    if decoded.num_rows() == 0 {
-                        continue;
-                    }
-                    if scan_tx
-                        .send(TableScanEvent::Collection(decoded))
-                        .await
-                        .is_err()
-                    {
-                        tracing::info!(
-                            processor_id,
-                            table = table_name,
-                            "table scan receiver closed"
-                        );
-                        return Ok(());
-                    }
-                }
-            }
-        }
-
-        Ok(())
     }
 
     async fn forward_data(
@@ -241,8 +157,8 @@ impl Processor for TableScanProcessor {
         let control_output = self.control_output.clone();
         let processor_id = self.id.clone();
         let table_name = self.table_name.clone();
-        let props = self.props.clone();
-        let decoder = Arc::clone(&self.decoder);
+        let provider = Arc::clone(&self.provider);
+        let scan_request = self.scan_request;
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
         let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
@@ -261,17 +177,11 @@ impl Processor for TableScanProcessor {
         let (ready_tx, ready_rx) = oneshot::channel();
         let handle = spawner.spawn(tracing::Instrument::instrument(async move {
             let (scan_tx, mut scan_rx) = mpsc::channel(channel_capacities.data);
-            let producer_processor_id = processor_id.clone();
-            let producer_table_name = table_name.clone();
             scan_spawner.spawn(tracing::Instrument::instrument(
                 Self::run_history_scan(
-                    producer_processor_id,
-                    producer_table_name,
-                    props,
-                    decoder,
+                    provider,
                     scan_tx,
-                    Arc::clone(&stats),
-                    scan_spawner.clone(),
+                    scan_request,
                 ),
                 scan_span,
             ));

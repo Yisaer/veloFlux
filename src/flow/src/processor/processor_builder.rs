@@ -4,6 +4,7 @@
 //! connecting ControlSourceProcessor outputs to leaf nodes (nodes without children).
 
 use crate::aggregation::AggregateFunctionRegistry;
+use crate::catalog::Catalog;
 use crate::checkpoint::{
     CheckpointError, CheckpointManifest, CheckpointSnapshotCollector, CheckpointStore,
     OperatorSnapshot, CHECKPOINT_FORMAT_VERSION,
@@ -162,6 +163,7 @@ pub(crate) enum PlanProcessor {
 
 #[derive(Clone)]
 pub(crate) struct ProcessorPipelineDependencies {
+    catalog: Arc<Catalog>,
     flow_instance_id: Arc<str>,
     mqtt_clients: MqttClientManager,
     connector_registry: Arc<ConnectorRegistry>,
@@ -181,8 +183,10 @@ pub(crate) struct ProcessorPipelineDependencies {
 }
 
 impl ProcessorPipelineDependencies {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         flow_instance_id: impl Into<Arc<str>>,
+        catalog: Arc<Catalog>,
         mqtt_clients: MqttClientManager,
         shared_stream_registry: Arc<SharedStreamRegistry>,
         registries: &PipelineRegistries,
@@ -191,6 +195,7 @@ impl ProcessorPipelineDependencies {
         property_registry: PropertyRegistry,
     ) -> Self {
         Self {
+            catalog,
             flow_instance_id: flow_instance_id.into(),
             mqtt_clients,
             connector_registry: registries.connector_registry(),
@@ -261,6 +266,7 @@ impl ProcessorPipelineOptions {
 
 #[derive(Clone)]
 struct ProcessorBuilderContext {
+    catalog: Option<Arc<Catalog>>,
     flow_instance_id: Arc<str>,
     pipeline_id: Arc<str>,
     shared_stream_name: Option<Arc<str>>,
@@ -291,6 +297,12 @@ struct PipelineLinkKindCounts {
 }
 
 impl ProcessorBuilderContext {
+    fn catalog(&self) -> Result<Arc<Catalog>, ProcessorError> {
+        self.catalog.clone().ok_or_else(|| {
+            ProcessorError::InvalidConfiguration("catalog unavailable for table scan".into())
+        })
+    }
+
     fn flow_instance_id(&self) -> &str {
         self.flow_instance_id.as_ref()
     }
@@ -1804,16 +1816,30 @@ fn create_processor_from_plan_node(
             ))
         }
         PhysicalPlan::TableScan(scan) => {
-            let crate::catalog::TableProps::History(props) = scan.props().clone();
-            let decoder = context
-                .decoder_registry()?
-                .instantiate(scan.decoder(), scan.table_name(), scan.schema())
-                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+            let catalog = context.catalog()?;
+            let provider = catalog
+                .get_table_provider(scan.table_name())
+                .ok_or_else(|| {
+                    ProcessorError::InvalidConfiguration(format!(
+                        "table provider not registered for table `{}`",
+                        scan.table_name()
+                    ))
+                })?;
+            if provider.schema().as_ref() != scan.schema().as_ref() {
+                return Err(ProcessorError::InvalidConfiguration(format!(
+                    "table provider schema mismatch for table `{}`",
+                    scan.table_name()
+                )));
+            }
+            let batch_size = match scan.props() {
+                crate::catalog::TableProps::History(props) => props.batch_size.unwrap_or(100),
+                crate::catalog::TableProps::MemoryMock(_) => 100,
+            };
             let processor = TableScanProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 scan.table_name().to_string(),
-                props,
-                decoder,
+                provider,
+                crate::table::provider::ScanRequest { batch_size },
                 channel_capacities,
             );
             Ok(ProcessorBuildOutput::with_processor(
@@ -2938,6 +2964,7 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
     create_processor_pipeline_with_context(
         physical_plan,
         ProcessorBuilderContext {
+            catalog: None,
             flow_instance_id: Arc::clone(&options.flow_instance_id),
             pipeline_id: Arc::from(options.stream_name.as_str()),
             shared_stream_name: Some(Arc::from(options.stream_name.as_str())),
@@ -2974,6 +3001,7 @@ pub(crate) fn create_processor_pipeline(
     create_processor_pipeline_with_context(
         physical_plan,
         ProcessorBuilderContext {
+            catalog: Some(dependencies.catalog),
             flow_instance_id: dependencies.flow_instance_id,
             pipeline_id: dependencies.pipeline_id,
             shared_stream_name: None,
@@ -3321,6 +3349,7 @@ mod tests {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
         let context = ProcessorBuilderContext {
+            catalog: None,
             flow_instance_id: Arc::<str>::from("default"),
             pipeline_id: Arc::<str>::from("test_pipe"),
             shared_stream_name: None,

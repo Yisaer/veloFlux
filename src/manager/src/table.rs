@@ -11,7 +11,9 @@ use axum::{
     response::IntoResponse,
 };
 use flow::DecoderRegistry;
-use flow::catalog::{HistoryTableProps, StreamDecoderConfig, TableDefinition, TableProps};
+use flow::catalog::{
+    HistoryTableProps, MemoryMockTableProps, StreamDecoderConfig, TableDefinition, TableProps,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::sync::Arc;
@@ -53,6 +55,12 @@ pub struct HistoryTablePropsRequest {
     pub topic: Option<String>,
     pub time_column: Option<String>,
     pub batch_size: Option<usize>,
+}
+
+#[derive(Deserialize, Serialize, Default, Clone)]
+#[serde(default)]
+pub struct MemoryMockTablePropsRequest {
+    pub rows: Vec<JsonValue>,
 }
 
 #[derive(Serialize)]
@@ -104,6 +112,17 @@ pub(crate) fn build_table_props(
                 batch_size: history_props.batch_size,
             }))
         }
+        "memory_mock" => {
+            let memory_props: MemoryMockTablePropsRequest =
+                serde_json::from_value(props.to_value())
+                    .map_err(|err| format!("invalid memory_mock table props: {err}"))?;
+            if memory_props.rows.iter().any(|row| !row.is_object()) {
+                return Err("memory_mock table rows must be JSON objects".to_string());
+            }
+            Ok(TableProps::MemoryMock(MemoryMockTableProps {
+                rows: memory_props.rows,
+            }))
+        }
         other => Err(format!("unsupported table type: {other}")),
     }
 }
@@ -113,6 +132,9 @@ pub(crate) fn build_table_decoder(
     decoder_registry: &DecoderRegistry,
     resolved_schema: &ResolvedSchema,
 ) -> Result<StreamDecoderConfig, String> {
+    if req.table_type.eq_ignore_ascii_case("memory_mock") {
+        return Ok(StreamDecoderConfig::json());
+    }
     let decoder_config = req.decoder.clone();
     if decoder_config.decode_type == "none" {
         return Ok(StreamDecoderConfig::new(
@@ -674,7 +696,9 @@ mod tests {
             .clone(),
         };
         let built = build_table_props("history", &props).expect("build history table props");
-        let TableProps::History(h) = built;
+        let TableProps::History(h) = built else {
+            panic!("expected history table props")
+        };
         assert_eq!(h.datasource, "ds1");
         assert_eq!(h.topic, "t1");
         assert_eq!(h.time_column, "ts");
@@ -694,7 +718,9 @@ mod tests {
             .clone(),
         };
         let built = build_table_props("history", &props).expect("build history table props");
-        let TableProps::History(h) = built;
+        let TableProps::History(h) = built else {
+            panic!("expected history table props")
+        };
         assert_eq!(h.time_column, "event_time");
     }
 

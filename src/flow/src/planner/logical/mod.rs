@@ -257,6 +257,7 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
         let request = TableScanRequest {
             batch_size: match definition.props() {
                 TableProps::History(props) => props.batch_size,
+                TableProps::MemoryMock(_) => None,
             },
         };
         let table_scan = TableScan::new(

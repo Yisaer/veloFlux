@@ -1,122 +1,122 @@
-# Table Scan Source
+# Table Providers and Table Scans
 
-This document describes the developer-facing design for bounded table scans.
+This document describes the runtime design for finite table data and table providers.
 
-## Purpose
+## Model
 
-`stream` and `table` are separate catalog concepts:
+`TableDefinition` describes table metadata:
 
-- A stream subscribes to an external or in-process source and continuously receives new data.
-- A table is a finite read source. In the current implementation, a table scan reads historical
-  storage once and then terminates the data path.
+- SQL-visible table name
+- logical row schema
+- provider type and persisted properties
+- decoder configuration for providers that consume encoded payloads
 
-The first supported table provider is `History`. It reads NanoMQ history Parquet files and decodes
-the payload stored in the Parquet `data` column.
+`TableProvider` is the single runtime contract for table behavior. A provider exposes the table
+schema and capabilities, and implements bounded `scan` and parameterized `lookup` operations.
+Provider instances are runtime resources and are not serialized into storage exports.
 
-## Current Scope
+The current provider implementations are:
 
-Implemented:
+- `HistoryTableProvider`: reads NanoMQ history Parquet files.
+- `MemoryMockTableProvider`: supplies deterministic rows declared by a `memory_mock` table type.
 
-- catalog-level `TableDefinition`
-- history-backed table props
-- logical `TableScan`
-- physical `PhysicalTableScan`
-- `TableScanProcessor`
-- `SELECT` over one history table
-- scalar projection and `WHERE` filtering
-- aggregate queries that explicitly use `GROUP BY eoswindow()`
+Both implementations use the same provider contract. The table type selects the concrete provider
+when the manager creates the `TableDefinition`; there is one provider registration per table.
 
-Not implemented yet:
+## Provider Contract
 
-- stream-table joins and lookup table planning
-- table aliases in SQL
-- table scan decode projection
-- manager REST endpoints and persistent storage for table definitions
+The provider contract uses structured requests rather than SQL strings or provider-native queries.
 
-## Table Definition
+Scan requests contain a batch size. Providers emit each `RecordBatch` through the scan output as
+soon as it is available; the scan response contains only completion metadata and never accumulates
+the complete table. The default batch size is `100` and provider-specific configuration may
+override it. Lookup requests contain:
 
-A table definition mirrors the stream definition shape where that makes sense:
+- projected columns
+- equality keys and values
+- supported filters
+- an inclusive time range
+- per-request limits
+- a cancellation token
 
-- `id`: SQL-visible relation name
-- `type`: table provider type, currently `History`
-- `schema`: decoded row schema
-- `props`: provider-specific configuration
-- `decoder`: payload decoder, currently using the same decoder registry as streams
+Provider capabilities describe supported scan and lookup operations, equality key columns,
+projection, predicates, and time-range filtering. Planner and runtime validation should use these
+capabilities instead of checking concrete provider types.
 
-Unlike streams, a table does not own a live subscription connector. It also does not currently expose
-stream-only options such as `shared`, `sampler`, or `eventtime`.
+## History Provider
 
-For `History` tables, props are:
-
-- `datasource`: directory containing history Parquet files
-- `topic`: topic used to discover files by filename
-- `time_column`: Parquet time column, default `ts`
-- `batch_size`: optional Parquet reader batch size, default `100`
-
-History table files use the existing NanoMQ naming convention:
+`HistoryTableProvider` reads files using the existing NanoMQ naming convention:
 
 ```text
 nanomq_{topic}-{start_ts}~{end_ts}_{seq}_{hash}.parquet
 ```
 
-The scan reads matching files sorted by `seq`. Each Parquet row must contain:
+It discovers matching files, sorts them by sequence, reads the Parquet `data` column, and decodes
+each payload with the table decoder. The configured time column must be `Int64` or `UInt64`, and
+the payload column must be `Binary`.
 
-- the configured time column as `Int64` or `UInt64`
-- `data` as `Binary`
+History table definitions are created through the existing table lifecycle and automatically get a
+runtime `HistoryTableProvider` binding. The manager persists the table definition and provider
+configuration.
 
-The `data` bytes are decoded with the table decoder into the table schema.
+History scans preserve the existing error policy: discovery and request validation errors fail the
+scan, while an unreadable file, an invalid Parquet batch, or a malformed payload is logged and
+skipped so later files and payloads can still be emitted.
 
-## Planning
+## Memory Mock Provider
 
-During SQL planning, catalog resolution can return either a stream or a table. A table relation lowers
-to logical `TableScan` instead of `DataSource`.
+`MemoryMockTableProvider` is the provider implementation for tables declared with
+`TableType::MemoryMock`. The manager accepts JSON objects in `props.rows` and converts them directly
+to `Tuple` rows and `RecordBatch` collections using the declared table schema. It stores those rows
+in memory and supports:
 
-Table scans currently support scalar scan queries and a planner-only aggregate shape:
+- equality-key lookup
+- filter and time-range evaluation
+- projection
+- deterministic insertion-order results
+- row replacement and append operations
+- request recording
+- injected delay and provider errors
+- cancellation checks
+- bounded scan batches
 
-- exactly one table source is supported in a table-scan query
-- stream-table mixed queries are rejected because lookup join planning is deferred
-- aggregate mappings require an explicit `GROUP BY eoswindow()`
-- incremental aggregate calls are rewritten to `PhysicalStreamingAggregation(window=eos)`
-- non-incremental aggregate calls keep the unfused `PhysicalEosWindow -> PhysicalAggregation`
-  plan shape
+The declaration is persisted and restored through the normal table storage, export, import, and
+startup lifecycle. It is a table type at the same level as `History`, not a separate provider
+registry or API resource.
 
-Table bindings use `SourceBindingKind::TableScan`. Logical column pruning keeps the full schema for
-this binding kind. This is required because `TableScanProcessor` currently decodes the full payload
-schema, and expression execution uses schema-derived `ColumnRef::ByIndex` references. Shrinking the
-binding schema before runtime decode projection exists would make indexes point at the wrong
-runtime columns.
+## Table Scan Runtime
 
-## Runtime Behavior
+The current SQL table-scan path is:
 
-`TableScanProcessor` is a source processor. It starts an internal scan task, reads history files,
-decodes payload bytes, and emits decoded collections on the data channel.
+```text
+TableDefinition(type)
+  -> HistoryTableProvider::scan or MemoryMockTableProvider::scan
+  -> TableScanProcessor
+  -> downstream operators
+```
 
-When all matching input has been read, it sends `StreamData::stream_graceful_end(0)` on the data
-channel. Downstream processors use the existing terminal data-channel behavior instead of a separate
-end-of-scan signal. This keeps table scan completion aligned with graceful data-path shutdown:
-downstream processors should finish already received data and flush/close according to their normal
-terminal handling.
+Table scans are finite. They read the currently visible table data once and terminate the data
+channel with `StreamData::stream_graceful_end(0)`. The control channel remains reserved for control
+signals. Each provider batch is forwarded before the next batch is read, so large tables do not
+need to be materialized in the provider response.
 
-The control channel remains reserved for control signals. The table scan completion signal is not
-mirrored onto the control channel.
+Supported table-scan SQL currently includes scalar projection, `WHERE` filtering, and aggregate
+queries with `GROUP BY eoswindow()`.
 
-`GROUP BY eoswindow()` has two runtime paths:
+## Manager and Runtime Lifecycle
 
-- Incremental aggregate calls use `StreamingEosAggregationProcessor`, which updates aggregate
-  state for each incoming collection and finalizes once on data-channel graceful end.
-- Non-incremental aggregate calls use `EosWindowProcessor`, which buffers decoded rows and emits
-  one collection only after receiving data-channel graceful end. If no rows were buffered, it emits
-  no collection.
+The manager persists table definitions through `POST /tables`, `GET /tables`, and
+`DELETE /tables/:name`. Runtime provider instances are created when a table is registered in a
+`FlowInstance` and are removed with the table. Export/import contains table metadata and provider
+configuration, not runtime provider objects. For `memory_mock`, the initial rows are part of the
+persisted provider configuration.
 
 ## Test Coverage
 
-Planner explain coverage lives in:
+Table-scan planner and pipeline coverage lives in:
 
 - `src/flow/tests/planner/physical/plan_explain_table_driven.rs`
-
-Pipeline input/output coverage lives in:
-
 - `src/flow/tests/pipeline/table_scan_tests.rs`
 
-The pipeline tests build temporary history Parquet files, register a history table directly in a
-`FlowInstance`, create a SQL pipeline, and assert the memory sink output.
+Provider binding coverage is in `src/flow/src/catalog/mod.rs`, and MemoryMock provider behavior is
+covered in `src/flow/src/table/memory.rs`.
