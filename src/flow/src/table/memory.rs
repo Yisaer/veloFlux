@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use datatypes::{Schema, Value};
 use parking_lot::{Mutex, RwLock};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -10,8 +11,8 @@ use crate::catalog::{TableCapabilities, TableLookupCapability};
 use crate::codec::{JsonDecoder, RecordDecoder};
 use crate::model::{Message, Tuple};
 use crate::table::provider::{
-    LookupFilter, LookupRequest, LookupResponse, LookupTimeRange, ScanOutput, ScanRequest,
-    ScanResponse, TableProvider, TableProviderError,
+    LookupFilter, LookupOutput, LookupRequest, LookupResponse, LookupTimeRange, ScanOutput,
+    ScanRequest, ScanResponse, TableProvider, TableProviderError,
 };
 
 /// Runtime behavior controls for the in-memory table provider.
@@ -25,15 +26,20 @@ pub struct MemoryTableBehavior {
 pub struct MemoryMockTableProvider {
     schema: Arc<Schema>,
     source_name: Arc<str>,
-    rows: RwLock<Vec<Tuple>>,
+    state: RwLock<MemoryTableState>,
     capabilities: TableCapabilities,
     requests: Mutex<Vec<LookupRequest>>,
     behavior: RwLock<MemoryTableBehavior>,
 }
 
+struct MemoryTableState {
+    rows: Vec<Tuple>,
+    indexes: HashMap<String, HashMap<Value, Vec<usize>>>,
+}
+
 impl MemoryMockTableProvider {
     pub fn new(schema: Arc<Schema>) -> Self {
-        let equality_keys = schema
+        let equality_keys: Vec<String> = schema
             .column_schemas()
             .iter()
             .map(|column| column.name.clone())
@@ -41,11 +47,17 @@ impl MemoryMockTableProvider {
         Self {
             schema,
             source_name: Arc::from("memory_table"),
-            rows: RwLock::new(Vec::new()),
+            state: RwLock::new(MemoryTableState {
+                rows: Vec::new(),
+                indexes: HashMap::new(),
+            }),
             capabilities: TableCapabilities {
                 scan: Some(crate::catalog::TableScanCapability {}),
                 lookup: Some(TableLookupCapability {
-                    equality_keys,
+                    lookup_key_sets: equality_keys
+                        .iter()
+                        .map(|column| vec![column.clone()])
+                        .collect(),
                     supports_projection: true,
                     supports_predicates: true,
                     supports_time_range: true,
@@ -83,20 +95,30 @@ impl MemoryMockTableProvider {
     }
 
     pub fn with_rows(self, rows: Vec<Tuple>) -> Self {
-        *self.rows.write() = rows;
+        self.replace_rows(rows);
         self
     }
 
     pub fn append_row(&self, row: Tuple) {
-        self.rows.write().push(row);
+        let mut state = self.state.write();
+        let row_index = state.rows.len();
+        state.rows.push(row.clone());
+        Self::add_row_to_indexes(&mut state.indexes, row_index, &row);
     }
 
     pub fn replace_rows(&self, rows: Vec<Tuple>) {
-        *self.rows.write() = rows;
+        let mut state = self.state.write();
+        state.rows = rows.clone();
+        state.indexes.clear();
+        for (row_index, row) in rows.iter().enumerate() {
+            Self::add_row_to_indexes(&mut state.indexes, row_index, row);
+        }
     }
 
     pub fn clear_rows(&self) {
-        self.rows.write().clear();
+        let mut state = self.state.write();
+        state.rows.clear();
+        state.indexes.clear();
     }
 
     pub fn set_behavior(&self, behavior: MemoryTableBehavior) {
@@ -109,6 +131,23 @@ impl MemoryMockTableProvider {
 
     pub fn clear_requests(&self) {
         self.requests.lock().clear();
+    }
+
+    fn add_row_to_indexes(
+        indexes: &mut HashMap<String, HashMap<Value, Vec<usize>>>,
+        row_index: usize,
+        row: &Tuple,
+    ) {
+        for message in row.messages() {
+            for (column, value) in message.entries() {
+                indexes
+                    .entry(column.to_string())
+                    .or_default()
+                    .entry(value.clone())
+                    .or_default()
+                    .push(row_index);
+            }
+        }
     }
 
     fn value_for_column<'a>(row: &'a Tuple, column: &str) -> Option<&'a Value> {
@@ -197,7 +236,7 @@ impl TableProvider for MemoryMockTableProvider {
                 "scan batch size must be greater than 0".to_string(),
             ));
         }
-        let rows = self.rows.read().clone();
+        let rows = self.state.read().rows.clone();
         for chunk in rows.chunks(request.batch_size) {
             let batch = crate::model::RecordBatch::new(chunk.to_vec())
                 .map_err(|err| TableProviderError::Provider(err.to_string()))?;
@@ -206,10 +245,19 @@ impl TableProvider for MemoryMockTableProvider {
         Ok(ScanResponse { snapshot_id: None })
     }
 
-    async fn lookup(&self, request: LookupRequest) -> Result<LookupResponse, TableProviderError> {
+    async fn lookup(
+        &self,
+        request: LookupRequest,
+        output: LookupOutput,
+    ) -> Result<LookupResponse, TableProviderError> {
         self.requests.lock().push(request.clone());
         if request.cancellation.is_cancelled() {
             return Err(TableProviderError::Cancelled);
+        }
+        if request.batch_size == 0 {
+            return Err(TableProviderError::InvalidRequest(
+                "lookup batch size must be greater than 0".to_string(),
+            ));
         }
 
         let behavior = self.behavior.read().clone();
@@ -223,42 +271,79 @@ impl TableProvider for MemoryMockTableProvider {
             return Err(TableProviderError::Provider(error));
         }
 
-        let rows = self.rows.read();
-        let mut matches = Vec::new();
-        for row in rows.iter() {
-            if request.equality_keys.iter().any(|key| {
-                Self::value_for_column(row, &key.column).is_none_or(|value| value != &key.value)
-            }) {
-                continue;
+        let candidate_indexes = {
+            let state = self.state.read();
+            if request.equality_keys.is_empty() {
+                (0..state.rows.len()).collect::<Vec<_>>()
+            } else {
+                let indexes = &state.indexes;
+                let mut candidates = request
+                    .equality_keys
+                    .iter()
+                    .map(|key| {
+                        if key.value.is_null() {
+                            return Ok(Vec::new());
+                        }
+                        let index = indexes.get(&key.column).ok_or_else(|| {
+                            TableProviderError::InvalidRequest(format!(
+                                "lookup column `{}` is not indexed",
+                                key.column
+                            ))
+                        })?;
+                        Ok(index.get(&key.value).cloned().unwrap_or_default())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                candidates.sort_by_key(Vec::len);
+                let Some(mut result) = candidates.first().cloned() else {
+                    return Ok(LookupResponse { snapshot_id: None });
+                };
+                for candidate in candidates.iter().skip(1) {
+                    result.retain(|row_index| candidate.binary_search(row_index).is_ok());
+                }
+                result.sort_unstable();
+                result
             }
-            if request
-                .filters
-                .iter()
-                .any(|filter| !Self::matches_filter(row, filter))
-            {
-                continue;
+        };
+        let mut batch = Vec::with_capacity(request.batch_size);
+        for row_index in candidate_indexes {
+            if request.cancellation.is_cancelled() {
+                return Err(TableProviderError::Cancelled);
             }
-            if request
-                .time_range
-                .as_ref()
-                .is_some_and(|range| !Self::matches_time_range(row, range))
-            {
-                continue;
+            let projected_row = {
+                let state = self.state.read();
+                let Some(row) = state.rows.get(row_index) else {
+                    continue;
+                };
+                if request.equality_keys.iter().any(|key| {
+                    Self::value_for_column(row, &key.column).is_none_or(|value| value != &key.value)
+                }) {
+                    continue;
+                }
+                if request
+                    .filters
+                    .iter()
+                    .any(|filter| !Self::matches_filter(row, filter))
+                {
+                    continue;
+                }
+                if request
+                    .time_range
+                    .as_ref()
+                    .is_some_and(|range| !Self::matches_time_range(row, range))
+                {
+                    continue;
+                }
+                self.project_row(row, &request.projection)
+            };
+            batch.push(projected_row);
+            if batch.len() == request.batch_size {
+                output.send(std::mem::take(&mut batch)).await?;
             }
-            matches.push(self.project_row(row, &request.projection));
         }
-
-        if matches.len() > request.limits.max_rows {
-            return Err(TableProviderError::ResourceLimit(format!(
-                "result contains {} rows, limit is {}",
-                matches.len(),
-                request.limits.max_rows
-            )));
+        if !batch.is_empty() {
+            output.send(batch).await?;
         }
-        Ok(LookupResponse {
-            rows: matches,
-            snapshot_id: None,
-        })
+        Ok(LookupResponse { snapshot_id: None })
     }
 }
 
@@ -285,9 +370,10 @@ fn compare_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::table::provider::{LookupKey, LookupLimits};
+    use crate::table::provider::{LookupKey, LookupOutput};
     use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, StringType};
     use std::sync::Arc;
+    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     fn schema() -> Arc<Schema> {
@@ -328,18 +414,32 @@ mod tests {
             equality_keys: Vec::new(),
             filters: Vec::new(),
             time_range: None,
-            limits: LookupLimits::default(),
+            batch_size: 1024,
             cancellation: CancellationToken::new(),
         }
     }
 
+    async fn lookup_rows(
+        provider: Arc<MemoryMockTableProvider>,
+        request: LookupRequest,
+    ) -> Result<Vec<Tuple>, TableProviderError> {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let task =
+            tokio::spawn(async move { provider.lookup(request, LookupOutput::new(sender)).await });
+        let mut rows = Vec::new();
+        while let Some(batch) = receiver.recv().await {
+            rows.extend(batch);
+        }
+        task.await.expect("lookup task panicked").map(|_| rows)
+    }
+
     #[tokio::test]
     async fn lookup_filters_projects_and_preserves_row_order() {
-        let provider = MemoryMockTableProvider::new(schema()).with_rows(vec![
+        let provider = Arc::new(MemoryMockTableProvider::new(schema()).with_rows(vec![
             row("v1", 100, "first"),
             row("v2", 200, "second"),
             row("v1", 300, "third"),
-        ]);
+        ]));
         let mut lookup = request();
         lookup.equality_keys.push(LookupKey {
             column: "id".to_string(),
@@ -352,23 +452,57 @@ mod tests {
             end: Some(300),
         });
 
-        let response = provider.lookup(lookup).await.unwrap();
-        assert_eq!(response.rows.len(), 1);
+        let rows = lookup_rows(Arc::clone(&provider), lookup).await.unwrap();
+        assert_eq!(rows.len(), 1);
         assert_eq!(
-            response.rows[0].value_by_name("memory_table", "value"),
+            rows[0].value_by_name("memory_table", "value"),
             Some(&Value::String("third".to_string()))
         );
         assert_eq!(provider.requests().len(), 1);
     }
 
     #[tokio::test]
-    async fn rows_can_be_refreshed_and_cancellation_is_observed() {
-        let provider = MemoryMockTableProvider::new(schema()).with_rows(vec![row("v1", 1, "old")]);
-        provider.replace_rows(vec![row("v1", 2, "new")]);
-        let response = provider.lookup(request()).await.unwrap();
-        assert_eq!(response.rows.len(), 1);
+    async fn lookup_uses_all_equality_keys_and_preserves_table_order() {
+        let provider = Arc::new(MemoryMockTableProvider::new(schema()).with_rows(vec![
+            row("v1", 100, "first"),
+            row("v2", 100, "other"),
+            row("v1", 200, "second"),
+            row("v1", 100, "third"),
+        ]));
+        let mut lookup = request();
+        lookup.equality_keys = vec![
+            LookupKey {
+                column: "id".to_string(),
+                value: Value::String("v1".to_string()),
+            },
+            LookupKey {
+                column: "ts".to_string(),
+                value: Value::Int64(100),
+            },
+        ];
+        lookup.projection = vec!["value".to_string()];
+
+        let rows = lookup_rows(Arc::clone(&provider), lookup).await.unwrap();
+        assert_eq!(rows.len(), 2);
         assert_eq!(
-            response.rows[0].value_by_name("table", "value"),
+            rows[0].value_by_name("memory_table", "value"),
+            Some(&Value::String("first".to_string()))
+        );
+        assert_eq!(
+            rows[1].value_by_name("memory_table", "value"),
+            Some(&Value::String("third".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn rows_can_be_refreshed_and_cancellation_is_observed() {
+        let provider =
+            Arc::new(MemoryMockTableProvider::new(schema()).with_rows(vec![row("v1", 1, "old")]));
+        provider.replace_rows(vec![row("v1", 2, "new")]);
+        let rows = lookup_rows(Arc::clone(&provider), request()).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].value_by_name("table", "value"),
             Some(&Value::String("new".to_string()))
         );
 
@@ -376,21 +510,25 @@ mod tests {
         cancellation.cancel();
         let mut cancelled_request = request();
         cancelled_request.cancellation = cancellation;
+        let (sender, _receiver) = mpsc::channel(1);
         assert!(matches!(
-            provider.lookup(cancelled_request).await,
+            provider
+                .lookup(cancelled_request, LookupOutput::new(sender))
+                .await,
             Err(TableProviderError::Cancelled)
         ));
     }
 
     #[tokio::test]
     async fn configured_provider_error_is_returned() {
-        let provider = MemoryMockTableProvider::new(schema());
+        let provider = Arc::new(MemoryMockTableProvider::new(schema()));
         provider.set_behavior(MemoryTableBehavior {
             delay: None,
             error: Some("injected failure".to_string()),
         });
+        let (sender, _receiver) = mpsc::channel(1);
         assert!(matches!(
-            provider.lookup(request()).await,
+            provider.lookup(request(), LookupOutput::new(sender)).await,
             Err(TableProviderError::Provider(message)) if message == "injected failure"
         ));
     }

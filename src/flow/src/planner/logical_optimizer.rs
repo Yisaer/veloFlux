@@ -123,6 +123,11 @@ fn eliminate_video_sink_identity_project(plan: Arc<LogicalPlan>) -> Arc<LogicalP
             new.base.children = rewrite_logical_children(&filter.base.children);
             Arc::new(LogicalPlan::Filter(new))
         }
+        LogicalPlan::LookupJoin(join) => {
+            let mut new = join.clone();
+            new.base.children = rewrite_logical_children(&join.base.children);
+            Arc::new(LogicalPlan::LookupJoin(new))
+        }
         LogicalPlan::Aggregation(aggregation) => {
             let mut new = aggregation.clone();
             new.base.children = rewrite_logical_children(&aggregation.base.children);
@@ -419,6 +424,7 @@ fn max_existing_cse_temp_id_in_plan(plan: &LogicalPlan) -> u64 {
                 }
             }
             LogicalPlan::Filter(filter) => visit_expr(&filter.predicate, max_id),
+            LogicalPlan::LookupJoin(_) => {}
             LogicalPlan::StatefulFunction(stateful) => {
                 for call in &stateful.calls {
                     visit_expr(&call.spec.original_expr, max_id);
@@ -502,6 +508,17 @@ fn apply_cse_with_cache(
             let mut new = filter.clone();
             new.base.children = new_children;
             Arc::new(LogicalPlan::Filter(new))
+        }
+        LogicalPlan::LookupJoin(join) => {
+            let new_children = join
+                .base
+                .children
+                .iter()
+                .map(|c| apply_cse_with_cache(c.clone(), ctx, cache))
+                .collect::<Vec<_>>();
+            let mut new = join.clone();
+            new.base.children = new_children;
+            Arc::new(LogicalPlan::LookupJoin(new))
         }
         LogicalPlan::Aggregation(agg) => {
             let new_children = agg
@@ -1425,6 +1442,14 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                 }
             }
             LogicalPlan::TableScan(_) => {}
+            LogicalPlan::LookupJoin(join) => {
+                for binding in &join.spec.key_bindings {
+                    self.mark_column_used(
+                        &binding.probe_column.relation,
+                        &binding.probe_column.column,
+                    );
+                }
+            }
             LogicalPlan::DataSink(_) => {}
             LogicalPlan::Tail(TailPlan { .. }) => {}
         }
@@ -1853,6 +1878,7 @@ impl<'a> StructFieldUsageCollector<'a> {
                 }
             }
             LogicalPlan::TableScan(_) => {}
+            LogicalPlan::LookupJoin(_) => {}
             LogicalPlan::DataSink(_) => {}
             LogicalPlan::Tail(TailPlan { .. }) => {}
         }
@@ -2122,6 +2148,7 @@ impl<'a> ListElementUsageCollector<'a> {
             }
             LogicalPlan::DataSource(_) => {}
             LogicalPlan::TableScan(_) => {}
+            LogicalPlan::LookupJoin(_) => {}
             LogicalPlan::DataSink(_) => {}
             LogicalPlan::Tail(TailPlan { .. }) => {}
         }
@@ -2629,6 +2656,11 @@ fn clone_with_children(plan: &LogicalPlan, children: Vec<Arc<LogicalPlan>>) -> A
             let mut new = window.clone();
             new.base.children = children;
             Arc::new(LogicalPlan::Window(new))
+        }
+        LogicalPlan::LookupJoin(join) => {
+            let mut new = join.clone();
+            new.base.children = children;
+            Arc::new(LogicalPlan::LookupJoin(new))
         }
     }
 }

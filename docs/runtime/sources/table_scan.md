@@ -12,16 +12,19 @@ This document describes the runtime design for finite table data and table provi
 - decoder configuration for providers that consume encoded payloads
 
 `TableProvider` is the single runtime contract for table behavior. A provider exposes the table
-schema and capabilities, and implements bounded `scan` and parameterized `lookup` operations.
-Provider instances are runtime resources and are not serialized into storage exports.
+schema and capabilities, and may implement bounded `scan` and parameterized `lookup` operations.
+Provider instances are runtime resources and are not serialized into storage exports. The current
+stream-to-table lookup join scope is documented in `table_lookup_join.md`.
 
 The current provider implementations are:
 
 - `HistoryTableProvider`: reads NanoMQ history Parquet files.
-- `MemoryMockTableProvider`: supplies deterministic rows declared by a `memory_mock` table type.
+- `MemoryMockTableProvider`: supplies deterministic rows declared by a `memory_mock` table type
+  and implements the current lookup contract.
 
 Both implementations use the same provider contract. The table type selects the concrete provider
 when the manager creates the `TableDefinition`; there is one provider registration per table.
+History lookup is deferred; its current runtime support is bounded table scan only.
 
 ## Provider Contract
 

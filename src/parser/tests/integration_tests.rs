@@ -7,10 +7,10 @@ use sqlparser::ast::Expr;
 #[test]
 fn test_stream_dialect_basic_parsing() {
     let basic_sql = r#"
-        SELECT u.name, o.amount
-        FROM users u
-        JOIN orders o ON u.id = o.user_id
-        WHERE u.age > 18
+        SELECT users.name, orders.amount
+        FROM users
+        JOIN orders ON users.id = orders.user_id
+        WHERE users.age > 18
     "#;
 
     // Use StreamSqlParser.parse() instead of direct Parser::parse_sql

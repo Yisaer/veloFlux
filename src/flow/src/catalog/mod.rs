@@ -125,7 +125,10 @@ impl TableCapabilities {
         Self {
             scan: Some(TableScanCapability {}),
             lookup: Some(TableLookupCapability {
-                equality_keys,
+                lookup_key_sets: equality_keys
+                    .into_iter()
+                    .map(|column| vec![column])
+                    .collect(),
                 supports_projection: true,
                 supports_predicates: true,
                 supports_time_range: true,
@@ -141,7 +144,9 @@ pub struct TableScanCapability {}
 /// Lookup capability metadata for a table provider.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableLookupCapability {
-    pub equality_keys: Vec<String>,
+    /// Indexed key sets. A provider may intersect multiple single-column key sets
+    /// to satisfy a composite equality lookup.
+    pub lookup_key_sets: Vec<Vec<String>>,
     pub supports_projection: bool,
     pub supports_predicates: bool,
     pub supports_time_range: bool,
@@ -760,9 +765,9 @@ impl Catalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Tuple;
     use crate::table::provider::{
-        LookupRequest, LookupResponse, ScanOutput, ScanRequest, ScanResponse, TableProviderError,
+        LookupOutput, LookupRequest, LookupResponse, ScanOutput, ScanRequest, ScanResponse,
+        TableProviderError,
     };
     use async_trait::async_trait;
 
@@ -792,11 +797,9 @@ mod tests {
         async fn lookup(
             &self,
             _request: LookupRequest,
+            _output: LookupOutput,
         ) -> Result<LookupResponse, TableProviderError> {
-            Ok(LookupResponse {
-                rows: Vec::<Tuple>::new(),
-                snapshot_id: None,
-            })
+            Ok(LookupResponse { snapshot_id: None })
         }
     }
 
@@ -815,7 +818,7 @@ mod tests {
             capabilities: TableCapabilities {
                 scan: None,
                 lookup: Some(TableLookupCapability {
-                    equality_keys: vec!["id".to_string()],
+                    lookup_key_sets: vec![vec!["id".to_string()]],
                     supports_projection: true,
                     supports_predicates: true,
                     supports_time_range: true,

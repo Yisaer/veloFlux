@@ -23,6 +23,41 @@ pub struct SourceInfo {
     pub alias: Option<String>,
 }
 
+/// The join types currently supported by the stream SQL parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    /// An inner join, including the SQL shorthand `JOIN`.
+    Inner,
+    /// A left outer join.
+    Left,
+    /// A right outer join.
+    Right,
+    /// A full outer join.
+    Full,
+    /// A cross join without a join constraint.
+    Cross,
+}
+
+/// The constraint attached to a JOIN clause.
+#[derive(Debug, Clone)]
+pub enum JoinConstraint {
+    /// An explicit ON expression.
+    On(Expr),
+    /// A JOIN without a constraint, used by CROSS JOIN.
+    None,
+}
+
+/// Represents one JOIN clause and its ON expression.
+#[derive(Debug, Clone)]
+pub struct JoinSpec {
+    /// The normalized join type.
+    pub join_type: JoinType,
+    /// The relation introduced by this join.
+    pub relation: SourceInfo,
+    /// The JOIN constraint.
+    pub constraint: JoinConstraint,
+}
+
 /// Represents a SELECT statement with its fields, optional WHERE and HAVING clauses, and aggregate mappings
 #[derive(Debug, Clone)]
 pub struct SelectStmt {
@@ -46,6 +81,10 @@ pub struct SelectStmt {
     pub acc_mappings: Vec<AccMappingEntry>,
     /// Information about the data sources (tables) accessed
     pub source_infos: Vec<SourceInfo>,
+    /// The base relation in the FROM clause when the query has a JOIN chain.
+    pub from: Option<SourceInfo>,
+    /// Structured JOIN clauses retained for planner validation.
+    pub joins: Vec<JoinSpec>,
     /// Names declared by WITH NAMED EXPRESSIONS, retained for planner validation.
     pub named_expression_names: Vec<String>,
 }
@@ -75,6 +114,8 @@ impl SelectStmt {
             stateful_mappings: Vec::new(),
             acc_mappings: Vec::new(),
             source_infos: Vec::new(),
+            from: None,
+            joins: Vec::new(),
             named_expression_names: Vec::new(),
         }
     }
@@ -92,6 +133,8 @@ impl SelectStmt {
             stateful_mappings: Vec::new(),
             acc_mappings: Vec::new(),
             source_infos: Vec::new(),
+            from: None,
+            joins: Vec::new(),
             named_expression_names: Vec::new(),
         }
     }
@@ -113,6 +156,8 @@ impl SelectStmt {
             stateful_mappings: Vec::new(),
             acc_mappings: Vec::new(),
             source_infos: Vec::new(),
+            from: None,
+            joins: Vec::new(),
             named_expression_names: Vec::new(),
         }
     }

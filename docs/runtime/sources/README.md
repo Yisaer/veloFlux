@@ -9,6 +9,7 @@ This directory contains source connector behavior and shared-source runtime topi
 - `file.md`: File source stream framing, built-in schema, and watch behavior.
 - `video.md`: Video source tuple schema, decoder behavior, and runtime constraints.
 - `table_scan.md`: Bounded table scan design for history-backed tables.
+- `table_lookup_join.md`: Stream-to-memory-table lookup join design and implementation scope.
 - `checkpoint_quiesce.md`: Source quiesce and final-checkpoint fence coordination.
 - `shared_mqtt_client.md`: Shared MQTT client lifecycle and `connector_key` semantics.
 - `shared/`: Shared-stream runtime behavior and optimizations.

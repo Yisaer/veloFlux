@@ -88,28 +88,32 @@ impl OutputLayout {
 }
 
 #[derive(Clone)]
-struct MessageColumnLayout {
-    name: Arc<str>,
-    data_type: ConcreteDatatype,
-    logical_index: usize,
+pub(crate) struct MessageColumnLayout {
+    pub(crate) name: Arc<str>,
+    pub(crate) data_type: ConcreteDatatype,
+    pub(crate) logical_index: usize,
 }
 
 #[derive(Clone)]
-struct MessageLayout {
-    source_name: Arc<str>,
-    columns: Vec<MessageColumnLayout>,
+pub(crate) struct MessageLayout {
+    pub(crate) source_name: Arc<str>,
+    pub(crate) columns: Vec<MessageColumnLayout>,
 }
 
 #[derive(Clone)]
-struct PlanLayout {
-    output: OutputLayout,
-    messages: Vec<MessageLayout>,
-    affiliate_len: usize,
+pub(crate) struct PlanLayout {
+    pub(crate) output: OutputLayout,
+    pub(crate) messages: Vec<MessageLayout>,
+    pub(crate) affiliate_len: usize,
 }
 
 impl PhysicalPlan {
     pub fn output_layout(&self) -> Result<OutputLayout, String> {
         Ok(self.derive_output_layout()?.output)
+    }
+
+    pub(crate) fn runtime_layout(&self) -> Result<PlanLayout, String> {
+        self.derive_output_layout()
     }
 
     fn derive_output_layout(&self) -> Result<PlanLayout, String> {
@@ -137,6 +141,45 @@ impl PhysicalPlan {
             }
             PhysicalPlan::MemoryCollectionMaterialize(plan) => {
                 Ok(plan_layout_from_materialized_output(&plan.output_layout))
+            }
+            PhysicalPlan::LookupJoin(plan) => {
+                let mut layout = passthrough_single_child(self)?;
+                let message_index = layout.messages.len();
+                if message_index != plan.table_message_index {
+                    return Err(format!(
+                        "lookup join table message index mismatch: planned {}, derived {}",
+                        plan.table_message_index, message_index
+                    ));
+                }
+                let columns = plan
+                    .table_schema
+                    .column_schemas()
+                    .iter()
+                    .enumerate()
+                    .map(|(logical_index, column)| MessageColumnLayout {
+                        name: Arc::from(column.name.as_str()),
+                        data_type: column.data_type.clone(),
+                        logical_index,
+                    })
+                    .collect::<Vec<_>>();
+                for (value_index, column) in columns.iter().enumerate() {
+                    layout.output.columns = append_column(
+                        &layout.output.columns,
+                        OutputColumnLayout {
+                            name: Arc::clone(&column.name),
+                            data_type: column.data_type.clone(),
+                            value_ref: OutputValueRef::Message {
+                                message_index,
+                                value_index,
+                            },
+                        },
+                    );
+                }
+                layout.messages.push(MessageLayout {
+                    source_name: Arc::from(plan.table_name.as_str()),
+                    columns,
+                });
+                Ok(layout)
             }
 
             PhysicalPlan::Filter(_)

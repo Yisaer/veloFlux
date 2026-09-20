@@ -287,6 +287,25 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
                 format_expr_for_explain(&filter.predicate)
             ));
         }
+        LogicalPlan::LookupJoin(join) => {
+            info.push(format!("table={}", join.spec.table_name));
+            info.push(format!("type={:?}", join.spec.join_type));
+            let keys = join
+                .spec
+                .key_bindings
+                .iter()
+                .map(|binding| {
+                    format!(
+                        "{}.{}={}.{}",
+                        binding.probe_column.relation,
+                        binding.probe_column.column,
+                        binding.table_column.relation,
+                        binding.table_column.column
+                    )
+                })
+                .collect::<Vec<_>>();
+            info.push(format!("keys=[{}]", keys.join(", ")));
+        }
         LogicalPlan::Aggregation(agg) => {
             info.push(format!(
                 "aggregates=[{}]",
@@ -961,6 +980,20 @@ fn build_physical_node_with_prefix(
                 "predicate={}",
                 format_expr_for_explain(&filter.predicate)
             ));
+        }
+        PhysicalPlan::LookupJoin(join) => {
+            info.push(format!("table={}", join.table_name));
+            let keys = join
+                .key_slots
+                .iter()
+                .map(|key| {
+                    format!(
+                        "{}.{}={}.{}",
+                        key.probe_relation, key.probe_column, key.table_relation, key.table_column
+                    )
+                })
+                .collect::<Vec<_>>();
+            info.push(format!("keys=[{}]", keys.join(", ")));
         }
         PhysicalPlan::Compute(compute) => {
             // Keep compute fields in order; it reflects evaluation order (later fields may depend on earlier ones).

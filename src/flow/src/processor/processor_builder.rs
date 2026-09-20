@@ -29,12 +29,12 @@ use crate::processor::{
     CheckpointCoordinator, CheckpointTrigger, CollectionLayoutNormalizeProcessor, ComputeProcessor,
     ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor,
     EmptySuppressProcessor, EosWindowProcessor, FilterProcessor, Ingress, InstantControlSignal,
-    MemoryCollectionMaterializeProcessor, OrderProcessor, Processor, ProcessorError,
-    ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor, SamplerProcessor,
-    SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor, SinkEncryptProcessor,
-    SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
-    StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor, TableScanProcessor,
-    TumblingWindowProcessor, WatermarkProcessor,
+    LookupJoinProcessor, MemoryCollectionMaterializeProcessor, OrderProcessor, Processor,
+    ProcessorError, ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor,
+    SamplerProcessor, SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor,
+    SinkEncryptProcessor, SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor,
+    StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
+    TableScanProcessor, TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{MetricKind, MetricSpec, ProcessorStats, ProcessorStatsHandle};
 use crate::runtime::TaskSpawner;
@@ -107,6 +107,8 @@ pub(crate) enum PlanProcessor {
     DataSource(DataSourceProcessor),
     /// TableScanProcessor created from PhysicalTableScan
     TableScan(TableScanProcessor),
+    /// LookupJoinProcessor created from PhysicalLookupJoin
+    LookupJoin(LookupJoinProcessor),
     /// DecoderProcessor created from PhysicalDecoder
     Decoder(DecoderProcessor),
     /// CollectionLayoutNormalizeProcessor inserted for collection sources that must preserve full schema.
@@ -418,6 +420,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.id(),
             PlanProcessor::DataSource(p) => p.id(),
             PlanProcessor::TableScan(p) => p.id(),
+            PlanProcessor::LookupJoin(p) => p.id(),
             PlanProcessor::Decoder(p) => p.id(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.id(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.id(),
@@ -452,6 +455,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.checkpoint_key(),
             PlanProcessor::DataSource(p) => p.checkpoint_key(),
             PlanProcessor::TableScan(p) => p.checkpoint_key(),
+            PlanProcessor::LookupJoin(p) => p.checkpoint_key(),
             PlanProcessor::Decoder(p) => p.checkpoint_key(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.checkpoint_key(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.checkpoint_key(),
@@ -486,6 +490,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(_) => "aggregation",
             PlanProcessor::DataSource(_) => "datasource",
             PlanProcessor::TableScan(_) => "table_scan",
+            PlanProcessor::LookupJoin(_) => "lookup_join",
             PlanProcessor::Decoder(_) => "decoder",
             PlanProcessor::CollectionLayoutNormalize(_) => "collection_layout_normalize",
             PlanProcessor::MemoryCollectionMaterialize(_) => "memory_collection_materialize",
@@ -523,6 +528,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::DataSource(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::TableScan(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::LookupJoin(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Decoder(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::CollectionLayoutNormalize(p) => {
                 p.set_checkpoint_snapshot_collector(collector)
@@ -566,6 +572,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::DataSource(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::TableScan(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::LookupJoin(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Decoder(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::CollectionLayoutNormalize(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.restore_checkpoint(snapshot),
@@ -600,6 +607,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::DataSource(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::TableScan(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::LookupJoin(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Decoder(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::CollectionLayoutNormalize(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.validate_checkpoint(snapshot),
@@ -634,6 +642,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.clear_checkpoint_restore(),
             PlanProcessor::DataSource(p) => p.clear_checkpoint_restore(),
             PlanProcessor::TableScan(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::LookupJoin(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Decoder(p) => p.clear_checkpoint_restore(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.clear_checkpoint_restore(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.clear_checkpoint_restore(),
@@ -668,6 +677,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.set_stats(stats),
             PlanProcessor::DataSource(p) => p.set_stats(stats),
             PlanProcessor::TableScan(p) => p.set_stats(stats),
+            PlanProcessor::LookupJoin(p) => p.set_stats(stats),
             PlanProcessor::Decoder(p) => p.set_stats(stats),
             PlanProcessor::CollectionLayoutNormalize(p) => p.set_stats(stats),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.set_stats(stats),
@@ -709,6 +719,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.start(spawner),
             PlanProcessor::DataSource(p) => p.start(spawner),
             PlanProcessor::TableScan(p) => p.start(spawner),
+            PlanProcessor::LookupJoin(p) => p.start(spawner),
             PlanProcessor::Decoder(p) => p.start(spawner),
             PlanProcessor::CollectionLayoutNormalize(p) => p.start(spawner),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.start(spawner),
@@ -744,6 +755,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.subscribe_output(),
             PlanProcessor::DataSource(p) => p.subscribe_output(),
             PlanProcessor::TableScan(p) => p.subscribe_output(),
+            PlanProcessor::LookupJoin(p) => p.subscribe_output(),
             PlanProcessor::Decoder(p) => p.subscribe_output(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.subscribe_output(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.subscribe_output(),
@@ -779,6 +791,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.subscribe_control_output(),
             PlanProcessor::DataSource(p) => p.subscribe_control_output(),
             PlanProcessor::TableScan(p) => p.subscribe_control_output(),
+            PlanProcessor::LookupJoin(p) => p.subscribe_control_output(),
             PlanProcessor::Decoder(p) => p.subscribe_control_output(),
             PlanProcessor::CollectionLayoutNormalize(p) => p.subscribe_control_output(),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.subscribe_control_output(),
@@ -814,6 +827,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.add_input(receiver),
             PlanProcessor::DataSource(p) => p.add_input(receiver),
             PlanProcessor::TableScan(p) => p.add_input(receiver),
+            PlanProcessor::LookupJoin(p) => p.add_input(receiver),
             PlanProcessor::Decoder(p) => p.add_input(receiver),
             PlanProcessor::CollectionLayoutNormalize(p) => p.add_input(receiver),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.add_input(receiver),
@@ -852,6 +866,7 @@ impl PlanProcessor {
             PlanProcessor::Aggregation(p) => p.add_control_input(receiver),
             PlanProcessor::DataSource(p) => p.add_control_input(receiver),
             PlanProcessor::TableScan(p) => p.add_control_input(receiver),
+            PlanProcessor::LookupJoin(p) => p.add_control_input(receiver),
             PlanProcessor::Decoder(p) => p.add_control_input(receiver),
             PlanProcessor::CollectionLayoutNormalize(p) => p.add_control_input(receiver),
             PlanProcessor::MemoryCollectionMaterialize(p) => p.add_control_input(receiver),
@@ -1846,6 +1861,32 @@ fn create_processor_from_plan_node(
                 PlanProcessor::TableScan(processor),
             ))
         }
+        PhysicalPlan::LookupJoin(join) => {
+            let catalog = context.catalog()?;
+            let provider = catalog
+                .get_table_provider(&join.table_name)
+                .ok_or_else(|| {
+                    ProcessorError::InvalidConfiguration(format!(
+                        "table provider not registered for table `{}`",
+                        join.table_name
+                    ))
+                })?;
+            if provider.schema().as_ref() != join.table_schema.as_ref() {
+                return Err(ProcessorError::InvalidConfiguration(format!(
+                    "table provider schema mismatch for table `{}`",
+                    join.table_name
+                )));
+            }
+            let processor = LookupJoinProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                Arc::new(join.clone()),
+                provider,
+                channel_capacities,
+            );
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::LookupJoin(processor),
+            ))
+        }
         PhysicalPlan::Decoder(decoder_plan) => {
             let schema = decoder_plan.schema();
             let mut processor = match context.shared_stream() {
@@ -2398,6 +2439,7 @@ fn plan_output_domain(
         | PhysicalPlan::MemoryCollectionMaterialize(_)
         | PhysicalPlan::StatefulFunction(_)
         | PhysicalPlan::Filter(_)
+        | PhysicalPlan::LookupJoin(_)
         | PhysicalPlan::Compute(_)
         | PhysicalPlan::Order(_)
         | PhysicalPlan::Project(_)

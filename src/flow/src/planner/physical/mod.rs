@@ -15,6 +15,7 @@ pub mod physical_empty_suppress;
 pub mod physical_eventtime_watermark;
 pub mod physical_filter;
 pub mod physical_inc_sink_encoder;
+pub mod physical_lookup_join;
 pub mod physical_memory_collection_materialize;
 pub mod physical_order;
 pub mod physical_process_time_watermark;
@@ -49,6 +50,7 @@ pub use physical_empty_suppress::PhysicalEmptySuppress;
 pub use physical_eventtime_watermark::PhysicalEventtimeWatermark;
 pub use physical_filter::PhysicalFilter;
 pub use physical_inc_sink_encoder::PhysicalIncSinkEncoder;
+pub use physical_lookup_join::{LookupJoinKeySlot, PhysicalLookupJoin};
 pub use physical_memory_collection_materialize::PhysicalMemoryCollectionMaterialize;
 pub use physical_order::{PhysicalOrder, PhysicalOrderKey};
 pub use physical_process_time_watermark::PhysicalProcessTimeWatermark;
@@ -88,6 +90,7 @@ pub enum PhysicalPlan {
     MemoryCollectionMaterialize(PhysicalMemoryCollectionMaterialize),
     StatefulFunction(PhysicalStatefulFunction),
     Filter(PhysicalFilter),
+    LookupJoin(PhysicalLookupJoin),
     Compute(PhysicalCompute),
     Order(PhysicalOrder),
     Project(PhysicalProject),
@@ -135,6 +138,7 @@ impl PhysicalPlan {
             PhysicalPlan::MemoryCollectionMaterialize(plan) => plan.base.children(),
             PhysicalPlan::StatefulFunction(plan) => plan.base.children(),
             PhysicalPlan::Filter(plan) => plan.base.children(),
+            PhysicalPlan::LookupJoin(plan) => plan.base.children(),
             PhysicalPlan::Compute(plan) => plan.base.children(),
             PhysicalPlan::Order(plan) => plan.base.children(),
             PhysicalPlan::Project(plan) => plan.base.children(),
@@ -179,6 +183,7 @@ impl PhysicalPlan {
             PhysicalPlan::MemoryCollectionMaterialize(_) => "PhysicalMemoryCollectionMaterialize",
             PhysicalPlan::StatefulFunction(_) => "PhysicalStatefulFunction",
             PhysicalPlan::Filter(_) => "PhysicalFilter",
+            PhysicalPlan::LookupJoin(_) => "PhysicalLookupJoin",
             PhysicalPlan::Compute(_) => "PhysicalCompute",
             PhysicalPlan::Order(_) => "PhysicalOrder",
             PhysicalPlan::Project(_) => "PhysicalProject",
@@ -222,6 +227,7 @@ impl PhysicalPlan {
             PhysicalPlan::MemoryCollectionMaterialize(plan) => plan.base.index(),
             PhysicalPlan::StatefulFunction(plan) => plan.base.index(),
             PhysicalPlan::Filter(plan) => plan.base.index(),
+            PhysicalPlan::LookupJoin(plan) => plan.base.index(),
             PhysicalPlan::Compute(plan) => plan.base.index(),
             PhysicalPlan::Order(plan) => plan.base.index(),
             PhysicalPlan::Project(plan) => plan.base.index(),

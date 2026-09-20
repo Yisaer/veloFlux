@@ -941,6 +941,9 @@ fn build_logical_ir(
         LogicalPlan::DataSink(plan) => LogicalPlanNodeKindIR::DataSink {
             sinks: vec![sink_to_ir(&plan.sink)],
         },
+        LogicalPlan::LookupJoin(_) => LogicalPlanNodeKindIR::Opaque {
+            plan_type: "LookupJoin".to_string(),
+        },
     };
 
     out.push(LogicalPlanNodeIR {

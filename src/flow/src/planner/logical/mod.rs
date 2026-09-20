@@ -1,9 +1,9 @@
 use crate::catalog::{StreamDefinition, TableDefinition, TableProps};
 use crate::pipeline::SourceInputConfig;
 use parser::window as parser_window;
-use parser::SelectStmt;
+use parser::{JoinConstraint, JoinType, SelectStmt};
 use sqlparser::ast::{visit_expressions_mut, Expr, Value as SqlValue};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
@@ -13,6 +13,7 @@ pub mod aggregation;
 pub mod compute;
 pub mod datasource;
 pub mod filter;
+pub mod lookup_join;
 pub mod order;
 pub mod project;
 pub mod sink;
@@ -26,6 +27,9 @@ pub use aggregation::Aggregation;
 pub use compute::Compute;
 pub use datasource::DataSource;
 pub use filter::Filter;
+pub use lookup_join::{
+    extract_lookup_key_bindings, LogicalColumnRef, LookupJoin, LookupJoinSpec, LookupKeyBinding,
+};
 pub use order::{Order, OrderItem};
 pub use project::Project;
 pub use sink::DataSinkPlan;
@@ -60,6 +64,7 @@ pub enum LogicalPlan {
     TableScan(TableScan),
     StatefulFunction(StatefulFunctionPlan),
     Filter(Filter),
+    LookupJoin(LookupJoin),
     Aggregation(Aggregation),
     Compute(Compute),
     Order(Order),
@@ -76,6 +81,7 @@ impl LogicalPlan {
             LogicalPlan::TableScan(plan) => plan.base.children(),
             LogicalPlan::StatefulFunction(plan) => plan.base.children(),
             LogicalPlan::Filter(plan) => plan.base.children(),
+            LogicalPlan::LookupJoin(plan) => plan.base.children(),
             LogicalPlan::Aggregation(plan) => plan.base.children(),
             LogicalPlan::Compute(plan) => plan.base.children(),
             LogicalPlan::Order(plan) => plan.base.children(),
@@ -92,6 +98,7 @@ impl LogicalPlan {
             LogicalPlan::TableScan(_) => "TableScan",
             LogicalPlan::StatefulFunction(_) => "StatefulFunction",
             LogicalPlan::Filter(_) => "Filter",
+            LogicalPlan::LookupJoin(_) => "LookupJoin",
             LogicalPlan::Aggregation(_) => "Aggregation",
             LogicalPlan::Compute(_) => "Compute",
             LogicalPlan::Order(_) => "Order",
@@ -108,6 +115,7 @@ impl LogicalPlan {
             LogicalPlan::TableScan(plan) => plan.base.index(),
             LogicalPlan::StatefulFunction(plan) => plan.base.index(),
             LogicalPlan::Filter(plan) => plan.base.index(),
+            LogicalPlan::LookupJoin(plan) => plan.base.index(),
             LogicalPlan::Aggregation(plan) => plan.base.index(),
             LogicalPlan::Compute(plan) => plan.base.index(),
             LogicalPlan::Order(plan) => plan.base.index(),
@@ -223,8 +231,104 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
         .iter()
         .filter(|source| table_defs.contains_key(&source.name))
         .count();
-    validate_eos_window_source_constraints(&select_stmt, table_sources)?;
-    if table_sources > 0 {
+    if !select_stmt.joins.is_empty() {
+        let from = select_stmt
+            .from
+            .as_ref()
+            .ok_or_else(|| "lookup join is missing its FROM relation".to_string())?;
+        let stream_sources = select_stmt
+            .source_infos
+            .iter()
+            .filter(|source| stream_defs.contains_key(&source.name))
+            .count();
+        if stream_sources != 1 {
+            return Err("stream-table lookup join requires exactly one stream source".to_string());
+        }
+        let stream = stream_defs.get(&from.name).ok_or_else(|| {
+            format!(
+                "lookup join FROM relation `{}` must be a registered stream",
+                from.name
+            )
+        })?;
+        let datasource = DataSource::new(
+            from.name.clone(),
+            None,
+            stream.decoder().clone(),
+            current_index,
+            stream.schema(),
+            stream.eventtime().cloned(),
+            stream.sampler().cloned(),
+        )
+        .with_stream_type(stream.stream_type());
+        let mut datasource = datasource;
+        datasource.source_input = source_inputs.get(&from.name).cloned().unwrap_or_default();
+        let mut current_plan = Arc::new(LogicalPlan::DataSource(datasource));
+        current_index += 1;
+        for join in &select_stmt.joins {
+            if join.join_type != JoinType::Inner {
+                return Err("only INNER stream-table lookup joins are supported".to_string());
+            }
+            let JoinConstraint::On(on) = &join.constraint else {
+                return Err("stream-table lookup join requires an ON clause".to_string());
+            };
+            let table = table_defs.get(&join.relation.name).ok_or_else(|| {
+                format!(
+                    "lookup join relation `{}` must be a registered table",
+                    join.relation.name
+                )
+            })?;
+            if table.table_type() != crate::catalog::TableType::MemoryMock {
+                return Err("only memory tables support lookup joins currently".to_string());
+            }
+            let Some(lookup_capability) = table.capabilities().lookup.as_ref() else {
+                return Err(format!(
+                    "table `{}` does not advertise lookup capability",
+                    table.id()
+                ));
+            };
+            let key_bindings = extract_lookup_key_bindings(
+                on,
+                &from.name,
+                stream.schema().as_ref(),
+                &join.relation.name,
+                table.schema().as_ref(),
+            )?;
+            for binding in &key_bindings {
+                let supported = lookup_capability
+                    .lookup_key_sets
+                    .iter()
+                    .any(|key_set| key_set.len() == 1 && key_set[0] == binding.table_column.column);
+                if !supported {
+                    return Err(format!(
+                        "table `{}` does not advertise an index for lookup column `{}`",
+                        table.id(),
+                        binding.table_column.column
+                    ));
+                }
+            }
+            let table_projection = required_lookup_table_projection(
+                &select_stmt,
+                &join.relation.name,
+                table.schema().as_ref(),
+                &key_bindings,
+            );
+            let lookup_join = LookupJoin::new(
+                LookupJoinSpec {
+                    join_type: join.join_type,
+                    table_name: join.relation.name.clone(),
+                    table_schema: table.schema(),
+                    table_projection,
+                    key_bindings,
+                },
+                current_plan,
+                current_index,
+            );
+            current_plan = Arc::new(LogicalPlan::LookupJoin(lookup_join));
+            current_index += 1;
+        }
+        current_plans.push(current_plan);
+    } else if table_sources > 0 {
+        validate_eos_window_source_constraints(&select_stmt, table_sources)?;
         if select_stmt.source_infos.len() != 1 {
             return Err("table scan currently supports exactly one relation".to_string());
         }
@@ -275,6 +379,7 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
         current_plans.push(Arc::new(LogicalPlan::TableScan(table_scan)));
         current_index += 1;
     } else {
+        validate_eos_window_source_constraints(&select_stmt, table_sources)?;
         for source_info in &select_stmt.source_infos {
             let definition = stream_defs.get(&source_info.name).ok_or_else(|| {
                 format!(
@@ -709,6 +814,116 @@ fn parser_window_expression_inputs(window: &parser_window::Window) -> Vec<&Expr>
         }
         parser_window::Window::Eos { .. } => Vec::new(),
     }
+}
+
+fn required_lookup_table_projection(
+    select_stmt: &SelectStmt,
+    table_name: &str,
+    table_schema: &datatypes::Schema,
+    key_bindings: &[LookupKeyBinding],
+) -> Vec<String> {
+    let mut required = HashSet::new();
+    let mut all_columns = false;
+
+    fn collect_expr_columns(
+        expr: &Expr,
+        table_name: &str,
+        required: &mut HashSet<String>,
+        all_columns: &mut bool,
+    ) {
+        let mut expr = expr.clone();
+        let _ = visit_expressions_mut(&mut expr, |node| {
+            if let Expr::CompoundIdentifier(idents) = node {
+                if let (Some(relation), Some(column)) = (idents.first(), idents.last()) {
+                    if relation.value == table_name {
+                        if column.value == "*" {
+                            *all_columns = true;
+                        } else {
+                            required.insert(column.value.clone());
+                        }
+                    }
+                }
+            }
+            ControlFlow::<()>::Continue(())
+        });
+    }
+
+    for field in &select_stmt.select_fields {
+        match &field.expr {
+            Expr::Identifier(identifier) if identifier.value == "*" => all_columns = true,
+            Expr::CompoundIdentifier(idents)
+                if idents
+                    .last()
+                    .is_some_and(|identifier| identifier.value == "*")
+                    && idents
+                        .first()
+                        .is_some_and(|identifier| identifier.value == table_name) =>
+            {
+                all_columns = true;
+            }
+            expr => collect_expr_columns(expr, table_name, &mut required, &mut all_columns),
+        }
+    }
+
+    if let Some(expr) = &select_stmt.where_condition {
+        collect_expr_columns(expr, table_name, &mut required, &mut all_columns);
+    }
+    if let Some(expr) = &select_stmt.having {
+        collect_expr_columns(expr, table_name, &mut required, &mut all_columns);
+    }
+    for expr in &select_stmt.group_by_exprs {
+        collect_expr_columns(expr, table_name, &mut required, &mut all_columns);
+    }
+    for item in &select_stmt.order_by {
+        collect_expr_columns(&item.expr, table_name, &mut required, &mut all_columns);
+    }
+    for expr in select_stmt.aggregate_mappings.values() {
+        collect_expr_columns(expr, table_name, &mut required, &mut all_columns);
+    }
+    for mapping in &select_stmt.stateful_mappings {
+        collect_expr_columns(
+            &mapping.spec.original_expr,
+            table_name,
+            &mut required,
+            &mut all_columns,
+        );
+        for expr in &mapping.spec.args {
+            collect_expr_columns(expr, table_name, &mut required, &mut all_columns);
+        }
+        if let Some(expr) = &mapping.spec.when {
+            collect_expr_columns(expr, table_name, &mut required, &mut all_columns);
+        }
+        for expr in &mapping.spec.partition_by {
+            collect_expr_columns(expr, table_name, &mut required, &mut all_columns);
+        }
+    }
+    for mapping in &select_stmt.acc_mappings {
+        collect_expr_columns(
+            &mapping.spec.original_expr,
+            table_name,
+            &mut required,
+            &mut all_columns,
+        );
+    }
+    if let Some(window) = &select_stmt.window {
+        if let Some(expr) = window.filter() {
+            collect_expr_columns(expr, table_name, &mut required, &mut all_columns);
+        }
+        for expr in parser_window_expression_inputs(window) {
+            collect_expr_columns(expr, table_name, &mut required, &mut all_columns);
+        }
+    }
+
+    for binding in key_bindings {
+        required.insert(binding.table_column.column.clone());
+    }
+
+    table_schema
+        .column_schemas()
+        .iter()
+        .filter(|column| all_columns || required.contains(&column.name))
+        .map(|column| column.name.clone())
+        .collect()
 }
 
 fn validate_select_alias_names(

@@ -36,7 +36,7 @@ pub use expression_extractor::{
     extract_select_expressions_simple,
 };
 pub use parser::{StreamSqlParser, parse_sql, parse_sql_with_registries};
-pub use select_stmt::{SelectField, SelectStmt};
+pub use select_stmt::{JoinConstraint, JoinSpec, JoinType, SelectField, SelectStmt};
 pub use stateful_call::{StatefulCallSpec, StatefulMappingEntry};
 pub use stateful_registry::{
     StatefulRegistry, StaticStatefulRegistry, builtin_stateful_function_names,

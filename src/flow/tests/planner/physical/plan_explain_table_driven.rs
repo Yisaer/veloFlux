@@ -356,6 +356,66 @@ fn setup_tables(props: TableProps) -> HashMap<String, Arc<TableDefinition>> {
     table_defs
 }
 
+fn setup_lookup_streams() -> HashMap<String, Arc<StreamDefinition>> {
+    let mut stream_defs = setup_streams();
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "stream".to_string(),
+            "k1".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream".to_string(),
+            "k2".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "stream".to_string(),
+            "t1".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+    let definition = StreamDefinition::new(
+        "stream",
+        schema,
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    );
+    stream_defs.insert("stream".to_string(), Arc::new(definition));
+    stream_defs
+}
+
+fn setup_lookup_tables() -> HashMap<String, Arc<TableDefinition>> {
+    let mut table_defs = HashMap::new();
+    for table_name in ["table_a", "table_b"] {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                table_name.to_string(),
+                "k1".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                table_name.to_string(),
+                "k2".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                table_name.to_string(),
+                "value".to_string(),
+                ConcreteDatatype::String(StringType),
+            ),
+        ]));
+        let definition = TableDefinition::new(
+            table_name,
+            schema,
+            TableProps::MemoryMock(MemoryMockTableProps { rows: Vec::new() }),
+            StreamDecoderConfig::json(),
+        );
+        table_defs.insert(table_name.to_string(), Arc::new(definition));
+    }
+    table_defs
+}
+
 fn setup_catalog_with_eventtime_stream_config(
     column: &'static str,
     type_key: &'static str,
@@ -739,6 +799,38 @@ fn explain_json_result_with_tables(
     Ok(explain.to_json().to_string())
 }
 
+fn explain_lookup_join_json(sql: &str) -> String {
+    let registries = PipelineRegistries::new_with_builtin();
+    let stream_defs = setup_lookup_streams();
+    let table_defs = setup_lookup_tables();
+    let select_stmt = parse_sql(sql).expect("parse lookup join SQL");
+    let bindings = bindings_for_select_with_tables(&select_stmt, &stream_defs, &table_defs);
+    let logical_plan = create_logical_plan_with_table_defs_and_source_inputs(
+        select_stmt,
+        Vec::new(),
+        &stream_defs,
+        &table_defs,
+        &HashMap::new(),
+    )
+    .expect("logical lookup join plan");
+    let (logical_plan, bindings) = flow::optimize_logical_plan(logical_plan, &bindings);
+    let physical_plan =
+        flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
+            .expect("physical lookup join plan");
+    let physical_plan = flow::optimize_physical_plan(
+        physical_plan,
+        registries.encoder_registry().as_ref(),
+        registries.aggregate_registry(),
+    );
+    let explain = PipelineExplain::new(
+        logical_plan,
+        physical_plan,
+        PipelineExplainConfig::default(),
+    );
+    println!("{sql}\n{}", explain.to_pretty_string());
+    explain.to_json().to_string()
+}
+
 fn explain_json_with_source_inputs(
     sql: &str,
     sinks: Vec<PipelineSink>,
@@ -867,6 +959,43 @@ fn plan_explain_window_group_by_and_over_partition_by_table_driven() {
 
     for case in cases {
         let got = explain_json_string(case.sql);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
+fn plan_explain_lookup_join_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = [
+        Case {
+            name: "single_lookup_join",
+            sql: "SELECT stream.k1, table_a.value FROM stream INNER JOIN table_a ON stream.k1 = table_a.k1",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Inner","keys=[stream.k1=table_a.k1]"],"operator":"LookupJoin"}],"id":"Project_2","info":["fields=[stream.k1; table_a.value]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[k1]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[k1]"],"operator":"PhysicalDecoder"}],"id":"PhysicalLookupJoin_2","info":["table=table_a","keys=[stream.k1=table_a.k1]"],"operator":"PhysicalLookupJoin"}],"id":"PhysicalProject_3","info":["fields=[stream.k1; table_a.value]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "lookup_join_with_multiple_keys",
+            sql: "SELECT stream.k1, table_a.value FROM stream INNER JOIN table_a ON stream.k1 = table_a.k1 AND stream.k2 = table_a.k2",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1, k2]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Inner","keys=[stream.k1=table_a.k1, stream.k2=table_a.k2]"],"operator":"LookupJoin"}],"id":"Project_2","info":["fields=[stream.k1; table_a.value]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalLookupJoin_2","info":["table=table_a","keys=[stream.k1=table_a.k1, stream.k2=table_a.k2]"],"operator":"PhysicalLookupJoin"}],"id":"PhysicalProject_3","info":["fields=[stream.k1; table_a.value]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "multiple_lookup_joins",
+            sql: "SELECT stream.k1, table_a.value, table_b.value FROM stream INNER JOIN table_a ON stream.k1 = table_a.k1 INNER JOIN table_b ON stream.k2 = table_b.k2",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1, k2]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Inner","keys=[stream.k1=table_a.k1]"],"operator":"LookupJoin"}],"id":"LookupJoin_2","info":["table=table_b","type=Inner","keys=[stream.k2=table_b.k2]"],"operator":"LookupJoin"}],"id":"Project_3","info":["fields=[stream.k1; table_a.value; table_b.value]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalLookupJoin_2","info":["table=table_a","keys=[stream.k1=table_a.k1]"],"operator":"PhysicalLookupJoin"}],"id":"PhysicalLookupJoin_3","info":["table=table_b","keys=[stream.k2=table_b.k2]"],"operator":"PhysicalLookupJoin"}],"id":"PhysicalProject_4","info":["fields=[stream.k1; table_a.value; table_b.value]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "multiple_lookup_joins_with_stream_and_table_outputs",
+            sql: "SELECT stream.k1, stream.t1, table_a.value, table_b.value FROM stream INNER JOIN table_a ON stream.k1 = table_a.k1 INNER JOIN table_b ON stream.k2 = table_b.k2",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1, k2, t1]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Inner","keys=[stream.k1=table_a.k1]"],"operator":"LookupJoin"}],"id":"LookupJoin_2","info":["table=table_b","type=Inner","keys=[stream.k2=table_b.k2]"],"operator":"LookupJoin"}],"id":"Project_3","info":["fields=[stream.k1; stream.t1; table_a.value; table_b.value]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[k1, k2, t1]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[k1, k2, t1]"],"operator":"PhysicalDecoder"}],"id":"PhysicalLookupJoin_2","info":["table=table_a","keys=[stream.k1=table_a.k1]"],"operator":"PhysicalLookupJoin"}],"id":"PhysicalLookupJoin_3","info":["table=table_b","keys=[stream.k2=table_b.k2]"],"operator":"PhysicalLookupJoin"}],"id":"PhysicalProject_4","info":["fields=[stream.k1; stream.t1; table_a.value; table_b.value]"],"operator":"PhysicalProject"}}"##,
+        },
+    ];
+
+    for case in cases {
+        let got = explain_lookup_join_json(case.sql);
         assert_eq!(got, case.expected, "case={}", case.name);
     }
 }

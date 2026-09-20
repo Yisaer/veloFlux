@@ -441,6 +441,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::Filter(new))
         }
+        PhysicalPlan::LookupJoin(join) => {
+            let mut new = join.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::LookupJoin(new))
+        }
         PhysicalPlan::Compute(compute) => {
             let mut new = compute.clone();
             new.base.children = children;

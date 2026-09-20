@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use datatypes::{Schema, Value};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -39,24 +38,6 @@ pub struct LookupTimeRange {
     pub end: Option<i64>,
 }
 
-/// Per-request resource limits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LookupLimits {
-    pub max_rows: usize,
-    pub max_bytes: usize,
-    pub timeout: Option<Duration>,
-}
-
-impl Default for LookupLimits {
-    fn default() -> Self {
-        Self {
-            max_rows: usize::MAX,
-            max_bytes: usize::MAX,
-            timeout: None,
-        }
-    }
-}
-
 /// Structured input to a table provider lookup.
 #[derive(Debug, Clone)]
 pub struct LookupRequest {
@@ -64,14 +45,13 @@ pub struct LookupRequest {
     pub equality_keys: Vec<LookupKey>,
     pub filters: Vec<LookupFilter>,
     pub time_range: Option<LookupTimeRange>,
-    pub limits: LookupLimits,
+    pub batch_size: usize,
     pub cancellation: CancellationToken,
 }
 
-/// Bounded rows returned by a table provider.
+/// Metadata returned after a table provider has emitted all lookup batches.
 #[derive(Debug, Clone)]
 pub struct LookupResponse {
-    pub rows: Vec<Tuple>,
     pub snapshot_id: Option<String>,
 }
 
@@ -108,6 +88,25 @@ impl ScanOutput {
     }
 }
 
+/// Sink used by a provider to emit one lookup batch at a time.
+#[derive(Clone)]
+pub struct LookupOutput {
+    sender: mpsc::Sender<Vec<Tuple>>,
+}
+
+impl LookupOutput {
+    pub fn new(sender: mpsc::Sender<Vec<Tuple>>) -> Self {
+        Self { sender }
+    }
+
+    pub async fn send(&self, batch: Vec<Tuple>) -> Result<(), TableProviderError> {
+        self.sender
+            .send(batch)
+            .await
+            .map_err(|_| TableProviderError::Provider("lookup output closed".to_string()))
+    }
+}
+
 /// Metadata returned after a table scan has emitted all batches.
 #[derive(Debug, Clone)]
 pub struct ScanResponse {
@@ -139,7 +138,11 @@ pub trait TableProvider: Send + Sync {
         output: ScanOutput,
     ) -> Result<ScanResponse, TableProviderError>;
 
-    async fn lookup(&self, request: LookupRequest) -> Result<LookupResponse, TableProviderError>;
+    async fn lookup(
+        &self,
+        request: LookupRequest,
+        output: LookupOutput,
+    ) -> Result<LookupResponse, TableProviderError>;
 }
 
 /// Provider implementation for the existing NanoMQ history table storage.
@@ -245,7 +248,11 @@ impl TableProvider for HistoryTableProvider {
         Ok(ScanResponse { snapshot_id: None })
     }
 
-    async fn lookup(&self, _request: LookupRequest) -> Result<LookupResponse, TableProviderError> {
+    async fn lookup(
+        &self,
+        _request: LookupRequest,
+        _output: LookupOutput,
+    ) -> Result<LookupResponse, TableProviderError> {
         Err(TableProviderError::Provider(
             "history table lookup is not implemented".to_string(),
         ))

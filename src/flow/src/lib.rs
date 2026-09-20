@@ -108,7 +108,7 @@ pub use shared_stream::{
 pub use stateful::StatefulFunctionRegistry;
 pub use table::memory::{MemoryMockTableProvider, MemoryTableBehavior};
 pub use table::provider::{
-    HistoryTableProvider, LookupFilter, LookupKey, LookupLimits, LookupRequest, LookupResponse,
+    HistoryTableProvider, LookupFilter, LookupKey, LookupOutput, LookupRequest, LookupResponse,
     LookupTimeRange, ScanOutput, ScanRequest, ScanResponse, TableProvider, TableProviderError,
 };
 pub use template::ConnectorString;

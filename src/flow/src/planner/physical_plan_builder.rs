@@ -7,22 +7,22 @@ use crate::expr::ScalarExpr;
 use crate::planner::logical::{
     aggregation::Aggregation as LogicalAggregation, compute::Compute as LogicalCompute,
     order::Order as LogicalOrder, DataSinkPlan, DataSource as LogicalDataSource,
-    Filter as LogicalFilter, LogicalPlan, LogicalWindow, LogicalWindowSpec,
+    Filter as LogicalFilter, LogicalPlan, LogicalWindow, LogicalWindowSpec, LookupJoin,
     Project as LogicalProject, StatefulFunctionPlan as LogicalStatefulFunction,
     TableScan as LogicalTableScan,
 };
 use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
 use crate::planner::physical::{
-    DataDomain, PartitionGroupKey, PhysicalAggregation, PhysicalBatch, PhysicalCompute,
-    PhysicalDataSink, PhysicalDataSource, PhysicalDecoder, PhysicalDecoderEventtimeSpec,
-    PhysicalEmptySuppress, PhysicalEventtimeWatermark, PhysicalFilter,
-    PhysicalMemoryCollectionMaterialize, PhysicalOrder, PhysicalOrderKey, PhysicalPlan,
-    PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect, PhysicalRowDiff,
-    PhysicalSampler, PhysicalSharedStream, PhysicalSharedStreamRequirement, PhysicalSinkCompress,
-    PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate,
-    PhysicalStatefulFunction, PhysicalTableScan, PhysicalTableScanSpec, PipelineStateUsage,
-    StatefulCall, WatermarkConfig,
+    DataDomain, LookupJoinKeySlot, PartitionGroupKey, PhysicalAggregation, PhysicalBatch,
+    PhysicalCompute, PhysicalDataSink, PhysicalDataSource, PhysicalDecoder,
+    PhysicalDecoderEventtimeSpec, PhysicalEmptySuppress, PhysicalEventtimeWatermark,
+    PhysicalFilter, PhysicalLookupJoin, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
+    PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
+    PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
+    PhysicalSharedStreamRequirement, PhysicalSinkCompress, PhysicalSinkConnector,
+    PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate, PhysicalStatefulFunction,
+    PhysicalTableScan, PhysicalTableScanSpec, PipelineStateUsage, StatefulCall, WatermarkConfig,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
@@ -479,6 +479,14 @@ fn create_physical_plan_with_builder_cached_with_options(
             let index = builder.allocate_index();
             create_physical_table_scan(logical_table_scan, index)
         }
+        LogicalPlan::LookupJoin(logical_lookup_join) => create_physical_lookup_join(
+            logical_lookup_join,
+            &logical_plan,
+            bindings,
+            registries,
+            options,
+            builder,
+        )?,
         LogicalPlan::StatefulFunction(logical_stateful) => {
             create_physical_stateful_function_with_builder(
                 logical_stateful,
@@ -957,6 +965,85 @@ fn create_physical_table_scan(logical_scan: &LogicalTableScan, index: i64) -> Ar
         },
         index,
     )))
+}
+
+fn create_physical_lookup_join(
+    logical_join: &LookupJoin,
+    logical_plan: &Arc<LogicalPlan>,
+    bindings: &SchemaBinding,
+    registries: &PipelineRegistries,
+    options: &PhysicalPlanBuildOptions,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    let child = logical_plan
+        .children()
+        .first()
+        .ok_or_else(|| "lookup join requires exactly one child".to_string())?;
+    if logical_plan.children().len() != 1 {
+        return Err("lookup join requires exactly one child".to_string());
+    }
+    let physical_child = create_physical_plan_with_builder_cached_with_options(
+        Arc::clone(child),
+        bindings,
+        registries,
+        options,
+        builder,
+    )?;
+    let child_layout = physical_child.runtime_layout()?;
+    let table_message_index = child_layout.messages.len();
+
+    let mut key_slots = Vec::with_capacity(logical_join.spec.key_bindings.len());
+    for binding in &logical_join.spec.key_bindings {
+        let (probe_message_index, probe_value_index) = child_layout
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.source_name.as_ref() == binding.probe_column.relation)
+            .find_map(|(message_index, message)| {
+                message
+                    .columns
+                    .iter()
+                    .position(|column| column.name.as_ref() == binding.probe_column.column)
+                    .map(|value_index| (message_index, value_index))
+            })
+            .ok_or_else(|| {
+                format!(
+                    "lookup join probe column `{}.{}` is not present in the child runtime layout",
+                    binding.probe_column.relation, binding.probe_column.column
+                )
+            })?;
+        let table_value_index = logical_join
+            .spec
+            .table_schema
+            .column_index(&binding.table_column.column)
+            .ok_or_else(|| {
+                format!(
+                    "lookup join table column `{}.{}` is not present in table schema",
+                    binding.table_column.relation, binding.table_column.column
+                )
+            })?;
+        key_slots.push(LookupJoinKeySlot {
+            probe_relation: binding.probe_column.relation.clone(),
+            probe_column: binding.probe_column.column.clone(),
+            probe_message_index,
+            probe_value_index,
+            table_relation: binding.table_column.relation.clone(),
+            table_column: binding.table_column.column.clone(),
+            table_value_index,
+        });
+    }
+
+    let index = builder.allocate_index();
+    let physical = PhysicalLookupJoin::new(
+        logical_join.spec.table_name.clone(),
+        Arc::clone(&logical_join.spec.table_schema),
+        logical_join.spec.table_projection.clone(),
+        key_slots,
+        table_message_index,
+        physical_child,
+        index,
+    );
+    Ok(Arc::new(PhysicalPlan::LookupJoin(physical)))
 }
 
 /// Create a PhysicalDataSource from a LogicalDataSource using centralized index management

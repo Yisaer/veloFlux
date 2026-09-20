@@ -1,6 +1,7 @@
 use sqlparser::ast::{
-    Expr, Function, FunctionArg, FunctionArgExpr, Ident, ObjectName, Query, Select, SelectItem,
-    SetExpr, Statement, UnaryOperator, Visit, VisitMut, VisitorMut,
+    Expr, Function, FunctionArg, FunctionArgExpr, Ident, JoinConstraint as SqlJoinConstraint,
+    JoinOperator, ObjectName, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
+    UnaryOperator, Visit, VisitMut, VisitorMut,
 };
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Location, Token, TokenWithLocation, Tokenizer};
@@ -9,7 +10,10 @@ use crate::aggregate_registry::{AggregateRegistry, default_aggregate_registry};
 use crate::aggregate_transformer::transform_aggregate_functions;
 use crate::col_placeholder_allocator::ColPlaceholderAllocator;
 use crate::dialect::StreamDialect;
-use crate::select_stmt::{OrderByItem, SelectField, SelectStmt};
+use crate::select_stmt::{
+    JoinConstraint as ParsedJoinConstraint, JoinSpec, JoinType, OrderByItem, SelectField,
+    SelectStmt, SourceInfo,
+};
 use crate::stateful_registry::{StatefulRegistry, default_stateful_registry};
 use crate::stateful_transformer::transform_stateful_functions;
 use crate::visitor::TableInfoVisitor;
@@ -398,11 +402,100 @@ impl StreamSqlParser {
         let mut select_stmt =
             SelectStmt::with_fields_and_conditions(select_fields, where_condition, having);
         select_stmt.source_infos = source_infos;
+        let (from, joins) = extract_join_structure(select)?;
+        select_stmt.from = from;
+        select_stmt.joins = joins;
 
         Ok(select_stmt)
     }
 
     // Window validation (e.g. only allowed in GROUP BY) is intentionally not enforced here.
+}
+
+fn extract_join_structure(select: &Select) -> Result<(Option<SourceInfo>, Vec<JoinSpec>), String> {
+    let Some(from) = select.from.first() else {
+        return Ok((None, Vec::new()));
+    };
+
+    if select.from.len() > 1 {
+        return Ok((None, Vec::new()));
+    }
+
+    let TableFactor::Table {
+        name: from_name,
+        alias: left_alias,
+        ..
+    } = &from.relation
+    else {
+        if from.joins.is_empty() {
+            return Ok((None, Vec::new()));
+        }
+        return Err("JOIN requires a named table relation".to_string());
+    };
+    if left_alias.is_some() && !from.joins.is_empty() {
+        return Err("stream/table aliases are not supported for JOIN".to_string());
+    }
+
+    let base_relation = SourceInfo {
+        name: from_name.to_string(),
+        alias: None,
+    };
+
+    let mut joins = Vec::with_capacity(from.joins.len());
+    for join in &from.joins {
+        let TableFactor::Table {
+            name,
+            alias: right_alias,
+            ..
+        } = &join.relation
+        else {
+            return Err("JOIN requires a named table relation".to_string());
+        };
+        if right_alias.is_some() {
+            return Err("stream/table aliases are not supported for JOIN".to_string());
+        }
+
+        let (join_type, constraint) = match &join.join_operator {
+            JoinOperator::Inner(constraint) => (JoinType::Inner, Some(constraint)),
+            JoinOperator::LeftOuter(constraint) => (JoinType::Left, Some(constraint)),
+            JoinOperator::RightOuter(constraint) => (JoinType::Right, Some(constraint)),
+            JoinOperator::FullOuter(constraint) => (JoinType::Full, Some(constraint)),
+            JoinOperator::CrossJoin => (JoinType::Cross, None),
+            JoinOperator::LeftSemi(_)
+            | JoinOperator::RightSemi(_)
+            | JoinOperator::LeftAnti(_)
+            | JoinOperator::RightAnti(_)
+            | JoinOperator::CrossApply
+            | JoinOperator::OuterApply => {
+                return Err("unsupported JOIN type".to_string());
+            }
+        };
+        let constraint = match constraint {
+            None => ParsedJoinConstraint::None,
+            Some(SqlJoinConstraint::On(on)) => ParsedJoinConstraint::On(on.clone()),
+            Some(SqlJoinConstraint::None) => ParsedJoinConstraint::None,
+            Some(SqlJoinConstraint::Using(_)) => {
+                return Err("JOIN USING is not supported".to_string());
+            }
+            Some(SqlJoinConstraint::Natural) => {
+                return Err("NATURAL JOIN is not supported".to_string());
+            }
+        };
+
+        joins.push(JoinSpec {
+            join_type,
+            relation: SourceInfo {
+                name: name.to_string(),
+                alias: None,
+            },
+            constraint,
+        });
+    }
+    if joins.is_empty() {
+        Ok((None, joins))
+    } else {
+        Ok((Some(base_relation), joins))
+    }
 }
 
 struct NullPredicateLowerer;
@@ -1782,6 +1875,7 @@ mod tests {
 mod source_info_tests {
     use super::*;
     use crate::Window;
+    use crate::select_stmt::JoinConstraint as ParsedJoinConstraint;
 
     #[test]
     fn test_parse_select_with_single_table() {
@@ -1836,6 +1930,102 @@ mod source_info_tests {
         assert_eq!(select_stmt.source_infos.len(), 1);
         assert_eq!(select_stmt.source_infos[0].name, "users");
         assert!(select_stmt.where_condition.is_some());
+    }
+
+    #[test]
+    fn test_parse_inner_join_and_normalize_plain_join() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse("SELECT live.id, lookup.name FROM live JOIN lookup ON live.id = lookup.id")
+            .unwrap();
+
+        assert_eq!(select_stmt.source_infos.len(), 2);
+        assert_eq!(select_stmt.source_infos[0].name, "live");
+        assert_eq!(select_stmt.source_infos[0].alias, None);
+        assert_eq!(select_stmt.source_infos[1].name, "lookup");
+        assert_eq!(select_stmt.source_infos[1].alias, None);
+        assert_eq!(select_stmt.joins.len(), 1);
+        assert_eq!(select_stmt.joins[0].join_type, JoinType::Inner);
+        assert_eq!(select_stmt.from.as_ref().unwrap().name, "live");
+        assert_eq!(select_stmt.joins[0].relation.name, "lookup");
+        assert!(matches!(
+            select_stmt.joins[0].constraint,
+            ParsedJoinConstraint::On(ref on) if on.to_string() == "live.id = lookup.id"
+        ));
+    }
+
+    #[test]
+    fn test_parse_inner_join_preserves_complete_on_expression() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse(
+                "SELECT * FROM live INNER JOIN lookup ON live.id = lookup.id AND live.kind = lookup.kind",
+            )
+            .unwrap();
+
+        assert_eq!(select_stmt.joins.len(), 1);
+        assert!(matches!(
+            select_stmt.joins[0].constraint,
+            ParsedJoinConstraint::On(ref on)
+                if on.to_string() == "live.id = lookup.id AND live.kind = lookup.kind"
+        ));
+    }
+
+    #[test]
+    fn test_parse_inner_join_chain_preserves_relation_order() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser
+            .parse(
+                "SELECT * FROM live JOIN table_one ON live.id = table_one.id JOIN stream_two ON live.id = stream_two.id",
+            )
+            .unwrap();
+
+        assert_eq!(select_stmt.from.as_ref().unwrap().name, "live");
+        assert_eq!(select_stmt.joins.len(), 2);
+        assert_eq!(select_stmt.joins[0].relation.name, "table_one");
+        assert_eq!(select_stmt.joins[1].relation.name, "stream_two");
+        assert_eq!(select_stmt.joins[0].join_type, JoinType::Inner);
+        assert_eq!(select_stmt.joins[1].join_type, JoinType::Inner);
+    }
+
+    #[test]
+    fn test_parse_join_rejects_relation_aliases() {
+        let parser = StreamSqlParser::new();
+
+        let left_alias = parser
+            .parse("SELECT * FROM live AS l JOIN lookup ON l.id = lookup.id")
+            .unwrap_err();
+        assert!(left_alias.contains("stream/table aliases are not supported for JOIN"));
+
+        let right_alias = parser
+            .parse("SELECT * FROM live JOIN lookup AS t ON live.id = t.id")
+            .unwrap_err();
+        assert!(right_alias.contains("stream/table aliases are not supported for JOIN"));
+    }
+
+    #[test]
+    fn test_parse_join_rejects_unsupported_join_forms() {
+        let parser = StreamSqlParser::new();
+
+        let left_join = parser
+            .parse("SELECT * FROM live LEFT JOIN lookup ON live.id = lookup.id")
+            .unwrap();
+        assert_eq!(left_join.joins[0].join_type, JoinType::Left);
+
+        let using_join = parser
+            .parse("SELECT * FROM live JOIN lookup USING (id)")
+            .unwrap_err();
+        assert!(using_join.contains("JOIN USING is not supported"));
+    }
+
+    #[test]
+    fn test_parse_non_join_query_keeps_join_list_empty() {
+        let parser = StreamSqlParser::new();
+        let select_stmt = parser.parse("SELECT a, b FROM users AS u").unwrap();
+
+        assert_eq!(select_stmt.source_infos.len(), 1);
+        assert_eq!(select_stmt.source_infos[0].alias, Some("u".to_string()));
+        assert!(select_stmt.joins.is_empty());
     }
 
     #[test]

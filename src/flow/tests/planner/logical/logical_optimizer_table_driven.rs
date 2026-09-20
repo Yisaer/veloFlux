@@ -2,7 +2,9 @@ use datatypes::{
     ColumnSchema, ConcreteDatatype, Int64Type, ListType, Schema, StringType, StructField,
     StructType,
 };
-use flow::catalog::{HistoryTableProps, MemoryStreamProps, TableDefinition, TableProps};
+use flow::catalog::{
+    HistoryTableProps, MemoryMockTableProps, MemoryStreamProps, TableDefinition, TableProps,
+};
 use flow::planner::decode_projection::{ListIndexSelection, ProjectionNode};
 use flow::planner::logical::{
     create_logical_plan, create_logical_plan_with_table_defs_and_source_inputs, LogicalPlan,
@@ -307,6 +309,80 @@ fn optimized_logical_json_with_shared_sources_and_registries(
     println!("{}", sql);
     println!("{}", explain.table_string());
     explain.to_json().to_string()
+}
+
+fn lookup_table_defs() -> HashMap<String, Arc<TableDefinition>> {
+    let mut tables = HashMap::new();
+    for table_name in ["table_a", "table_b"] {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                table_name.to_string(),
+                "k1".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                table_name.to_string(),
+                "k2".to_string(),
+                ConcreteDatatype::Int64(Int64Type),
+            ),
+            ColumnSchema::new(
+                table_name.to_string(),
+                "value".to_string(),
+                ConcreteDatatype::String(StringType),
+            ),
+        ]));
+        let definition = TableDefinition::new(
+            table_name,
+            schema,
+            TableProps::MemoryMock(MemoryMockTableProps { rows: Vec::new() }),
+            StreamDecoderConfig::json(),
+        );
+        tables.insert(table_name.to_string(), Arc::new(definition));
+    }
+    tables
+}
+
+fn lookup_join_logical_json(sql: &str) -> serde_json::Value {
+    let stream_defs = setup_streams();
+    let table_defs = lookup_table_defs();
+    let select_stmt = parse_sql(sql).expect("parse lookup join SQL");
+    let bindings = SchemaBinding::new(
+        select_stmt
+            .source_infos
+            .iter()
+            .map(|source| {
+                let (schema, kind) = if let Some(stream) = stream_defs.get(&source.name) {
+                    (stream.schema(), SourceBindingKind::Regular)
+                } else {
+                    (
+                        table_defs
+                            .get(&source.name)
+                            .expect("lookup table definition")
+                            .schema(),
+                        SourceBindingKind::TableScan,
+                    )
+                };
+                SchemaBindingEntry {
+                    source_name: source.name.clone(),
+                    alias: None,
+                    schema,
+                    kind,
+                }
+            })
+            .collect(),
+    );
+    let logical_plan = create_logical_plan_with_table_defs_and_source_inputs(
+        select_stmt,
+        Vec::new(),
+        &stream_defs,
+        &table_defs,
+        &HashMap::new(),
+    )
+    .expect("logical lookup join plan");
+    let (optimized, _) = flow::optimize_logical_plan(logical_plan, &bindings);
+    let explain = ExplainReport::from_logical(optimized);
+    println!("{sql}\n{}", explain.table_string());
+    explain.to_json()
 }
 
 fn optimized_logical_plan_with_shared_sources(
@@ -687,6 +763,35 @@ fn create_logical_plan_table_driven() {
         let got = optimized_logical_json(case.sql);
         assert_eq!(got, case.expected, "case={}", case.name);
     }
+}
+
+fn assert_lookup_join_logical_json(sql: &str, expected: &str) {
+    let got = lookup_join_logical_json(sql).to_string();
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn create_single_inner_lookup_join_logical_plan() {
+    assert_lookup_join_logical_json(
+        "SELECT stream.k1, table_a.value FROM stream INNER JOIN table_a ON stream.k1 = table_a.k1",
+        r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Inner","keys=[stream.k1=table_a.k1]"],"operator":"LookupJoin"}],"id":"Project_2","info":["fields=[stream.k1; table_a.value]"],"operator":"Project"}"##,
+    );
+}
+
+#[test]
+fn create_lookup_join_with_multiple_equality_keys_logical_plan() {
+    assert_lookup_join_logical_json(
+        "SELECT stream.k1, table_a.value FROM stream INNER JOIN table_a ON stream.k1 = table_a.k1 AND stream.k2 = table_a.k2",
+        r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1, k2]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Inner","keys=[stream.k1=table_a.k1, stream.k2=table_a.k2]"],"operator":"LookupJoin"}],"id":"Project_2","info":["fields=[stream.k1; table_a.value]"],"operator":"Project"}"##,
+    );
+}
+
+#[test]
+fn create_multiple_inner_lookup_joins_logical_plan() {
+    assert_lookup_join_logical_json(
+        "SELECT stream.k1, table_a.value, table_b.value FROM stream INNER JOIN table_a ON stream.k1 = table_a.k1 INNER JOIN table_b ON stream.k2 = table_b.k2",
+        r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1, k2]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Inner","keys=[stream.k1=table_a.k1]"],"operator":"LookupJoin"}],"id":"LookupJoin_2","info":["table=table_b","type=Inner","keys=[stream.k2=table_b.k2]"],"operator":"LookupJoin"}],"id":"Project_3","info":["fields=[stream.k1; table_a.value; table_b.value]"],"operator":"Project"}"##,
+    );
 }
 
 #[test]

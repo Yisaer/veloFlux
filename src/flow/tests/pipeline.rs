@@ -37,5 +37,8 @@ mod column_filter_tests;
 #[path = "pipeline/table_scan_tests.rs"]
 mod table_scan_tests;
 
+#[path = "pipeline/lookup_join_tests.rs"]
+mod lookup_join_tests;
+
 #[path = "pipeline/window_partition_tests.rs"]
 mod window_partition_tests;
