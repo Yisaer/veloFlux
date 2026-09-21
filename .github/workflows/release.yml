@@ -49,7 +49,7 @@ jobs:
             bin_path: target/release/veloflux
             video_feature: "true"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -78,7 +78,7 @@ jobs:
           tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME" "${ASSET_NAME}.config.example.yaml"
           rm "$ASSET_NAME" "${ASSET_NAME}.config.example.yaml"
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: veloflux-${{ matrix.asset_suffix }}
           path: veloflux-${{ matrix.asset_suffix }}.tar.gz
@@ -99,7 +99,7 @@ jobs:
           - linux-x86_64-video
     steps:
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: veloflux-${{ matrix.asset_suffix }}
           path: .
@@ -139,7 +139,7 @@ jobs:
             bin_path: target/release-artifacts/android-arm64/veloflux
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -148,8 +148,13 @@ jobs:
           targets: ${{ matrix.rust_target }}
       - uses: Swatinem/rust-cache@v2
         if: matrix.build_mode != 'linux-arm64-container'
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v4
         if: matrix.build_mode == 'android-cross'
+        with:
+          # Do not install the obsolete `tools` package (removed from the
+          # SDK repository); `platform-tools` is enough since the NDK is
+          # installed explicitly in the next step.
+          packages: platform-tools
       - name: Install Android arm64 toolchain
         if: matrix.build_mode == 'android-cross'
         run: |
@@ -302,7 +307,7 @@ jobs:
           tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME" "${ASSET_NAME}.config.example.yaml"
           rm "$ASSET_NAME" "${ASSET_NAME}.config.example.yaml"
       - name: Upload cross artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: veloflux-${{ matrix.asset_suffix }}
           path: veloflux-${{ matrix.asset_suffix }}.tar.gz
@@ -322,7 +327,7 @@ jobs:
           - android-arm64
     steps:
       - name: Download cross artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: veloflux-${{ matrix.asset_suffix }}
           path: .
@@ -347,12 +352,12 @@ jobs:
       QNX_TARGET_TRIPLE: aarch64-unknown-nto-qnx710
       QNX_ASSET_SUFFIX: qnx71-aarch64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -362,7 +367,7 @@ jobs:
         run: docker pull "$QNX_SDP_IMAGE"
 
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: .cargo-cache
           key: qnx71-release-cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
@@ -495,7 +500,7 @@ jobs:
           rm "$asset_name" "${asset_name}.config.example.yaml"
 
       - name: Upload QNX 7.1 release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: veloflux-${{ env.QNX_ASSET_SUFFIX }}
           path: veloflux-${{ env.QNX_ASSET_SUFFIX }}.tar.gz
@@ -509,7 +514,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download QNX 7.1 release artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: veloflux-qnx71-aarch64
           path: .
@@ -526,7 +531,7 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
@@ -546,7 +551,7 @@ jobs:
           tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME"
           rm -rf "$ASSET_NAME"
       - name: Upload FFI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: veloflux-ffi-linux-x86_64
           path: veloflux-ffi-linux-x86_64.tar.gz
@@ -559,7 +564,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download FFI artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: veloflux-ffi-linux-x86_64
           path: .
