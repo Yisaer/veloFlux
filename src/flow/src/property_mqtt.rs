@@ -116,7 +116,7 @@ async fn run_provider(
         tokio::select! {
             _ = &mut shutdown_rx => break,
             event = event_loop.poll() => match event {
-                Ok(MqttEvent::Connected) => {
+                Ok(MqttEvent::Connected { .. }) => {
                     if seen_connected && !connected {
                         veloflux_metrics::property_registry_mqtt_reconnects_total().inc();
                     }

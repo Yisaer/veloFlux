@@ -15,6 +15,25 @@ use rumqttc::{
     Transport,
 };
 
+pub(crate) const DEFAULT_MQTT_MAX_PACKET_SIZE: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, Default)]
+pub(crate) enum MqttOutgoingPacketLimit {
+    #[default]
+    Unknown,
+    Unlimited,
+    Limited(usize),
+}
+
+impl MqttOutgoingPacketLimit {
+    pub(crate) fn from_connack(limit: Option<usize>) -> Self {
+        match limit {
+            Some(limit) => Self::Limited(limit),
+            None => Self::Unlimited,
+        }
+    }
+}
+
 /// MQTT wire protocol used by one client connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -286,8 +305,13 @@ pub(crate) enum MqttEventLoop {
 }
 
 pub(crate) enum MqttEvent {
-    Connected,
-    Publish { topic: String, payload: Bytes },
+    Connected {
+        max_outgoing_packet_size: Option<usize>,
+    },
+    Publish {
+        topic: String,
+        payload: Bytes,
+    },
     Disconnected,
     Other,
 }
@@ -383,7 +407,9 @@ impl MqttEventLoop {
     pub(crate) async fn poll(&mut self) -> Result<MqttEvent, MqttConnectionError> {
         match self {
             Self::V3(event_loop) => match event_loop.poll().await {
-                Ok(V3Event::Incoming(V3Packet::ConnAck(_))) => Ok(MqttEvent::Connected),
+                Ok(V3Event::Incoming(V3Packet::ConnAck(_))) => Ok(MqttEvent::Connected {
+                    max_outgoing_packet_size: None,
+                }),
                 Ok(V3Event::Incoming(V3Packet::Publish(publish))) => Ok(MqttEvent::Publish {
                     topic: publish.topic,
                     payload: publish.payload,
@@ -394,7 +420,13 @@ impl MqttEventLoop {
                 Err(err) => Err(MqttConnectionError::Connection(err.to_string())),
             },
             Self::V5(event_loop) => match event_loop.poll().await {
-                Ok(V5Event::Incoming(V5Packet::ConnAck(_))) => Ok(MqttEvent::Connected),
+                Ok(V5Event::Incoming(V5Packet::ConnAck(connack))) => Ok(MqttEvent::Connected {
+                    max_outgoing_packet_size: connack
+                        .properties
+                        .as_ref()
+                        .and_then(|properties| properties.max_packet_size)
+                        .map(|size| size as usize),
+                }),
                 Ok(V5Event::Incoming(V5Packet::Publish(publish))) => {
                     let topic = String::from_utf8(publish.topic.to_vec()).map_err(|_| {
                         MqttConnectionError::Connection(

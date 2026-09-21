@@ -2,7 +2,8 @@
 
 use super::{DeliveryResult, SinkConnector, SinkConnectorError};
 use crate::connector::mqtt_protocol::{
-    MqttClient, MqttConnectionError, MqttEvent, MqttEventLoop, MqttOptions, MqttQos,
+    MqttClient, MqttConnectionError, MqttEvent, MqttEventLoop, MqttOptions,
+    MqttOutgoingPacketLimit, MqttProtocolVersion, MqttQos, DEFAULT_MQTT_MAX_PACKET_SIZE,
 };
 use async_trait::async_trait;
 use parking_lot::RwLock;
@@ -115,6 +116,20 @@ enum SinkClient {
 }
 
 impl SinkClient {
+    fn protocol_version(&self) -> MqttProtocolVersion {
+        match self {
+            Self::Shared(shared) => shared.protocol_version(),
+            Self::Standalone(standalone) => standalone.protocol_version,
+        }
+    }
+
+    fn outgoing_packet_limit(&self) -> MqttOutgoingPacketLimit {
+        match self {
+            Self::Shared(shared) => shared.outgoing_packet_limit(),
+            Self::Standalone(standalone) => standalone.outgoing_packet_limit(),
+        }
+    }
+
     async fn publish(
         &self,
         topic: &str,
@@ -154,11 +169,14 @@ struct StandaloneMqttClient {
     client: MqttClient,
     event_loop_handle: JoinHandle<()>,
     state: MqttConnectionState,
+    protocol_version: MqttProtocolVersion,
+    v3_max_packet_size: usize,
 }
 
 #[derive(Clone, Default)]
 struct MqttConnectionState {
     connected: Arc<AtomicBool>,
+    outgoing_packet_limit: Arc<RwLock<MqttOutgoingPacketLimit>>,
     last_error: Arc<RwLock<Option<String>>>,
 }
 
@@ -167,15 +185,16 @@ impl MqttConnectionState {
         self.connected.load(Ordering::Acquire)
     }
 
-    fn set_connected(&self, connected: bool) {
-        self.connected.store(connected, Ordering::Release);
-        if connected {
-            *self.last_error.write() = None;
-        }
+    fn set_connected(&self, max_outgoing_packet_size: Option<usize>) {
+        *self.outgoing_packet_limit.write() =
+            MqttOutgoingPacketLimit::from_connack(max_outgoing_packet_size);
+        *self.last_error.write() = None;
+        self.connected.store(true, Ordering::Release);
     }
 
     fn set_error(&self, err: impl Into<String>) {
         self.connected.store(false, Ordering::Release);
+        *self.outgoing_packet_limit.write() = MqttOutgoingPacketLimit::Unknown;
         *self.last_error.write() = Some(err.into());
     }
 
@@ -197,7 +216,18 @@ impl StandaloneMqttClient {
             client,
             event_loop_handle,
             state,
+            protocol_version: config.protocol_version.unwrap_or_default(),
+            v3_max_packet_size: config
+                .max_packet_size
+                .unwrap_or(DEFAULT_MQTT_MAX_PACKET_SIZE),
         })
+    }
+
+    fn outgoing_packet_limit(&self) -> MqttOutgoingPacketLimit {
+        match self.protocol_version {
+            MqttProtocolVersion::V3 => MqttOutgoingPacketLimit::Limited(self.v3_max_packet_size),
+            MqttProtocolVersion::V5 => *self.state.outgoing_packet_limit.read(),
+        }
     }
 
     async fn publish(
@@ -250,8 +280,10 @@ async fn run_event_loop(mut event_loop: MqttEventLoop, state: MqttConnectionStat
     let max_backoff = std::time::Duration::from_secs(5);
     loop {
         match event_loop.poll().await {
-            Ok(MqttEvent::Connected) => {
-                state.set_connected(true);
+            Ok(MqttEvent::Connected {
+                max_outgoing_packet_size,
+            }) => {
+                state.set_connected(max_outgoing_packet_size);
                 backoff = std::time::Duration::from_millis(100);
             }
             Ok(MqttEvent::Disconnected) => {
@@ -261,7 +293,6 @@ async fn run_event_loop(mut event_loop: MqttEventLoop, state: MqttConnectionStat
                 backoff = std::time::Duration::from_millis(100);
             }
             Ok(MqttEvent::Publish { .. }) | Ok(MqttEvent::Other) => {
-                state.set_connected(true);
                 backoff = std::time::Duration::from_millis(100);
             }
             Err(MqttConnectionError::RequestsDone) => break,
@@ -369,7 +400,17 @@ impl SinkConnector for MqttSinkConnector {
     }
 
     fn max_delivery_bytes(&self) -> Option<usize> {
-        self.config.max_packet_size
+        if self.config.connector_key.is_none()
+            && self.config.protocol_version.unwrap_or_default() == MqttProtocolVersion::V3
+        {
+            Some(
+                self.config
+                    .max_packet_size
+                    .unwrap_or(DEFAULT_MQTT_MAX_PACKET_SIZE),
+            )
+        } else {
+            None
+        }
     }
 
     async fn start_delivery(
@@ -431,6 +472,27 @@ impl SinkConnector for MqttSinkConnector {
         })?;
         let user_properties = std::mem::take(&mut self.delivery_user_properties);
         if let Some(client) = &self.client {
+            let packet_size = mqtt_publish_packet_size(
+                client.protocol_version(),
+                topic.expose(),
+                qos,
+                payload.len(),
+                &user_properties,
+            )?;
+            match client.outgoing_packet_limit() {
+                MqttOutgoingPacketLimit::Unknown => {
+                    return Err(SinkConnectorError::Transient(
+                        "mqtt not connected: outgoing packet limit unavailable before CONNACK"
+                            .to_string(),
+                    ));
+                }
+                MqttOutgoingPacketLimit::Limited(limit) if packet_size > limit => {
+                    return Err(SinkConnectorError::Permanent(format!(
+                        "mqtt publish packet size {packet_size} exceeds connection limit {limit}"
+                    )));
+                }
+                MqttOutgoingPacketLimit::Unlimited | MqttOutgoingPacketLimit::Limited(_) => {}
+            }
             client
                 .publish(
                     topic.expose(),
@@ -468,6 +530,49 @@ impl SinkConnector for MqttSinkConnector {
     }
 }
 
+const MQTT_MAX_REMAINING_LENGTH: usize = 268_435_455;
+
+fn mqtt_variable_byte_integer_len(value: usize) -> Result<usize, SinkConnectorError> {
+    if value > MQTT_MAX_REMAINING_LENGTH {
+        return Err(SinkConnectorError::Permanent(
+            "mqtt publish packet exceeds protocol size limit".to_string(),
+        ));
+    }
+    Ok(match value {
+        0..=127 => 1,
+        128..=16_383 => 2,
+        16_384..=2_097_151 => 3,
+        _ => 4,
+    })
+}
+
+fn mqtt_publish_packet_size(
+    protocol_version: MqttProtocolVersion,
+    topic: &str,
+    qos: MqttQos,
+    payload_len: usize,
+    user_properties: &[crate::connector::MqttUserProperty],
+) -> Result<usize, SinkConnectorError> {
+    let mut remaining_len = 2usize
+        .saturating_add(topic.len())
+        .saturating_add(if qos == MqttQos::Qos0 { 0 } else { 2 })
+        .saturating_add(payload_len);
+    if protocol_version == MqttProtocolVersion::V5 {
+        let properties_len = user_properties.iter().fold(0usize, |len, property| {
+            len.saturating_add(1)
+                .saturating_add(2)
+                .saturating_add(property.key.len())
+                .saturating_add(2)
+                .saturating_add(property.value.expose().len())
+        });
+        remaining_len = remaining_len
+            .saturating_add(mqtt_variable_byte_integer_len(properties_len)?)
+            .saturating_add(properties_len);
+    }
+    let remaining_len_bytes = mqtt_variable_byte_integer_len(remaining_len)?;
+    Ok(1 + remaining_len_bytes + remaining_len)
+}
+
 fn build_mqtt_options(config: &MqttSinkConfig) -> Result<MqttOptions, SinkConnectorError> {
     let normalized = normalize_broker_url(&config.broker_url);
     let endpoint = Url::parse(&normalized).map_err(|err| {
@@ -495,7 +600,9 @@ fn build_mqtt_options(config: &MqttSinkConfig) -> Result<MqttOptions, SinkConnec
             ))
         })?;
 
-    let max_packet_size = config.max_packet_size.unwrap_or(64 * 1024 * 1024);
+    let max_packet_size = config
+        .max_packet_size
+        .unwrap_or(DEFAULT_MQTT_MAX_PACKET_SIZE);
     let mut options = MqttOptions::new(
         config.protocol_version.unwrap_or_default(),
         config.client_id(),
@@ -533,20 +640,25 @@ fn normalize_broker_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connector::mqtt_client::SharedMqttClientConfig;
     use crate::connector::SinkConnector;
     use crate::model::batch_from_columns_simple;
     use crate::runtime::TaskSpawner;
     use crate::test_support::EmbeddedMqttBroker;
     use datatypes::Value;
+    use rumqttc::mqttbytes::v4::Publish as V3Publish;
     use rumqttc::v5::mqttbytes::v5::Packet as V5Packet;
+    use rumqttc::v5::mqttbytes::v5::{Publish as V5Publish, PublishProperties};
     use rumqttc::v5::mqttbytes::QoS as V5Qos;
     use rumqttc::v5::{AsyncClient as V5Client, Event as V5Event, MqttOptions as V5Options};
     use rumqttc::{
         AsyncClient as V3Client, Event as V3Event, MqttOptions as V3Options, Packet as V3Packet,
         QoS as V3Qos,
     };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use tokio::runtime::Handle;
-    use tokio::sync::{mpsc, oneshot};
+    use tokio::sync::{mpsc, oneshot, watch};
     use tokio::time::{timeout, Duration};
 
     fn test_spawner() -> TaskSpawner {
@@ -556,6 +668,358 @@ mod tests {
                 .build()
                 .expect("build test tokio runtime"),
         )
+    }
+
+    #[test]
+    fn mqtt_publish_packet_size_matches_rumqttc_for_qos_and_properties() {
+        let topic = "fleet/vehicle/telemetry";
+        let payload = vec![b'x'; 127];
+        for (qos, v3_qos, v5_qos) in [
+            (MqttQos::Qos0, V3Qos::AtMostOnce, V5Qos::AtMostOnce),
+            (MqttQos::Qos1, V3Qos::AtLeastOnce, V5Qos::AtLeastOnce),
+        ] {
+            let mut v3 = V3Publish::new(topic, v3_qos, payload.clone());
+            let mut v5 = V5Publish::new(topic, v5_qos, payload.clone(), None);
+            if qos != MqttQos::Qos0 {
+                v3.pkid = 1;
+                v5.pkid = 1;
+            }
+            assert_eq!(
+                mqtt_publish_packet_size(MqttProtocolVersion::V3, topic, qos, payload.len(), &[])
+                    .expect("v3 packet size"),
+                v3.size()
+            );
+            assert_eq!(
+                mqtt_publish_packet_size(MqttProtocolVersion::V5, topic, qos, payload.len(), &[])
+                    .expect("v5 packet size"),
+                v5.size()
+            );
+        }
+
+        let properties = vec![
+            crate::connector::MqttUserProperty::new("tag", "first"),
+            crate::connector::MqttUserProperty::new("tag", "second"),
+        ];
+        let v5 = V5Publish::new(
+            topic,
+            V5Qos::AtMostOnce,
+            payload.clone(),
+            Some(PublishProperties {
+                user_properties: properties
+                    .iter()
+                    .map(|property| (property.key.clone(), property.value.expose().to_string()))
+                    .collect(),
+                ..PublishProperties::default()
+            }),
+        );
+        assert_eq!(
+            mqtt_publish_packet_size(
+                MqttProtocolVersion::V5,
+                topic,
+                MqttQos::Qos0,
+                payload.len(),
+                &properties
+            )
+            .expect("v5 packet size with user properties"),
+            v5.size()
+        );
+        assert!(mqtt_publish_packet_size(
+            MqttProtocolVersion::V3,
+            topic,
+            MqttQos::Qos0,
+            MQTT_MAX_REMAINING_LENGTH,
+            &[]
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn mqtt_sink_rejects_oversized_packets_for_standalone_and_shared_v3() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let spawner = TaskSpawner::from_handle(Handle::current());
+        let manager = MqttClientManager::new("default", spawner.clone());
+        let topic = broker.scoped_topic("sink/packet-limit");
+        manager
+            .create_client(SharedMqttClientConfig {
+                key: "packet-limit".to_string(),
+                broker_url: broker.broker_url(),
+                topic: broker.scoped_filter("sink/#"),
+                client_id: "mqtt_shared_packet_limit".to_string(),
+                qos: 0,
+                max_packet_size: Some(256),
+                protocol_version: MqttProtocolVersion::V3,
+                username: None,
+                password: None,
+                resolved_password: None,
+            })
+            .await
+            .expect("create shared client");
+
+        for config in [
+            MqttSinkConfig::new("standalone", broker.broker_url(), topic.clone(), 1)
+                .with_max_packet_size(256),
+            MqttSinkConfig::new("shared", broker.broker_url(), topic.clone(), 1)
+                .with_connector_key("packet-limit")
+                .with_max_packet_size(8),
+        ] {
+            let mut connector = MqttSinkConnector::new(
+                config.sink_name.clone(),
+                config,
+                Arc::<str>::from("default"),
+                manager.clone(),
+                spawner.clone(),
+            );
+            connector.ready().await.expect("mqtt sink ready");
+            let expected_payload_limit = if connector.config.connector_key.is_some() {
+                None
+            } else {
+                Some(256)
+            };
+            assert_eq!(connector.max_delivery_bytes(), expected_payload_limit);
+            connector
+                .start_delivery(&crate::PropertyContext::default())
+                .await
+                .expect("start oversized delivery");
+            connector
+                .write_chunk(&vec![b'x'; 256])
+                .await
+                .expect("write oversized delivery");
+            let error = connector
+                .finish_delivery()
+                .await
+                .expect_err("full publish packet exceeds connection limit");
+            assert!(matches!(error, SinkConnectorError::Permanent(_)));
+            assert!(error.to_string().contains("exceeds connection limit 256"));
+            connector.close().await.expect("close mqtt sink");
+        }
+    }
+
+    #[tokio::test]
+    async fn mqtt_sink_checks_resolved_topic_size_for_each_delivery() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let registry = crate::PropertyRegistry::new(
+            std::collections::BTreeMap::from([(
+                "vin".to_string(),
+                crate::secret::SecretString::new("short"),
+            )]),
+            true,
+        );
+        let topic = registry
+            .bind(r#"out/{{ prop("vin") }}"#)
+            .expect("bind dynamic MQTT topic");
+        let spawner = TaskSpawner::from_handle(Handle::current());
+        let mut connector = MqttSinkConnector::new(
+            "dynamic-topic-limit",
+            MqttSinkConfig::new("dynamic-topic-limit", broker.broker_url(), topic, 0)
+                .with_max_packet_size(64),
+            Arc::<str>::from("default"),
+            MqttClientManager::new("default", spawner.clone()),
+            spawner,
+        );
+        connector.ready().await.expect("mqtt sink ready");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !matches!(
+            connector.client.as_ref(),
+            Some(SinkClient::Standalone(client)) if client.state.is_connected()
+        ) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "MQTT did not connect"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        connector
+            .start_delivery(&registry.snapshot())
+            .await
+            .expect("start short-topic delivery");
+        connector
+            .write_chunk(&vec![b'x'; 40])
+            .await
+            .expect("write short-topic delivery");
+        connector
+            .finish_delivery()
+            .await
+            .expect("short-topic packet fits limit");
+
+        registry
+            .apply_override(
+                "vin",
+                crate::secret::SecretString::new("this-is-a-very-long-vin"),
+            )
+            .expect("update dynamic topic property");
+        connector
+            .start_delivery(&registry.snapshot())
+            .await
+            .expect("start long-topic delivery");
+        connector
+            .write_chunk(&vec![b'x'; 40])
+            .await
+            .expect("write long-topic delivery");
+        let error = connector
+            .finish_delivery()
+            .await
+            .expect_err("longer resolved topic exceeds limit");
+        assert!(matches!(error, SinkConnectorError::Permanent(_)));
+        assert!(error.to_string().contains("exceeds connection limit 64"));
+        connector.close().await.expect("close mqtt sink");
+    }
+
+    #[tokio::test]
+    async fn mqtt_v5_sink_uses_broker_outgoing_limit_for_standalone_and_shared_clients() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind MQTT 5 test broker");
+        let port = listener.local_addr().expect("broker address").port();
+        let (connack_tx, connack_rx) = watch::channel(false);
+        let broker = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.expect("accept MQTT client");
+                let mut connack_rx = connack_rx.clone();
+                tokio::spawn(async move {
+                    let mut buffer = [0u8; 512];
+                    let mut header = [0u8; 1];
+                    stream
+                        .read_exact(&mut header)
+                        .await
+                        .expect("read CONNECT header");
+                    assert_eq!(header[0], 0x10, "expected MQTT CONNECT packet");
+                    let mut remaining_len = 0usize;
+                    for index in 0..4 {
+                        let mut byte = [0u8; 1];
+                        stream
+                            .read_exact(&mut byte)
+                            .await
+                            .expect("read CONNECT remaining length");
+                        remaining_len |= usize::from(byte[0] & 0x7f) << (7 * index);
+                        if byte[0] & 0x80 == 0 {
+                            break;
+                        }
+                        assert!(index < 3, "invalid MQTT remaining length");
+                    }
+                    let mut connect_body = vec![0u8; remaining_len];
+                    stream
+                        .read_exact(&mut connect_body)
+                        .await
+                        .expect("read complete CONNECT body");
+                    while !*connack_rx.borrow() {
+                        connack_rx.changed().await.expect("release CONNACK");
+                    }
+                    // Successful CONNACK with Maximum Packet Size = 128 bytes.
+                    stream
+                        .write_all(&[0x20, 0x08, 0x00, 0x00, 0x05, 0x27, 0x00, 0x00, 0x00, 0x80])
+                        .await
+                        .expect("send CONNACK");
+                    while stream.read(&mut buffer).await.unwrap_or(0) != 0 {}
+                });
+            }
+        });
+
+        let broker_url = format!("tcp://127.0.0.1:{port}");
+        let spawner = TaskSpawner::from_handle(Handle::current());
+        let manager = MqttClientManager::new("default", spawner.clone());
+        manager
+            .create_client(SharedMqttClientConfig {
+                key: "v5-packet-limit".to_string(),
+                broker_url: broker_url.clone(),
+                topic: "tests/#".to_string(),
+                client_id: "mqtt_shared_v5_packet_limit".to_string(),
+                qos: 0,
+                max_packet_size: Some(8192),
+                protocol_version: MqttProtocolVersion::V5,
+                username: None,
+                password: None,
+                resolved_password: None,
+            })
+            .await
+            .expect("create shared MQTT 5 client");
+
+        let user_properties = vec![crate::connector::MqttUserProperty::new(
+            "tag",
+            "property-value-that-makes-the-packet-too-large",
+        )];
+        assert!(
+            mqtt_publish_packet_size(
+                MqttProtocolVersion::V5,
+                "tests/packet-limit",
+                MqttQos::Qos1,
+                90,
+                &[],
+            )
+            .expect("bare MQTT 5 packet size")
+                <= 128
+        );
+
+        for config in [
+            MqttSinkConfig::new("v5-standalone", &broker_url, "tests/packet-limit", 1)
+                .with_protocol_version(MqttProtocolVersion::V5)
+                .with_max_packet_size(8192)
+                .with_user_properties(user_properties.clone()),
+            MqttSinkConfig::new("v5-shared", &broker_url, "tests/packet-limit", 1)
+                .with_connector_key("v5-packet-limit")
+                .with_user_properties(user_properties.clone()),
+        ] {
+            connack_tx.send(false).expect("hold CONNACK");
+            let mut connector = MqttSinkConnector::new(
+                config.sink_name.clone(),
+                config,
+                Arc::<str>::from("default"),
+                manager.clone(),
+                spawner.clone(),
+            );
+            connector.ready().await.expect("MQTT 5 sink ready");
+            assert_eq!(connector.max_delivery_bytes(), None);
+
+            connector
+                .start_delivery(&crate::PropertyContext::default())
+                .await
+                .expect("start delivery before CONNACK");
+            connector
+                .write_chunk(&vec![b'x'; 90])
+                .await
+                .expect("write delivery before CONNACK");
+            let error = connector
+                .finish_delivery()
+                .await
+                .expect_err("limit is unknown before CONNACK");
+            assert!(matches!(error, SinkConnectorError::Transient(_)));
+            connector.abort_delivery().await;
+
+            connack_tx.send(true).expect("send CONNACK");
+
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let connected = match connector.client.as_ref().expect("MQTT client") {
+                    SinkClient::Shared(shared) => shared.is_connected(),
+                    SinkClient::Standalone(standalone) => standalone.state.is_connected(),
+                };
+                if connected {
+                    break;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "MQTT 5 did not connect"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+
+            connector
+                .start_delivery(&crate::PropertyContext::default())
+                .await
+                .expect("start oversized MQTT 5 delivery");
+            connector
+                .write_chunk(&vec![b'x'; 90])
+                .await
+                .expect("write oversized MQTT 5 delivery");
+            let error = connector
+                .finish_delivery()
+                .await
+                .expect_err("packet exceeds broker limit");
+            assert!(matches!(error, SinkConnectorError::Permanent(_)));
+            assert!(error.to_string().contains("exceeds connection limit 128"));
+            connector.close().await.expect("close MQTT 5 sink");
+        }
+        broker.abort();
     }
 
     #[tokio::test]

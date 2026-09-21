@@ -287,7 +287,7 @@ async fn run_standalone_loop(
                             Err(_) => break,
                         }
                     }
-                    Ok(MqttEvent::Connected) => {
+                    Ok(MqttEvent::Connected { .. }) => {
                         backoff = Duration::from_millis(100);
                         let _ = client.subscribe(topic.clone(), qos).await;
                     }

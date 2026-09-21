@@ -12,7 +12,8 @@ use url::Url;
 
 use crate::backpressure_hub::BackpressureHub;
 use crate::connector::mqtt_protocol::{
-    MqttClient, MqttConnectionError, MqttEvent, MqttOptions, MqttQos,
+    MqttClient, MqttConnectionError, MqttEvent, MqttOptions, MqttOutgoingPacketLimit, MqttQos,
+    DEFAULT_MQTT_MAX_PACKET_SIZE,
 };
 use crate::connector::{mask_url_userinfo, url_has_userinfo, ConnectorError};
 use crate::runtime::TaskSpawner;
@@ -129,6 +130,18 @@ impl SharedMqttClient {
         self.entry.config.protocol_version
     }
 
+    pub(crate) fn outgoing_packet_limit(&self) -> MqttOutgoingPacketLimit {
+        match self.entry.config.protocol_version {
+            crate::connector::MqttProtocolVersion::V3 => MqttOutgoingPacketLimit::Limited(
+                self.entry
+                    .config
+                    .max_packet_size
+                    .unwrap_or(DEFAULT_MQTT_MAX_PACKET_SIZE),
+            ),
+            crate::connector::MqttProtocolVersion::V5 => *self.entry.outgoing_packet_limit.read(),
+        }
+    }
+
     pub async fn publish(
         &self,
         topic: String,
@@ -196,6 +209,7 @@ struct MqttClientEntry {
     ref_count: AtomicUsize,
     closing: AtomicBool,
     connected: AtomicBool,
+    outgoing_packet_limit: RwLock<MqttOutgoingPacketLimit>,
     last_error: RwLock<Option<String>>,
     spawner: TaskSpawner,
 }
@@ -213,6 +227,7 @@ impl MqttClientEntry {
             ref_count: AtomicUsize::new(0),
             closing: AtomicBool::new(false),
             connected: AtomicBool::new(false),
+            outgoing_packet_limit: RwLock::new(MqttOutgoingPacketLimit::Unknown),
             last_error: RwLock::new(None),
             spawner,
         }
@@ -338,7 +353,6 @@ impl MqttClientEntry {
                     _ = shutdown_rx.changed() => break,
                     event = event_loop.poll() => match event {
                         Ok(MqttEvent::Publish { topic: publish_topic, payload }) => {
-                            entry_for_task.connected.store(true, Ordering::Release);
                             backoff = Duration::from_millis(100);
                             if mqtt_topic_matches(&topic, &publish_topic) {
                                 entry_for_task.record_rx_message_metric();
@@ -349,13 +363,15 @@ impl MqttClientEntry {
                         }
                         Ok(MqttEvent::Disconnected) => {
                             entry_for_task.connected.store(false, Ordering::Release);
+                            *entry_for_task.outgoing_packet_limit.write() = MqttOutgoingPacketLimit::Unknown;
                             entry_for_task.set_connected_metric(false);
                             entry_for_task.record_error_metric(MQTT_SHARED_CLIENT_ERROR_DISCONNECT);
                             *entry_for_task.last_error.write() = Some("disconnect".to_string());
                             tracing::warn!("shared mqtt client disconnected; reconnecting");
                             event_loop.clean();
                         }
-                        Ok(MqttEvent::Connected) => {
+                        Ok(MqttEvent::Connected { max_outgoing_packet_size }) => {
+                            *entry_for_task.outgoing_packet_limit.write() = MqttOutgoingPacketLimit::from_connack(max_outgoing_packet_size);
                             let was_connected = entry_for_task.connected.swap(true, Ordering::AcqRel);
                             entry_for_task.set_connected_metric(true);
                             if seen_connected && !was_connected {
@@ -369,6 +385,7 @@ impl MqttClientEntry {
                         Ok(MqttEvent::Other) => {}
                         Err(MqttConnectionError::RequestsDone) => {
                             entry_for_task.connected.store(false, Ordering::Release);
+                            *entry_for_task.outgoing_packet_limit.write() = MqttOutgoingPacketLimit::Unknown;
                             entry_for_task.set_connected_metric(false);
                             if entry_for_task.closing.load(Ordering::Acquire) {
                                 break;
@@ -384,6 +401,7 @@ impl MqttClientEntry {
                         }
                         Err(MqttConnectionError::Connection(err)) => {
                             entry_for_task.connected.store(false, Ordering::Release);
+                            *entry_for_task.outgoing_packet_limit.write() = MqttOutgoingPacketLimit::Unknown;
                             entry_for_task.set_connected_metric(false);
                             entry_for_task.record_error_metric(MQTT_SHARED_CLIENT_ERROR_POLL);
                             *entry_for_task.last_error.write() = Some(err.clone());
@@ -430,6 +448,7 @@ impl MqttClientEntry {
         runtime.join_handle.abort();
         let _ = runtime.join_handle.await;
         self.connected.store(false, Ordering::Release);
+        *self.outgoing_packet_limit.write() = MqttOutgoingPacketLimit::Unknown;
         self.set_connected_metric(false);
         if emit_terminal {
             runtime
@@ -602,7 +621,9 @@ fn build_mqtt_options(config: &SharedMqttClientConfig) -> Result<MqttOptions, Co
             ))
         })?;
 
-    let max_packet_size = config.max_packet_size.unwrap_or(64 * 1024 * 1024);
+    let max_packet_size = config
+        .max_packet_size
+        .unwrap_or(DEFAULT_MQTT_MAX_PACKET_SIZE);
     let mut options = MqttOptions::new(
         config.protocol_version,
         config.client_id.clone(),

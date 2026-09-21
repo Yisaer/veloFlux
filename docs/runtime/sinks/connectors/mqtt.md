@@ -149,11 +149,27 @@ sink-local publish routing and retain behavior.
 
 `max_packet_size`
 
-- controls MQTT option limits when a standalone or shared client is created
+- for MQTT 3.1.1, controls both incoming and outgoing packet limits on the connection
+- for MQTT 5, advertises only the maximum packet size the client accepts from the broker;
+  the broker's CONNACK Maximum Packet Size controls outgoing packets
 - in standalone sink mode, sink-local `max_packet_size` config owns the connection limit
-- in shared-client sink mode, the shared client config owns the connection limit instead
+- in shared-client sink mode, the shared client config owns the connection limit instead;
+  a sink-local value does not constrain that shared connection
 
-The default packet limit is `64 MiB` when the chosen connection owner does not specify an override.
+The default MQTT 3.1.1 connection limit is `64 MiB` when the connection owner does not specify an
+override. MQTT 5 uses the broker-advertised outgoing limit when present; otherwise only the MQTT
+protocol packet-size limit applies. A sink calculates the complete PUBLISH packet size, including
+topic, QoS packet identifier, and MQTT 5 User Properties, before enqueueing it. If the complete
+packet exceeds the limit, the sink returns a permanent delivery error without enqueueing it.
+Before an MQTT 5 connection receives CONNACK, its outgoing limit is unknown and the sink returns a
+transient delivery error instead of enqueueing the publish. A CONNACK without Maximum Packet Size
+marks the connected client as having no broker-advertised outgoing limit.
+MQTT 3.1.1 standalone sinks also use their outgoing limit as an early payload accumulation ceiling;
+exceeding that ceiling fails during accumulation, before the sink's complete-packet check. MQTT 5
+and shared sinks have no fixed early payload ceiling.
+
+The pre-enqueue check does not confirm broker receipt or eliminate a race with a reconnect that
+negotiates a different MQTT 5 limit. The client library retains its wire-write packet-size check.
 
 ## Interaction With Batching / Row Diff / Omit-If-Empty
 
