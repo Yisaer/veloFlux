@@ -97,7 +97,7 @@ current_group_key = nil
 current_group_expr = nil
 current_window_size = nil
 
-function agg_select_list()
+function init_agg_state()
   if current_group_key == nil then
     current_group_key = pick_int_col()
     if math.random(2) == 1 then
@@ -109,10 +109,15 @@ function agg_select_list()
   if current_window_size == nil then
     current_window_size = tostring(math.random(2, 4))
   end
+end
+
+function agg_select_list()
+  init_agg_state()
   return current_group_expr .. " AS k, count(" .. current_group_key .. ") AS c"
 end
 
 function group_by_list()
+  init_agg_state()
   return "countwindow(" .. current_window_size .. "), " .. current_group_expr
 end
 
@@ -134,7 +139,8 @@ end
 
 function agg_order_items_unique()
   if math.random(2) == 1 then
-    return "k " .. pick(order_dirs)
+    init_agg_state()
+    return current_group_expr .. " " .. pick(order_dirs)
   end
   return "c " .. pick(order_dirs)
 end

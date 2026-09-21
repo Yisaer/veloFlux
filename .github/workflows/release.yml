@@ -129,116 +129,11 @@ jobs:
             build_mode: linux-arm64-container
             video_feature: "true"
             bin_path: target/release-artifacts/linux-arm64-video/veloflux
-          - asset_suffix: android-arm64
-            runner: ubuntu-latest
-            rust_target: aarch64-linux-android
-            build_mode: android-cross
-            video_feature: "false"
-            android_ndk_version: 26.3.11579264
-            android_api_level: 24
-            bin_path: target/release-artifacts/android-arm64/veloflux
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
-        if: matrix.build_mode != 'linux-arm64-container'
-        with:
-          targets: ${{ matrix.rust_target }}
-      - uses: Swatinem/rust-cache@v2
-        if: matrix.build_mode != 'linux-arm64-container'
-      - uses: android-actions/setup-android@v4
-        if: matrix.build_mode == 'android-cross'
-        with:
-          # Do not install the obsolete `tools` package (removed from the
-          # SDK repository); `platform-tools` is enough since the NDK is
-          # installed explicitly in the next step.
-          packages: platform-tools
-      - name: Install Android arm64 toolchain
-        if: matrix.build_mode == 'android-cross'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential protobuf-compiler
-          sdkmanager --install "ndk;${{ matrix.android_ndk_version }}"
-          NDK="$ANDROID_HOME/ndk/${{ matrix.android_ndk_version }}"
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          API="${{ matrix.android_api_level }}"
-          mkdir -p "$RUNNER_TEMP/cross-bin"
-          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-gcc"
-          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang++" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-g++"
-          ln -sf "$TOOLCHAIN/llvm-ar" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-ar"
-          ln -sf "$TOOLCHAIN/llvm-ranlib" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-ranlib"
-          ln -sf "$TOOLCHAIN/llvm-strip" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-strip"
-          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-gcc"
-          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang++" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-g++"
-          ln -sf "$TOOLCHAIN/llvm-ar" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-ar"
-          ln -sf "$TOOLCHAIN/llvm-ranlib" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-ranlib"
-          ln -sf "$TOOLCHAIN/llvm-strip" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-strip"
-          echo "$RUNNER_TEMP/cross-bin" >> "$GITHUB_PATH"
-          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android${API}-clang" >> "$GITHUB_ENV"
-          echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android${API}-clang" >> "$GITHUB_ENV"
-          echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes" >> "$GITHUB_ENV"
-      - name: Prebuild Android GMP cache
-        if: matrix.build_mode == 'android-cross'
-        run: |
-          NDK="$ANDROID_HOME/ndk/${{ matrix.android_ndk_version }}"
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          API="${{ matrix.android_api_level }}"
-          WRAPPER_DIR="$RUNNER_TEMP/android-gmp-wrapper"
-          PREBUILD_DIR="$RUNNER_TEMP/android-gmp-prebuild"
-
-          mkdir -p "$WRAPPER_DIR" "$PREBUILD_DIR/src"
-          export ANDROID_TARGET_CC="$TOOLCHAIN/aarch64-linux-android${API}-clang"
-          export ANDROID_TARGET_CXX="$TOOLCHAIN/aarch64-linux-android${API}-clang++"
-          export ANDROID_TARGET_AR="$TOOLCHAIN/llvm-ar"
-          export ANDROID_TARGET_RANLIB="$TOOLCHAIN/llvm-ranlib"
-          export GMP_MPFR_SYS_CACHE="$RUNNER_TEMP/gmp-mpfr-cache"
-          HOST_CC="$(command -v gcc || true)"
-          if [ -z "$HOST_CC" ]; then
-            echo "Host C compiler 'gcc' not found in PATH" >&2
-            exit 1
-          fi
-          export HOST_CC
-          echo "GMP_MPFR_SYS_CACHE=$GMP_MPFR_SYS_CACHE" >> "$GITHUB_ENV"
-
-          cat > "$WRAPPER_DIR/gcc" <<'EOF'
-          #!/usr/bin/env bash
-          for arg in "$@"; do
-            case "$arg" in
-              *gen-*.c) exec "$HOST_CC" "$@" ;;
-            esac
-          done
-          exec "$ANDROID_TARGET_CC" "$@"
-          EOF
-          cat > "$WRAPPER_DIR/g++" <<'EOF'
-          #!/usr/bin/env bash
-          exec "$ANDROID_TARGET_CXX" "$@"
-          EOF
-          cat > "$WRAPPER_DIR/ar" <<'EOF'
-          #!/usr/bin/env bash
-          exec "$ANDROID_TARGET_AR" "$@"
-          EOF
-          cat > "$WRAPPER_DIR/ranlib" <<'EOF'
-          #!/usr/bin/env bash
-          exec "$ANDROID_TARGET_RANLIB" "$@"
-          EOF
-          chmod +x "$WRAPPER_DIR/gcc" "$WRAPPER_DIR/g++" "$WRAPPER_DIR/ar" "$WRAPPER_DIR/ranlib"
-
-          cat > "$PREBUILD_DIR/Cargo.toml" <<'EOF'
-          [package]
-          name = "android-gmp-prebuild"
-          version = "0.0.0"
-          edition = "2021"
-
-          [dependencies]
-          gmp-mpfr-sys = { version = "=1.6.8", features = ["force-cross"] }
-          EOF
-          printf '' > "$PREBUILD_DIR/src/lib.rs"
-
-          PATH="$WRAPPER_DIR:$PATH" cargo build --manifest-path "$PREBUILD_DIR/Cargo.toml" --target ${{ matrix.rust_target }}
       - name: Build Linux arm64 compatibility binary
         if: matrix.build_mode == 'linux-arm64-container'
         run: |
@@ -292,12 +187,6 @@ jobs:
               cp "$BIN" target/release-artifacts/${{ matrix.asset_suffix }}/veloflux
               chown -R "$HOST_UID:$HOST_GID" target/release-artifacts
             '
-      - name: Build cross release binary
-        if: matrix.build_mode != 'linux-arm64-container'
-        run: |
-          cargo build --release --target ${{ matrix.rust_target }} --no-default-features --features "metrics,profiling,allocator-system"
-          mkdir -p target/release-artifacts/${{ matrix.asset_suffix }}
-          cp "target/${{ matrix.rust_target }}/release/veloflux" "target/release-artifacts/${{ matrix.asset_suffix }}/veloflux"
       - name: Prepare cross release asset
         run: |
           BIN_PATH="${{ matrix.bin_path }}"
@@ -312,8 +201,127 @@ jobs:
           name: veloflux-${{ matrix.asset_suffix }}
           path: veloflux-${{ matrix.asset_suffix }}.tar.gz
 
-  upload-cross-release-assets:
-    if: github.event_name == 'release'
+  build-and-upload-android-release:
+    if: github.event_name == 'release' || github.event.inputs.package_group == 'cross-release' || github.event.inputs.package_group == 'all'
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: android-actions/setup-android@v4
+        with:
+          # Do not install the obsolete `tools` package (removed from the
+          # SDK repository); `platform-tools` is enough since the NDK is
+          # installed explicitly in the next step.
+          packages: platform-tools
+      - name: Install Android arm64 toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential protobuf-compiler
+          sdkmanager --install "ndk;26.3.11579264"
+          NDK="$ANDROID_HOME/ndk/26.3.11579264"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          API="24"
+          mkdir -p "$RUNNER_TEMP/cross-bin"
+          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-gcc"
+          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang++" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-g++"
+          ln -sf "$TOOLCHAIN/llvm-ar" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-ar"
+          ln -sf "$TOOLCHAIN/llvm-ranlib" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-ranlib"
+          ln -sf "$TOOLCHAIN/llvm-strip" "$RUNNER_TEMP/cross-bin/aarch64-linux-android-strip"
+          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-gcc"
+          ln -sf "$TOOLCHAIN/aarch64-linux-android${API}-clang++" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-g++"
+          ln -sf "$TOOLCHAIN/llvm-ar" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-ar"
+          ln -sf "$TOOLCHAIN/llvm-ranlib" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-ranlib"
+          ln -sf "$TOOLCHAIN/llvm-strip" "$RUNNER_TEMP/cross-bin/aarch64-unknown-linux-android-strip"
+          echo "$RUNNER_TEMP/cross-bin" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$TOOLCHAIN/aarch64-linux-android${API}-clang" >> "$GITHUB_ENV"
+          echo "CC_aarch64_linux_android=$TOOLCHAIN/aarch64-linux-android${API}-clang" >> "$GITHUB_ENV"
+          echo "AR_aarch64_linux_android=$TOOLCHAIN/llvm-ar" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes" >> "$GITHUB_ENV"
+      - name: Prebuild Android GMP cache
+        run: |
+          NDK="$ANDROID_HOME/ndk/26.3.11579264"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          API="24"
+          WRAPPER_DIR="$RUNNER_TEMP/android-gmp-wrapper"
+          PREBUILD_DIR="$RUNNER_TEMP/android-gmp-prebuild"
+
+          mkdir -p "$WRAPPER_DIR" "$PREBUILD_DIR/src"
+          export ANDROID_TARGET_CC="$TOOLCHAIN/aarch64-linux-android${API}-clang"
+          export ANDROID_TARGET_CXX="$TOOLCHAIN/aarch64-linux-android${API}-clang++"
+          export ANDROID_TARGET_AR="$TOOLCHAIN/llvm-ar"
+          export ANDROID_TARGET_RANLIB="$TOOLCHAIN/llvm-ranlib"
+          export GMP_MPFR_SYS_CACHE="$RUNNER_TEMP/gmp-mpfr-cache"
+          HOST_CC="$(command -v gcc || true)"
+          if [ -z "$HOST_CC" ]; then
+            echo "Host C compiler 'gcc' not found in PATH" >&2
+            exit 1
+          fi
+          export HOST_CC
+          echo "GMP_MPFR_SYS_CACHE=$GMP_MPFR_SYS_CACHE" >> "$GITHUB_ENV"
+
+          cat > "$WRAPPER_DIR/gcc" <<'EOF'
+          #!/usr/bin/env bash
+          for arg in "$@"; do
+            case "$arg" in
+              *gen-*.c) exec "$HOST_CC" "$@" ;;
+            esac
+          done
+          exec "$ANDROID_TARGET_CC" "$@"
+          EOF
+          cat > "$WRAPPER_DIR/g++" <<'EOF'
+          #!/usr/bin/env bash
+          exec "$ANDROID_TARGET_CXX" "$@"
+          EOF
+          cat > "$WRAPPER_DIR/ar" <<'EOF'
+          #!/usr/bin/env bash
+          exec "$ANDROID_TARGET_AR" "$@"
+          EOF
+          cat > "$WRAPPER_DIR/ranlib" <<'EOF'
+          #!/usr/bin/env bash
+          exec "$ANDROID_TARGET_RANLIB" "$@"
+          EOF
+          chmod +x "$WRAPPER_DIR/gcc" "$WRAPPER_DIR/g++" "$WRAPPER_DIR/ar" "$WRAPPER_DIR/ranlib"
+
+          cat > "$PREBUILD_DIR/Cargo.toml" <<'EOF'
+          [package]
+          name = "android-gmp-prebuild"
+          version = "0.0.0"
+          edition = "2021"
+
+          [dependencies]
+          gmp-mpfr-sys = { version = "=1.6.8", features = ["force-cross"] }
+          EOF
+          printf '' > "$PREBUILD_DIR/src/lib.rs"
+
+          PATH="$WRAPPER_DIR:$PATH" cargo build --manifest-path "$PREBUILD_DIR/Cargo.toml" --target aarch64-linux-android
+      - name: Build Android arm64 release binary
+        run: |
+          cargo build --release --target aarch64-linux-android --no-default-features --features "metrics,profiling,allocator-system"
+          mkdir -p target/release-artifacts/android-arm64
+          cp target/aarch64-linux-android/release/veloflux target/release-artifacts/android-arm64/veloflux
+      - name: Prepare Android arm64 release asset
+        run: |
+          ASSET_NAME="veloflux-android-arm64"
+          cp target/release-artifacts/android-arm64/veloflux "$ASSET_NAME"
+          cp etc/config.example.yaml "${ASSET_NAME}.config.example.yaml"
+          tar -czf "${ASSET_NAME}.tar.gz" "$ASSET_NAME" "${ASSET_NAME}.config.example.yaml"
+          rm "$ASSET_NAME" "${ASSET_NAME}.config.example.yaml"
+      - name: Upload Android arm64 artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: veloflux-android-arm64
+          path: veloflux-android-arm64.tar.gz
+
+  upload-linux-arm64-release-assets:
+    if: ${{ always() && github.event_name == 'release' }}
     needs: build-and-upload-cross-release
     permissions:
       contents: write
@@ -324,18 +332,35 @@ jobs:
         asset_suffix:
           - linux-arm64
           - linux-arm64-video
-          - android-arm64
     steps:
-      - name: Download cross artifact
+      - name: Download Linux ARM64 artifact
         uses: actions/download-artifact@v7
         with:
           name: veloflux-${{ matrix.asset_suffix }}
           path: .
-      - name: Upload cross release asset
+      - name: Upload Linux ARM64 release asset
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.release.tag_name }}
           files: veloflux-${{ matrix.asset_suffix }}.tar.gz
+
+  upload-android-release-assets:
+    if: github.event_name == 'release'
+    needs: build-and-upload-android-release
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Android ARM64 artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: veloflux-android-arm64
+          path: .
+      - name: Upload Android ARM64 release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name }}
+          files: veloflux-android-arm64.tar.gz
 
   build-and-upload-qnx71-release:
     if: github.event_name == 'release' || github.event.inputs.package_group == 'qnx71' || github.event.inputs.package_group == 'all'

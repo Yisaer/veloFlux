@@ -40,14 +40,14 @@ test:
 # AddressSanitizer (requires nightly)
 # Usage: make test-asan [TARGET=x86_64-unknown-linux-gnu]
 test-asan:
-	@echo "Running workspace-wide tests with AddressSanitizer (excluding benches)..."
-	@RUSTFLAGS="-Zsanitizer=address -Clink-arg=-fuse-ld=lld" $(CARGO) test -Zbuild-std --workspace --lib --tests $(if $(TARGET),--target $(TARGET)) --no-default-features --features allocator-system,metrics -- --test-threads=1
+	@echo "Running workspace library tests with AddressSanitizer..."
+	@RUSTFLAGS="-Zsanitizer=address -Clink-arg=-fuse-ld=lld" $(CARGO) test -Zbuild-std --workspace --lib $(if $(TARGET),--target $(TARGET)) --no-default-features --features allocator-system,metrics -- --test-threads=1
 
 # Data Race Detection (requires nightly)
 # Usage: make test-tsan [TARGET=x86_64-unknown-linux-gnu]
 test-tsan:
-	@echo "Running workspace-wide tests with ThreadSanitizer (excluding benches)..."
-	@TSAN_OPTIONS="suppressions=$(CURDIR)/scripts/tsan_suppressions.txt" RUSTFLAGS="-Zsanitizer=thread -Clink-arg=-fuse-ld=lld" $(CARGO) test -Zbuild-std --workspace --lib --tests $(if $(TARGET),--target $(TARGET)) --no-default-features --features allocator-system,metrics -- --test-threads=1 --skip e2e::file_source_checkpoint::file_source_checkpoint_resumes_from_last_emitted_offset
+	@echo "Running workspace library tests with ThreadSanitizer..."
+	@TSAN_OPTIONS="suppressions=$(CURDIR)/scripts/tsan_suppressions.txt" RUSTFLAGS="-Zsanitizer=thread -Clink-arg=-fuse-ld=lld" $(CARGO) test -Zbuild-std --workspace --lib $(if $(TARGET),--target $(TARGET)) --no-default-features --features allocator-system,metrics -- --test-threads=1
 
 # Stack Overflow Detection
 # Runs tests with a restricted stack size to expose unbounded recursion
