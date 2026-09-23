@@ -142,7 +142,8 @@ function agg_order_items_unique()
     init_agg_state()
     return current_group_expr .. " " .. pick(order_dirs)
   end
-  return "c " .. pick(order_dirs)
+  init_agg_state()
+  return "count(" .. current_group_key .. ") " .. pick(order_dirs)
 end
 
 function select_expr_list()
