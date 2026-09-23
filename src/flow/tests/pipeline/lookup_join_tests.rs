@@ -363,3 +363,130 @@ async fn pipeline_lookup_join_table_driven() {
         run_lookup_join_case(case).await;
     }
 }
+
+#[tokio::test]
+async fn pipeline_lookup_join_outer_and_mixed_table_driven() {
+    let cases = vec![
+        LookupJoinCase {
+            name: "single_left_lookup_join",
+            sql: "SELECT stream.id, table_a.a_value FROM stream LEFT JOIN table_a ON stream.id = table_a.id",
+            stream_columns: vec![("id".to_string(), vec![Value::Int64(1), Value::Int64(2)])],
+            tables: vec![LookupTableCase {
+                name: "table_a",
+                columns: vec![
+                    ("id", ConcreteDatatype::Int64(datatypes::Int64Type)),
+                    (
+                        "a_value",
+                        ConcreteDatatype::String(datatypes::StringType),
+                    ),
+                ],
+                rows: vec![json_row(&[("id", 1.into()), ("a_value", "a1".into())])],
+            }],
+            expected: serde_json::json!([
+                {"stream.id": 1, "table_a.a_value": "a1"},
+                {"stream.id": 2}
+            ]),
+        },
+        LookupJoinCase {
+            name: "inner_then_left_lookup_joins",
+            sql: "SELECT stream.id, table_a.a_value, table_b.b_value FROM stream INNER JOIN table_a ON stream.id = table_a.id LEFT JOIN table_b ON stream.id = table_b.id",
+            stream_columns: vec![("id".to_string(), vec![Value::Int64(1), Value::Int64(2)])],
+            tables: vec![
+                LookupTableCase {
+                    name: "table_a",
+                    columns: vec![
+                        ("id", ConcreteDatatype::Int64(datatypes::Int64Type)),
+                        (
+                            "a_value",
+                            ConcreteDatatype::String(datatypes::StringType),
+                        ),
+                    ],
+                    rows: vec![json_row(&[("id", 1.into()), ("a_value", "a1".into())])],
+                },
+                LookupTableCase {
+                    name: "table_b",
+                    columns: vec![
+                        ("id", ConcreteDatatype::Int64(datatypes::Int64Type)),
+                        (
+                            "b_value",
+                            ConcreteDatatype::String(datatypes::StringType),
+                        ),
+                    ],
+                    rows: vec![json_row(&[("id", 2.into()), ("b_value", "b2".into())])],
+                },
+            ],
+            expected: serde_json::json!([
+                {"stream.id": 1, "table_a.a_value": "a1"}
+            ]),
+        },
+        LookupJoinCase {
+            name: "left_then_inner_lookup_joins",
+            sql: "SELECT stream.id, table_a.a_value, table_b.b_value FROM stream LEFT JOIN table_a ON stream.id = table_a.id INNER JOIN table_b ON stream.id = table_b.id",
+            stream_columns: vec![("id".to_string(), vec![Value::Int64(1), Value::Int64(2)])],
+            tables: vec![
+                LookupTableCase {
+                    name: "table_a",
+                    columns: vec![
+                        ("id", ConcreteDatatype::Int64(datatypes::Int64Type)),
+                        (
+                            "a_value",
+                            ConcreteDatatype::String(datatypes::StringType),
+                        ),
+                    ],
+                    rows: vec![json_row(&[("id", 1.into()), ("a_value", "a1".into())])],
+                },
+                LookupTableCase {
+                    name: "table_b",
+                    columns: vec![
+                        ("id", ConcreteDatatype::Int64(datatypes::Int64Type)),
+                        (
+                            "b_value",
+                            ConcreteDatatype::String(datatypes::StringType),
+                        ),
+                    ],
+                    rows: vec![json_row(&[("id", 2.into()), ("b_value", "b2".into())])],
+                },
+            ],
+            expected: serde_json::json!([
+                {"stream.id": 2, "table_b.b_value": "b2"}
+            ]),
+        },
+        LookupJoinCase {
+            name: "left_then_left_lookup_joins",
+            sql: "SELECT stream.id, table_a.a_value, table_b.b_value FROM stream LEFT JOIN table_a ON stream.id = table_a.id LEFT JOIN table_b ON stream.id = table_b.id",
+            stream_columns: vec![("id".to_string(), vec![Value::Int64(1), Value::Int64(2)])],
+            tables: vec![
+                LookupTableCase {
+                    name: "table_a",
+                    columns: vec![
+                        ("id", ConcreteDatatype::Int64(datatypes::Int64Type)),
+                        (
+                            "a_value",
+                            ConcreteDatatype::String(datatypes::StringType),
+                        ),
+                    ],
+                    rows: vec![json_row(&[("id", 1.into()), ("a_value", "a1".into())])],
+                },
+                LookupTableCase {
+                    name: "table_b",
+                    columns: vec![
+                        ("id", ConcreteDatatype::Int64(datatypes::Int64Type)),
+                        (
+                            "b_value",
+                            ConcreteDatatype::String(datatypes::StringType),
+                        ),
+                    ],
+                    rows: vec![json_row(&[("id", 2.into()), ("b_value", "b2".into())])],
+                },
+            ],
+            expected: serde_json::json!([
+                {"stream.id": 1, "table_a.a_value": "a1"},
+                {"stream.id": 2, "table_b.b_value": "b2"}
+            ]),
+        },
+    ];
+
+    for case in cases {
+        run_lookup_join_case(case).await;
+    }
+}

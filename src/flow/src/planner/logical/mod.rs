@@ -265,8 +265,13 @@ pub fn create_logical_plan_with_table_defs_and_source_inputs(
         let mut current_plan = Arc::new(LogicalPlan::DataSource(datasource));
         current_index += 1;
         for join in &select_stmt.joins {
-            if join.join_type != JoinType::Inner {
-                return Err("only INNER stream-table lookup joins are supported".to_string());
+            match join.join_type {
+                JoinType::Inner | JoinType::Left => {}
+                _ => {
+                    return Err(
+                        "stream-table lookup join supports only INNER and LEFT JOIN".to_string()
+                    );
+                }
             }
             let JoinConstraint::On(on) = &join.constraint else {
                 return Err("stream-table lookup join requires an ON clause".to_string());

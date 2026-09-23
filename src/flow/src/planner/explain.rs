@@ -983,6 +983,7 @@ fn build_physical_node_with_prefix(
         }
         PhysicalPlan::LookupJoin(join) => {
             info.push(format!("table={}", join.table_name));
+            info.push(format!("type={:?}", join.join_type));
             let keys = join
                 .key_slots
                 .iter()

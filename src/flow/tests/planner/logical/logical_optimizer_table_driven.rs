@@ -795,6 +795,43 @@ fn create_multiple_inner_lookup_joins_logical_plan() {
 }
 
 #[test]
+fn create_lookup_join_types_logical_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = [
+        Case {
+            name: "single_left_lookup_join",
+            sql: "SELECT stream.k1, table_a.value FROM stream LEFT JOIN table_a ON stream.k1 = table_a.k1",
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Left","keys=[stream.k1=table_a.k1]"],"operator":"LookupJoin"}],"id":"Project_2","info":["fields=[stream.k1; table_a.value]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "inner_then_left_lookup_joins",
+            sql: "SELECT stream.k1, stream.k2, table_a.value, table_b.value FROM stream INNER JOIN table_a ON stream.k1 = table_a.k1 LEFT JOIN table_b ON stream.k2 = table_b.k2",
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1, k2]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Inner","keys=[stream.k1=table_a.k1]"],"operator":"LookupJoin"}],"id":"LookupJoin_2","info":["table=table_b","type=Left","keys=[stream.k2=table_b.k2]"],"operator":"LookupJoin"}],"id":"Project_3","info":["fields=[stream.k1; stream.k2; table_a.value; table_b.value]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "left_then_inner_lookup_joins",
+            sql: "SELECT stream.k1, stream.k2, table_a.value, table_b.value FROM stream LEFT JOIN table_a ON stream.k1 = table_a.k1 INNER JOIN table_b ON stream.k2 = table_b.k2",
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1, k2]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Left","keys=[stream.k1=table_a.k1]"],"operator":"LookupJoin"}],"id":"LookupJoin_2","info":["table=table_b","type=Inner","keys=[stream.k2=table_b.k2]"],"operator":"LookupJoin"}],"id":"Project_3","info":["fields=[stream.k1; stream.k2; table_a.value; table_b.value]"],"operator":"Project"}"##,
+        },
+        Case {
+            name: "left_then_left_lookup_joins",
+            sql: "SELECT stream.k1, stream.k2, table_a.value, table_b.value FROM stream LEFT JOIN table_a ON stream.k1 = table_a.k1 LEFT JOIN table_b ON stream.k2 = table_b.k2",
+            expected: r##"{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[k1, k2]"],"operator":"DataSource"}],"id":"LookupJoin_1","info":["table=table_a","type=Left","keys=[stream.k1=table_a.k1]"],"operator":"LookupJoin"}],"id":"LookupJoin_2","info":["table=table_b","type=Left","keys=[stream.k2=table_b.k2]"],"operator":"LookupJoin"}],"id":"Project_3","info":["fields=[stream.k1; stream.k2; table_a.value; table_b.value]"],"operator":"Project"}"##,
+        },
+    ];
+
+    for case in cases {
+        let got = lookup_join_logical_json(case.sql).to_string();
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
 fn create_logical_plan_stateful_table_driven() {
     struct Case {
         name: &'static str,

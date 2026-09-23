@@ -17,7 +17,8 @@ INNER JOIN device_table
 
 The current scope is intentionally limited to:
 
-- `INNER JOIN` only; plain `JOIN` is normalized to `INNER JOIN`.
+- `INNER JOIN` and `LEFT JOIN`; plain `JOIN` is normalized to `INNER JOIN`, and
+  `LEFT OUTER JOIN` is normalized to `LEFT JOIN`.
 - One unbounded stream on the left side.
 - One or more registered tables on the right side.
 - A `memory_mock` table provider.
@@ -27,7 +28,7 @@ The current scope is intentionally limited to:
 
 The following capabilities are deferred:
 
-- `LEFT`, `RIGHT`, `FULL`, and `CROSS JOIN`.
+- `RIGHT`, `FULL`, and `CROSS JOIN`.
 - Stream-to-stream and table-to-table joins.
 - History-table lookup.
 - Stream and table relation aliases.
@@ -44,6 +45,14 @@ For an `INNER JOIN`:
 
 ```text
 zero matches  -> no output row
+one match     -> one enriched output row
+N matches     -> N enriched output rows
+```
+
+For a `LEFT JOIN`:
+
+```text
+zero matches  -> one stream row with a NULL table message
 one match     -> one enriched output row
 N matches     -> N enriched output rows
 ```
@@ -112,7 +121,7 @@ LogicalLookupJoin
 
 The lookup-join node contains:
 
-- normalized join type (`INNER`);
+- normalized join type (`INNER` or `LEFT`);
 - table name and schema;
 - equality-key bindings;
 - required table projection derived from all downstream expression dependencies;
@@ -213,7 +222,7 @@ Planning rejects:
 - a right-hand relation that is not a table;
 - a table without lookup capability;
 - more than one stream or lookup table in the current scope;
-- unsupported join types;
+- unsupported join types such as `RIGHT`, `FULL`, and `CROSS`;
 - an `ON` expression without a stream/table equality key;
 - unresolved or ambiguous qualified columns.
 

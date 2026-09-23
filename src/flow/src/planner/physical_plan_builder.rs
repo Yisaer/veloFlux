@@ -17,12 +17,13 @@ use crate::planner::physical::{
     DataDomain, LookupJoinKeySlot, PartitionGroupKey, PhysicalAggregation, PhysicalBatch,
     PhysicalCompute, PhysicalDataSink, PhysicalDataSource, PhysicalDecoder,
     PhysicalDecoderEventtimeSpec, PhysicalEmptySuppress, PhysicalEventtimeWatermark,
-    PhysicalFilter, PhysicalLookupJoin, PhysicalMemoryCollectionMaterialize, PhysicalOrder,
-    PhysicalOrderKey, PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject,
-    PhysicalResultCollect, PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream,
-    PhysicalSharedStreamRequirement, PhysicalSinkCompress, PhysicalSinkConnector,
-    PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate, PhysicalStatefulFunction,
-    PhysicalTableScan, PhysicalTableScanSpec, PipelineStateUsage, StatefulCall, WatermarkConfig,
+    PhysicalFilter, PhysicalLookupJoin, PhysicalLookupJoinConfig,
+    PhysicalMemoryCollectionMaterialize, PhysicalOrder, PhysicalOrderKey, PhysicalPlan,
+    PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect, PhysicalRowDiff,
+    PhysicalSampler, PhysicalSharedStream, PhysicalSharedStreamRequirement, PhysicalSinkCompress,
+    PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate,
+    PhysicalStatefulFunction, PhysicalTableScan, PhysicalTableScanSpec, PipelineStateUsage,
+    StatefulCall, WatermarkConfig,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
@@ -1035,11 +1036,14 @@ fn create_physical_lookup_join(
 
     let index = builder.allocate_index();
     let physical = PhysicalLookupJoin::new(
-        logical_join.spec.table_name.clone(),
-        Arc::clone(&logical_join.spec.table_schema),
-        logical_join.spec.table_projection.clone(),
-        key_slots,
-        table_message_index,
+        PhysicalLookupJoinConfig {
+            join_type: logical_join.spec.join_type,
+            table_name: logical_join.spec.table_name.clone(),
+            table_schema: Arc::clone(&logical_join.spec.table_schema),
+            table_projection: logical_join.spec.table_projection.clone(),
+            key_slots,
+            table_message_index,
+        },
         physical_child,
         index,
     );

@@ -50,7 +50,7 @@ pub use physical_empty_suppress::PhysicalEmptySuppress;
 pub use physical_eventtime_watermark::PhysicalEventtimeWatermark;
 pub use physical_filter::PhysicalFilter;
 pub use physical_inc_sink_encoder::PhysicalIncSinkEncoder;
-pub use physical_lookup_join::{LookupJoinKeySlot, PhysicalLookupJoin};
+pub use physical_lookup_join::{LookupJoinKeySlot, PhysicalLookupJoin, PhysicalLookupJoinConfig};
 pub use physical_memory_collection_materialize::PhysicalMemoryCollectionMaterialize;
 pub use physical_order::{PhysicalOrder, PhysicalOrderKey};
 pub use physical_process_time_watermark::PhysicalProcessTimeWatermark;

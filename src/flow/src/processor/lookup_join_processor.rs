@@ -16,6 +16,7 @@ use crate::table::provider::{
 };
 use datatypes::Value;
 use futures::StreamExt;
+use parser::JoinType;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -96,6 +97,79 @@ async fn send_collection_with_cancellation(
         }
         _ = cancellation.cancelled() => Ok(false),
     }
+}
+
+fn build_table_message(
+    physical_join: &PhysicalLookupJoin,
+    projection: &[String],
+    table_tuple: Option<&Tuple>,
+) -> Result<Arc<Message>, ProcessorError> {
+    let projected_values = if let Some(table_tuple) = table_tuple {
+        if table_tuple.messages().len() != 1 {
+            return Err(ProcessorError::ProcessingError(format!(
+                "lookup provider '{}' returned a row with {} messages; exactly one is required",
+                physical_join.table_name,
+                table_tuple.messages().len()
+            )));
+        }
+        let table_message = table_tuple.messages().first().ok_or_else(|| {
+            ProcessorError::ProcessingError(format!(
+                "lookup provider '{}' returned a row without a message",
+                physical_join.table_name
+            ))
+        })?;
+        if table_message.entries().count() != projection.len() {
+            return Err(ProcessorError::ProcessingError(format!(
+                "lookup provider '{}' returned {} columns, expected {}",
+                physical_join.table_name,
+                table_message.entries().count(),
+                projection.len()
+            )));
+        }
+        projection
+            .iter()
+            .enumerate()
+            .map(|(value_index, column)| {
+                let value = table_message
+                    .value_by_index(value_index)
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                (column.clone(), value)
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+    let table_keys = physical_join
+        .table_schema
+        .column_schemas()
+        .iter()
+        .map(|column| Arc::<str>::from(column.name.as_str()))
+        .collect();
+    let table_values = physical_join
+        .table_schema
+        .column_schemas()
+        .iter()
+        .map(|column| {
+            Arc::new(
+                projected_values
+                    .get(&column.name)
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+        })
+        .collect();
+    Ok(Arc::new(Message::new(
+        physical_join.table_name.clone(),
+        table_keys,
+        table_values,
+    )))
+}
+
+fn build_joined_tuple(stream_tuple: &Tuple, table_message: Arc<Message>) -> Tuple {
+    let mut messages = stream_tuple.messages().to_vec();
+    messages.push(table_message);
+    Tuple::with_timestamp(Arc::from(messages), stream_tuple.timestamp)
 }
 
 /// Executes a stream-to-table lookup join for each input tuple.
@@ -201,6 +275,7 @@ impl LookupJoinProcessor {
                     .await
             });
             let mut lookup_task = LookupTaskGuard::new(lookup_task);
+            let mut matched = false;
 
             loop {
                 let Some(table_batch) = (tokio::select! {
@@ -217,65 +292,10 @@ impl LookupJoinProcessor {
                         lookup_task.abort_and_wait().await;
                         return Ok(());
                     }
-                    let table_message = table_tuple.messages().first().ok_or_else(|| {
-                        ProcessorError::ProcessingError(format!(
-                            "lookup provider `{}` returned a row without a message",
-                            physical_join.table_name
-                        ))
-                    })?;
-                    if table_tuple.messages().len() != 1 {
-                        return Err(ProcessorError::ProcessingError(format!(
-                        "lookup provider `{}` returned a row with {} messages; exactly one is required",
-                        physical_join.table_name,
-                        table_tuple.messages().len()
-                    )));
-                    }
-                    if table_message.entries().count() != projection.len() {
-                        return Err(ProcessorError::ProcessingError(format!(
-                            "lookup provider `{}` returned {} columns, expected {}",
-                            physical_join.table_name,
-                            table_message.entries().count(),
-                            projection.len()
-                        )));
-                    }
-
-                    let mut messages = tuple.messages().to_vec();
-                    let projected_values = projection
-                        .iter()
-                        .enumerate()
-                        .map(|(value_index, column)| {
-                            let value = table_message
-                                .value_by_index(value_index)
-                                .cloned()
-                                .unwrap_or(Value::Null);
-                            (column.clone(), value)
-                        })
-                        .collect::<HashMap<_, _>>();
-                    let table_values = physical_join
-                        .table_schema
-                        .column_schemas()
-                        .iter()
-                        .map(|column| {
-                            Arc::new(
-                                projected_values
-                                    .get(&column.name)
-                                    .cloned()
-                                    .unwrap_or(Value::Null),
-                            )
-                        })
-                        .collect();
-                    let table_keys = physical_join
-                        .table_schema
-                        .column_schemas()
-                        .iter()
-                        .map(|column| Arc::<str>::from(column.name.as_str()))
-                        .collect();
-                    messages.push(Arc::new(Message::new(
-                        physical_join.table_name.clone(),
-                        table_keys,
-                        table_values,
-                    )));
-                    output_rows.push(Tuple::with_timestamp(Arc::from(messages), tuple.timestamp));
+                    matched = true;
+                    let table_message =
+                        build_table_message(physical_join, &projection, Some(&table_tuple))?;
+                    output_rows.push(build_joined_tuple(tuple, table_message));
                     if output_rows.len() == OUTPUT_COLLECTION_ROWS {
                         let batch = RecordBatch::new_with_metadata_from(
                             std::mem::take(&mut output_rows),
@@ -299,6 +319,29 @@ impl LookupJoinProcessor {
             }
 
             lookup_task.finish().await?;
+            if !matched && physical_join.join_type == JoinType::Left {
+                let table_message = build_table_message(physical_join, &projection, None)?;
+                output_rows.push(build_joined_tuple(tuple, table_message));
+                if output_rows.len() == OUTPUT_COLLECTION_ROWS {
+                    let batch = RecordBatch::new_with_metadata_from(
+                        std::mem::take(&mut output_rows),
+                        input.as_ref(),
+                    )
+                    .map_err(|error| ProcessorError::ProcessingError(error.to_string()))?;
+                    if !send_collection_with_cancellation(
+                        output,
+                        data_channel_capacity,
+                        batch,
+                        cancellation,
+                        stats,
+                    )
+                    .await?
+                    {
+                        return Ok(());
+                    }
+                    emitted_output = true;
+                }
+            }
         }
 
         if !output_rows.is_empty() || !emitted_output {

@@ -2019,6 +2019,33 @@ mod source_info_tests {
     }
 
     #[test]
+    fn test_parse_left_join_normalizes_left_outer_join() {
+        let parser = StreamSqlParser::new();
+
+        let left_join = parser
+            .parse("SELECT * FROM live LEFT JOIN lookup ON live.id = lookup.id")
+            .unwrap();
+        let left_outer_join = parser
+            .parse("SELECT * FROM live LEFT OUTER JOIN lookup ON live.id = lookup.id")
+            .unwrap();
+
+        assert_eq!(left_join.joins[0].join_type, JoinType::Left);
+        assert_eq!(left_outer_join.joins[0].join_type, JoinType::Left);
+        assert_eq!(
+            left_join.joins[0].relation.name,
+            left_outer_join.joins[0].relation.name
+        );
+        assert!(matches!(
+            left_join.joins[0].constraint,
+            ParsedJoinConstraint::On(ref on) if on.to_string() == "live.id = lookup.id"
+        ));
+        assert!(matches!(
+            left_outer_join.joins[0].constraint,
+            ParsedJoinConstraint::On(ref on) if on.to_string() == "live.id = lookup.id"
+        ));
+    }
+
+    #[test]
     fn test_parse_non_join_query_keeps_join_list_empty() {
         let parser = StreamSqlParser::new();
         let select_stmt = parser.parse("SELECT a, b FROM users AS u").unwrap();
