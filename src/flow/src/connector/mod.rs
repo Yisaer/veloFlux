@@ -39,7 +39,10 @@ pub enum SourceCheckpointMode {
 /// Events emitted by an upstream connector.
 pub enum ConnectorEvent {
     /// Binary payload received from the source.
-    Payload(Vec<u8>),
+    ///
+    /// Kept as shared `Bytes` end to end: MQTT/rumqttc already hands out
+    /// `Bytes`, so no per-packet copy happens on ingest.
+    Payload(bytes::Bytes),
     /// Decoded collection received from the source.
     Collection(Box<dyn Collection>),
     /// The connector has no more data to produce.

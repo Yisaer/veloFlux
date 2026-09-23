@@ -274,7 +274,6 @@ async fn run_standalone_loop(
                                 connector_id.as_str(),
                             ])
                             .inc();
-                        let payload = payload.to_vec();
                         match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                             Ok(_) => {
                                 veloflux_metrics::mqtt_source_messages_out_total()
@@ -451,7 +450,9 @@ mod tests {
             &sender,
             &flow_instance_id,
             "shared_source_connector",
-            Some(Ok(SharedMqttEvent::Payload(b"after-error".to_vec()))),
+            Some(Ok(SharedMqttEvent::Payload(bytes::Bytes::from_static(
+                b"after-error",
+            )))),
         )
         .await;
 

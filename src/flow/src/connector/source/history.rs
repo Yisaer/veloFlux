@@ -179,7 +179,7 @@ async fn process_batch(
 
     for payload in payloads {
         if sender
-            .send(Ok(ConnectorEvent::Payload(payload)))
+            .send(Ok(ConnectorEvent::Payload(payload.into())))
             .await
             .is_err()
         {

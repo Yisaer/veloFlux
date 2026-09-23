@@ -238,7 +238,9 @@ async fn forward_message(
         return true;
     };
     match sender
-        .send(Ok(ConnectorEvent::Payload(payload.to_vec())))
+        .send(Ok(ConnectorEvent::Payload(bytes::Bytes::copy_from_slice(
+            payload,
+        ))))
         .await
     {
         Ok(_) => {
@@ -329,7 +331,7 @@ mod tests {
             .expect("stream item")
             .expect("source event");
         match event {
-            ConnectorEvent::Payload(payload) => assert_eq!(payload, br#"{"v":1}"#),
+            ConnectorEvent::Payload(payload) => assert_eq!(&payload[..], br#"{"v":1}"#),
             other => panic!("unexpected event: {other:?}"),
         }
 
@@ -365,7 +367,7 @@ mod tests {
             .expect("stream item")
             .expect("source event");
         match event {
-            ConnectorEvent::Payload(payload) => assert_eq!(payload, br#"{"v":2}"#),
+            ConnectorEvent::Payload(payload) => assert_eq!(&payload[..], br#"{"v":2}"#),
             other => panic!("unexpected event: {other:?}"),
         }
 

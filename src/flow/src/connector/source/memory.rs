@@ -87,7 +87,7 @@ impl SourceConnector for MemorySourceConnector {
                             tracing::error!(connector_id = %connector_id, topic = %topic, "memory source received Bytes for non-bytes topic");
                             return None;
                         }
-                        Some(Ok(ConnectorEvent::Payload(payload.to_vec())))
+                        Some(Ok(ConnectorEvent::Payload(payload)))
                     }
                     Ok(MemoryData::Collection(collection)) => {
                         if kind != MemoryTopicKind::Collection {
@@ -162,7 +162,7 @@ mod tests {
             .await
             .expect("receive bytes connector event")
         {
-            ConnectorEvent::Payload(payload) => assert_eq!(payload, b"hello"),
+            ConnectorEvent::Payload(payload) => assert_eq!(&payload[..], b"hello"),
             other => panic!("expected bytes payload, got {other:?}"),
         }
 
@@ -213,7 +213,7 @@ mod tests {
             .await
             .expect("receive post-lag event")
         {
-            ConnectorEvent::Payload(payload) => assert_eq!(payload, b"third"),
+            ConnectorEvent::Payload(payload) => assert_eq!(&payload[..], b"third"),
             other => panic!("expected latest payload after lag, got {other:?}"),
         }
 
@@ -223,7 +223,7 @@ mod tests {
             .await
             .expect("receive event after lag recovery")
         {
-            ConnectorEvent::Payload(payload) => assert_eq!(payload, b"fourth"),
+            ConnectorEvent::Payload(payload) => assert_eq!(&payload[..], b"fourth"),
             other => panic!("expected payload after lag recovery, got {other:?}"),
         }
     }

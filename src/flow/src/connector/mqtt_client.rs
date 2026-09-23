@@ -67,7 +67,9 @@ impl SharedMqttClientConfig {
 
 #[derive(Debug, Clone)]
 pub enum SharedMqttEvent {
-    Payload(Vec<u8>),
+    /// Shared payload reference; rumqttc hands out `Bytes` so sources
+    /// forward without copying.
+    Payload(bytes::Bytes),
     EndOfStream,
 }
 
@@ -357,7 +359,7 @@ impl MqttClientEntry {
                             if mqtt_topic_matches(&topic, &publish_topic) {
                                 entry_for_task.record_rx_message_metric();
                                 let _ = events_hub_for_task
-                                    .send(Ok(SharedMqttEvent::Payload(payload.to_vec())))
+                                    .send(Ok(SharedMqttEvent::Payload(payload)))
                                     .await;
                             }
                         }

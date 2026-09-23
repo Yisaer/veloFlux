@@ -68,7 +68,7 @@ impl SourceConnector for MockSourceConnector {
         let start = self.next_payload_index.load(Ordering::Acquire);
         for (index, payload) in self.payloads.iter().enumerate().skip(start) {
             self.sender
-                .send(Ok(ConnectorEvent::Payload(payload.clone())))
+                .send(Ok(ConnectorEvent::Payload(payload.clone().into())))
                 .map_err(|_| ConnectorError::Other("mock source receiver closed".to_string()))?;
             self.next_payload_index
                 .store(index.saturating_add(1), Ordering::Release);
@@ -139,7 +139,7 @@ impl SourceConnector for MockSourceConnector {
 
 impl MockSourceHandle {
     /// Send a payload to every subscriber of the mock connector.
-    pub async fn send(&self, payload: impl Into<Vec<u8>>) -> Result<(), MockSourceError> {
+    pub async fn send(&self, payload: impl Into<bytes::Bytes>) -> Result<(), MockSourceError> {
         self.sender
             .send(Ok(ConnectorEvent::Payload(payload.into())))
             .map_err(|_| MockSourceError::Closed)

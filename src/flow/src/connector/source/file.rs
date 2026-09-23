@@ -895,7 +895,7 @@ impl FileCursor {
             let _ = sender.blocking_send(Err(err));
         })?;
         if sender
-            .blocking_send(Ok(ConnectorEvent::Payload(payload)))
+            .blocking_send(Ok(ConnectorEvent::Payload(payload.into())))
             .is_err()
         {
             debug!(path = %self.path.display(), "file source receiver closed");
