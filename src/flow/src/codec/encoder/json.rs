@@ -1,8 +1,7 @@
-use super::template_transform::JsonTemplateTransform;
 use super::{EncodeError, SinkEncoder, SinkEncoderFactory};
 use crate::model::{Collection, Tuple};
 use crate::planner::physical::output_layout::{OutputLayout, OutputValueRef};
-use crate::planner::sink::{JsonOutputFormat, SinkEncoderConfig, SinkEncoderTransformConfig};
+use crate::planner::sink::{JsonOutputFormat, SinkEncoderConfig};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use datatypes::Value;
@@ -15,7 +14,6 @@ pub struct JsonEncoder {
     props: JsonMap<String, JsonValue>,
     output_format: JsonOutputFormat,
     omit_null_columns: bool,
-    transform: Option<Arc<JsonTemplateBinding>>,
     output_layout: Option<Arc<OutputLayout>>,
 }
 
@@ -31,7 +29,6 @@ impl JsonEncoder {
             id,
             output_format,
             omit_null_columns,
-            transform: json_template_transform_from_config(config)?,
             props: config.props().clone(),
             output_layout: None,
         })
@@ -52,7 +49,6 @@ impl SinkEncoderFactory for JsonEncoder {
         Ok(Box::new(JsonEncoderRuntime::new(
             self.output_format,
             self.omit_null_columns,
-            self.transform.clone(),
             self.output_layout.clone(),
         )))
     }
@@ -66,7 +62,6 @@ impl SinkEncoderFactory for JsonEncoder {
             props: self.props.clone(),
             output_format: self.output_format,
             omit_null_columns: self.omit_null_columns,
-            transform: self.transform.clone(),
             output_layout: Some(output_layout),
         }))
     }
@@ -76,9 +71,6 @@ struct JsonEncoderRuntime {
     output_format: JsonOutputFormat,
     is_first_row: bool,
     omit_null_columns: bool,
-    transform: Option<Arc<JsonTemplateTransform>>,
-    transform_binding: Option<Arc<JsonTemplateBinding>>,
-    transform_revision: Option<u64>,
     output_layout: Option<Arc<OutputLayout>>,
 }
 
@@ -86,24 +78,12 @@ impl JsonEncoderRuntime {
     fn new(
         output_format: JsonOutputFormat,
         omit_null_columns: bool,
-        transform_binding: Option<Arc<JsonTemplateBinding>>,
         output_layout: Option<Arc<OutputLayout>>,
     ) -> Self {
-        let transform = transform_binding
-            .as_ref()
-            .map(|binding| Arc::clone(&binding.initial));
-        let transform_revision = transform_binding
-            .as_ref()
-            .map(|binding| binding.initial_revision);
-        let transform_binding =
-            transform_binding.filter(|binding| binding.property_registry.runtime_updates_enabled());
         Self {
             output_format,
             is_first_row: true,
             omit_null_columns,
-            transform,
-            transform_binding,
-            transform_revision,
             output_layout,
         }
     }
@@ -112,7 +92,6 @@ impl JsonEncoderRuntime {
 #[derive(Clone, Copy)]
 struct JsonRowEncodeOptions<'a> {
     output_layout: Option<&'a OutputLayout>,
-    output_mask_mode: OutputMaskMode,
     null_policy: NullColumnPolicy,
 }
 
@@ -120,24 +99,9 @@ impl<'a> JsonRowEncodeOptions<'a> {
     fn native(output_layout: Option<&'a OutputLayout>, null_policy: NullColumnPolicy) -> Self {
         Self {
             output_layout,
-            output_mask_mode: OutputMaskMode::HonorMask,
             null_policy,
         }
     }
-
-    fn transform(output_layout: Option<&'a OutputLayout>) -> Self {
-        Self {
-            output_layout,
-            output_mask_mode: OutputMaskMode::DenseForTemplate,
-            null_policy: NullColumnPolicy::KeepNulls,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum OutputMaskMode {
-    HonorMask,
-    DenseForTemplate,
 }
 
 #[derive(Clone, Copy)]
@@ -148,16 +112,6 @@ enum NullColumnPolicy {
 
 impl SinkEncoder for JsonEncoderRuntime {
     fn begin_delivery(&mut self) -> Result<Option<bytes::Bytes>, EncodeError> {
-        if let Some(binding) = &self.transform_binding {
-            let properties = binding.property_registry.snapshot();
-            if self.transform_revision != Some(properties.revision()) {
-                self.transform = Some(Arc::new(JsonTemplateTransform::compile(
-                    &binding.template,
-                    properties.clone(),
-                )?));
-                self.transform_revision = Some(properties.revision());
-            }
-        }
         self.is_first_row = true;
         match self.output_format {
             JsonOutputFormat::Array => Ok(Some(bytes::Bytes::from_static(b"["))),
@@ -182,9 +136,7 @@ impl SinkEncoder for JsonEncoderRuntime {
                 &mut chunk,
                 self.omit_null_columns,
                 tuple,
-                self.transform.as_deref(),
                 self.output_layout.as_deref(),
-                matches!(self.output_format, JsonOutputFormat::Ndjson),
             )?;
             if matches!(self.output_format, JsonOutputFormat::Ndjson) {
                 chunk.push(b'\n');
@@ -274,43 +226,26 @@ fn encode_row_from_output_layout(
     options: JsonRowEncodeOptions<'_>,
 ) -> Result<JsonValue, EncodeError> {
     let mut json_row = JsonMap::new();
-    match options.output_mask_mode {
-        OutputMaskMode::HonorMask => {
-            let output_mask = tuple.output_mask();
-            if output_mask.is_some_and(|mask| mask.len() != output_layout.columns.len()) {
-                return Err(EncodeError::Other(format!(
-                    "output_mask width {} does not match output schema width {}",
-                    output_mask.map_or(0, <[bool]>::len),
-                    output_layout.columns.len()
-                )));
-            }
+    let output_mask = tuple.output_mask();
+    if output_mask.is_some_and(|mask| mask.len() != output_layout.columns.len()) {
+        return Err(EncodeError::Other(format!(
+            "output_mask width {} does not match output schema width {}",
+            output_mask.map_or(0, <[bool]>::len),
+            output_layout.columns.len()
+        )));
+    }
 
-            for (index, column) in output_layout.columns.iter().enumerate() {
-                if output_mask.is_some_and(|mask| !mask[index]) {
-                    continue;
-                }
-                let value = resolve_output_value(tuple, &column.value_ref)?;
-                let null_policy = if output_mask.is_some() {
-                    NullColumnPolicy::KeepNulls
-                } else {
-                    options.null_policy
-                };
-                insert_json_field(&mut json_row, column.name.as_ref(), value, null_policy);
-            }
+    for (index, column) in output_layout.columns.iter().enumerate() {
+        if output_mask.is_some_and(|mask| !mask[index]) {
+            continue;
         }
-        OutputMaskMode::DenseForTemplate => {
-            // Row-diff branches expose `.row` as the dense current output row. The mask controls
-            // incremental emission and does not remove unchanged values from the template input.
-            for column in output_layout.columns.iter() {
-                let value = resolve_output_value(tuple, &column.value_ref)?;
-                insert_json_field(
-                    &mut json_row,
-                    column.name.as_ref(),
-                    value,
-                    options.null_policy,
-                );
-            }
-        }
+        let value = resolve_output_value(tuple, &column.value_ref)?;
+        let null_policy = if output_mask.is_some() {
+            NullColumnPolicy::KeepNulls
+        } else {
+            options.null_policy
+        };
+        insert_json_field(&mut json_row, column.name.as_ref(), value, null_policy);
     }
 
     Ok(JsonValue::Object(json_row))
@@ -327,60 +262,19 @@ fn append_tuple_json(
     payload: &mut Vec<u8>,
     omit_null_columns: bool,
     tuple: &Tuple,
-    transform: Option<&JsonTemplateTransform>,
     output_layout: Option<&OutputLayout>,
-    compact_transform: bool,
 ) -> Result<(), EncodeError> {
-    let options = if transform.is_some() {
-        JsonRowEncodeOptions::transform(output_layout)
-    } else {
-        JsonRowEncodeOptions::native(
-            output_layout,
-            if omit_null_columns {
-                NullColumnPolicy::OmitNullObjectFields
-            } else {
-                NullColumnPolicy::KeepNulls
-            },
-        )
-    };
-    let row = tuple_to_json_with_options(tuple, options)?;
-    if let Some(transform) = transform {
-        if compact_transform {
-            payload.extend(transform.render_compact_item(row)?);
+    let options = JsonRowEncodeOptions::native(
+        output_layout,
+        if omit_null_columns {
+            NullColumnPolicy::OmitNullObjectFields
         } else {
-            payload.extend(transform.render_item(row)?);
-        }
-    } else {
-        serde_json::to_writer(payload, &row).map_err(EncodeError::Serialization)?;
-    }
+            NullColumnPolicy::KeepNulls
+        },
+    );
+    let row = tuple_to_json_with_options(tuple, options)?;
+    serde_json::to_writer(payload, &row).map_err(EncodeError::Serialization)?;
     Ok(())
-}
-
-fn json_template_transform_from_config(
-    config: &SinkEncoderConfig,
-) -> Result<Option<Arc<JsonTemplateBinding>>, EncodeError> {
-    match config.transform() {
-        Some(SinkEncoderTransformConfig::Template { template }) => {
-            let property_registry = config.property_registry().clone();
-            let properties = property_registry.snapshot();
-            let initial_revision = properties.revision();
-            let initial = Arc::new(JsonTemplateTransform::compile(template, properties)?);
-            Ok(Some(Arc::new(JsonTemplateBinding {
-                template: template.clone(),
-                property_registry,
-                initial,
-                initial_revision,
-            })))
-        }
-        None => Ok(None),
-    }
-}
-
-struct JsonTemplateBinding {
-    template: String,
-    property_registry: crate::PropertyRegistry,
-    initial: Arc<JsonTemplateTransform>,
-    initial_revision: u64,
 }
 
 fn number_from_f64(value: f64) -> JsonValue {
@@ -396,12 +290,10 @@ mod tests {
     use crate::model::Collection;
     use crate::planner::physical::output_layout::OutputColumnLayout;
     use crate::planner::sink::SinkEncoderConfig;
-    use crate::secret::SecretString;
     use datatypes::{
         ConcreteDatatype, Int64Type, ListType, ListValue, StringType, StructField, StructType,
         StructValue, TimestampValue,
     };
-    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     fn extend_optional(payload: &mut Vec<u8>, chunk: Option<bytes::Bytes>) {
@@ -446,7 +338,6 @@ mod tests {
         JsonEncoderRuntime::new(
             encoder.output_format,
             encoder.omit_null_columns,
-            encoder.transform.clone(),
             Some(test_output_layout(collection)),
         )
     }
@@ -834,260 +725,5 @@ mod tests {
 
         let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
         assert_eq!(json, serde_json::json!([]));
-    }
-
-    #[test]
-    fn json_encoder_transform_renders_each_row() {
-        let batch = batch_from_columns_simple(vec![
-            (
-                "orders".to_string(),
-                "amount".to_string(),
-                vec![Value::Int64(10), Value::Int64(20)],
-            ),
-            (
-                "orders".to_string(),
-                "status".to_string(),
-                vec![
-                    Value::String("ok".to_string()),
-                    Value::String("fail".to_string()),
-                ],
-            ),
-        ])
-        .expect("valid batch");
-
-        let config = SinkEncoderConfig::json_with_transform_template(
-            "{\"value\":{{ json(.row.amount) }},\"label\":{{ json(.row.status) }} }",
-        );
-        let encoder = JsonEncoder::new("json", &config).expect("encoder");
-        let payload = encode_collection(&encoder, &batch);
-
-        let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!([
-                {"value":10, "label":"ok"},
-                {"value":20, "label":"fail"}
-            ])
-        );
-    }
-
-    #[test]
-    fn json_encoder_ndjson_compacts_template_output() {
-        let batch = batch_from_columns_simple(vec![(
-            "orders".to_string(),
-            "amount".to_string(),
-            vec![Value::Int64(10)],
-        )])
-        .expect("valid batch");
-        let mut config = json_config_with_format("ndjson");
-        config = config.with_transform_template("{\n  \"value\": {{ json(.row.amount) }}\n}");
-        let encoder = JsonEncoder::new("json", &config).expect("NDJSON template encoder");
-
-        let payload = encode_collection(&encoder, &batch);
-
-        assert_eq!(payload, b"{\"value\":10}\n");
-    }
-
-    #[test]
-    fn json_encoder_transform_streaming_renders_each_row() {
-        let config = SinkEncoderConfig::json_with_transform_template(
-            "{\"value\":{{ json(.row.amount) }},\"label\":{{ json(.row.status) }} }",
-        );
-        let encoder = JsonEncoder::new("json", &config).expect("encoder");
-        let batch1 = batch_from_columns_simple(vec![
-            (
-                "orders".to_string(),
-                "amount".to_string(),
-                vec![Value::Int64(1)],
-            ),
-            (
-                "orders".to_string(),
-                "status".to_string(),
-                vec![Value::String("ok".to_string())],
-            ),
-        ])
-        .expect("batch1");
-        let mut runtime = test_runtime(&encoder, &batch1);
-        let mut payload = Vec::new();
-        extend_optional(
-            &mut payload,
-            runtime.begin_delivery().expect("begin delivery"),
-        );
-        if let Some(chunk) = runtime.append(&batch1).expect("append batch1") {
-            payload.extend_from_slice(&chunk);
-        }
-
-        let batch2 = batch_from_columns_simple(vec![
-            (
-                "orders".to_string(),
-                "amount".to_string(),
-                vec![Value::Int64(2)],
-            ),
-            (
-                "orders".to_string(),
-                "status".to_string(),
-                vec![Value::String("fail".to_string())],
-            ),
-        ])
-        .expect("batch2");
-        if let Some(chunk) = runtime.append(&batch2).expect("append batch2") {
-            payload.extend_from_slice(&chunk);
-        }
-
-        extend_optional(
-            &mut payload,
-            runtime.finish_delivery().expect("finish delivery"),
-        );
-        let json: serde_json::Value = serde_json::from_slice(&payload).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!([
-                {"value":1, "label":"ok"},
-                {"value":2, "label":"fail"}
-            ])
-        );
-    }
-
-    #[test]
-    fn json_encoder_transform_exposes_row_json_and_properties() {
-        let batch = batch_from_columns_simple(vec![(
-            "orders".to_string(),
-            "amount".to_string(),
-            vec![Value::Int64(10)],
-        )])
-        .expect("valid batch");
-        let properties = crate::PropertyContext::new(BTreeMap::from([(
-            "vin".to_string(),
-            SecretString::new("VIN-123".to_string()),
-        )]));
-        let config = SinkEncoderConfig::json_with_transform_template(
-            r#"{"vin":{{ prop("vin") | json }},"amount":{{ json(.row.amount) }} }"#,
-        )
-        .with_property_registry(crate::PropertyRegistry::from_context(properties));
-
-        let encoder = JsonEncoder::new("json", &config).expect("encoder");
-        let payload = encode_collection(&encoder, &batch);
-
-        assert_eq!(
-            serde_json::from_slice::<JsonValue>(&payload).expect("valid JSON"),
-            serde_json::json!([{"vin": "VIN-123", "amount": 10}])
-        );
-    }
-
-    #[test]
-    fn json_encoder_transform_snapshots_properties_at_delivery_start() {
-        let batch = batch_from_columns_simple(vec![(
-            "orders".to_string(),
-            "amount".to_string(),
-            vec![Value::Int64(10)],
-        )])
-        .expect("valid batch");
-        let registry = crate::PropertyRegistry::new(
-            BTreeMap::from([(
-                "vin".to_string(),
-                SecretString::new("VIN-INITIAL".to_string()),
-            )]),
-            true,
-        );
-        let config =
-            SinkEncoderConfig::json_with_transform_template(r#"{"vin":{{ prop("vin") | json }} }"#)
-                .with_property_registry(registry.clone());
-        let encoder = JsonEncoder::new("json", &config).expect("encoder");
-        let mut runtime = test_runtime(&encoder, &batch);
-
-        runtime.begin_delivery().expect("begin first delivery");
-        registry
-            .apply_override("vin", SecretString::new("VIN-UPDATED"))
-            .expect("update vin");
-        let first = runtime
-            .append(&batch)
-            .expect("append first delivery")
-            .expect("first payload");
-        runtime.finish_delivery().expect("finish first delivery");
-
-        runtime.begin_delivery().expect("begin second delivery");
-        let second = runtime
-            .append(&batch)
-            .expect("append second delivery")
-            .expect("second payload");
-
-        assert_eq!(
-            serde_json::from_slice::<JsonValue>(&first).expect("first JSON"),
-            serde_json::json!({"vin": "VIN-INITIAL"})
-        );
-        assert_eq!(
-            serde_json::from_slice::<JsonValue>(&second).expect("second JSON"),
-            serde_json::json!({"vin": "VIN-UPDATED"})
-        );
-    }
-
-    #[test]
-    fn json_encoder_transform_is_fixed_for_static_registry() {
-        let batch = batch_from_columns_simple(vec![(
-            "orders".to_string(),
-            "amount".to_string(),
-            vec![Value::Int64(10)],
-        )])
-        .expect("valid batch");
-        let registry = crate::PropertyRegistry::new(
-            BTreeMap::from([(
-                "vin".to_string(),
-                SecretString::new("VIN-INITIAL".to_string()),
-            )]),
-            false,
-        );
-        let config =
-            SinkEncoderConfig::json_with_transform_template(r#"{"vin":{{ prop("vin") | json }} }"#)
-                .with_property_registry(registry.clone());
-        let encoder = JsonEncoder::new("json", &config).expect("encoder");
-        let mut runtime = test_runtime(&encoder, &batch);
-
-        registry
-            .apply_override("vin", SecretString::new("VIN-UPDATED"))
-            .expect("update registry snapshot");
-        runtime.begin_delivery().expect("begin delivery");
-        let payload = runtime
-            .append(&batch)
-            .expect("append delivery")
-            .expect("payload");
-
-        assert_eq!(
-            serde_json::from_slice::<JsonValue>(&payload).expect("valid JSON"),
-            serde_json::json!({"vin": "VIN-INITIAL"})
-        );
-    }
-
-    #[test]
-    fn json_encoder_transform_reports_missing_property_as_encode_error() {
-        let batch = batch_from_columns_simple(vec![(
-            "orders".to_string(),
-            "amount".to_string(),
-            vec![Value::Int64(10)],
-        )])
-        .expect("valid batch");
-        let config = SinkEncoderConfig::json_with_transform_template(
-            r#"{"vin":{{ prop("missing") | json }},"amount":{{ json(.row.amount) }} }"#,
-        );
-        let encoder = JsonEncoder::new("json", &config).expect("encoder");
-        let mut runtime = test_runtime(&encoder, &batch);
-
-        let err = runtime.append(&batch).expect_err("missing property");
-        assert!(err
-            .to_string()
-            .contains("property `missing` is not defined"));
-    }
-
-    #[test]
-    fn json_encoder_rejects_malformed_transform_template() {
-        let config = SinkEncoderConfig::json_with_transform_template("{{ json(.row.amount) ");
-        let err = match JsonEncoder::new("json", &config) {
-            Ok(_) => panic!("invalid template should fail"),
-            Err(err) => err,
-        };
-
-        assert!(
-            err.to_string().contains("invalid template"),
-            "unexpected error: {err}"
-        );
     }
 }

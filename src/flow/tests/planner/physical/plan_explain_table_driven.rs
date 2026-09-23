@@ -580,6 +580,17 @@ fn build_nop_csv_sink(sink_id: &'static str, batch_count: Option<usize>) -> Pipe
     }
 }
 
+fn build_nop_template_sink(sink_id: &'static str) -> PipelineSink {
+    let encoder =
+        SinkEncoderConfig::template(r#"{"a":{{ json(.c) }}}"#).with_template_framing("[", ",", "]");
+    let connector = PipelineSinkConnector::new(
+        "test_connector",
+        SinkConnectorConfig::Nop(NopSinkConfig::default()),
+        encoder,
+    );
+    PipelineSink::new(sink_id, connector)
+}
+
 fn build_nop_json_delta_sink(sink_id: &'static str, batch_count: Option<usize>) -> PipelineSink {
     build_nop_json_delta_sink_with_columns(sink_id, batch_count, None)
 }
@@ -618,42 +629,6 @@ fn build_nop_json_delta_omit_if_empty_sink_with_columns(
         }
         None => SinkOutputConfig::delta().with_omit_if_empty(true),
     })
-}
-
-fn build_nop_json_transform_sink(
-    sink_id: &'static str,
-    batch_count: Option<usize>,
-) -> PipelineSink {
-    let connector = PipelineSinkConnector::new(
-        "test_connector",
-        SinkConnectorConfig::Nop(NopSinkConfig::default()),
-        SinkEncoderConfig::json_with_transform_template(
-            r#"{"x":{{ json(.row.c) }},"y":{{ json(.row.d) }} }"#,
-        ),
-    );
-    let sink = PipelineSink::new(sink_id, connector);
-    match batch_count {
-        None => sink,
-        Some(batch_count) => {
-            let mut common_props = CommonSinkProps::default();
-            common_props.batch_count = Some(batch_count);
-            sink.with_common_props(common_props)
-        }
-    }
-}
-
-fn build_nop_json_transform_delta_sink_with_columns(
-    sink_id: &'static str,
-    batch_count: Option<usize>,
-    columns: Option<&[&'static str]>,
-) -> PipelineSink {
-    let sink = build_nop_json_transform_sink(sink_id, batch_count);
-    match columns {
-        Some(columns) => sink.with_output(SinkOutputConfig::delta_with_columns(
-            columns.iter().copied(),
-        )),
-        None => sink.with_output(SinkOutputConfig::delta()),
-    }
 }
 
 fn build_video_sink(sink_id: &'static str) -> PipelineSink {
@@ -1946,23 +1921,49 @@ fn plan_explain_csv_encoder_table_driven() {
 }
 
 #[test]
+fn plan_explain_template_encoder_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        sink: PipelineSink,
+        covers: &'static [&'static str],
+        expected: &'static str,
+    }
+
+    let cases = vec![Case {
+        name: "template_encoder_uses_fixed_output_layout",
+        sql: "SELECT a AS c, b + 1 AS d FROM stream_ab",
+        sink: build_nop_template_sink("test_sink"),
+        covers: &[
+            "sink.encoder.template",
+            "planner.physical.output_layout_fixed_slots",
+        ],
+        expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as c; b + 1 as d]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=template"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a as c; b + 1 as d]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=template"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+    }];
+
+    for case in cases {
+        assert!(!case.covers.is_empty(), "case={} missing covers", case.name);
+        let got = explain_json_result(case.sql, vec![case.sink])
+            .unwrap_or_else(|err| panic!("case={} unexpected error: {err}", case.name));
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
 fn plan_explain_optimizer_table_driven() {
     #[derive(Clone, Copy)]
     struct SinkSpec {
         sink_id: &'static str,
         batch_count: Option<usize>,
-        transform_template: bool,
     }
 
     const SINK_NO_BATCH: &[SinkSpec] = &[SinkSpec {
         sink_id: "test_sink",
         batch_count: None,
-        transform_template: false,
     }];
     const SINK_BATCH_10: &[SinkSpec] = &[SinkSpec {
         sink_id: "test_sink",
         batch_count: Some(10),
-        transform_template: false,
     }];
 
     struct PhysicalOptimizerCase {
@@ -2019,71 +2020,7 @@ fn plan_explain_optimizer_table_driven() {
         let sinks = case
             .sinks
             .iter()
-            .map(|s| {
-                if s.transform_template {
-                    build_nop_json_transform_sink(s.sink_id, s.batch_count)
-                } else {
-                    build_nop_json_sink(s.sink_id, s.batch_count)
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let got = explain_json(case.sql, sinks);
-        assert_eq!(got, case.expected, "case={}", case.name);
-    }
-}
-
-#[test]
-fn plan_explain_encoder_transform_table_driven() {
-    #[derive(Clone, Copy)]
-    struct SinkSpec {
-        sink_id: &'static str,
-        batch_count: Option<usize>,
-    }
-
-    const SINK_NO_BATCH_TRANSFORM: &[SinkSpec] = &[SinkSpec {
-        sink_id: "test_sink",
-        batch_count: None,
-    }];
-    const SINK_BATCH_10_TRANSFORM: &[SinkSpec] = &[SinkSpec {
-        sink_id: "test_sink",
-        batch_count: Some(10),
-    }];
-
-    struct Case {
-        name: &'static str,
-        sql: &'static str,
-        sinks: &'static [SinkSpec],
-        covers: &'static [&'static str],
-        expected: &'static str,
-    }
-
-    let cases = vec![
-        Case {
-            name: "transform_template_without_batch_keeps_regular_encoder",
-            sql: "SELECT a + 1 AS c, b + 1 AS d FROM stream_ab",
-            sinks: SINK_NO_BATCH_TRANSFORM,
-            covers: &["sink.encoder.transform"],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a + 1 as c; b + 1 as d]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","transform=template"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a + 1 as c; b + 1 as d]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=json","transform=template"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
-        },
-        Case {
-            name: "transform_template_with_batch_uses_sink_encoder",
-            sql: "SELECT a + 1 AS c, b + 1 AS d FROM stream_ab",
-            sinks: SINK_BATCH_10_TRANSFORM,
-            covers: &[
-                "sink.encoder.transform",
-                "planner.physical.streaming_encoder_rewrite",
-            ],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a + 1 as c; b + 1 as d]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","transform=template","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a + 1 as c; b + 1 as d]"],"operator":"PhysicalProject"}],"id":"PhysicalIncSinkEncoder_5","info":["sink_id=test_sink","encoder=json","transform=template","batch_count=10"],"operator":"PhysicalIncSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
-        },
-    ];
-
-    for case in cases {
-        let _ = case.covers;
-        let sinks = case
-            .sinks
-            .iter()
-            .map(|s| build_nop_json_transform_sink(s.sink_id, s.batch_count))
+            .map(|s| build_nop_json_sink(s.sink_id, s.batch_count))
             .collect::<Vec<_>>();
 
         let got = explain_json(case.sql, sinks);
@@ -2191,17 +2128,6 @@ fn plan_explain_row_diff_table_driven() {
             sinks: vec![build_nop_json_delta_sink("test_sink", None)],
             covers: &["planner.physical.output_layout_fixed_slots"],
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[*]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","output.mode=delta"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, b, flag, k1, k2]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[*]"],"operator":"PhysicalProject"}],"id":"PhysicalRowDiff_4","info":["sink_id=test_sink","mode=delta","columns=[a, b, flag, k1, k2]"],"operator":"PhysicalRowDiff"}],"id":"PhysicalSinkEncoder_5","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
-        },
-        RowDiffExplainCase {
-            name: "row_diff_and_template_are_orthogonal_in_plan_shape",
-            sql: "SELECT a AS c, b AS d FROM stream_ab",
-            sinks: vec![build_nop_json_transform_delta_sink_with_columns(
-                "test_sink",
-                None,
-                Some(&["c"]),
-            )],
-            covers: &["planner.physical.output_layout_fixed_slots"],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as c; b as d]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","output.mode=delta","output.columns=[c]","transform=template"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a as c; b as d]"],"operator":"PhysicalProject"}],"id":"PhysicalRowDiff_4","info":["sink_id=test_sink","mode=delta","columns=[c]"],"operator":"PhysicalRowDiff"}],"id":"PhysicalSinkEncoder_5","info":["sink_id=test_sink","encoder=json","transform=template"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         RowDiffExplainCase {
             name: "row_diff_omit_if_empty_inserts_empty_suppress_after_row_diff",

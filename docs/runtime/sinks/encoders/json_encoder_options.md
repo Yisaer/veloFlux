@@ -27,9 +27,7 @@ The JSON encoder has to combine several behaviors:
 
 - array or NDJSON delivery framing
 - plain full-row JSON object encoding
-- item-level template transform
 - row-diff mask-aware output
-- by-index delayed materialization
 - object-field `null` omission
 
 The pipeline API should expose only the options users need to control directly.
@@ -84,46 +82,6 @@ NDJSON emits zero bytes. If no delivery is started, neither format creates an ou
 The format is a delivery-level encoder option. It does not change sink batching or make the file
 sink append to a long-lived file.
 
-### `encoder.transform`
-
-Meaning:
-
-- enable item-level row transform before final JSON delivery framing is emitted
-
-Supported value today:
-
-- `template`
-
-Example:
-
-```json
-{
-  "encoder": {
-    "type": "json",
-    "transform": {
-      "template": "{\"value\":{{ json(.row.amount) }},\"label\":{{ json(.row.status) }} }"
-    }
-  }
-}
-```
-
-Function enabled:
-
-- JSON encoder transform
-
-Effect:
-
-- each input SQL row is exposed to the template as `.row`
-- the template renders one JSON item
-- the JSON encoder still owns the configured array or NDJSON framing
-- NDJSON compacts the rendered JSON item before appending the record LF
-
-Example input rows:
-
-```json
-[{"amount":10,"status":"ok"},{"amount":20,"status":"fail"}]
-```
-
 Example output payload:
 
 ```json
@@ -132,7 +90,7 @@ Example output payload:
 
 Related document:
 
-- [Encoder Transform](encoder_transform.md)
+- [Template Encoder](encoder_transform.md)
 
 ### `encoder.props.omit_null_columns`
 
@@ -204,8 +162,7 @@ The current implementation uses an internal row-encoding option bundle equivalen
 
 ```rust
 struct JsonRowEncodeOptions<'a> {
-    output_layout: &'a OutputLayout,
-    output_mask_mode: OutputMaskMode,
+    output_layout: Option<&'a OutputLayout>,
     null_policy: NullColumnPolicy,
 }
 ```
@@ -224,7 +181,6 @@ Meaning:
 Function enabled:
 
 - row-diff aware encoding
-- dense row exposure for template rendering on row-diff branches
 
 Typical source:
 
@@ -247,35 +203,9 @@ Final output layout:
 [x, y]
 ```
 
-The encoder uses this layout for both final output names and indexed runtime
-value access.
-
-### `output_mask_mode`
-
-Meaning:
-
-- tells the encoder how to interpret a tuple that carries `output_mask`
-
-Current modes:
-
-- `HonorMask`
-- `DenseForTemplate`
-
-#### `HonorMask`
-
-Meaning:
-
-- use `output_mask` to decide which fields are emitted
-
-Function enabled:
-
-- row-diff sparse JSON object encoding
-
-Effect:
-
-- `mask = false` -> omit field
-- `mask = true` -> emit field
-- `mask = true` and value is `null` -> still emit `"field": null`
+The encoder uses this layout for final output names and indexed runtime value access.
+When a tuple carries an output mask, the JSON encoder applies that mask directly
+while walking the layout. It does not use a separate output-mask mode.
 
 Example:
 
@@ -289,36 +219,6 @@ Output:
 ```json
 {"b":3}
 ```
-
-#### `DenseForTemplate`
-
-Meaning:
-
-- ignore sparse omission for template input and expose the dense row-diff output row
-
-Function enabled:
-
-- `encoder.transform=template` on row-diff sink branches
-
-Effect:
-
-- unchanged tracked columns remain visible to the template as `null`
-- the template still sees a stable row shape under `.row`
-
-Example:
-
-```json
-row values: {"a":null,"b":3}
-mask:       [false, true]
-```
-
-Template input `.row`:
-
-```json
-{"a":null,"b":3}
-```
-
-This preserves the current template contract until a future mask-aware template design is added.
 
 ### `null_policy`
 
@@ -339,7 +239,6 @@ Meaning:
 
 Used for:
 
-- template-adjacent internal paths where we intentionally keep current behavior
 - native paths when `encoder.props.omit_null_columns = false`
 
 Example:
@@ -403,19 +302,16 @@ Output:
 Important limit:
 
 - this policy does not override row-diff sparse semantics
-- if `output_mask_mode = HonorMask` and the mask selects a changed-to-`null` field, that field must
-  still be emitted as `"field": null`
+- a changed-to-`null` field selected by the output mask is still emitted as `"field": null`
 
 ## Feature Mapping Summary
 
 | User or runtime option | Meaning | Enables / affects |
 |---|---|---|
 | `encoder.props.format` | select `array` or `ndjson` delivery framing | JSON delivery boundaries and row separators |
-| `encoder.transform=template` | render one JSON item per row through a template | encoder transform |
 | `encoder.props.omit_null_columns` | omit `null` object fields on native JSON object encoding | null-field omission |
-| `output_layout` | align final columns with fixed runtime value references | native, row-diff-aware, and template rendering |
-| `output_mask_mode=HonorMask` | emit sparse fields according to `output_mask` | row-diff sparse JSON encoding |
-| `output_mask_mode=DenseForTemplate` | expose dense `.row` even on row-diff branches | row-diff + template compatibility |
+| `output_layout` | align final columns with fixed runtime value references | native and row-diff-aware JSON encoding |
+| tuple `output_mask` | select fields while walking the final output layout | row-diff sparse JSON encoding |
 | `null_policy=KeepNulls` | keep object-field `null` values | legacy / explicit keep-null behavior |
 | `null_policy=OmitNullObjectFields` | omit `null` object fields | default full-output null omission |
 
@@ -457,7 +353,6 @@ Configuration:
 
 Derived runtime behavior:
 
-- `output_mask_mode = HonorMask`
 - `null_policy = OmitNullObjectFields`
 
 Input row:
@@ -489,7 +384,6 @@ Configuration:
 
 Derived runtime behavior:
 
-- `output_mask_mode = HonorMask`
 - `null_policy = KeepNulls`
 
 Input row:
@@ -522,7 +416,6 @@ Configuration:
 Derived runtime behavior:
 
 - `output_layout` is required
-- `output_mask_mode = HonorMask`
 - changed-to-`null` fields are still emitted
 
 Runtime row state:
@@ -536,41 +429,4 @@ Output row item:
 
 ```json
 {"a":null}
-```
-
-### Example 4: Row-Diff With Template Transform
-
-Configuration:
-
-```json
-{
-  "encoder": {
-    "type": "json",
-    "transform": {
-      "template": "{{ json(.row) }}"
-    }
-  },
-  "output": {
-    "mode": "delta"
-  }
-}
-```
-
-Derived runtime behavior:
-
-- `output_layout` is required
-- `output_mask_mode = DenseForTemplate`
-- `null_policy = KeepNulls`
-
-Runtime row state:
-
-```json
-row values: {"a":null,"b":10}
-mask:       [false, true]
-```
-
-Template input `.row`:
-
-```json
-{"a":null,"b":10}
 ```

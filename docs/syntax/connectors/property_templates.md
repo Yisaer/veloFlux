@@ -1,6 +1,6 @@
 # Connector Property Templates
 
-Connector property templates use the same Upon engine as JSON encoder transform
+Connector property templates use the same Upon engine as the template encoder
 templates. They are compiled when a pipeline is applied:
 
 ```text
@@ -43,7 +43,7 @@ With the local MQTT provider enabled, literal-only templates remain fixed while
 templates using `prop()` are resolved from one immutable snapshot at the
 consumer boundary:
 
-- JSON transforms snapshot at encoder delivery start;
+- Template encoder values are resolved at encoder delivery start;
 - MQTT and HTTP sinks snapshot after receiving a complete encoded delivery and
   before the first external attempt;
 - file sinks use that connector snapshot for the final filename pattern after

@@ -4,7 +4,7 @@ use super::decoder::{
 use super::encoder::SinkEncoderFactory;
 use super::CodecError;
 use crate::catalog::StreamDecoderConfig;
-use crate::codec::encoder::{CsvEncoder, JsonEncoder, ProtobufEncoder};
+use crate::codec::encoder::{CsvEncoder, JsonEncoder, ProtobufEncoder, TemplateEncoder};
 use crate::planner::sink::SinkEncoderConfig;
 use datatypes::Schema;
 use parking_lot::RwLock;
@@ -183,6 +183,15 @@ impl EncoderRegistry {
                     )
                 })?;
                 Ok(Arc::new(ProtobufEncoder::new(Arc::clone(bundle))) as Arc<_>)
+            }),
+        );
+        self.register_encoder(
+            "template",
+            Arc::new(|config| {
+                Ok(Arc::new(
+                    TemplateEncoder::new(config.kind_str().to_string(), config)
+                        .map_err(|err| CodecError::Other(err.to_string()))?,
+                ) as Arc<_>)
             }),
         );
     }

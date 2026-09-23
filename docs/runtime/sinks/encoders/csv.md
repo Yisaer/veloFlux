@@ -23,7 +23,7 @@ bytes. It is intended for byte-oriented sink connectors such as file, HTTP, MQTT
 | `header` | boolean | `true` | Emit the final SQL-visible column names once at the beginning of each delivery unit. |
 
 Unknown encoder properties are ignored consistently with the existing encoder configuration
-model. `encoder.transform` is not supported for CSV and is rejected during planning.
+model. The template encoder is a separate encoder kind and is not configured through CSV.
 
 ## Record and Delivery Semantics
 

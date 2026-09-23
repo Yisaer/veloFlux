@@ -13,6 +13,7 @@ fn individual_registry_defaults_include_builtins() {
 
     let encoder_registry = EncoderRegistry::default();
     assert!(encoder_registry.is_registered("json"));
+    assert!(encoder_registry.is_registered("template"));
 
     let decoder_registry = DecoderRegistry::default();
     assert!(decoder_registry.is_registered("json"));
@@ -41,6 +42,7 @@ fn pipeline_registries_default_uses_builtins() {
     assert!(registries.connector_registry().is_registered("nng_pubsub"));
 
     assert!(registries.encoder_registry().is_registered("json"));
+    assert!(registries.encoder_registry().is_registered("template"));
     assert!(registries.decoder_registry().is_registered("json"));
     assert!(registries.aggregate_registry().is_registered("sum"));
     assert!(registries.stateful_registry().is_registered("lag"));

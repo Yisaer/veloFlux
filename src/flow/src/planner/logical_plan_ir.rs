@@ -16,8 +16,8 @@ use crate::connector::sink::mqtt::MqttSinkConfig;
 use crate::planner::logical::LogicalPlan;
 use crate::planner::sink::{
     CommonSinkProps, CustomSinkConnectorConfig, PipelineSink, PipelineSinkConnector,
-    SinkConnectorConfig, SinkDeltaOutputConfig, SinkEncoderConfig, SinkEncoderTransformConfig,
-    SinkOutputConfig, SinkOutputMode,
+    SinkConnectorConfig, SinkDeltaOutputConfig, SinkEncoderConfig, SinkOutputConfig,
+    SinkOutputMode,
 };
 
 #[derive(Debug, Error)]
@@ -44,7 +44,6 @@ pub struct SinkIR {
     pub connector_settings: JsonValue,
     pub encoder_kind: Option<String>,
     pub encoder_props: Option<JsonMap<String, JsonValue>>,
-    pub encoder_transform: Option<SinkEncoderTransformIR>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -68,11 +67,6 @@ pub enum SinkOutputModeIR {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SinkDeltaOutputIR {
     pub columns: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SinkEncoderTransformIR {
-    Template { template: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -358,16 +352,8 @@ fn sink_ir_to_pipeline_sink(sink: &SinkIR) -> Result<PipelineSink, String> {
         .encoder_kind
         .as_deref()
         .ok_or_else(|| "sink IR missing encoder_kind".to_string())?;
-    let mut encoder_props = sink.encoder_props.clone().unwrap_or_default();
-    let transform = sink
-        .encoder_transform
-        .as_ref()
-        .cloned()
-        .or_else(|| extract_legacy_transform_from_props(&mut encoder_props));
-    let mut encoder = SinkEncoderConfig::new(encoder_kind.to_string(), encoder_props);
-    if let Some(transform) = transform.as_ref() {
-        encoder = encoder.with_transform(transform_ir_to_config(transform));
-    }
+    let encoder_props = sink.encoder_props.clone().unwrap_or_default();
+    let encoder = SinkEncoderConfig::new(encoder_kind.to_string(), encoder_props);
 
     let connector = match sink.connector_kind.as_str() {
         "mqtt" => SinkConnectorConfig::Mqtt(mqtt_sink_from_ir_settings(&sink.connector_settings)?),
@@ -964,19 +950,6 @@ fn sink_to_ir(sink: &PipelineSink) -> SinkIR {
         connector_settings,
         encoder_kind: Some(sink.connector.encoder.kind_str().to_string()),
         encoder_props: Some(sink.connector.encoder.props().clone()),
-        encoder_transform: sink
-            .connector
-            .encoder
-            .transform()
-            .map(transform_config_to_ir),
-    }
-}
-
-fn transform_ir_to_config(transform: &SinkEncoderTransformIR) -> SinkEncoderTransformConfig {
-    match transform {
-        SinkEncoderTransformIR::Template { template } => SinkEncoderTransformConfig::Template {
-            template: template.clone(),
-        },
     }
 }
 
@@ -1008,27 +981,6 @@ fn sink_output_to_ir(output: &SinkOutputConfig) -> SinkOutputIR {
         include_columns: output.include_columns.clone(),
         exclude_columns: output.exclude_columns.clone(),
     }
-}
-
-fn transform_config_to_ir(transform: &SinkEncoderTransformConfig) -> SinkEncoderTransformIR {
-    match transform {
-        SinkEncoderTransformConfig::Template { template } => SinkEncoderTransformIR::Template {
-            template: template.clone(),
-        },
-    }
-}
-
-fn extract_legacy_transform_from_props(
-    encoder_props: &mut JsonMap<String, JsonValue>,
-) -> Option<SinkEncoderTransformIR> {
-    let transform = encoder_props.remove("transform")?;
-    let template = transform
-        .as_object()
-        .and_then(|obj| obj.get("template"))
-        .and_then(|value| value.as_str())?;
-    Some(SinkEncoderTransformIR::Template {
-        template: template.to_string(),
-    })
 }
 
 fn common_sink_props_to_ir(common: &CommonSinkProps) -> CommonSinkPropsIR {

@@ -70,22 +70,22 @@ Additional notes:
 
 ## Current Built-In Sink Encoders
 
-The runtime currently registers the following built-in encoder kinds:
+The runtime currently registers the following built-in encoder kinds. The `template` row describes
+the target encoder design from issue #382 and becomes active when the implementation lands:
 
 | Encoder | Runtime built-in | Output type | Streaming support | Notes |
 |--------|-------------------|-------------|-------------------|-------|
 | `json` | yes | bytes | yes | Encodes a `Collection` with `array` (default) or `ndjson` delivery framing and supports encoder-local JSON formatting options. |
+| `template` | planned | bytes | yes | Renders one template item per input row and owns the output framing. |
 | `csv` | yes | bytes | yes | Encodes the fixed output layout as UTF-8 CSV and supports configurable delimiter and per-delivery headers. |
 | `none` | planner pseudo-mode | collection passthrough | n/a | No encoder node is built; the connector receives decoded collections directly. |
 
-Current transform support:
+Current template encoder design:
 
-- `encoder.transform=template` is only supported for `encoder.type=json`.
-- `encoder.type=csv` supports `props.delimiter` and `props.header`, requires `output.mode=full`, and
-  does not support encoder transforms.
-- The transform is item-level (`row -> transformed JSON item`), not a standalone collection
-  transform stage.
-- When `encoder.type=none`, any configured transform is ignored by design.
+- `encoder.type=template` is a top-level encoder kind, not a JSON encoder attribute.
+- The encoder consumes a collection but renders one output item per row.
+- The template input row comes from the planner-defined `OutputLayout`.
+- The template encoder owns framing and emits bytes; it is not a standalone collection transform.
 - `encoder.props.omit_null_columns` is a JSON-encoder-local option that controls omission of
   `null` object fields during native JSON object encoding.
 - `encoder.props.format` selects JSON delivery framing: `array` by default or LF-terminated
@@ -94,7 +94,7 @@ Current transform support:
 See also:
 
 - [CSV Sink Encoder](encoders/csv.md)
-- [Encoder Transform](encoders/encoder_transform.md)
+- [Template Encoder](encoders/encoder_transform.md)
 - [JSON Encoder Options](encoders/json_encoder_options.md)
 - [Delivery Compression](delivery/compress.md)
 - [Delivery Encryption](delivery/encrypt.md)
@@ -251,10 +251,10 @@ These capabilities already exist near the sink boundary:
 1. **Sink batching**
    - Planner-managed flush grouping using `Batch`.
 
-2. **JSON encoder transform**
-   - `encoder.type=json`
-   - `encoder.transform=template`
-   - implemented inside the JSON encoder, not as a standalone plan stage.
+2. **Template encoder**
+   - `encoder.type=template`
+   - renders one template item per input row
+   - implemented as a top-level encoder, not as a standalone plan stage.
 
 3. **JSON null-field omission**
    - `encoder.type=json`
@@ -303,6 +303,6 @@ In particular:
 - [Omit If Empty](output/omit_if_empty.md)
 - [Row Diff Output](output/row_diff_output.md)
 - [Column Filter](output/column_filter.md)
-- [Encoder Transform](encoders/encoder_transform.md)
+- [Template Encoder](encoders/encoder_transform.md)
 - [JSON Null Field Omission](encoders/json_null_column_omit.md)
 - [Plan-Fixed Output Layout](../../planner/performance/plan_fixed_output_slots.md)

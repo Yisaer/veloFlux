@@ -23,7 +23,7 @@ Row diff output should be modeled as a **sink-level output mode**, not as:
 
 - a SQL scalar function
 - a SQL stateful function
-- an encoder transform
+- a row-oriented template encoder
 
 Why:
 
@@ -32,7 +32,7 @@ Why:
 2. Different sinks of the same pipeline may need different delivery styles:
    - one sink may want full rows
    - another sink may want row diff rows
-3. Encoder transforms are row formatting features, not previous-row comparison features.
+3. The template encoder is a row-formatting feature, not a previous-row comparison feature.
 
 The sink-side row diff design therefore has two layers:
 
@@ -458,22 +458,15 @@ This lets JSON output express both:
 - sparse patch-like payloads for downstream systems that want them
 - dense stable-schema rows when the encoder chooses not to use the mask
 
-### Template Contract
+### Template Encoder Contract
 
-`encoder.transform=template` should not block row diff at the planner level, but exact semantics
-depend on whether the template layer can observe the mask.
+The `template` encoder is row-oriented and consumes the dense final output row from
+`OutputLayout`. Row diff runs before the encoder. The output mask controls sparse native encoder
+emission, but does not make the template input sparse; unchanged fields may therefore appear as
+`null` in `.row`.
 
-There are two practical phases:
-
-1. Initial phase
-   - template only sees row values
-   - row diff + template degrades to dense `NULL`-filled rendering
-
-2. Later phase
-   - template context is extended with mask-aware input
-   - template can selectively render changed fields
-
-This should be documented as an encoder capability issue, not a row diff planning issue.
+Mask-aware template rendering is not part of the current contract. A future extension may expose
+the mask explicitly, but that must not change the one-row-in, one-item-out encoder contract.
 
 ### Validation Guidance
 
@@ -530,18 +523,18 @@ For structured object encoders such as JSON:
 This keeps row diff semantics available without forcing every encoder to implement sparse output on
 day one.
 
-### With `encoder.transform=template`
+### With `encoder=template`
 
-`encoder.transform=template` remains an encoder-local formatting feature. It is still orthogonal to
-row diff at the plan level:
+The `template` encoder remains an encoder-local formatting feature. It is still orthogonal to row
+diff at the plan level:
 
 - row diff runs before the encoder
-- the template consumes whatever row representation the encoder exposes
+- the template consumes the dense row representation exposed by `OutputLayout`
 
-However, semantic fidelity depends on whether the encoder transform can see the mask:
+However, semantic fidelity depends on whether the template encoder can see the mask:
 
-- if the transform can read `output_mask`, it can preserve row diff intent
-- if it can only read row values, it only sees the dense `NULL`-filled row and cannot distinguish
+- if a future template context can read `output_mask`, it can preserve row diff intent
+- with the current row-only context, it only sees the dense `NULL`-filled row and cannot distinguish
   "unchanged" from "changed to `NULL`"
 
 So row diff and template are architecturally orthogonal, but exact sparse rendering requires a

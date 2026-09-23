@@ -343,9 +343,8 @@ async fn direct_pipeline_uses_instance_property_registry_for_delivery() {
             filename_pattern,
             retention: FileRetentionConfig::default(),
         }),
-        SinkEncoderConfig::json_with_transform_template(
-            r#"{"vin":{{ prop("vin") | json }},"x":{{ json(.row.x) }} }"#,
-        ),
+        SinkEncoderConfig::template(r#"{"vin":"{{ prop("vin") }}","x":{{ json(.x) }}{{ "}" }}"#)
+            .with_template_framing("[", ",", "]"),
     );
     let sink = PipelineSink::new("property_file_sink", connector);
     let mut pipeline = instance

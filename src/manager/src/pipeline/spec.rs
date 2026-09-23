@@ -15,10 +15,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use super::types::{
-    CreatePipelineRequest, CreatePipelineSourceRequest, EncoderTransformRequest,
-    FileSinkPropsRequest, HttpSinkPropsRequest, KuraSinkPropsRequest, MemorySinkPropsRequest,
-    MqttSinkPropsRequest, NngPubSubSinkPropsRequest, NopSinkPropsRequest, SinkOutputConfigRequest,
-    VideoSinkPropsRequest,
+    CreatePipelineRequest, CreatePipelineSourceRequest, FileSinkPropsRequest, HttpSinkPropsRequest,
+    KuraSinkPropsRequest, MemorySinkPropsRequest, MqttSinkPropsRequest, NngPubSubSinkPropsRequest,
+    NopSinkPropsRequest, SinkOutputConfigRequest, VideoSinkPropsRequest,
 };
 
 const MAX_SCHEDULE_DATETIME_RANGES: usize = 128;
@@ -656,11 +655,9 @@ pub(crate) fn build_pipeline_definition(
             SinkType::Kuksa | SinkType::Kura => SinkEncoderConfig::new("none", JsonMap::new()),
             SinkType::Video => {
                 let default_encoder = sink_req.encoder.encode_type.eq_ignore_ascii_case("json")
-                    && sink_req.encoder.props.is_empty()
-                    && sink_req.encoder.transform.is_none();
+                    && sink_req.encoder.props.is_empty();
                 let none_encoder = sink_req.encoder.encode_type.eq_ignore_ascii_case("none")
-                    && sink_req.encoder.props.is_empty()
-                    && sink_req.encoder.transform.is_none();
+                    && sink_req.encoder.props.is_empty();
                 if !default_encoder && !none_encoder {
                     return Err("video sink does not support encoder config".to_string());
                 }
@@ -690,8 +687,6 @@ pub(crate) fn build_pipeline_definition(
             }
         };
 
-        encoder_config =
-            apply_encoder_transform_request(encoder_config, sink_req.encoder.transform.as_ref());
         encoder_config = resolve_proto_bundle_for_encoder(encoder_config, &sink_req.encoder)?;
         encoder_config
             .validate()
@@ -773,21 +768,6 @@ pub(crate) fn status_label(status: PipelineStatus) -> String {
     }
 }
 
-fn apply_encoder_transform_request(
-    encoder_config: SinkEncoderConfig,
-    transform: Option<&EncoderTransformRequest>,
-) -> SinkEncoderConfig {
-    let Some(transform) = transform else {
-        return encoder_config;
-    };
-
-    if matches!(encoder_config.kind(), SinkEncoderKind::None) {
-        return encoder_config;
-    }
-
-    encoder_config.with_transform_template(transform.template.clone())
-}
-
 /// Resolve a [`ProtoDescriptorBundle`] from the schema registry when the encoder
 /// type is `"protobuf"` and `props.ref` references a named schema.
 fn resolve_proto_bundle_for_encoder(
@@ -825,7 +805,7 @@ mod tests {
     use super::*;
     use flow::FlowInstance;
     use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
-    use flow::connector::{DEFAULT_MEMORY_PUBSUB_CAPACITY, MemoryTopicKind};
+    use flow::connector::MemoryTopicKind;
     use flow::secret::SecretString;
     use flow::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
     use serde_json::json;
@@ -948,29 +928,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_pipeline_definition_wires_encoder_transform_request() {
-        let instance = test_instance();
-        let request = sample_request_with_encoder(json!({
-            "type": "json",
-            "transform": {
-                "template": "{\"x\":{{ json(.row.a) }} }"
-            }
-        }));
-
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
-        let sink = &definition.sinks()[0];
-
-        assert_eq!(sink.encoder.kind_str(), "json");
-        assert_eq!(sink.encoder.transform_kind(), Some("template"));
-        assert_eq!(
-            sink.encoder.transform_template(),
-            Some("{\"x\":{{ json(.row.a) }} }")
-        );
-    }
-
-    #[tokio::test]
     async fn build_pipeline_definition_renders_supported_connector_properties() {
         let instance = test_instance();
         instance.set_property_context(flow::PropertyContext::new(BTreeMap::from([
@@ -1045,54 +1002,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_pipeline_definition_ignores_transform_when_encoder_none() {
-        let instance = test_instance();
-        let topic = "sink_none_transform";
-        instance
-            .declare_memory_topic(
-                topic,
-                MemoryTopicKind::Collection,
-                DEFAULT_MEMORY_PUBSUB_CAPACITY,
-            )
-            .expect("declare collection memory topic");
-        let request = serde_json::from_value(json!({
-            "id": "pipe_1",
-            "revision": 1,
-            "sql": "SELECT 1 AS a",
-            "sinks": [
-                {
-                    "id": "sink_1",
-                    "type": "memory",
-                    "props": { "topic": topic },
-                    "encoder": {
-                        "type": "none",
-                        "transform": {
-                            "template": "{\"x\":{{ json(.row.a) }} }"
-                        }
-                    }
-                }
-            ],
-            "options": {
-                "data_channel_capacity": 16,
-                "eventtime": {
-                    "enabled": false,
-                    "late_tolerance_ms": 0
-                }
-            }
-        }))
-        .expect("deserialize pipeline request");
-
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
-        let sink = &definition.sinks()[0];
-
-        assert_eq!(sink.encoder.kind_str(), "none");
-        assert_eq!(sink.encoder.transform_kind(), None);
-        assert_eq!(sink.encoder.transform_template(), None);
-    }
-
-    #[tokio::test]
     async fn build_pipeline_definition_wires_sink_output_request() {
         let instance = test_instance();
         let request = serde_json::from_value::<CreatePipelineRequest>(json!({
@@ -1132,72 +1041,6 @@ mod tests {
 
         assert_eq!(sink.output.mode.as_str(), "delta");
         assert_eq!(sink.output.delta_columns(), Some(&["a".to_string()][..]));
-    }
-
-    #[test]
-    fn create_pipeline_request_rejects_non_object_encoder_transform() {
-        let result = serde_json::from_value::<CreatePipelineRequest>(json!({
-            "id": "pipe_1",
-            "revision": 1,
-            "sql": "SELECT 1 AS a",
-            "sinks": [
-                {
-                    "id": "sink_1",
-                    "type": "nop",
-                    "props": { "log": false },
-                    "encoder": {
-                        "type": "json",
-                        "transform": "oops"
-                    }
-                }
-            ],
-            "options": {
-                "data_channel_capacity": 16,
-                "eventtime": {
-                    "enabled": false,
-                    "late_tolerance_ms": 0
-                }
-            }
-        }));
-
-        assert!(
-            result.is_err(),
-            "non-object transform should fail deserialization"
-        );
-    }
-
-    #[test]
-    fn create_pipeline_request_rejects_missing_template_in_encoder_transform() {
-        let result = serde_json::from_value::<CreatePipelineRequest>(json!({
-            "id": "pipe_1",
-            "revision": 1,
-            "sql": "SELECT 1 AS a",
-            "sinks": [
-                {
-                    "id": "sink_1",
-                    "type": "nop",
-                    "props": { "log": false },
-                    "encoder": {
-                        "type": "json",
-                        "transform": {
-                            "tpl": "{\"x\":{{ json(.row.a) }} }"
-                        }
-                    }
-                }
-            ],
-            "options": {
-                "data_channel_capacity": 16,
-                "eventtime": {
-                    "enabled": false,
-                    "late_tolerance_ms": 0
-                }
-            }
-        }));
-
-        assert!(
-            result.is_err(),
-            "missing template should fail deserialization"
-        );
     }
 
     #[test]

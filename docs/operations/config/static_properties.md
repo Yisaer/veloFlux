@@ -76,7 +76,7 @@ property value or complete rendered connector string.
 MQTT override payloads are sensitive input and must not be logged, emitted in
 metrics, or included in update errors. The value is necessarily exposed as plaintext at the MQTT or HTTP client call
 boundary and in generated file names when used by a file sink affix. When
-`prop()` is used by a JSON encoder transform, it can also enter the encoded
+When `prop()` is used by a template encoder, it can also enter the encoded
 payload bytes. Transport confidentiality depends on the connector's TLS and
 authentication configuration; file-name confidentiality depends on filesystem
 access controls.

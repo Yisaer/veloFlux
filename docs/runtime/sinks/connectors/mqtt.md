@@ -36,7 +36,7 @@ MQTT sink definitions currently accept:
 - optional `protocol_version` (`v3` or `v5`)
 - optional ordered `user_properties`
 - encoder config
-- sink output config (`full` / `delta`, `omit_if_empty`, encoder transform, batching, common sink
+- sink output config (`full` / `delta`, `omit_if_empty`, encoder selection, batching, common sink
   props)
 
 Manager validates `topic` as required. The topic may use property templates
@@ -100,7 +100,7 @@ MQTT sink is a bytes-oriented connector.
 Current implications:
 
 - normal usage expects an encoder node to turn rows/collections into bytes
-- encoder transforms, if configured, happen before MQTT delivery
+- the template encoder, if configured, renders rows before MQTT delivery
 - batching decisions also happen before MQTT delivery
 
 Unlike memory collection or Kuksa sinks, MQTT does not implement collection-native delivery. If a
@@ -180,7 +180,7 @@ Relevant interactions are:
 - batching changes how many rows are encoded into one publish payload
 - row diff changes the row values and optional output-mask metadata before encoding
 - `omit_if_empty` may suppress the branch so the MQTT connector publishes nothing
-- encoder transform reshapes each encoded row item before the final bytes are emitted
+- the template encoder renders each row item before the final bytes are emitted
 
 This means MQTT sink testing should focus on the published payload bytes and publish count, not on
 re-implementing row-diff or batching logic inside the connector.
@@ -220,7 +220,7 @@ the connector becomes ready again.
 - Verify sink-local publish `topic`, `qos`, and `retain` still apply when using a shared client.
 - Verify standalone `max_packet_size` is honored by the sink-owned connection.
 - Verify shared-client sink behavior inherits packet-size limits from the shared client resource.
-- Verify row diff, omit-if-empty, and encoder transform change the published payload/count only
+- Verify row diff, omit-if-empty, and template encoder selection change the published payload/count only
   through upstream sink-output stages.
 - Verify runtime errors are surfaced when MQTT sink is used without a bytes-producing encoder path.
 - Verify disconnect/reconnect behavior eventually restores readiness for standalone clients.

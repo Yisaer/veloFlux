@@ -42,12 +42,12 @@ features:
       - docs/runtime/sinks/connectors/memory.md
     status: active
 
-  - id: sink.encoder.transform
-    title: Encoder transform
-    summary: Apply template-based encoder transforms before sink emission when configured.
+  - id: sink.encoder.template
+    title: Template encoder
+    summary: Render one template item per output row and frame one sink delivery.
     doc_refs:
       - docs/runtime/sinks/encoders/encoder_transform.md
-    status: active
+    status: planned
 
   - id: sink.encoder.csv_output
     title: CSV sink encoder

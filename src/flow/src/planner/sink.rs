@@ -354,14 +354,13 @@ pub struct NopSinkConfig {
 pub struct SinkEncoderConfig {
     kind: SinkEncoderKind,
     props: JsonMap<String, JsonValue>,
-    transform: Option<SinkEncoderTransformConfig>,
     proto_bundle: Option<Arc<crate::codec::ProtoDescriptorBundle>>,
     property_registry: Arc<crate::PropertyRegistry>,
 }
 
 impl PartialEq for SinkEncoderConfig {
     fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind && self.props == other.props && self.transform == other.transform
+        self.kind == other.kind && self.props == other.props
     }
 }
 
@@ -372,6 +371,7 @@ impl Eq for SinkEncoderConfig {}
 pub enum SinkEncoderKind {
     Csv,
     Json,
+    Template,
     Protobuf,
     None,
     Custom(String),
@@ -384,31 +384,12 @@ pub(crate) enum JsonOutputFormat {
     Ndjson,
 }
 
-/// Supported encoder transform kinds.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SinkEncoderTransformConfig {
-    Template { template: String },
-}
-
-impl SinkEncoderTransformConfig {
-    pub fn kind_str(&self) -> &'static str {
-        match self {
-            SinkEncoderTransformConfig::Template { .. } => "template",
-        }
-    }
-
-    pub fn template(&self) -> &str {
-        match self {
-            SinkEncoderTransformConfig::Template { template } => template.as_str(),
-        }
-    }
-}
-
 impl SinkEncoderKind {
     pub fn as_str(&self) -> &str {
         match self {
             SinkEncoderKind::Csv => "csv",
             SinkEncoderKind::Json => "json",
+            SinkEncoderKind::Template => "template",
             SinkEncoderKind::Protobuf => "protobuf",
             SinkEncoderKind::None => "none",
             SinkEncoderKind::Custom(kind) => kind.as_str(),
@@ -421,6 +402,7 @@ impl From<String> for SinkEncoderKind {
         match value.as_str() {
             "csv" => SinkEncoderKind::Csv,
             "json" => SinkEncoderKind::Json,
+            "template" => SinkEncoderKind::Template,
             "protobuf" => SinkEncoderKind::Protobuf,
             "none" => SinkEncoderKind::None,
             other => SinkEncoderKind::Custom(other.to_string()),
@@ -433,6 +415,7 @@ impl From<&str> for SinkEncoderKind {
         match value {
             "csv" => SinkEncoderKind::Csv,
             "json" => SinkEncoderKind::Json,
+            "template" => SinkEncoderKind::Template,
             "protobuf" => SinkEncoderKind::Protobuf,
             "none" => SinkEncoderKind::None,
             other => SinkEncoderKind::Custom(other.to_string()),
@@ -445,7 +428,6 @@ impl SinkEncoderConfig {
         Self {
             kind: kind.into(),
             props,
-            transform: None,
             proto_bundle: None,
             property_registry: Arc::new(crate::PropertyRegistry::default()),
         }
@@ -459,8 +441,25 @@ impl SinkEncoderConfig {
         Self::new(SinkEncoderKind::Csv, JsonMap::new())
     }
 
-    pub fn json_with_transform_template(template: impl Into<String>) -> Self {
-        Self::json().with_transform_template(template)
+    pub fn template(template: impl Into<String>) -> Self {
+        let mut props = JsonMap::new();
+        props.insert("template".to_string(), JsonValue::String(template.into()));
+        Self::new(SinkEncoderKind::Template, props)
+    }
+
+    pub fn with_template_framing(
+        mut self,
+        begin: impl Into<String>,
+        delimiter: impl Into<String>,
+        end: impl Into<String>,
+    ) -> Self {
+        self.props
+            .insert("begin".to_string(), JsonValue::String(begin.into()));
+        self.props
+            .insert("delimiter".to_string(), JsonValue::String(delimiter.into()));
+        self.props
+            .insert("end".to_string(), JsonValue::String(end.into()));
+        self
     }
 
     pub fn kind(&self) -> &SinkEncoderKind {
@@ -473,6 +472,37 @@ impl SinkEncoderConfig {
 
     pub fn props(&self) -> &JsonMap<String, JsonValue> {
         &self.props
+    }
+
+    pub fn template_source(&self) -> Result<&str, String> {
+        match self.props.get("template") {
+            Some(JsonValue::String(value)) if !value.is_empty() => Ok(value),
+            Some(JsonValue::String(_)) => {
+                Err("encoder.props.template must not be empty".to_string())
+            }
+            Some(_) => Err("encoder.props.template must be a string".to_string()),
+            None => Err("encoder.props.template is required".to_string()),
+        }
+    }
+
+    fn template_framing_property(&self, name: &str) -> Result<&str, String> {
+        match self.props.get(name) {
+            None => Ok(""),
+            Some(JsonValue::String(value)) => Ok(value),
+            Some(_) => Err(format!("encoder.props.{name} must be a string")),
+        }
+    }
+
+    pub fn template_begin(&self) -> Result<&str, String> {
+        self.template_framing_property("begin")
+    }
+
+    pub fn template_delimiter(&self) -> Result<&str, String> {
+        self.template_framing_property("delimiter")
+    }
+
+    pub fn template_end(&self) -> Result<&str, String> {
+        self.template_framing_property("end")
     }
 
     pub fn json_omit_null_columns(&self) -> Result<bool, String> {
@@ -524,43 +554,16 @@ impl SinkEncoderConfig {
         }
     }
 
-    pub fn transform(&self) -> Option<&SinkEncoderTransformConfig> {
-        if matches!(self.kind, SinkEncoderKind::None) {
-            return None;
-        }
-        self.transform.as_ref()
-    }
-
-    pub fn with_transform_template(mut self, template: impl Into<String>) -> Self {
-        self.transform = Some(SinkEncoderTransformConfig::Template {
-            template: template.into(),
-        });
-        self
-    }
-
-    pub fn transform_template(&self) -> Option<&str> {
-        self.transform().map(SinkEncoderTransformConfig::template)
-    }
-
-    pub fn transform_kind(&self) -> Option<&'static str> {
-        self.transform().map(SinkEncoderTransformConfig::kind_str)
-    }
-
-    pub fn with_transform(mut self, transform: SinkEncoderTransformConfig) -> Self {
-        self.transform = Some(transform);
-        self
-    }
-
-    pub(crate) fn property_registry(&self) -> &crate::PropertyRegistry {
-        self.property_registry.as_ref()
-    }
-
     pub(crate) fn with_property_registry(
         mut self,
         property_registry: crate::PropertyRegistry,
     ) -> Self {
         self.property_registry = Arc::new(property_registry);
         self
+    }
+
+    pub(crate) fn property_registry(&self) -> crate::PropertyRegistry {
+        (*self.property_registry).clone()
     }
 
     pub fn proto_bundle(&self) -> Option<&Arc<crate::codec::ProtoDescriptorBundle>> {
@@ -597,19 +600,11 @@ impl SinkEncoderConfig {
             );
         }
 
-        let Some(_transform) = self.transform.as_ref() else {
-            return Ok(());
-        };
-
-        if matches!(self.kind, SinkEncoderKind::None) {
-            return Ok(());
-        }
-
-        if !matches!(self.kind, SinkEncoderKind::Json) {
-            return Err(format!(
-                "encoder transform is only supported for encoder.type=json, got `{}`",
-                self.kind.as_str()
-            ));
+        if matches!(self.kind, SinkEncoderKind::Template) {
+            self.template_source()?;
+            self.template_begin()?;
+            self.template_delimiter()?;
+            self.template_end()?;
         }
 
         Ok(())
@@ -634,31 +629,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encoder_none_transform_is_ignored() {
-        let config = SinkEncoderConfig::new("none", JsonMap::new())
-            .with_transform_template("{\"x\":{{ json(.row.a) }} }");
+    fn template_encoder_validates_props() {
+        let config = SinkEncoderConfig::template("{\"a\":{{ json(.b) }}}")
+            .with_template_framing("[", ",", "]");
 
-        assert_eq!(config.transform(), None);
-        assert_eq!(config.transform_template(), None);
-        assert_eq!(config.transform_kind(), None);
-        assert!(
-            config.validate().is_ok(),
-            "none+transform should be ignored"
-        );
+        assert_eq!(config.template_source().unwrap(), "{\"a\":{{ json(.b) }}}");
+        assert_eq!(config.template_begin().unwrap(), "[");
+        assert_eq!(config.template_delimiter().unwrap(), ",");
+        assert_eq!(config.template_end().unwrap(), "]");
+        assert!(config.validate().is_ok());
     }
 
     #[test]
-    fn custom_encoder_transform_is_rejected() {
-        let config = SinkEncoderConfig::new("custom_encoder", JsonMap::new())
-            .with_transform_template("{\"x\":{{ json(.row.a) }} }");
-
-        let err = config
+    fn template_encoder_requires_non_empty_template() {
+        let err = SinkEncoderConfig::new("template", JsonMap::new())
             .validate()
-            .expect_err("custom encoder should reject transform");
-        assert!(
-            err.contains("only supported for encoder.type=json"),
-            "unexpected error: {err}"
+            .expect_err("template source should be required");
+        assert!(err.contains("encoder.props.template is required"));
+
+        let mut props = JsonMap::new();
+        props.insert("template".to_string(), JsonValue::String(String::new()));
+        let err = SinkEncoderConfig::new("template", props)
+            .validate()
+            .expect_err("template source should not be empty");
+        assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn template_encoder_requires_string_framing_props() {
+        let mut props = JsonMap::new();
+        props.insert(
+            "template".to_string(),
+            JsonValue::String("{{ .b }}".to_string()),
         );
+        props.insert("delimiter".to_string(), JsonValue::Bool(true));
+        let err = SinkEncoderConfig::new("template", props)
+            .validate()
+            .expect_err("delimiter should be a string");
+        assert!(err.contains("encoder.props.delimiter must be a string"));
     }
 
     #[test]
@@ -732,18 +740,6 @@ mod tests {
             .expect_err("non-boolean header should fail");
         assert!(
             err.contains("header must be a boolean"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn csv_encoder_rejects_template_transform() {
-        let err = SinkEncoderConfig::csv()
-            .with_transform_template("{{ json(.row) }}")
-            .validate()
-            .expect_err("CSV transform should fail");
-        assert!(
-            err.contains("only supported for encoder.type=json"),
             "unexpected error: {err}"
         );
     }

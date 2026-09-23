@@ -53,7 +53,7 @@
 ### Streaming encoder rewrite
 
 - Encoded sink batching lowering is covered by `encoded_sink_with_batch_lowers_to_sink_encoder`.
-- Template-transform plus batching rewrite is covered by `transform_template_with_batch_uses_sink_encoder`.
+- Template encoder batching coverage is deferred until the runtime encoder is implemented.
 - CSV fixed-layout planning, streaming batching lowering, and delta-mode rejection are covered by
   `plan_explain_csv_encoder_table_driven`.
 
@@ -70,7 +70,6 @@
   - alias projection
   - memory-collection sink placement
   - wildcard degradation
-  - template orthogonality
   - omit-if-empty insertion after row diff
 - Representative cases include:
   - `row_diff_single_json_sink_inserts_physical_row_diff`
@@ -79,7 +78,6 @@
   - `row_diff_alias_project_rewrites_into_row_diff`
   - `row_diff_memory_collection_sink_places_row_diff_before_materialize`
   - `row_diff_wildcard_projection_keeps_materializing_project`
-  - `row_diff_and_template_are_orthogonal_in_plan_shape`
   - `row_diff_omit_if_empty_inserts_empty_suppress_after_row_diff`
 
 ### Eventtime validation and explain
@@ -136,7 +134,6 @@
 
 - Baseline batching runtime coverage is provided by:
   - `pipeline_batching_table_driven`
-  - `pipeline_encoder_transform_table_driven`
 - Graceful-stop flushing of a partial batch is covered by `sink_encoder_flushes_partial_batch_on_graceful_stop`.
 - Row-diff plus batching plus omit-if-empty runtime behavior is covered by `delta_batched_output_suppresses_empty_batches_but_keeps_non_empty_ones`.
 - CSV fixed-layout batching and per-delivery headers are covered by
@@ -171,7 +168,7 @@
 ## Mixed Planner and Runtime Pairings
 
 - Shared-project by-index rewrite guard has runtime pairing coverage through `shared_project_with_json_and_collection_sink_preserves_alias_output`.
-- Alias projection plus template transform has runtime pairing coverage through `transform_template_with_alias_projection_keeps_output_correct`.
+- Alias projection plus template encoder runtime pairing is deferred until the runtime encoder is implemented.
 - Row-diff plus memory-collection late materialization has runtime pairing coverage through `memory_collection_sink_delta_output_preserves_output_mask`.
 - Sampler plus downstream row-diff, streaming aggregation, batching, and omit-if-empty combinations are covered by the dedicated sampler runtime cases listed above.
 - Stateful plus downstream CSE boundary semantics are covered by the planner case `logical_optimizer_cse_keeps_stateful_dependency_boundary` together with the runtime stateful-function coverage already present in `stateful_function_table_driven`.

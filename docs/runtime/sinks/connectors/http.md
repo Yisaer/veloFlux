@@ -44,7 +44,7 @@ HTTP sink definitions accept:
   - `max_backoff_ms` (default: `30000`) — backoff upper bound
   - `jitter` (accepted, not yet applied; current backoff is deterministic)
 - encoder config (required)
-- sink output config (`full` / `delta`, `omit_if_empty`, encoder transform, batching, common sink
+- sink output config (`full` / `delta`, `omit_if_empty`, encoder selection, batching, common sink
   props)
 
 Manager validates `url` as required and rejects `encoder.type=none`. Legacy HTTP props
@@ -183,8 +183,8 @@ When retry is not configured (`retry.max_attempts` unset), each delivery is atte
   unit and sent as one HTTP request body.
 - **Delta output**: Row-diff output works with compatible encoders. CSV rejects
   `output.mode=delta` because CSV deliveries require stable dense rows.
-- **Encoder transform**: Template transforms are supported when the encoder is `json`. The
-  transform output forms the HTTP body.
+- **Template encoder**: The `template` encoder renders one item per row and its framed output
+  forms the HTTP body.
 - **Compression / Encryption**: Delivery compression (`gzip`, `zstd`) and encryption (`aes-gcm`) are
   supported as pre-processing steps before the HTTP request is sent. In multipart mode, only the
   file part contains the transformed bytes; the multipart envelope and static fields remain
@@ -198,6 +198,7 @@ When `content_type` is not explicitly configured:
 |---|---|
 | `json` with `props.format=array` or no format | `application/json` |
 | `json` with `props.format=ndjson` | `application/x-ndjson` |
+| `template` | no inferred value unless an explicit content type is configured |
 | `csv` | `text/csv; charset=utf-8` |
 | `protobuf` | `application/octet-stream` |
 | Other / custom | (no Content-Type header set) |

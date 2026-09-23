@@ -157,22 +157,12 @@ This preserves the distinction between:
 - unchanged field: omitted because the mask does not select it
 - changed-to-`null` field: emitted as `"field": null`
 
-### With `encoder.transform=template`
+### With the template encoder
 
-For the first iteration, `omit_null_columns` only applies to the JSON encoder's native object
-encoding path.
-
-It does **not** automatically rewrite the output of `encoder.transform=template`.
-
-Reason:
-
-- template output structure is owned by the template itself
-- the rendered JSON item may not even be an object
-- row-diff + template currently uses a dense `.row` contract and does not yet expose
-  mask-aware field omission semantics
-
-If template-aware null omission is needed later, it should be designed explicitly as part of a
-template contract extension, not inferred from the plain object-encoding path.
+`omit_null_columns` applies only to the native JSON encoder. The template encoder owns its rendered
+output structure and does not inherit JSON object-field omission implicitly. Its root context is
+the dense final output row; null handling must be expressed by the template itself or by a future
+template-specific option.
 
 ## Compatibility Notes
 
@@ -185,7 +175,7 @@ However, the following behavior remains unchanged:
 
 - row-diff sparse omission continues to be driven by `output_mask`
 - changed-to-`null` on row-diff branches continues to emit `"field": null`
-- template rendering semantics remain unchanged in the first iteration
+- template encoder rendering is independent from native JSON null omission
 
 ## Implementation Notes
 
@@ -194,4 +184,4 @@ The current implementation shape is:
 1. Parse `omit_null_columns` from `SinkEncoderConfig` / `encoder.props`, defaulting to `true`.
 2. Apply the omission rule recursively while converting values into JSON objects.
 3. Keep row-diff mask-aware helpers explicit so they still emit mask-selected `null` fields.
-4. Leave `encoder.transform=template` behavior unchanged in the first iteration.
+4. Keep template encoder null handling independent from native JSON object encoding.

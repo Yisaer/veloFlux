@@ -17,13 +17,13 @@ interactions:
       - pipeline.runtime.checkpoint_recovery
     status: active
 
-  - id: runtime.alias_projection.encoder_transform
-    title: Alias projection encoder transform
-    summary: Validate that encoder transforms observe SQL-visible alias output after projection.
+  - id: runtime.alias_projection.template_encoder
+    title: Alias projection template encoder
+    summary: Validate that the template encoder observes SQL-visible alias output after projection.
     features:
       - parser.select.projection_alias
-      - sink.encoder.transform
-    status: active
+      - sink.encoder.template
+    status: planned
 
   - id: runtime.stateful_projection.row_diff
     title: Stateful projection row-diff output
@@ -264,13 +264,13 @@ interactions:
       - planner.physical.output_layout_fixed_slots
     status: active
 
-  - id: runtime.row_diff_template_transform_pairing
-    title: Row-diff template transform pairing
-    summary: Validate row-diff output together with template-based encoder transform output.
+  - id: runtime.row_diff_template_encoder_pairing
+    title: Row-diff template encoder pairing
+    summary: Validate row-diff output together with the row-level template encoder.
     features:
       - sink.output.row_diff
-      - sink.encoder.transform
-    status: active
+      - sink.encoder.template
+    status: planned
 
   - id: runtime.row_diff_batch_streaming_encoder_pairing
     title: Row-diff batch streaming encoder pairing

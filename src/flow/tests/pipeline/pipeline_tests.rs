@@ -2267,30 +2267,6 @@ async fn pipeline_row_diff_json_table_driven() {
                 {"x": 2}
             ]),
         },
-        RowDiffJsonCase {
-            name: "template_transform_still_sees_dense_row_on_delta_branch",
-            source_name: "stream",
-            sql: "SELECT a, b FROM stream",
-            covers: &["sink.output.row_diff", "sink.encoder.transform"],
-            input_data: vec![
-                (
-                    "a".to_string(),
-                    vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
-                ),
-                (
-                    "b".to_string(),
-                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(10)],
-                ),
-            ],
-            sink_common: CommonSinkProps::default(),
-            encoder: SinkEncoderConfig::json_with_transform_template("{{ json(.row) }}"),
-            output: SinkOutputConfig::delta(),
-            expected: serde_json::json!([
-                {"a": 1, "b": 10},
-                {"a": null, "b": null},
-                {"a": 2, "b": null}
-            ]),
-        },
     ];
 
     for case in cases {
@@ -2298,16 +2274,16 @@ async fn pipeline_row_diff_json_table_driven() {
     }
 }
 
-// coverage-covers: parser.select.projection_alias, sink.encoder.transform
+// coverage-covers: parser.select.projection_alias, sink.encoder.json_output
 #[tokio::test]
-async fn transform_template_with_alias_projection_keeps_output_correct() {
+async fn json_encoder_with_alias_projection_keeps_output_correct() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
     ))
     .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
-        "pipeline_transform_template",
-        "transform_template_with_alias_projection_keeps_output_correct",
+        "pipeline_json_alias_projection",
+        "json_encoder_with_alias_projection_keeps_output_correct",
     );
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     let input_data = vec![
@@ -2335,9 +2311,7 @@ async fn transform_template_with_alias_projection_keeps_output_correct() {
             SinkType::Memory,
             SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
         )
-        .with_encoder(SinkEncoderConfig::json_with_transform_template(
-            r#"{"x":{{ json(.row.x) }},"y":{{ json(.row.y) }} }"#,
-        ))],
+        .with_encoder(SinkEncoderConfig::json())],
     );
     instance
         .create_pipeline(CreatePipelineRequest::new(pipeline))
@@ -2368,7 +2342,7 @@ async fn transform_template_with_alias_projection_keeps_output_correct() {
             {"x": 20, "y": 2},
             {"x": 30, "y": 3}
         ])),
-        "transform template should see aliased row values"
+        "JSON encoder should preserve aliased row values"
     );
 
     instance

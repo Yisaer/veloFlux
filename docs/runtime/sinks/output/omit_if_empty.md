@@ -196,7 +196,7 @@ so it neither changes fixed value references nor consumes the output mask.
 
 ## Relationship To Encoder Templates
 
-`omit_if_empty` is independent from `encoder.transform=template`.
+`omit_if_empty` is independent from `encoder=template`.
 
 Template rendering remains an encoder-local concern:
 

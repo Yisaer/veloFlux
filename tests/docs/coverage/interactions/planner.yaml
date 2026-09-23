@@ -16,13 +16,13 @@ interactions:
       - planner.physical.output_layout_fixed_slots
     status: active
 
-  - id: planner.physical.transform_batch_streaming_encoder
-    title: Transform batch streaming encoder
-    summary: Validate that template-transform sinks can still use the streaming encoder rewrite when batching is enabled.
+  - id: planner.physical.template_batch_streaming_encoder
+    title: Template batch streaming encoder
+    summary: Validate that template encoder batching preserves one framed delivery.
     features:
-      - sink.encoder.transform
+      - sink.encoder.template
       - planner.physical.streaming_encoder_rewrite
-    status: active
+    status: planned
 
   - id: planner.physical.streaming_encoder_batch_fixed_output_layout
     title: Streaming encoder batch fixed output layout

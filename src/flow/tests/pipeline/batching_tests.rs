@@ -130,7 +130,7 @@ async fn run_batch_bytes_case(case: BatchBytesCase) {
         "default", None,
     ))
     .expect("create flow instance");
-    let (input_topic, output_topic) = make_memory_topics("pipeline_batching_transform", case.name);
+    let (input_topic, output_topic) = make_memory_topics("pipeline_batching_bytes", case.name);
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
     install_memory_stream_schema(&instance, &input_topic, &case.input_data).await;
 
@@ -153,7 +153,7 @@ async fn run_batch_bytes_case(case: BatchBytesCase) {
     let pipeline = PipelineDefinition::new(pipeline_id.clone(), case.sql, vec![sink]);
     instance
         .create_pipeline(CreatePipelineRequest::new(pipeline))
-        .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case.name));
     instance
         .start_pipeline(&pipeline_id)
         .await
@@ -176,6 +176,90 @@ async fn run_batch_bytes_case(case: BatchBytesCase) {
             actual.as_slice(),
             expected,
             "Wrong output bytes batch for test: {}",
+            case.name
+        );
+    }
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to stop pipeline for test: {}", case.name));
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to delete pipeline for test: {}", case.name));
+}
+
+struct TemplateEncoderCase {
+    name: &'static str,
+    sink_common: CommonSinkProps,
+    input_schema: Vec<(String, Vec<Value>)>,
+    input_collections: Vec<Vec<(String, Vec<Value>)>>,
+    expected_outputs: Vec<&'static [u8]>,
+}
+
+async fn run_template_encoder_case(case: TemplateEncoderCase) {
+    println!("Running test: {}", case.name);
+
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("pipeline_template_encoder", case.name);
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    install_memory_stream_schema(&instance, &input_topic, &case.input_schema).await;
+
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output bytes");
+    let pipeline_id = format!("pipe_{output_topic}");
+    let sink = SinkDefinition::new(
+        "mem_sink",
+        SinkType::Memory,
+        SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+    )
+    .with_common_props(case.sink_common)
+    .with_encoder(
+        SinkEncoderConfig::template(r#"{"a":{{ json(.c) }}{{ "}" }}"#)
+            .with_template_framing("[", ",", "]"),
+    );
+    let pipeline = PipelineDefinition::new(
+        pipeline_id.clone(),
+        "SELECT a AS c, b + 1 AS d FROM stream",
+        vec![sink],
+    );
+    instance
+        .create_pipeline(CreatePipelineRequest::new(pipeline))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case.name));
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|_| panic!("Failed to start pipeline for: {}", case.name));
+
+    let timeout_duration = Duration::from_secs(5);
+    for columns in case.input_collections {
+        let collection = batch_from_columns_simple(
+            columns
+                .into_iter()
+                .map(|(name, values)| ("stream".to_string(), name, values))
+                .collect(),
+        )
+        .unwrap_or_else(|_| panic!("Failed to create input collection for: {}", case.name));
+        publish_input_collection(
+            &instance,
+            &input_topic,
+            Box::new(collection),
+            timeout_duration,
+        )
+        .await;
+    }
+
+    for expected in case.expected_outputs {
+        let actual = recv_next_bytes(&mut output, timeout_duration).await;
+        assert_eq!(
+            actual.as_slice(),
+            expected,
+            "Wrong sink output for test: {}",
             case.name
         );
     }
@@ -216,96 +300,113 @@ async fn pipeline_batching_table_driven() {
 }
 
 #[tokio::test]
-async fn pipeline_encoder_transform_table_driven() {
-    let cases = vec![
-        BatchBytesCase {
-            name: "sink_encoder_flushes_transformed_json_bytes",
-            sql: "SELECT a + 1 AS c, b + 10 AS d FROM stream",
-            covers: &["sink.encoder.transform", "sink.output.batching"],
-            input_data: vec![
-                (
-                    "a".to_string(),
-                    vec![Value::Int64(1), Value::Int64(3), Value::Int64(5)],
-                ),
-                (
-                    "b".to_string(),
-                    vec![Value::Int64(2), Value::Int64(4), Value::Int64(6)],
-                ),
-            ],
-            sink_common: CommonSinkProps {
-                batch_count: Some(2),
-                // Ensure the final partial batch is flushed without relying on stop/close.
-                batch_duration: Some(Duration::from_millis(50)),
-            },
-            encoder: SinkEncoderConfig::json_with_transform_template(
-                r#"{"x":{{ json(.row.c) }},"y":{{ json(.row.d) }} }"#,
+async fn pipeline_csv_encoder_table_driven() {
+    let cases = vec![BatchBytesCase {
+        name: "csv_encoder_batches_fixed_layout_rows_with_header_per_delivery",
+        sql: "SELECT a AS vin, b + 10 AS total FROM stream",
+        covers: &[
+            "sink.encoder.csv_output",
+            "sink.output.batching",
+            "planner.physical.output_layout_fixed_slots",
+        ],
+        input_data: vec![
+            (
+                "a".to_string(),
+                vec![Value::Int64(1), Value::Int64(3), Value::Int64(5)],
             ),
-            output: None,
-            expected_batches: vec![
-                br#"[{"x":2,"y":12 },{"x":4,"y":14 }]"#,
-                br#"[{"x":6,"y":16 }]"#,
-            ],
+            (
+                "b".to_string(),
+                vec![Value::Int64(2), Value::Int64(4), Value::Int64(6)],
+            ),
+        ],
+        sink_common: CommonSinkProps {
+            batch_count: Some(2),
+            batch_duration: Some(Duration::from_millis(50)),
         },
-        BatchBytesCase {
-            name: "delta_transform_batched_output_keeps_dense_rows_and_flushes_correctly",
-            sql: "SELECT a, b FROM stream",
-            covers: &[
-                "sink.encoder.transform",
-                "sink.output.row_diff",
-                "sink.output.batching",
-            ],
-            input_data: vec![
-                (
-                    "a".to_string(),
-                    vec![Value::Int64(1), Value::Int64(1), Value::Int64(2)],
-                ),
-                (
-                    "b".to_string(),
-                    vec![Value::Int64(10), Value::Int64(10), Value::Int64(10)],
-                ),
-            ],
-            sink_common: CommonSinkProps {
-                batch_count: Some(3),
-                batch_duration: None,
-            },
-            encoder: SinkEncoderConfig::json_with_transform_template("{{ json(.row) }}"),
-            output: Some(SinkOutputConfig::delta()),
-            expected_batches: vec![br#"[{"a":1,"b":10},{"a":null,"b":null},{"a":2,"b":null}]"#],
+        encoder: {
+            let mut props = JsonMap::new();
+            props.insert("header".to_string(), JsonValue::Bool(true));
+            SinkEncoderConfig::new("csv", props)
         },
-        BatchBytesCase {
-            name: "csv_encoder_batches_fixed_layout_rows_with_header_per_delivery",
-            sql: "SELECT a AS vin, b + 10 AS total FROM stream",
-            covers: &[
-                "sink.encoder.csv_output",
-                "sink.output.batching",
-                "planner.physical.output_layout_fixed_slots",
+        output: None,
+        expected_batches: vec![b"vin,total\n1,12\n3,14\n", b"vin,total\n5,16\n"],
+    }];
+
+    for case in cases {
+        run_batch_bytes_case(case).await;
+    }
+}
+
+#[tokio::test]
+async fn pipeline_template_encoder_table_driven() {
+    let cases = vec![
+        TemplateEncoderCase {
+            name: "template_encoder_without_batch_emits_one_sink_output",
+            sink_common: CommonSinkProps::default(),
+            input_schema: vec![
+                ("a".to_string(), vec![Value::Int64(1), Value::Int64(2)]),
+                ("b".to_string(), vec![Value::Int64(10), Value::Int64(20)]),
             ],
-            input_data: vec![
-                (
-                    "a".to_string(),
-                    vec![Value::Int64(1), Value::Int64(3), Value::Int64(5)],
-                ),
-                (
-                    "b".to_string(),
-                    vec![Value::Int64(2), Value::Int64(4), Value::Int64(6)],
-                ),
-            ],
+            input_collections: vec![vec![
+                ("a".to_string(), vec![Value::Int64(1), Value::Int64(2)]),
+                ("b".to_string(), vec![Value::Int64(10), Value::Int64(20)]),
+            ]],
+            expected_outputs: vec![br#"[{"a":1},{"a":2}]"#],
+        },
+        TemplateEncoderCase {
+            name: "template_encoder_batch_count_two_emits_two_sink_outputs",
             sink_common: CommonSinkProps {
                 batch_count: Some(2),
                 batch_duration: Some(Duration::from_millis(50)),
             },
-            encoder: {
-                let mut props = JsonMap::new();
-                props.insert("header".to_string(), JsonValue::Bool(true));
-                SinkEncoderConfig::new("csv", props)
+            input_schema: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                ),
+            ],
+            input_collections: vec![vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                ),
+            ]],
+            expected_outputs: vec![br#"[{"a":1},{"a":2}]"#, br#"[{"a":3}]"#],
+        },
+        TemplateEncoderCase {
+            name: "template_encoder_batch_count_two_combines_two_input_collections",
+            sink_common: CommonSinkProps {
+                batch_count: Some(2),
+                batch_duration: Some(Duration::from_millis(50)),
             },
-            output: None,
-            expected_batches: vec![b"vin,total\n1,12\n3,14\n", b"vin,total\n5,16\n"],
+            input_schema: vec![
+                ("a".to_string(), vec![Value::Int64(1)]),
+                ("b".to_string(), vec![Value::Int64(10)]),
+            ],
+            input_collections: vec![
+                vec![
+                    ("a".to_string(), vec![Value::Int64(1)]),
+                    ("b".to_string(), vec![Value::Int64(10)]),
+                ],
+                vec![
+                    ("a".to_string(), vec![Value::Int64(2)]),
+                    ("b".to_string(), vec![Value::Int64(20)]),
+                ],
+            ],
+            expected_outputs: vec![br#"[{"a":1},{"a":2}]"#],
         },
     ];
 
     for case in cases {
-        run_batch_bytes_case(case).await;
+        run_template_encoder_case(case).await;
     }
 }
 

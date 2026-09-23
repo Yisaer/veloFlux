@@ -3,7 +3,7 @@
 mod csv;
 mod json;
 mod proto;
-mod template_transform;
+mod template;
 
 use crate::model::Collection;
 use crate::planner::physical::output_layout::OutputLayout;
@@ -13,6 +13,7 @@ use std::sync::Arc;
 pub use csv::CsvEncoder;
 pub use json::JsonEncoder;
 pub use proto::ProtobufEncoder;
+pub use template::TemplateEncoder;
 
 /// Errors that can occur during encoding.
 #[derive(thiserror::Error, Debug)]

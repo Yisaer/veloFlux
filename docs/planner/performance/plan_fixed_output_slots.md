@@ -19,7 +19,7 @@ pub enum OutputValueRef {
 }
 ```
 
-Encoders, row-diff, and encoder transforms resolve final output values through
+Encoders, row-diff, and the template encoder resolve final output values through
 this layout. They do not scan messages by source name or look up computed values
 by name.
 
