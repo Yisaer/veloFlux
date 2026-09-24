@@ -4,9 +4,14 @@ use crate::planner::physical::output_layout::{OutputLayout, OutputValueRef};
 use crate::planner::sink::{JsonOutputFormat, SinkEncoderConfig};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
-use datatypes::Value;
+use datatypes::{StructField, StructType, Value};
+use serde::Serialize;
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+const MAX_STRUCT_WRITE_PLANS: usize = 64;
 
 /// Encoder that emits row objects using the configured JSON delivery format.
 pub struct JsonEncoder {
@@ -14,7 +19,7 @@ pub struct JsonEncoder {
     props: JsonMap<String, JsonValue>,
     output_format: JsonOutputFormat,
     omit_null_columns: bool,
-    output_layout: Option<Arc<OutputLayout>>,
+    write_plan: Option<Arc<JsonWritePlan>>,
 }
 
 impl JsonEncoder {
@@ -30,7 +35,7 @@ impl JsonEncoder {
             output_format,
             omit_null_columns,
             props: config.props().clone(),
-            output_layout: None,
+            write_plan: None,
         })
     }
 
@@ -49,7 +54,7 @@ impl SinkEncoderFactory for JsonEncoder {
         Ok(Box::new(JsonEncoderRuntime::new(
             self.output_format,
             self.omit_null_columns,
-            self.output_layout.clone(),
+            self.write_plan.clone(),
         )))
     }
 
@@ -62,7 +67,7 @@ impl SinkEncoderFactory for JsonEncoder {
             props: self.props.clone(),
             output_format: self.output_format,
             omit_null_columns: self.omit_null_columns,
-            output_layout: Some(output_layout),
+            write_plan: Some(Arc::new(JsonWritePlan::build(&output_layout)?)),
         }))
     }
 }
@@ -71,43 +76,170 @@ struct JsonEncoderRuntime {
     output_format: JsonOutputFormat,
     is_first_row: bool,
     omit_null_columns: bool,
-    output_layout: Option<Arc<OutputLayout>>,
+    write_plan: Option<Arc<JsonWritePlan>>,
+    struct_write_plans: JsonStructWritePlanCache,
 }
 
 impl JsonEncoderRuntime {
     fn new(
         output_format: JsonOutputFormat,
         omit_null_columns: bool,
-        output_layout: Option<Arc<OutputLayout>>,
+        write_plan: Option<Arc<JsonWritePlan>>,
     ) -> Self {
         Self {
             output_format,
             is_first_row: true,
             omit_null_columns,
-            output_layout,
+            write_plan,
+            struct_write_plans: JsonStructWritePlanCache::default(),
         }
     }
 }
 
-#[derive(Clone, Copy)]
-struct JsonRowEncodeOptions<'a> {
-    output_layout: Option<&'a OutputLayout>,
-    null_policy: NullColumnPolicy,
+struct JsonWritePlan {
+    columns: Vec<JsonOutputField>,
+    layout_width: usize,
 }
 
-impl<'a> JsonRowEncodeOptions<'a> {
-    fn native(output_layout: Option<&'a OutputLayout>, null_policy: NullColumnPolicy) -> Self {
-        Self {
-            output_layout,
-            null_policy,
+struct JsonOutputField {
+    prefix: Vec<u8>,
+    slots: Vec<JsonOutputSlot>,
+}
+
+struct JsonOutputSlot {
+    layout_index: usize,
+    value_ref: OutputValueRef,
+}
+
+struct JsonStructWritePlan {
+    struct_type: StructType,
+    fields: Vec<JsonStructOutputField>,
+}
+
+struct JsonStructOutputField {
+    prefix: Vec<u8>,
+    indices: Vec<usize>,
+}
+
+#[derive(Default)]
+struct JsonStructWritePlanCache {
+    plans: HashMap<u64, Vec<Arc<JsonStructWritePlan>>>,
+    len: usize,
+}
+
+impl JsonStructWritePlanCache {
+    fn get_or_build(
+        &mut self,
+        struct_type: &StructType,
+    ) -> Result<Arc<JsonStructWritePlan>, EncodeError> {
+        let fields = struct_type.fields();
+        // Only names affect field order and serialized key prefixes.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        fields.len().hash(&mut hasher);
+        for field in fields.iter() {
+            field.name().hash(&mut hasher);
         }
+        let key = hasher.finish();
+
+        if let Some(candidates) = self.plans.get(&key) {
+            for plan in candidates {
+                let cached_fields = plan.struct_type.fields();
+                if fields.len() == cached_fields.len()
+                    && fields
+                        .iter()
+                        .zip(cached_fields.iter())
+                        .all(|(left, right)| left.name() == right.name())
+                {
+                    return Ok(Arc::clone(plan));
+                }
+            }
+        }
+
+        let plan = Arc::new(JsonStructWritePlan::build(struct_type, &fields)?);
+        if self.len >= MAX_STRUCT_WRITE_PLANS {
+            // Dynamically shaped structs must not grow the runtime cache without bound.
+            self.plans.clear();
+            self.len = 0;
+        }
+        self.plans.entry(key).or_default().push(Arc::clone(&plan));
+        self.len += 1;
+        Ok(plan)
     }
 }
 
-#[derive(Clone, Copy)]
-enum NullColumnPolicy {
-    KeepNulls,
-    OmitNullObjectFields,
+impl JsonStructWritePlan {
+    fn build(struct_type: &StructType, fields: &[StructField]) -> Result<Self, EncodeError> {
+        let mut ordered = (0..fields.len()).collect::<Vec<_>>();
+        ordered.sort_unstable_by(|left, right| {
+            fields[*left]
+                .name()
+                .cmp(fields[*right].name())
+                .then(left.cmp(right))
+        });
+
+        let mut output_fields: Vec<JsonStructOutputField> = Vec::new();
+        let mut current_name = None;
+        for index in ordered {
+            let name = fields[index].name();
+            if current_name != Some(name) {
+                let mut prefix = serde_json::to_vec(name).map_err(EncodeError::Serialization)?;
+                prefix.push(b':');
+                output_fields.push(JsonStructOutputField {
+                    prefix,
+                    indices: Vec::new(),
+                });
+                current_name = Some(name);
+            }
+            output_fields
+                .last_mut()
+                .expect("field was inserted")
+                .indices
+                .push(index);
+        }
+
+        Ok(Self {
+            struct_type: struct_type.clone(),
+            fields: output_fields,
+        })
+    }
+}
+
+impl JsonWritePlan {
+    fn build(layout: &OutputLayout) -> Result<Self, EncodeError> {
+        let mut ordered = layout.columns.iter().enumerate().collect::<Vec<_>>();
+        // Keep duplicate names in layout order so a mask can select an earlier value.
+        ordered.sort_unstable_by(|(left_index, left), (right_index, right)| {
+            left.name.cmp(&right.name).then(left_index.cmp(right_index))
+        });
+
+        let mut columns: Vec<JsonOutputField> = Vec::new();
+        let mut current_name = None;
+        for (layout_index, column) in ordered {
+            let name = column.name.as_ref();
+            if current_name != Some(name) {
+                let mut prefix = serde_json::to_vec(name).map_err(EncodeError::Serialization)?;
+                prefix.push(b':');
+                columns.push(JsonOutputField {
+                    prefix,
+                    slots: Vec::new(),
+                });
+                current_name = Some(name);
+            }
+            columns
+                .last_mut()
+                .expect("column was inserted")
+                .slots
+                .push(JsonOutputSlot {
+                    layout_index,
+                    value_ref: column.value_ref.clone(),
+                });
+        }
+
+        Ok(Self {
+            columns,
+            layout_width: layout.columns.len(),
+        })
+    }
 }
 
 impl SinkEncoder for JsonEncoderRuntime {
@@ -134,9 +266,10 @@ impl SinkEncoder for JsonEncoderRuntime {
             }
             append_tuple_json(
                 &mut chunk,
-                self.omit_null_columns,
                 tuple,
-                self.output_layout.as_deref(),
+                self.omit_null_columns,
+                self.write_plan.as_deref(),
+                &mut self.struct_write_plans,
             )?;
             if matches!(self.output_format, JsonOutputFormat::Ndjson) {
                 chunk.push(b'\n');
@@ -157,137 +290,147 @@ impl SinkEncoder for JsonEncoderRuntime {
     }
 }
 
-fn value_to_json(value: &Value, null_policy: NullColumnPolicy) -> JsonValue {
-    match value {
-        Value::Null => JsonValue::Null,
-        Value::Bool(v) => JsonValue::Bool(*v),
-        Value::String(v) => JsonValue::String(v.clone()),
-        Value::Bytes(v) => JsonValue::String(BASE64_STANDARD.encode(v.as_ref())),
-        Value::Float32(v) => number_from_f64(*v as f64),
-        Value::Float64(v) => number_from_f64(*v),
-        Value::Int8(v) => JsonValue::Number(JsonNumber::from(*v)),
-        Value::Int16(v) => JsonValue::Number(JsonNumber::from(*v)),
-        Value::Int32(v) => JsonValue::Number(JsonNumber::from(*v)),
-        Value::Int64(v) => JsonValue::Number(JsonNumber::from(*v)),
-        Value::Uint8(v) => JsonValue::Number(JsonNumber::from(*v)),
-        Value::Uint16(v) => JsonValue::Number(JsonNumber::from(*v)),
-        Value::Uint32(v) => JsonValue::Number(JsonNumber::from(*v)),
-        Value::Uint64(v) => JsonValue::Number(JsonNumber::from(*v)),
-        Value::Timestamp(v) => v
-            .to_rfc3339_utc()
-            .map(JsonValue::String)
-            .unwrap_or(JsonValue::Null),
-        Value::Struct(struct_value) => {
-            let mut map = JsonMap::new();
-            let fields = struct_value.fields().fields();
-            for (field, item) in fields.iter().zip(struct_value.items().iter()) {
-                insert_json_field(&mut map, field.name(), item, null_policy);
-            }
-            JsonValue::Object(map)
-        }
-        Value::List(list) => {
-            let values = list
-                .items()
-                .iter()
-                .map(|item| value_to_json(item, null_policy))
-                .collect::<Vec<_>>();
-            JsonValue::Array(values)
-        }
-    }
-}
-
-fn insert_json_field(
-    json_row: &mut JsonMap<String, JsonValue>,
-    key: &str,
-    value: &Value,
-    null_policy: NullColumnPolicy,
-) {
-    if matches!(null_policy, NullColumnPolicy::OmitNullObjectFields) && matches!(value, Value::Null)
-    {
-        return;
-    }
-
-    json_row.insert(key.to_string(), value_to_json(value, null_policy));
-}
-
-fn tuple_to_json_with_options(
+fn append_tuple_json(
+    payload: &mut Vec<u8>,
     tuple: &Tuple,
-    options: JsonRowEncodeOptions<'_>,
-) -> Result<JsonValue, EncodeError> {
-    let output_layout = options.output_layout.ok_or_else(|| {
+    omit_null_columns: bool,
+    write_plan: Option<&JsonWritePlan>,
+    struct_write_plans: &mut JsonStructWritePlanCache,
+) -> Result<(), EncodeError> {
+    let write_plan = write_plan.ok_or_else(|| {
         EncodeError::Other("JSON encoding requires the final output layout".to_string())
     })?;
-    encode_row_from_output_layout(tuple, output_layout, options)
-}
-
-fn encode_row_from_output_layout(
-    tuple: &Tuple,
-    output_layout: &OutputLayout,
-    options: JsonRowEncodeOptions<'_>,
-) -> Result<JsonValue, EncodeError> {
-    let mut json_row = JsonMap::new();
     let output_mask = tuple.output_mask();
-    if output_mask.is_some_and(|mask| mask.len() != output_layout.columns.len()) {
+    if output_mask.is_some_and(|mask| mask.len() != write_plan.layout_width) {
         return Err(EncodeError::Other(format!(
             "output_mask width {} does not match output schema width {}",
             output_mask.map_or(0, <[bool]>::len),
-            output_layout.columns.len()
+            write_plan.layout_width
         )));
     }
+    let keep_nulls = output_mask.is_some() || !omit_null_columns;
 
-    for (index, column) in output_layout.columns.iter().enumerate() {
-        if output_mask.is_some_and(|mask| !mask[index]) {
-            continue;
+    payload.push(b'{');
+    let mut first = true;
+    for field in &write_plan.columns {
+        let mut selected = None;
+        for slot in &field.slots {
+            if output_mask.is_some_and(|mask| !mask[slot.layout_index]) {
+                continue;
+            }
+            let value = slot.value_ref.resolve(tuple).map_err(EncodeError::Other)?;
+            if keep_nulls || !matches!(value, Value::Null) {
+                selected = Some(value);
+            }
         }
-        let value = resolve_output_value(tuple, &column.value_ref)?;
-        let null_policy = if output_mask.is_some() {
-            NullColumnPolicy::KeepNulls
-        } else {
-            options.null_policy
-        };
-        insert_json_field(&mut json_row, column.name.as_ref(), value, null_policy);
+        if let Some(value) = selected {
+            if !first {
+                payload.push(b',');
+            }
+            first = false;
+            payload.extend_from_slice(&field.prefix);
+            write_json_value(payload, value, keep_nulls, struct_write_plans)?;
+        }
     }
-
-    Ok(JsonValue::Object(json_row))
-}
-
-fn resolve_output_value<'a>(
-    tuple: &'a Tuple,
-    value_ref: &OutputValueRef,
-) -> Result<&'a Value, EncodeError> {
-    value_ref.resolve(tuple).map_err(EncodeError::Other)
-}
-
-fn append_tuple_json(
-    payload: &mut Vec<u8>,
-    omit_null_columns: bool,
-    tuple: &Tuple,
-    output_layout: Option<&OutputLayout>,
-) -> Result<(), EncodeError> {
-    let options = JsonRowEncodeOptions::native(
-        output_layout,
-        if omit_null_columns {
-            NullColumnPolicy::OmitNullObjectFields
-        } else {
-            NullColumnPolicy::KeepNulls
-        },
-    );
-    let row = tuple_to_json_with_options(tuple, options)?;
-    serde_json::to_writer(payload, &row).map_err(EncodeError::Serialization)?;
+    payload.push(b'}');
     Ok(())
 }
 
-fn number_from_f64(value: f64) -> JsonValue {
-    JsonNumber::from_f64(value)
-        .map(JsonValue::Number)
-        .unwrap_or(JsonValue::Null)
+fn write_json_serde<T: Serialize + ?Sized>(
+    payload: &mut Vec<u8>,
+    value: &T,
+) -> Result<(), EncodeError> {
+    serde_json::to_writer(payload, value).map_err(EncodeError::Serialization)
+}
+
+fn write_json_float(payload: &mut Vec<u8>, value: f64) -> Result<(), EncodeError> {
+    if let Some(number) = JsonNumber::from_f64(value) {
+        write_json_serde(payload, &number)
+    } else {
+        payload.extend_from_slice(b"null");
+        Ok(())
+    }
+}
+
+fn write_json_value(
+    payload: &mut Vec<u8>,
+    value: &Value,
+    keep_nulls: bool,
+    struct_write_plans: &mut JsonStructWritePlanCache,
+) -> Result<(), EncodeError> {
+    match value {
+        Value::Null => payload.extend_from_slice(b"null"),
+        Value::Bool(value) => {
+            payload.extend_from_slice(if *value { b"true" } else { b"false" });
+        }
+        Value::String(value) => write_json_serde(payload, value)?,
+        Value::Bytes(value) => {
+            let encoded = BASE64_STANDARD.encode(value.as_ref());
+            write_json_serde(payload, &encoded)?;
+        }
+        Value::Float32(value) => write_json_float(payload, *value as f64)?,
+        Value::Float64(value) => write_json_float(payload, *value)?,
+        Value::Int8(value) => write_json_serde(payload, value)?,
+        Value::Int16(value) => write_json_serde(payload, value)?,
+        Value::Int32(value) => write_json_serde(payload, value)?,
+        Value::Int64(value) => write_json_serde(payload, value)?,
+        Value::Uint8(value) => write_json_serde(payload, value)?,
+        Value::Uint16(value) => write_json_serde(payload, value)?,
+        Value::Uint32(value) => write_json_serde(payload, value)?,
+        Value::Uint64(value) => write_json_serde(payload, value)?,
+        Value::Timestamp(value) => {
+            if let Some(text) = value.to_rfc3339_utc() {
+                write_json_serde(payload, &text)?;
+            } else {
+                payload.extend_from_slice(b"null");
+            }
+        }
+        Value::List(list) => {
+            payload.push(b'[');
+            for (index, item) in list.items().iter().enumerate() {
+                if index != 0 {
+                    payload.push(b',');
+                }
+                write_json_value(payload, item, keep_nulls, struct_write_plans)?;
+            }
+            payload.push(b']');
+        }
+        Value::Struct(struct_value) => {
+            let struct_type = struct_value.fields();
+            let items = struct_value.items();
+            let plan = struct_write_plans.get_or_build(struct_type)?;
+
+            payload.push(b'{');
+            let mut first = true;
+            for field in &plan.fields {
+                let mut selected = None;
+                for &index in field.indices.iter().rev() {
+                    if let Some(item) = items.get(index) {
+                        if keep_nulls || !matches!(item, Value::Null) {
+                            selected = Some(item);
+                            break;
+                        }
+                    }
+                }
+                if let Some(item) = selected {
+                    if !first {
+                        payload.push(b',');
+                    }
+                    first = false;
+                    payload.extend_from_slice(&field.prefix);
+                    write_json_value(payload, item, keep_nulls, struct_write_plans)?;
+                }
+            }
+            payload.push(b'}');
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::batch_from_columns_simple;
-    use crate::model::Collection;
+    use crate::model::{batch_from_columns_simple, Collection, Message};
     use crate::planner::physical::output_layout::OutputColumnLayout;
     use crate::planner::sink::SinkEncoderConfig;
     use datatypes::{
@@ -335,10 +478,11 @@ mod tests {
     }
 
     fn test_runtime(encoder: &JsonEncoder, collection: &dyn Collection) -> JsonEncoderRuntime {
+        let layout = test_output_layout(collection);
         JsonEncoderRuntime::new(
             encoder.output_format,
             encoder.omit_null_columns,
-            Some(test_output_layout(collection)),
+            Some(Arc::new(JsonWritePlan::build(&layout).expect("write plan"))),
         )
     }
 
@@ -416,6 +560,67 @@ mod tests {
 
         assert_eq!(default_payload, br#"[{"amount":10},{"amount":20}]"#);
         assert_eq!(array_payload, default_payload);
+    }
+
+    #[test]
+    fn json_encoder_writes_fields_in_sorted_order() {
+        let batch = batch_from_columns_simple(vec![
+            ("orders".to_string(), "b".to_string(), vec![Value::Int64(1)]),
+            ("orders".to_string(), "a".to_string(), vec![Value::Int64(2)]),
+        ])
+        .expect("valid batch");
+        let encoder = JsonEncoder::new("json", &SinkEncoderConfig::json()).expect("encoder");
+
+        assert_eq!(encode_collection(&encoder, &batch), br#"[{"a":2,"b":1}]"#);
+    }
+
+    #[test]
+    fn json_encoder_duplicate_names_respect_output_mask() {
+        let name: Arc<str> = Arc::from("dup");
+        let message = Arc::new(Message::new(
+            "orders",
+            vec![Arc::clone(&name), Arc::clone(&name)],
+            vec![Arc::new(Value::Int64(1)), Arc::new(Value::Int64(2))],
+        ));
+        let mut tuple = Tuple::new(vec![message]);
+        let layout = OutputLayout::new(
+            (0..2)
+                .map(|value_index| OutputColumnLayout {
+                    name: Arc::clone(&name),
+                    data_type: ConcreteDatatype::Int64(Int64Type),
+                    value_ref: OutputValueRef::Message {
+                        message_index: 0,
+                        value_index,
+                    },
+                })
+                .collect(),
+        );
+        let plan = JsonWritePlan::build(&layout).expect("write plan");
+
+        tuple.set_output_mask(vec![true, false]);
+        let mut payload = Vec::new();
+        let mut struct_write_plans = JsonStructWritePlanCache::default();
+        append_tuple_json(
+            &mut payload,
+            &tuple,
+            true,
+            Some(&plan),
+            &mut struct_write_plans,
+        )
+        .expect("encode first slot");
+        assert_eq!(payload, br#"{"dup":1}"#);
+
+        tuple.set_output_mask(vec![true, true]);
+        payload.clear();
+        append_tuple_json(
+            &mut payload,
+            &tuple,
+            true,
+            Some(&plan),
+            &mut struct_write_plans,
+        )
+        .expect("encode last slot");
+        assert_eq!(payload, br#"{"dup":2}"#);
     }
 
     #[test]
