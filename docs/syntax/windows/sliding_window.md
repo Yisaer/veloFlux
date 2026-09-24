@@ -26,6 +26,12 @@ GROUP BY slidingwindow('ss', 10, 5) OVER (WHEN flag > 0)
 GROUP BY slidingwindow('ss', 10, 5) OVER (WHEN flag > 0 PARTITION BY vehicle_id)
 ```
 
+Stateful calls inside `WHEN` are supported. For example:
+
+```sql
+GROUP BY slidingwindow('ss', 10) OVER (WHEN lag(flag) = 1)
+```
+
 ## Semantics
 
 Each incoming tuple is a trigger point with timestamp `t`. `lookback` and `lookahead` are measured
@@ -60,6 +66,10 @@ remain in the row buffer and can be included by later triggered windows.
 The trigger condition is orthogonal to `PARTITION BY`: each partition evaluates
 the condition on its own input tuples and maintains its own pending sliding
 windows.
+
+When a stateful `WHEN` expression is used, the stateful result is computed for the current input
+tuple before the trigger condition is evaluated. A false or `NULL` trigger condition will not
+create an emission request, but it will not by itself suppress stateful state updates.
 
 ### Watermark contract for lookahead
 

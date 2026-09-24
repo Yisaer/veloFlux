@@ -81,6 +81,11 @@ The current built-in patterns are:
 - aggregate functions currently advertise `select`
 - stateful functions currently advertise `select` and `where`
 
+Stateful calls are also supported in window-owned expressions: `statewindow` open/emit expressions,
+sliding-window `OVER (WHEN ...)`, window `FILTER (WHERE ...)`, and window `PARTITION BY`
+expressions. The parser rewrites these calls to placeholder columns before planner validation;
+the window expressions consume the placeholders for the current input row.
+
 Context metadata should be read together with `requirements`:
 
 - aggregate functions normally require `AggregateContext`

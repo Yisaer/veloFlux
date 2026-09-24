@@ -2,7 +2,7 @@
 //! Validates transformation via a JSON view over the parsed SelectStmt.
 
 use parser::{
-    StaticAggregateRegistry, StaticStatefulRegistry, parse_sql, parse_sql_with_registries,
+    StaticAggregateRegistry, StaticStatefulRegistry, Window, parse_sql, parse_sql_with_registries,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -368,4 +368,121 @@ fn case_17_consecutive_arguments_validation() {
 
     parse_sql("SELECT consecutive_start(a > 5, ts) FROM stream")
         .expect("consecutive_start 2-arg form should parse");
+}
+
+#[test]
+fn case_18_stateful_calls_in_state_window_predicates() {
+    let select_stmt = parse_sql(
+        "SELECT sum(a) FROM stream GROUP BY statewindow(lag(a) > 0, latest(status) = 'closed')",
+    )
+    .expect("stateful calls in statewindow predicates should parse");
+
+    match select_stmt
+        .window
+        .as_ref()
+        .expect("state window should exist")
+    {
+        Window::State { open, emit, .. } => {
+            assert_eq!(open.to_string(), "col_1 > 0");
+            assert_eq!(emit.to_string(), "col_2 = 'closed'");
+        }
+        other => panic!("expected state window, got {other:?}"),
+    }
+
+    assert_eq!(
+        select_stmt
+            .stateful_mappings
+            .iter()
+            .map(|entry| (entry.output_column.as_str(), entry.spec.func_name.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("col_1", "lag"), ("col_2", "latest")]
+    );
+}
+
+#[test]
+fn case_19_stateful_call_in_sliding_window_when() {
+    let select_stmt = parse_sql(
+        "SELECT sum(a) FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN lag(flag) = 1)",
+    )
+    .expect("stateful call in sliding window WHEN should parse");
+
+    match select_stmt
+        .window
+        .as_ref()
+        .expect("sliding window should exist")
+    {
+        Window::Sliding {
+            trigger_condition: Some(condition),
+            ..
+        } => assert_eq!(condition.to_string(), "col_1 = 1"),
+        other => panic!("expected sliding window with trigger condition, got {other:?}"),
+    }
+
+    assert_eq!(select_stmt.stateful_mappings.len(), 1);
+    assert_eq!(select_stmt.stateful_mappings[0].output_column, "col_1");
+    assert_eq!(select_stmt.stateful_mappings[0].spec.func_name, "lag");
+}
+
+#[test]
+fn case_20_stateful_call_in_window_filter() {
+    let select_stmt = parse_sql(
+        "SELECT sum(a) FROM stream GROUP BY statewindow(a > 0, a = 9) FILTER (WHERE latest(enabled) = true)",
+    )
+    .expect("stateful call in window filter should parse");
+
+    match select_stmt
+        .window
+        .as_ref()
+        .expect("state window should exist")
+    {
+        Window::State {
+            filter: Some(filter),
+            ..
+        } => assert_eq!(filter.to_string(), "col_1 = true"),
+        other => panic!("expected state window with filter, got {other:?}"),
+    }
+
+    assert_eq!(select_stmt.stateful_mappings.len(), 1);
+    assert_eq!(select_stmt.stateful_mappings[0].spec.func_name, "latest");
+}
+
+#[test]
+fn case_21_stateful_call_in_window_partition_by() {
+    let select_stmt = parse_sql(
+        "SELECT sum(a) FROM stream GROUP BY statewindow(a > 0, a = 9) OVER (PARTITION BY latest(device_id))",
+    )
+    .expect("stateful call in window partition should parse");
+
+    match select_stmt
+        .window
+        .as_ref()
+        .expect("state window should exist")
+    {
+        Window::State { partition_by, .. } => {
+            assert_eq!(partition_by.len(), 1);
+            assert_eq!(partition_by[0].to_string(), "col_1");
+        }
+        other => panic!("expected partitioned state window, got {other:?}"),
+    }
+
+    assert_eq!(select_stmt.stateful_mappings.len(), 1);
+    assert_eq!(select_stmt.stateful_mappings[0].spec.func_name, "latest");
+}
+
+#[test]
+fn case_22_stateful_call_in_window_reuses_projection_placeholder() {
+    let select_stmt =
+        parse_sql("SELECT lag(a) FROM stream GROUP BY statewindow(lag(a) > 0, a = 9)")
+            .expect("stateful call should be reused across projection and window");
+
+    assert_eq!(select_stmt.select_fields[0].expr.to_string(), "col_1");
+    match select_stmt
+        .window
+        .as_ref()
+        .expect("state window should exist")
+    {
+        Window::State { open, .. } => assert_eq!(open.to_string(), "col_1 > 0"),
+        other => panic!("expected state window, got {other:?}"),
+    }
+    assert_eq!(select_stmt.stateful_mappings.len(), 1);
 }

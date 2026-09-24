@@ -82,6 +82,18 @@ Window functions may use SQL function `FILTER (WHERE ...)` syntax. The filter st
 - `HAVING`: filters aggregate results after windowing and aggregation.
 - `WHERE`: filters rows in the final filter stage after windowing and aggregation.
 
+Stateful calls inside window-owned expressions are a planned extension, not current syntax. The
+planned contexts are:
+
+- `statewindow(open_expr, emit_expr)` arguments;
+- `slidingwindow(...) OVER (WHEN expr)`;
+- `window(...) FILTER (WHERE expr)`;
+- window `OVER (PARTITION BY ...)` expressions.
+
+The intended evaluation order is stateful evaluation before window filtering and window formation.
+Therefore, a window filter would decide whether a row is collected without implicitly changing
+whether a stateful function advances its state.
+
 ## Examples
 
 ```sql

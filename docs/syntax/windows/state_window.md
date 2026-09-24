@@ -28,6 +28,10 @@ For `statewindow`, the `OVER` clause supports **only**:
 `ORDER BY`, window frames, named windows, and other `OVER` features are not supported for
 `statewindow` in StreamDialect.
 
+Stateful function calls inside `open_expr`, `emit_expr`, the window `FILTER (WHERE ...)`, and
+`OVER (PARTITION BY ...)` are supported. These calls are evaluated for the current input row and
+rewritten to placeholder columns before the state-window expressions are planned.
+
 ## Semantics
 
 `statewindow` buffers input rows between an "open" condition and an "emit" condition.
@@ -88,6 +92,19 @@ each other's state windows.
 ### Control / End-of-Stream
 
 On graceful termination, if a partition is active and has buffered rows, the current buffered batch may be flushed before shutdown (matching the current processor behavior).
+
+### Stateful Expressions
+
+Stateful expressions are evaluated before the state window processes the current row. For example:
+
+```sql
+GROUP BY statewindow(lag(a) > 0, latest(status) = 'closed')
+    FILTER (WHERE changed_col(true, device_id) IS NOT NULL)
+```
+
+The stateful results are represented by internal placeholder columns and consumed by the window
+predicates. The window filter controls collection into the state window; it does not implicitly
+prevent stateful functions from processing the input row.
 
 ## Examples
 

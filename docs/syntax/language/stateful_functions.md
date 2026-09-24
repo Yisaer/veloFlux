@@ -25,6 +25,10 @@ execution stage, but they differ in two important ways:
 - They are evaluated for every input row.
 - Their execution order must match expression dependency order.
 
+Stateful calls are supported in `SELECT` expressions, the query-level `WHERE` condition, and
+expressions owned by a window declaration. Window-owned expressions include state-window
+predicates, sliding-window trigger conditions, window filters, and window partition keys.
+
 ## Supported Syntax
 
 The current supported shape is:
@@ -64,6 +68,42 @@ Built-in stateful functions currently include:
 - `acc_min`
 - `acc_count`
 - `acc_avg`
+
+## Window Expression Support
+
+Stateful calls can be used in expressions owned by a window declaration:
+
+```sql
+SELECT sum(a)
+FROM stream
+GROUP BY statewindow(lag(a) > 0, latest(status) = 'closed')
+```
+
+```sql
+SELECT sum(a)
+FROM stream
+GROUP BY slidingwindow('ss', 10) OVER (WHEN lag(flag) = 1)
+```
+
+```sql
+SELECT sum(a)
+FROM stream
+GROUP BY statewindow(a > 0, a = 9)
+    FILTER (WHERE latest(enabled) = true)
+```
+
+Before planning, the parser rewrites each stateful call to an internal placeholder column and
+records the stateful call in dependency order. The resulting placeholder can then be consumed by
+the window expression. The execution order is:
+
+```text
+DataSource -> StatefulFunction -> window FILTER -> Window
+```
+
+Consequently, `open_expr`, `emit_expr`, `OVER (WHEN ...)`, window `FILTER (WHERE ...)`, and window
+`PARTITION BY` expressions consume stateful placeholder columns computed for the current input
+row. A window filter controls row collection, but does not implicitly suppress stateful state
+updates.
 
 ## Built-in Functions
 

@@ -1645,6 +1645,43 @@ fn plan_explain_stateful_table_driven() {
 }
 
 #[test]
+fn plan_explain_stateful_window_expression_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = [
+        Case {
+            name: "stateful_state_window_predicates",
+            sql: "SELECT sum(a) FROM stream GROUP BY statewindow(lag(a) > 0, latest(b) > 0)",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; latest(b) -> col_2]"],"operator":"StatefulFunction"}],"id":"Window_2","info":["kind=state","open=col_1 > 0","emit=col_2 > 0"],"operator":"Window"}],"id":"Aggregation_3","info":["aggregates=[sum(a) -> col_3]"],"operator":"Aggregation"}],"id":"Project_4","info":["fields=[col_3 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1; latest(b) -> col_2]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_3]","window=state","open=col_1 > 0","emit=col_2 > 0"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_5","info":["fields=[col_3 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "stateful_sliding_window_when",
+            sql: "SELECT sum(a) FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN lag(flag) = 1)",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, flag]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(flag) -> col_1]"],"operator":"StatefulFunction"}],"id":"Window_2","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none","trigger=col_1 = 1"],"operator":"Window"}],"id":"Aggregation_3","info":["aggregates=[sum(a) -> col_2]"],"operator":"Aggregation"}],"id":"Project_4","info":["fields=[col_2 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, flag]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, flag]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(flag) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProcessTimeWatermark_3","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_5","info":["calls=[sum(a) -> col_2]","window=sliding","unit=Seconds","lookback=10","lookahead=none","trigger=col_1 = 1"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_6","info":["fields=[col_2 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "stateful_window_filter",
+            sql: "SELECT sum(a) FROM stream GROUP BY statewindow(a > 0, a = 9) FILTER (WHERE latest(b) > 0)",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[latest(b) -> col_1]"],"operator":"StatefulFunction"}],"id":"Filter_2","info":["predicate=col_1 > 0"],"operator":"Filter"}],"id":"Window_3","info":["kind=state","open=a > 0","emit=a = 9"],"operator":"Window"}],"id":"Aggregation_4","info":["aggregates=[sum(a) -> col_2]"],"operator":"Aggregation"}],"id":"Project_5","info":["fields=[col_2 as sum(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[latest(b) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalFilter_3","info":["predicate=col_1 > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalStreamingAggregation_5","info":["calls=[sum(a) -> col_2]","window=state","open=a > 0","emit=a = 9"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_6","info":["fields=[col_2 as sum(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "stateful_window_partition_by",
+            sql: "SELECT lag(a) FROM stream GROUP BY statewindow(lag(a) > 0, a = 9) OVER (PARTITION BY latest(k1))",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, k1]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; latest(k1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Window_2","info":["kind=state","open=col_1 > 0","emit=a = 9","partition_by=col_2"],"operator":"Window"}],"id":"Project_3","info":["fields=[col_1 as lag(a)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, k1]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, k1]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1; latest(k1) -> col_2]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalStateWindow_3","info":["kind=state","open=col_1 > 0","emit=a = 9","partition_by=col_2"],"operator":"PhysicalStateWindow"}],"id":"PhysicalProject_4","info":["fields=[col_1 as lag(a)]"],"operator":"PhysicalProject"}}"##,
+        },
+    ];
+
+    for case in cases {
+        let got = explain_json_string(case.sql);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
 fn plan_explain_pipeline_state_table_driven() {
     struct Case {
         name: &'static str,

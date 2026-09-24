@@ -4,6 +4,7 @@ use crate::select_stmt::SelectStmt;
 use crate::stateful_call::{StatefulCallSpec, StatefulMappingEntry};
 use crate::stateful_registry::StatefulRegistry;
 use crate::stateful_validation::validate_stateful_context_expr;
+use crate::window::Window;
 use sqlparser::ast::{
     Expr, Function, FunctionArg, FunctionArgExpr, Ident, UnaryOperator, Value, WindowSpec,
     WindowType,
@@ -57,6 +58,18 @@ pub fn transform_stateful_functions(
         )?;
     }
 
+    if let Some(window) = &mut select_stmt.window {
+        rewrite_window_stateful(
+            window,
+            &aggregate_registry,
+            &stateful_registry,
+            allocator,
+            &mut seen,
+            &mut mappings,
+            &mut ordered_columns,
+        )?;
+    }
+
     select_stmt.stateful_mappings = ordered_columns
         .iter()
         .map(|output_column| {
@@ -72,6 +85,87 @@ pub fn transform_stateful_functions(
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok((select_stmt, mappings))
+}
+
+fn rewrite_window_stateful(
+    window: &mut Window,
+    aggregate_registry: &Arc<dyn AggregateRegistry>,
+    stateful_registry: &Arc<dyn StatefulRegistry>,
+    allocator: &mut ColPlaceholderAllocator,
+    seen: &mut HashMap<String, String>,
+    mappings: &mut HashMap<String, StatefulCallSpec>,
+    ordered_columns: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut rewrite = |expr: &mut Expr| {
+        *expr = rewrite_expr_stateful(
+            expr,
+            aggregate_registry,
+            stateful_registry,
+            allocator,
+            seen,
+            mappings,
+            ordered_columns,
+        )?;
+        Ok::<(), String>(())
+    };
+
+    match window {
+        Window::Tumbling {
+            partition_by,
+            filter,
+            ..
+        }
+        | Window::Count {
+            partition_by,
+            filter,
+            ..
+        } => {
+            for expr in partition_by {
+                rewrite(expr)?;
+            }
+            if let Some(filter) = filter {
+                rewrite(filter)?;
+            }
+        }
+        Window::Sliding {
+            partition_by,
+            trigger_condition,
+            filter,
+            ..
+        } => {
+            for expr in partition_by {
+                rewrite(expr)?;
+            }
+            if let Some(trigger_condition) = trigger_condition {
+                rewrite(trigger_condition)?;
+            }
+            if let Some(filter) = filter {
+                rewrite(filter)?;
+            }
+        }
+        Window::State {
+            open,
+            emit,
+            partition_by,
+            filter,
+        } => {
+            rewrite(open)?;
+            rewrite(emit)?;
+            for expr in partition_by {
+                rewrite(expr)?;
+            }
+            if let Some(filter) = filter {
+                rewrite(filter)?;
+            }
+        }
+        Window::Eos { filter } => {
+            if let Some(filter) = filter {
+                rewrite(filter)?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn rewrite_expr_stateful(

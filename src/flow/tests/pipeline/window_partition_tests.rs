@@ -534,6 +534,70 @@ async fn state_window_group_and_partition_pipeline_table_driven() {
     }
 }
 
+// coverage-covers: parser.function.stateful_functions, pipeline.window.state, pipeline.window.when
+#[tokio::test]
+async fn stateful_window_expression_pipeline_table_driven() {
+    let cases = vec![
+        CollectionWindowPartitionCase {
+            name: "stateful_state_window_predicates",
+            sql: "SELECT sum(a) AS s FROM stream GROUP BY statewindow(lag(a) > 0, latest(b) > 0)",
+            input_data: vec![
+                ("a".to_string(), vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]),
+                ("b".to_string(), vec![Value::Int64(0), Value::Int64(1), Value::Int64(1)]),
+                ("k1".to_string(), vec![Value::Int64(1); 3]),
+                ("k2".to_string(), vec![Value::Int64(10); 3]),
+                ("m".to_string(), vec![Value::Int64(0); 3]),
+            ],
+            expected_outputs: vec![serde_json::json!([{"s": 5}])],
+            assert_no_extra_output: true,
+        },
+        CollectionWindowPartitionCase {
+            name: "stateful_sliding_window_when",
+            sql: "SELECT sum(a) AS s FROM stream GROUP BY slidingwindow('ss', 10) OVER (WHEN lag(flag) = 1)",
+            input_data: vec![
+                ("a".to_string(), vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)]),
+                ("flag".to_string(), vec![Value::Int64(0), Value::Int64(1), Value::Int64(1)]),
+                ("k1".to_string(), vec![Value::Int64(1); 3]),
+                ("k2".to_string(), vec![Value::Int64(10); 3]),
+                ("m".to_string(), vec![Value::Int64(0); 3]),
+            ],
+            expected_outputs: vec![serde_json::json!([{"s": 6}])],
+            assert_no_extra_output: true,
+        },
+        CollectionWindowPartitionCase {
+            name: "stateful_window_filter",
+            sql: "SELECT sum(a) AS s FROM stream GROUP BY statewindow(a > 0, a = 9) FILTER (WHERE latest(b) > 0)",
+            input_data: vec![
+                ("a".to_string(), vec![Value::Int64(1), Value::Int64(2), Value::Int64(9)]),
+                ("b".to_string(), vec![Value::Int64(0), Value::Int64(1), Value::Int64(1)]),
+                ("k1".to_string(), vec![Value::Int64(1); 3]),
+                ("k2".to_string(), vec![Value::Int64(10); 3]),
+                ("m".to_string(), vec![Value::Int64(0); 3]),
+            ],
+            expected_outputs: vec![serde_json::json!([{"s": 11}])],
+            assert_no_extra_output: true,
+        },
+        CollectionWindowPartitionCase {
+            name: "stateful_window_partition_by",
+            sql: "SELECT sum(a) AS s FROM stream GROUP BY statewindow(lag(a) > 0, a = 9) OVER (PARTITION BY latest(k1))",
+            input_data: columns_from_rows(vec![
+                serde_json::json!({"a": 1, "k1": 1, "k2": 10, "m": 0}),
+                serde_json::json!({"a": 10, "k1": 2, "k2": 10, "m": 0}),
+                serde_json::json!({"a": 2, "k1": 1, "k2": 10, "m": 0}),
+                serde_json::json!({"a": 20, "k1": 2, "k2": 10, "m": 0}),
+                serde_json::json!({"a": 9, "k1": 1, "k2": 10, "m": 0}),
+                serde_json::json!({"a": 9, "k1": 2, "k2": 10, "m": 0}),
+            ]),
+            expected_outputs: vec![serde_json::json!([{"s": 11}]), serde_json::json!([{"s": 39}])],
+            assert_no_extra_output: true,
+        },
+    ];
+
+    for case in cases {
+        run_collection_window_partition_case(case).await;
+    }
+}
+
 // coverage-covers: parser.window.sliding.over_when, pipeline.window.when, stream.window.sliding
 #[tokio::test]
 async fn sliding_window_when_pipeline_table_driven() {

@@ -8,7 +8,9 @@ use flow::planner::sink::{
     SinkEncoderConfig, SinkOutputConfig,
 };
 use flow::processor::sampler_processor::{MergerConfig, PackerProps};
-use flow::processor::{EncodedDeliveryFlags, SamplerConfig, SamplingStrategy, StreamData};
+use flow::processor::{
+    EncodedDeliveryFlags, ProcessorStatsHandle, SamplerConfig, SamplingStrategy, StreamData,
+};
 use flow::{CodecError, FlowInstance, Merger};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::sync::Arc;
@@ -183,6 +185,31 @@ async fn assert_no_output(output: &mut JsonOutput, timeout_duration: Duration) {
             Ok(Some(other)) => panic!("unexpected sampler output: {}", other.description()),
         }
     }
+}
+
+async fn wait_for_sampler_counter(handle: &ProcessorStatsHandle, name: &str, expected: u64) {
+    for _ in 0..100 {
+        let actual = handle
+            .snapshot()
+            .stats
+            .custom
+            .get(name)
+            .copied()
+            .unwrap_or_default();
+        if actual >= expected {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+
+    let actual = handle
+        .snapshot()
+        .stats
+        .custom
+        .get(name)
+        .copied()
+        .unwrap_or_default();
+    panic!("sampler counter {name} did not reach {expected}, actual={actual}");
 }
 
 // coverage-covers: processor.sampler.strategy
@@ -697,7 +724,7 @@ async fn sampler_latest_before_streaming_aggregation_then_delta_output() {
 }
 
 // coverage-covers: processor.sampler.strategy, stream.window.count, sink.output.batching
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -719,101 +746,67 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
                 SinkOutputConfig::default(),
                 CommonSinkProps {
                     batch_count: Some(2),
-                    batch_duration: Some(Duration::from_secs(3)),
+                    batch_duration: None,
                 },
             )],
         )
         .expect("build pipeline");
     let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
-    let interval_settle = interval + Duration::from_millis(60);
-    let batch_output_timeout = Duration::from_secs(4);
 
     pipeline.start().await.expect("start pipeline");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::task::yield_now().await;
+    tokio::time::advance(interval).await;
+    tokio::task::yield_now().await;
 
-    for value in [1, 2] {
-        let payload = format!(r#"{{"a": {value}}}"#).into_bytes();
-        pipeline
-            .send_stream_data("agg_batch_sampler_stream", StreamData::bytes(payload))
-            .await
-            .expect("send first sampled interval");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    tokio::time::sleep(interval_settle).await;
-    assert_no_output(&mut output, Duration::from_millis(80)).await;
-
-    for value in [3, 4] {
-        let payload = format!(r#"{{"a": {value}}}"#).into_bytes();
-        pipeline
-            .send_stream_data("agg_batch_sampler_stream", StreamData::bytes(payload))
-            .await
-            .expect("send second sampled interval");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    tokio::time::sleep(interval_settle).await;
-    assert_no_output(&mut output, Duration::from_millis(80)).await;
-
-    for value in [1, 2] {
-        let payload = format!(r#"{{"a": {value}}}"#).into_bytes();
-        pipeline
-            .send_stream_data("agg_batch_sampler_stream", StreamData::bytes(payload))
-            .await
-            .expect("send third sampled interval");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    tokio::time::sleep(interval_settle).await;
-
-    for value in [3, 4] {
-        let payload = format!(r#"{{"a": {value}}}"#).into_bytes();
-        pipeline
-            .send_stream_data("agg_batch_sampler_stream", StreamData::bytes(payload))
-            .await
-            .expect("send fourth sampled interval");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    tokio::time::sleep(interval_settle).await;
-    let first = recv_next_json(&mut output, batch_output_timeout).await;
-    assert_eq!(first, serde_json::json!([{"total": 6}, {"total": 6}]));
-
-    for value in [0, 0] {
-        let payload = format!(r#"{{"a": {value}}}"#).into_bytes();
-        pipeline
-            .send_stream_data("agg_batch_sampler_stream", StreamData::bytes(payload))
-            .await
-            .expect("send fifth sampled interval");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    tokio::time::sleep(interval_settle).await;
-
-    for value in [5, 5] {
-        let payload = format!(r#"{{"a": {value}}}"#).into_bytes();
-        pipeline
-            .send_stream_data("agg_batch_sampler_stream", StreamData::bytes(payload))
-            .await
-            .expect("send sixth sampled interval");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    tokio::time::sleep(interval_settle).await;
-    let second = recv_next_json(&mut output, batch_output_timeout).await;
-    assert_eq!(
-        second,
-        serde_json::json!([{"total": 5}]),
-        "streaming encoder batching should flush the trailing sampled aggregation row by duration"
-    );
-
-    let sampler_stats = pipeline
+    let sampler_handle = pipeline
         .processor_stats()
         .iter()
         .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
-        .expect("sampler stats should exist")
-        .snapshot()
-        .stats;
+        .cloned()
+        .expect("sampler stats should exist");
+
+    macro_rules! send_sample_pair {
+        ($first:expr, $second:expr, $input_count:expr, $output_count:expr, $ordinal:literal) => {{
+            for value in [$first, $second] {
+                let payload = format!(r#"{{"a": {value}}}"#).into_bytes();
+                pipeline
+                    .send_stream_data("agg_batch_sampler_stream", StreamData::bytes(payload))
+                    .await
+                    .expect(concat!("send ", $ordinal, " sampled interval"));
+            }
+            wait_for_sampler_counter(&sampler_handle, "messages_in", $input_count).await;
+            tokio::time::advance(interval).await;
+            wait_for_sampler_counter(&sampler_handle, "messages_out", $output_count).await;
+        }};
+    }
+
+    send_sample_pair!(1, 2, 2, 1, "first");
+    send_sample_pair!(3, 4, 4, 2, "second");
+    send_sample_pair!(1, 2, 6, 3, "third");
+    send_sample_pair!(3, 4, 8, 4, "fourth");
+
+    let first = recv_next_json(&mut output, Duration::from_secs(1)).await;
+    assert_eq!(first, serde_json::json!([{"total": 6}, {"total": 6}]));
+
+    send_sample_pair!(0, 0, 10, 5, "fifth");
+    send_sample_pair!(5, 5, 12, 6, "sixth");
+    send_sample_pair!(0, 0, 14, 7, "seventh");
+    send_sample_pair!(5, 5, 16, 8, "eighth");
+
+    let second = recv_next_json(&mut output, Duration::from_secs(1)).await;
     assert_eq!(
-        sampler_stats.custom["messages_in"], 12,
+        second,
+        serde_json::json!([{"total": 5}, {"total": 5}]),
+        "streaming encoder batching should emit the second complete batch"
+    );
+
+    let sampler_stats = sampler_handle.snapshot().stats;
+    assert_eq!(
+        sampler_stats.custom["messages_in"], 16,
         "sampler should observe every raw input before streaming aggregation and batching"
     );
     assert_eq!(
-        sampler_stats.custom["messages_out"], 6,
+        sampler_stats.custom["messages_out"], 8,
         "sampler should still emit one sampled message per interval before downstream batching"
     );
 
