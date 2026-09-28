@@ -1,8 +1,12 @@
 use crate::func::WasmUdf;
-use crate::metadata::UdfMetadata;
-use std::sync::Arc;
+use crate::metadata::{UdfExecutionMode, UdfMetadata};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use thiserror::Error;
 use wasmtime::{Config, Engine, Linker, Module, Store};
+
+static GLOBAL_ENGINE: OnceLock<Engine> = OnceLock::new();
+static EPOCH_TICKER: OnceLock<Result<(), String>> = OnceLock::new();
 
 /// Global WASM execution engine shared across all UDF instances.
 ///
@@ -31,11 +35,38 @@ impl WasmEngine {
     /// Create a new engine with default safety limits.
     pub fn new() -> Result<Self, WasmError> {
         let mut config = Config::new();
-        // Enable fuel consumption for per-call budgeting (eval_row sets fuel).
-        // Epoch interruption is left disabled; we rely on fuel alone for timeout.
-        config.consume_fuel(true);
+        config.epoch_interruption(true);
 
-        let engine = Engine::new(&config)?;
+        let engine = match GLOBAL_ENGINE.get() {
+            Some(engine) => engine.clone(),
+            None => {
+                let candidate = Engine::new(&config)?;
+                let _ = GLOBAL_ENGINE.set(candidate);
+                GLOBAL_ENGINE.get().cloned().ok_or_else(|| {
+                    WasmError::Compile(wasmtime::Error::msg(
+                        "global WASM engine initialization failed",
+                    ))
+                })?
+            }
+        };
+
+        let ticker_result = EPOCH_TICKER.get_or_init(|| {
+            let engine_weak = engine.weak();
+            std::thread::Builder::new()
+                .name("wasm-udf-epoch".to_string())
+                .spawn(move || loop {
+                    std::thread::sleep(Duration::from_millis(10));
+                    let Some(engine) = engine_weak.upgrade() else {
+                        break;
+                    };
+                    engine.increment_epoch();
+                })
+                .map(|_| ())
+                .map_err(|error| format!("failed to start WASM epoch ticker: {error}"))
+        });
+        if let Err(error) = ticker_result {
+            return Err(WasmError::Compile(wasmtime::Error::msg(error.clone())));
+        }
 
         let mut linker = Linker::new(&engine);
         linker.func_wrap("host", "alloc", host_alloc)?;
@@ -56,7 +87,7 @@ impl WasmEngine {
         enforce_memory_cap(&module)?;
 
         let mut store = Store::new(&self.engine, ());
-        store.set_fuel(10_000_000).ok();
+        store.set_epoch_deadline(100);
         let instance = self.linker.instantiate(&mut store, &module)?;
 
         // Verify required exports exist
@@ -86,9 +117,7 @@ impl WasmEngine {
 
         let mut store = Store::new(&self.engine, ());
 
-        // Set a generous fuel budget for metadata reading.
-        // Per-call fuel is set separately in eval_row.
-        store.set_fuel(10_000_000)?;
+        store.set_epoch_deadline(100);
 
         let instance = self.linker.instantiate(&mut store, &module)?;
 
@@ -102,12 +131,12 @@ impl WasmEngine {
             });
         }
 
+        let instance_pre = self.linker.instantiate_pre(&module)?;
         WasmUdf::new(
             name.to_string(),
             metadata,
             self.engine.clone(),
-            module,
-            Arc::clone(&self.linker),
+            instance_pre,
         )
     }
 }
@@ -217,6 +246,17 @@ fn read_metadata(
 }
 
 fn validate_metadata(metadata: &UdfMetadata) -> Result<(), WasmError> {
+    if metadata.abi_version != 1 {
+        return Err(WasmError::InvalidMetadata(format!(
+            "unsupported ABI version: {}",
+            metadata.abi_version
+        )));
+    }
+    if metadata.execution_mode != UdfExecutionMode::Row {
+        return Err(WasmError::InvalidMetadata(
+            "only row execution mode is supported in this implementation".to_string(),
+        ));
+    }
     if metadata.name.trim().is_empty() {
         return Err(WasmError::InvalidMetadata(
             "UDF name must not be empty".to_string(),
@@ -274,13 +314,13 @@ mod tests {
                 (memory (export "memory") 1 256)
                 (data (i32.const 0) "\00\00\00\00")
 
-                ;; Metadata JSON at offset 128 (exactly 97 bytes)
-                (data (i32.const 128) "{\"name\":\"test_udf\",\"description\":\"minimal test\",\"args\":[],\"return_type\":\"any\",\"batch_mode\":false}")
+                ;; Metadata JSON at offset 128 (exactly 117 bytes)
+                (data (i32.const 128) "{\"abi_version\":1,\"name\":\"test_udf\",\"description\":\"minimal test\",\"args\":[],\"return_type\":\"any\",\"execution_mode\":\"row\"}")
 
                 (func (export "udf_metadata_ptr") (result i32)
                     i32.const 128)
                 (func (export "udf_metadata_len") (result i32)
-                    i32.const 97)
+                    i32.const 117)
 
                 ;; udf_row: allocates output, writes length header + copies data
                 (func (export "udf_row") (param $input_ptr i32) (param $input_len i32) (result i32)
@@ -337,5 +377,13 @@ mod tests {
             .instantiate("wrong_name", &wasm)
             .expect_err("should reject name mismatch");
         assert!(err.to_string().contains("wrong_name"));
+    }
+
+    #[test]
+    fn engines_share_process_global_wasm_engine() {
+        let first = WasmEngine::new().expect("create first engine");
+        let second = WasmEngine::new().expect("create second engine");
+
+        assert!(Engine::same(&first.engine, &second.engine));
     }
 }

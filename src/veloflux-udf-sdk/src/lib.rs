@@ -151,11 +151,12 @@ macro_rules! define_udf {
                     "type": $crate::type_name::<$arg_ty>(),
                 }));)*
                 let meta = $crate::serde_json::json!({
+                    "abi_version": 1,
                     "name": $name,
                     "description": $desc,
                     "args": args,
                     "return_type": $ret,
-                    "batch_mode": false,
+                    "execution_mode": "row",
                 });
                 $crate::serde_json::to_vec(&meta).unwrap()
             });

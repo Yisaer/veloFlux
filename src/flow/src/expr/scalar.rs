@@ -1,4 +1,4 @@
-use crate::expr::custom_func::CustomFunc;
+use crate::expr::custom_func::{CustomFunc, CustomFuncBindings};
 use crate::expr::func::{BinaryFunc, EvalError, UnaryFunc};
 use crate::model::{Collection, CollectionMetadata, Tuple};
 use crate::processor::processor_state::ProcessorState;
@@ -322,6 +322,53 @@ impl ScalarExpr {
                     WindowMetadataField::End => Ok(Value::Timestamp(window.end)),
                 }
             }
+        }
+    }
+
+    /// Bind processor-owned implementations to all custom functions in this expression.
+    pub fn bind_custom_functions(&mut self, bindings: &CustomFuncBindings) {
+        match self {
+            ScalarExpr::CallUnary { expr, .. } | ScalarExpr::FieldAccess { expr, .. } => {
+                expr.bind_custom_functions(bindings)
+            }
+            ScalarExpr::CallBinary { expr1, expr2, .. } => {
+                expr1.bind_custom_functions(bindings);
+                expr2.bind_custom_functions(bindings);
+            }
+            ScalarExpr::ListIndex { expr, index_expr } => {
+                expr.bind_custom_functions(bindings);
+                index_expr.bind_custom_functions(bindings);
+            }
+            ScalarExpr::CallFunc { func, args } => {
+                if let Some(bound) = bindings.get(func.name()) {
+                    *func = bound;
+                }
+                for arg in args {
+                    arg.bind_custom_functions(bindings);
+                }
+            }
+            ScalarExpr::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                if let Some(expr) = operand {
+                    expr.bind_custom_functions(bindings);
+                }
+                for (when_expr, then_expr) in when_then {
+                    when_expr.bind_custom_functions(bindings);
+                    then_expr.bind_custom_functions(bindings);
+                }
+                if let Some(expr) = else_expr {
+                    expr.bind_custom_functions(bindings);
+                }
+            }
+            ScalarExpr::Column(_)
+            | ScalarExpr::Wildcard { .. }
+            | ScalarExpr::Literal(_, _)
+            | ScalarExpr::PipelineState { .. }
+            | ScalarExpr::ProcessorState { .. }
+            | ScalarExpr::WindowMetadata { .. } => {}
         }
     }
 

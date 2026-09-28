@@ -11,11 +11,16 @@ use crate::catalog::FunctionDef;
 use crate::expr::func::EvalError;
 use datatypes::Value;
 
-pub use registry::CustomFuncRegistry;
+pub use registry::{CustomFuncBindings, CustomFuncRegistry};
 
 /// Custom function that can be implemented by users
 /// This trait allows users to define their own functions for evaluation
 pub trait CustomFunc: Send + Sync + std::fmt::Debug {
+    /// Create a processor-bound implementation for this function.
+    fn bind_runtime(&self) -> Result<Option<std::sync::Arc<dyn CustomFunc>>, String> {
+        Ok(None)
+    }
+
     /// Validate function arguments for a single row evaluation.
     ///
     /// # Arguments
@@ -36,7 +41,11 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
     /// # Returns
     ///
     /// Returns the evaluated result for the current row.
-    fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError>;
+    fn eval_row(&self, _args: &[Value]) -> Result<Value, EvalError> {
+        Err(EvalError::NotImplemented {
+            feature: "custom function runtime is not initialized".to_string(),
+        })
+    }
 
     /// Get the function name for debugging purposes
     fn name(&self) -> &str;

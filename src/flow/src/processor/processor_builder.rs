@@ -14,6 +14,7 @@ use crate::codec::{
     SinkEncryptionConfig,
 };
 use crate::connector::{ConnectorRegistry, MqttClientManager};
+use crate::expr::custom_func::{CustomFuncBindings, CustomFuncRegistry};
 use crate::pipeline::PipelineRuntimeFailure;
 use crate::planner::physical::{DataDomain, PhysicalPlan};
 use crate::processor::base::{
@@ -173,6 +174,7 @@ pub(crate) struct ProcessorPipelineDependencies {
     decoder_registry: Arc<DecoderRegistry>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     stateful_registry: Arc<StatefulFunctionRegistry>,
+    custom_func_registry: Arc<CustomFuncRegistry>,
     shared_stream_registry: Arc<SharedStreamRegistry>,
     spawner: TaskSpawner,
     property_registry: PropertyRegistry,
@@ -205,6 +207,7 @@ impl ProcessorPipelineDependencies {
             decoder_registry: registries.decoder_registry(),
             aggregate_registry: registries.aggregate_registry(),
             stateful_registry: registries.stateful_registry(),
+            custom_func_registry: registries.custom_func_registry(),
             shared_stream_registry,
             spawner,
             property_registry,
@@ -279,6 +282,7 @@ struct ProcessorBuilderContext {
     decoder_registry: Option<Arc<DecoderRegistry>>,
     aggregate_registry: Option<Arc<AggregateFunctionRegistry>>,
     stateful_registry: Option<Arc<StatefulFunctionRegistry>>,
+    custom_func_registry: Arc<CustomFuncRegistry>,
     shared_stream_registry: Option<Arc<SharedStreamRegistry>>,
     eventtime: Option<EventtimePipelineContext>,
     merger_registry: Option<Arc<MergerRegistry>>,
@@ -299,6 +303,11 @@ struct PipelineLinkKindCounts {
 }
 
 impl ProcessorBuilderContext {
+    fn custom_func_bindings(&self) -> Result<CustomFuncBindings, ProcessorError> {
+        CustomFuncBindings::from_registry(&self.custom_func_registry)
+            .map_err(ProcessorError::InvalidConfiguration)
+    }
+
     fn catalog(&self) -> Result<Arc<Catalog>, ProcessorError> {
         self.catalog.clone().ok_or_else(|| {
             ProcessorError::InvalidConfiguration("catalog unavailable for table scan".into())
@@ -1803,13 +1812,16 @@ fn create_processor_from_plan_node(
     plan: &Arc<PhysicalPlan>,
     context: &ProcessorBuilderContext,
 ) -> Result<ProcessorBuildOutput, ProcessorError> {
+    let bindings = context.custom_func_bindings()?;
+    let mut bound_plan = plan.as_ref().clone();
+    bound_plan.bind_custom_functions(&bindings);
     let plan_name = plan.get_plan_name();
     let channel_capacities = context.channel_capacities_for(plan.as_ref());
     let processor_id = context
         .shared_stream()
         .map(|opts| format!("shared:{}/{}", opts.stream_name, plan_name))
         .unwrap_or_else(|| plan_name.clone());
-    match plan.as_ref() {
+    match bound_plan {
         PhysicalPlan::DataSource(ds) => {
             let schema = ds.schema();
             let checkpoint_key = context.checkpoint_keys.get(&plan_name).ok_or_else(|| {
@@ -3017,6 +3029,7 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
             decoder_registry: None,
             aggregate_registry: None,
             stateful_registry: None,
+            custom_func_registry: CustomFuncRegistry::with_builtins(),
             shared_stream_registry: None,
             eventtime: None,
             merger_registry: Some(Arc::clone(&options.merger_registry)),
@@ -3054,6 +3067,7 @@ pub(crate) fn create_processor_pipeline(
             decoder_registry: Some(dependencies.decoder_registry),
             aggregate_registry: Some(dependencies.aggregate_registry),
             stateful_registry: Some(dependencies.stateful_registry),
+            custom_func_registry: dependencies.custom_func_registry,
             shared_stream_registry: Some(dependencies.shared_stream_registry),
             eventtime: dependencies.eventtime,
             merger_registry: Some(dependencies.merger_registry),
@@ -3402,6 +3416,7 @@ mod tests {
             decoder_registry: Some(decoder_registry),
             aggregate_registry: Some(aggregate_registry),
             stateful_registry: Some(stateful_registry),
+            custom_func_registry: CustomFuncRegistry::with_builtins(),
             shared_stream_registry: None,
             eventtime: None,
             merger_registry: None,

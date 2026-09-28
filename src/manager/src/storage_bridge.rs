@@ -512,6 +512,14 @@ fn load_wasm_udfs(
         let wasm_bytes =
             std::fs::read(&wasm_path).map_err(|e| format!("read {}: {e}", wasm_path.display()))?;
 
+        let actual_sha256 = sha256_hex(&wasm_bytes);
+        if actual_sha256 != udf.wasm_sha256 {
+            return Err(format!(
+                "WASM UDF '{}' hash mismatch: expected {}, got {}",
+                udf.name, udf.wasm_sha256, actual_sha256
+            ));
+        }
+
         let wasm_udf = engine
             .instantiate(&udf.name, &wasm_bytes)
             .map_err(|e| format!("instantiate UDF '{}': {e}", udf.name))?;
@@ -524,6 +532,15 @@ fn load_wasm_udfs(
     instance.set_custom_func_registry(registry);
 
     Ok(udfs.len())
+}
+
+#[cfg(feature = "wasm_udf")]
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    format!("{:x}", hasher.finalize())
 }
 
 pub(crate) async fn hydrate_runtime_from_storage(
@@ -636,6 +653,7 @@ mod tests {
     use crate::stream::CreateStreamRequest;
     use flow::FlowInstance;
     use serde_json::{Map as JsonMap, Value as JsonValue, json};
+    use storage::StoredUdf;
     use tempfile::tempdir;
 
     #[test]
@@ -677,6 +695,33 @@ mod tests {
         let decoded = mqtt_config_from_stored(&stored);
         assert_eq!(decoded.protocol_version, flow::MqttProtocolVersion::V5);
         assert_eq!(stored.revision, 7);
+    }
+
+    #[cfg(feature = "wasm_udf")]
+    #[tokio::test]
+    async fn startup_rejects_tampered_wasm_udf_file() {
+        let dir = tempdir().expect("create temporary directory");
+        let storage = StorageManager::new(dir.path()).expect("create storage");
+        storage
+            .create_udf(StoredUdf {
+                name: "tampered_udf".to_string(),
+                revision: 1,
+                wasm_sha256: "expected-hash".to_string(),
+                raw_json: "{}".to_string(),
+            })
+            .expect("store UDF metadata");
+        std::fs::write(
+            storage.wasm_files_dir().join("expected-hash.wasm"),
+            b"tampered module",
+        )
+        .expect("write tampered WASM file");
+
+        let instance = FlowInstance::new(
+            flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
+        )
+        .expect("create flow instance");
+        let error = load_wasm_udfs(&storage, &instance).expect_err("hash mismatch must fail");
+        assert!(error.contains("hash mismatch"));
     }
 
     fn sample_stream_request(name: &str) -> CreateStreamRequest {

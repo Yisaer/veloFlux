@@ -1,5 +1,8 @@
 use std::sync::Arc;
 
+use crate::expr::custom_func::CustomFuncBindings;
+use crate::expr::ScalarExpr;
+
 pub mod base_physical;
 pub mod output_layout;
 pub mod physical_aggregation;
@@ -128,6 +131,133 @@ pub enum PhysicalPlan {
 }
 
 impl PhysicalPlan {
+    /// Bind processor-owned implementations to all scalar functions in this node.
+    pub fn bind_custom_functions(&mut self, bindings: &CustomFuncBindings) {
+        fn bind_scalars(scalars: &mut [ScalarExpr], bindings: &CustomFuncBindings) {
+            for scalar in scalars {
+                scalar.bind_custom_functions(bindings);
+            }
+        }
+
+        fn bind_aggregate_calls(calls: &mut [AggregateCall], bindings: &CustomFuncBindings) {
+            for call in calls {
+                bind_scalars(&mut call.args, bindings);
+            }
+        }
+
+        match self {
+            PhysicalPlan::Filter(plan) => {
+                plan.scalar_predicate.bind_custom_functions(bindings);
+            }
+            PhysicalPlan::Compute(plan) => {
+                for field in &mut plan.fields {
+                    field.compiled_expr.bind_custom_functions(bindings);
+                }
+            }
+            PhysicalPlan::Order(plan) => {
+                for key in &mut plan.keys {
+                    key.compiled_expr.bind_custom_functions(bindings);
+                }
+            }
+            PhysicalPlan::Project(plan) => {
+                let fields = Arc::make_mut(&mut plan.fields);
+                for field in fields {
+                    field.compiled_expr.bind_custom_functions(bindings);
+                }
+            }
+            PhysicalPlan::Aggregation(plan) => {
+                bind_aggregate_calls(&mut plan.aggregate_calls, bindings);
+                bind_scalars(&mut plan.group_by_scalars, bindings);
+            }
+            PhysicalPlan::StatefulFunction(plan) => {
+                for call in &mut plan.calls {
+                    bind_scalars(&mut call.arg_scalars, bindings);
+                    if let Some(expr) = &mut call.when_scalar {
+                        expr.bind_custom_functions(bindings);
+                    }
+                    bind_scalars(&mut call.partition_by_scalars, bindings);
+                }
+            }
+            PhysicalPlan::StreamingAggregation(plan) => {
+                bind_aggregate_calls(&mut plan.aggregate_calls, bindings);
+                bind_scalars(&mut plan.group_by_scalars, bindings);
+                match &mut plan.window {
+                    StreamingWindowSpec::Tumbling {
+                        partition_by_scalars,
+                        ..
+                    }
+                    | StreamingWindowSpec::Count {
+                        partition_by_scalars,
+                        ..
+                    } => bind_scalars(partition_by_scalars, bindings),
+                    StreamingWindowSpec::Sliding {
+                        partition_by_scalars,
+                        trigger_condition_scalar,
+                        ..
+                    } => {
+                        bind_scalars(partition_by_scalars, bindings);
+                        if let Some(expr) = trigger_condition_scalar {
+                            expr.bind_custom_functions(bindings);
+                        }
+                    }
+                    StreamingWindowSpec::State {
+                        open_scalar,
+                        emit_scalar,
+                        partition_by_scalars,
+                        ..
+                    } => {
+                        open_scalar.bind_custom_functions(bindings);
+                        emit_scalar.bind_custom_functions(bindings);
+                        bind_scalars(partition_by_scalars, bindings);
+                    }
+                    StreamingWindowSpec::Eos => {}
+                }
+            }
+            PhysicalPlan::TumblingWindow(plan) => {
+                bind_scalars(&mut plan.partition_by_scalars, bindings);
+            }
+            PhysicalPlan::CountWindow(plan) => {
+                bind_scalars(&mut plan.partition_by_scalars, bindings);
+            }
+            PhysicalPlan::SlidingWindow(plan) => {
+                bind_scalars(&mut plan.partition_by_scalars, bindings);
+                if let Some(expr) = &mut plan.trigger_condition_scalar {
+                    expr.bind_custom_functions(bindings);
+                }
+            }
+            PhysicalPlan::StateWindow(plan) => {
+                bind_scalars(&mut plan.partition_by_scalars, bindings);
+                plan.open_scalar.bind_custom_functions(bindings);
+                plan.emit_scalar.bind_custom_functions(bindings);
+            }
+            PhysicalPlan::DataSource(_)
+            | PhysicalPlan::TableScan(_)
+            | PhysicalPlan::Decoder(_)
+            | PhysicalPlan::CollectionLayoutNormalize(_)
+            | PhysicalPlan::MemoryCollectionMaterialize(_)
+            | PhysicalPlan::LookupJoin(_)
+            | PhysicalPlan::RowDiff(_)
+            | PhysicalPlan::ColumnFilter(_)
+            | PhysicalPlan::EmptySuppress(_)
+            | PhysicalPlan::SharedStream(_)
+            | PhysicalPlan::SourceChangeGate(_)
+            | PhysicalPlan::Batch(_)
+            | PhysicalPlan::DataSink(_)
+            | PhysicalPlan::SinkConnector(_)
+            | PhysicalPlan::SinkEncoder(_)
+            | PhysicalPlan::IncSinkEncoder(_)
+            | PhysicalPlan::SinkCompress(_)
+            | PhysicalPlan::SinkEncrypt(_)
+            | PhysicalPlan::ResultCollect(_)
+            | PhysicalPlan::Barrier(_)
+            | PhysicalPlan::EosWindow(_)
+            | PhysicalPlan::ProcessTimeWatermark(_)
+            | PhysicalPlan::EventtimeWatermark(_)
+            | PhysicalPlan::Watermark(_)
+            | PhysicalPlan::Sampler(_) => {}
+        }
+    }
+
     /// Get the children of this physical plan
     pub fn children(&self) -> &[Arc<PhysicalPlan>] {
         match self {

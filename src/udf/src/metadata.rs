@@ -6,23 +6,28 @@ use serde::{Deserialize, Serialize};
 /// pointing to a JSON blob matching this struct.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UdfMetadata {
+    /// Host/WASM ABI contract version.
+    pub abi_version: u32,
     /// Canonical function name (must match the externally assigned name).
     pub name: String,
     /// Human-readable description.
     #[serde(default)]
     pub description: String,
-    /// Additional SQL-visible aliases for this function.
-    #[serde(default)]
-    pub aliases: Vec<String>,
     /// Argument descriptors in call order.
     #[serde(default)]
     pub args: Vec<UdfArg>,
     /// Expected return type.
     #[serde(default)]
     pub return_type: String,
-    /// Whether this UDF supports batch evaluation.
-    #[serde(default)]
-    pub batch_mode: bool,
+    /// Execution mode declared by the module.
+    pub execution_mode: UdfExecutionMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UdfExecutionMode {
+    Row,
+    Batch,
 }
 
 /// Descriptor for a single argument.

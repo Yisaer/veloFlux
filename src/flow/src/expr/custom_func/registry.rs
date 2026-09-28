@@ -36,8 +36,49 @@ use super::misc_func::{
 
 use super::CustomFunc;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Processor-bound function implementations.
+///
+/// Built-in functions remain stateless definitions. WASM definitions are
+/// replaced with implementations that own the processor-local WASM runtime.
+pub struct CustomFuncBindings {
+    functions: HashMap<String, Arc<dyn CustomFunc>>,
+}
+
+impl CustomFuncBindings {
+    pub fn empty() -> Self {
+        Self {
+            functions: HashMap::new(),
+        }
+    }
+
+    pub fn from_registry(registry: &CustomFuncRegistry) -> Result<Self, String> {
+        let mut functions = HashMap::new();
+        let mut created = HashSet::new();
+        for func in registry.functions.values() {
+            let name = func.name().to_lowercase();
+            if !created.insert(name.clone()) {
+                continue;
+            }
+            if let Some(bound) = func.bind_runtime()? {
+                functions.insert(name, bound);
+            }
+        }
+        Ok(Self { functions })
+    }
+
+    pub fn get(&self, name: &str) -> Option<Arc<dyn CustomFunc>> {
+        self.functions.get(&name.to_lowercase()).cloned()
+    }
+}
+
+impl Default for CustomFuncBindings {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
 
 /// Registry for scalar custom functions referenced in SQL (e.g. `concat(a, b)`).
 pub struct CustomFuncRegistry {

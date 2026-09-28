@@ -11,5 +11,5 @@ pub mod metadata;
 
 pub use abi::AbiError;
 pub use engine::{WasmEngine, WasmError};
-pub use func::WasmUdf;
-pub use metadata::{UdfArg, UdfMetadata};
+pub use func::{WasmUdf, WasmUdfDefinition, WasmUdfEvaluator, WasmUdfRuntime};
+pub use metadata::{UdfArg, UdfExecutionMode, UdfMetadata};

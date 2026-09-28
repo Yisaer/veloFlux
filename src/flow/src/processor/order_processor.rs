@@ -262,7 +262,11 @@ impl Processor for OrderProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let handle_start = std::time::Instant::now();
-                                        match Self::apply_order(physical_order.as_ref(), collection, Some(stats.as_ref())) {
+                                        match Self::apply_order(
+                                            physical_order.as_ref(),
+                                            collection,
+                                            Some(stats.as_ref()),
+                                        ) {
                                             Ok(out_collection) => {
                                                 let out = StreamData::collection(out_collection);
                                                 let out_rows = out.row_count();

@@ -3,8 +3,10 @@ use crate::metadata::UdfMetadata;
 use datatypes::Value;
 use flow::expr::custom_func::CustomFunc;
 use flow::expr::func::EvalError;
-use std::sync::Arc;
-use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
+use std::sync::{Arc, Mutex};
+use wasmtime::{Engine, InstancePre, Memory, Store, TypedFunc};
+
+const HEAP_START: u32 = 4;
 
 /// A user-defined function backed by a WASM module.
 ///
@@ -15,12 +17,10 @@ pub struct WasmUdf {
     metadata: UdfMetadata,
     /// Wasmtime engine (shared across all UDFs).
     engine: Engine,
-    /// Compiled WASM module (cheap to instantiate per-call).
-    module: Module,
-    /// Host function linker (shared, pre-seeded with host functions).
-    linker: Arc<Linker<()>>,
-    /// Fuel budget per `eval_row` call.
-    fuel_per_call: u64,
+    /// Pre-linked instantiation plan reused by processor-owned runtimes.
+    instance_pre: InstancePre<()>,
+    /// Epoch ticks allowed for one `eval_row` call.
+    epoch_ticks_per_call: u64,
 }
 
 impl std::fmt::Debug for WasmUdf {
@@ -28,38 +28,33 @@ impl std::fmt::Debug for WasmUdf {
         f.debug_struct("WasmUdf")
             .field("name", &self.name)
             .field("metadata", &self.metadata)
-            .field("fuel_per_call", &self.fuel_per_call)
+            .field("epoch_ticks_per_call", &self.epoch_ticks_per_call)
             .finish_non_exhaustive()
     }
 }
 
 impl WasmUdf {
-    /// Default fuel budget per `eval_row` call.
-    pub const DEFAULT_FUEL_PER_CALL: u64 = 100_000;
+    /// Default epoch budget per `eval_row` call.
+    pub const DEFAULT_EPOCH_TICKS_PER_CALL: u64 = 10;
 
     /// Create a new WasmUdf.
     pub(crate) fn new(
         name: String,
         metadata: UdfMetadata,
         engine: Engine,
-        module: Module,
-        linker: Arc<Linker<()>>,
+        instance_pre: InstancePre<()>,
     ) -> Result<Self, super::engine::WasmError> {
         Ok(Self {
             name,
             metadata,
             engine,
-            module,
-            linker,
-            fuel_per_call: Self::DEFAULT_FUEL_PER_CALL,
+            instance_pre,
+            epoch_ticks_per_call: Self::DEFAULT_EPOCH_TICKS_PER_CALL,
         })
     }
 
-    /// Set the fuel budget per row evaluation.
-    #[allow(dead_code)]
-    pub fn with_fuel_per_call(mut self, fuel: u64) -> Self {
-        self.fuel_per_call = fuel;
-        self
+    pub(crate) fn create_runtime(&self) -> Result<WasmUdfRuntime, EvalError> {
+        WasmUdfRuntime::new(self)
     }
 
     /// Bump-allocate `size` bytes in WASM linear memory.
@@ -70,7 +65,6 @@ impl WasmUdf {
             return Ok(0);
         }
         let size = size as u32;
-        const HEAP_START: u32 = 4;
         const PAGE_SIZE: u64 = 65536;
         const MAX_PAGES: u64 = 256;
 
@@ -124,6 +118,18 @@ impl WasmUdf {
 }
 
 impl CustomFunc for WasmUdf {
+    fn bind_runtime(&self) -> Result<Option<Arc<dyn CustomFunc>>, String> {
+        self.create_runtime()
+            .map(|runtime| {
+                Some(Arc::new(BoundWasmUdf {
+                    name: self.name.clone(),
+                    metadata: self.metadata.clone(),
+                    runtime: Mutex::new(runtime),
+                }) as Arc<dyn CustomFunc>)
+            })
+            .map_err(|error| error.to_string())
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         let expected = self.metadata.args.len();
         let actual = args.len();
@@ -136,40 +142,122 @@ impl CustomFunc for WasmUdf {
         Ok(())
     }
 
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl WasmUdf {
+    fn instance_pre(&self) -> &InstancePre<()> {
+        &self.instance_pre
+    }
+}
+
+/// A worker-owned WASM execution state for one UDF definition.
+pub struct WasmUdfRuntime {
+    store: Store<()>,
+    memory: Memory,
+    udf_row: TypedFunc<(i32, i32), i32>,
+    epoch_ticks_per_call: u64,
+}
+
+/// Explicit architecture name for the immutable registry-side UDF definition.
+pub type WasmUdfDefinition = WasmUdf;
+
+/// Explicit architecture name for the worker-owned evaluator.
+pub type WasmUdfEvaluator = WasmUdfRuntime;
+
+struct BoundWasmUdf {
+    name: String,
+    metadata: UdfMetadata,
+    runtime: Mutex<WasmUdfRuntime>,
+}
+
+impl std::fmt::Debug for BoundWasmUdf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundWasmUdf")
+            .field("name", &self.name)
+            .field("metadata", &self.metadata)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CustomFunc for BoundWasmUdf {
+    fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
+        let expected = self.metadata.args.len();
+        if expected > 0 && args.len() != expected {
+            return Err(EvalError::TypeMismatch {
+                expected: format!("{} arguments", expected),
+                actual: args.len().to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        // NOTE: This creates a new Store + instantiates the WASM module on every
-        // row evaluation. This is orders of magnitude more expensive than the
-        // built-in scalar function path. For the initial MVP this is acceptable;
-        // a follow-up must implement InstancePre caching or a Store/Instance pool
-        // before WASM UDFs can be treated as production-ready for streaming
-        // workloads. See docs/integrations/wasm-udf.md#performance.
-        let mut store = Store::new(&self.engine, ());
-        store
-            .set_fuel(self.fuel_per_call)
-            .map_err(|e| EvalError::NotImplemented {
-                feature: format!("fuel budget: {e}"),
-            })?;
+        self.runtime
+            .lock()
+            .map_err(|_| EvalError::NotImplemented {
+                feature: "WASM UDF runtime lock poisoned".to_string(),
+            })?
+            .eval_row(args)
+    }
 
-        // Instantiate the module into this store
-        let instance = self
-            .linker
-            .instantiate(&mut store, &self.module)
-            .map_err(|e| EvalError::NotImplemented {
-                feature: format!("instantiation: {e}"),
-            })?;
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
 
+impl WasmUdfRuntime {
+    fn new(udf: &WasmUdf) -> Result<Self, EvalError> {
+        let mut store = Store::new(&udf.engine, ());
+        store.set_epoch_deadline(udf.epoch_ticks_per_call);
+        let instance =
+            udf.instance_pre()
+                .instantiate(&mut store)
+                .map_err(|e| EvalError::NotImplemented {
+                    feature: format!("instantiation: {e}"),
+                })?;
         let memory =
             instance
                 .get_memory(&mut store, "memory")
                 .ok_or_else(|| EvalError::NotImplemented {
                     feature: "missing WASM memory export".to_string(),
                 })?;
-
-        let udf_row: TypedFunc<(i32, i32), i32> = instance
+        let udf_row = instance
             .get_typed_func(&mut store, "udf_row")
             .map_err(|e| EvalError::NotImplemented {
                 feature: format!("udf_row function: {e}"),
             })?;
+        Ok(Self {
+            store,
+            memory,
+            udf_row,
+            epoch_ticks_per_call: udf.epoch_ticks_per_call,
+        })
+    }
+
+    fn reset_scratch_arena(&mut self) -> Result<(), EvalError> {
+        self.memory
+            .write(&mut self.store, 0, &HEAP_START.to_le_bytes())
+            .map_err(|e| EvalError::NotImplemented {
+                feature: format!("reset WASM scratch arena: {e}"),
+            })
+    }
+
+    fn eval_row(&mut self, args: &[Value]) -> Result<Value, EvalError> {
+        let result = self.eval_row_inner(args);
+        let reset_result = self.reset_scratch_arena();
+
+        match (result, reset_result) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(value), Ok(())) => Ok(value),
+        }
+    }
+
+    fn eval_row_inner(&mut self, args: &[Value]) -> Result<Value, EvalError> {
+        self.store.set_epoch_deadline(self.epoch_ticks_per_call);
 
         // Serialize arguments to JSON
         let input_json = serialize_args(args).map_err(|e| EvalError::TypeMismatch {
@@ -180,7 +268,7 @@ impl CustomFunc for WasmUdf {
         let input_len = input_json.len() as i32;
 
         // Allocate memory in WASM via direct bump allocator
-        let input_ptr = Self::wasm_alloc(&memory, &mut store, input_len)?;
+        let input_ptr = WasmUdf::wasm_alloc(&self.memory, &mut self.store, input_len)?;
         if input_ptr == 0 && input_len > 0 {
             return Err(EvalError::NotImplemented {
                 feature: "alloc returned null".to_string(),
@@ -188,25 +276,18 @@ impl CustomFunc for WasmUdf {
         }
 
         // Write input JSON to WASM memory
-        memory
-            .write(&mut store, input_ptr as usize, &input_json)
+        self.memory
+            .write(&mut self.store, input_ptr as usize, &input_json)
             .map_err(|e| EvalError::NotImplemented {
                 feature: format!("failed to write input to WASM memory: {e}"),
             })?;
 
         // Call the UDF
-        let result_ptr = udf_row
-            .call(&mut store, (input_ptr, input_len))
-            .map_err(|e| {
-                if store.get_fuel().unwrap_or(0) == 0 {
-                    EvalError::NotImplemented {
-                        feature: "UDF exceeded fuel budget (timeout)".to_string(),
-                    }
-                } else {
-                    EvalError::NotImplemented {
-                        feature: format!("UDF evaluation failed: {e}"),
-                    }
-                }
+        let result_ptr = self
+            .udf_row
+            .call(&mut self.store, (input_ptr, input_len))
+            .map_err(|e| EvalError::NotImplemented {
+                feature: format!("UDF evaluation failed or timed out: {e}"),
             })?;
 
         if result_ptr == 0 {
@@ -220,8 +301,8 @@ impl CustomFunc for WasmUdf {
         // and returns pointer to the data (buffer + 4).
         let len_offset = (result_ptr as usize).saturating_sub(4);
         let mut len_bytes = [0u8; 4];
-        memory
-            .read(&store, len_offset, &mut len_bytes)
+        self.memory
+            .read(&self.store, len_offset, &mut len_bytes)
             .map_err(|e| EvalError::NotImplemented {
                 feature: format!("failed to read result length: {e}"),
             })?;
@@ -235,8 +316,8 @@ impl CustomFunc for WasmUdf {
         }
 
         let mut result_buf = vec![0u8; result_len as usize];
-        memory
-            .read(&store, result_ptr as usize, &mut result_buf)
+        self.memory
+            .read(&self.store, result_ptr as usize, &mut result_buf)
             .map_err(|e| EvalError::NotImplemented {
                 feature: format!("failed to read result: {e}"),
             })?;
@@ -245,14 +326,6 @@ impl CustomFunc for WasmUdf {
             expected: "valid JSON result".to_string(),
             actual: e.to_string(),
         })
-    }
-
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    fn aliases(&self) -> &'static [&'static str] {
-        &[]
     }
 }
 
@@ -273,13 +346,13 @@ mod tests {
                 (memory (export "memory") 1 256)
                 (data (i32.const 0) "\00\00\00\00")
 
-                ;; Metadata JSON at offset 128 (exactly 118 bytes)
-                (data (i32.const 128) "{\"name\":\"test_udf\",\"description\":\"identity\",\"args\":[{\"name\":\"x\",\"type\":\"any\"}],\"return_type\":\"any\",\"batch_mode\":false}")
+                ;; Metadata JSON at offset 128 (exactly 138 bytes)
+                (data (i32.const 128) "{\"abi_version\":1,\"name\":\"test_udf\",\"description\":\"identity\",\"args\":[{\"name\":\"x\",\"type\":\"any\"}],\"return_type\":\"any\",\"execution_mode\":\"row\"}")
 
                 (func (export "udf_metadata_ptr") (result i32)
                     i32.const 128)
                 (func (export "udf_metadata_len") (result i32)
-                    i32.const 118)
+                    i32.const 138)
 
                 ;; udf_row: allocates output, writes length header + copies data
                 (func (export "udf_row") (param $input_ptr i32) (param $input_len i32) (result i32)
@@ -311,11 +384,40 @@ mod tests {
         .into()
     }
 
+    fn looping_wasm_module() -> Vec<u8> {
+        wat::parse_str(
+            r#"
+            (module
+                (import "host" "alloc" (func $alloc (param i32) (result i32)))
+
+                (memory (export "memory") 1 1)
+                (data (i32.const 128) "{\"abi_version\":1,\"name\":\"loop_udf\",\"description\":\"loop\",\"args\":[],\"return_type\":\"any\",\"execution_mode\":\"row\"}")
+
+                (func (export "udf_metadata_ptr") (result i32)
+                    i32.const 128)
+                (func (export "udf_metadata_len") (result i32)
+                    i32.const 109)
+
+                (func (export "udf_row") (param i32) (param i32) (result i32)
+                    (loop
+                        br 0)
+                    unreachable)
+            )
+            "#,
+        )
+        .expect("wat parse")
+        .into()
+    }
+
     #[test]
     fn identity_udf_int64() {
         let engine = WasmEngine::new().expect("create engine");
         let wasm = identity_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
+        let udf = udf
+            .bind_runtime()
+            .expect("bind runtime")
+            .expect("WASM runtime");
 
         let input = vec![Value::Int64(42)];
         let result = udf.eval_row(&input).expect("eval_row");
@@ -327,6 +429,10 @@ mod tests {
         let engine = WasmEngine::new().expect("create engine");
         let wasm = identity_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
+        let udf = udf
+            .bind_runtime()
+            .expect("bind runtime")
+            .expect("WASM runtime");
 
         let input = vec![Value::String("hello wasm".to_string())];
         let result = udf.eval_row(&input).expect("eval_row");
@@ -338,6 +444,10 @@ mod tests {
         let engine = WasmEngine::new().expect("create engine");
         let wasm = identity_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
+        let udf = udf
+            .bind_runtime()
+            .expect("bind runtime")
+            .expect("WASM runtime");
 
         let input = vec![Value::Float64(3.14)];
         let result = udf.eval_row(&input).expect("eval_row");
@@ -349,6 +459,10 @@ mod tests {
         let engine = WasmEngine::new().expect("create engine");
         let wasm = identity_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
+        let udf = udf
+            .bind_runtime()
+            .expect("bind runtime")
+            .expect("WASM runtime");
 
         let input = vec![Value::Bool(true)];
         let result = udf.eval_row(&input).expect("eval_row");
@@ -366,12 +480,50 @@ mod tests {
         let engine = WasmEngine::new().expect("create engine");
         let wasm = identity_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
+        let udf = udf
+            .bind_runtime()
+            .expect("bind runtime")
+            .expect("WASM runtime");
 
         for i in 0..10 {
             let input = vec![Value::Int64(i)];
             let result = udf.eval_row(&input).expect("eval_row");
             assert_eq!(result, Value::Int64(i), "failed at iteration {i}");
         }
+    }
+
+    #[test]
+    fn repeated_calls_reuse_linear_memory() {
+        let engine = WasmEngine::new().expect("create engine");
+        let wasm = identity_wasm_module();
+        let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
+        let mut runtime = WasmUdfRuntime::new(&udf).expect("create runtime");
+        let initial_pages = runtime.memory.size(&runtime.store);
+
+        for i in 0..10_000 {
+            let result = runtime
+                .eval_row(&[Value::Int64(i)])
+                .expect("eval_row should reuse scratch memory");
+            assert_eq!(result, Value::Int64(i));
+        }
+
+        assert_eq!(runtime.memory.size(&runtime.store), initial_pages);
+    }
+
+    #[test]
+    fn infinite_wasm_call_is_interrupted() {
+        let engine = WasmEngine::new().expect("create engine");
+        let wasm = looping_wasm_module();
+        let udf = engine.instantiate("loop_udf", &wasm).expect("instantiate");
+        let udf = udf
+            .bind_runtime()
+            .expect("bind runtime")
+            .expect("WASM runtime");
+
+        let error = udf
+            .eval_row(&[])
+            .expect_err("infinite call should time out");
+        assert!(error.to_string().contains("timed out"));
     }
 
     // ── large data (triggers memory growth) ───────────────────────
@@ -381,6 +533,10 @@ mod tests {
         let engine = WasmEngine::new().expect("create engine");
         let wasm = identity_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
+        let udf = udf
+            .bind_runtime()
+            .expect("bind runtime")
+            .expect("WASM runtime");
 
         // 10 KB string — one WASM page is 64 KB, but input + output + allocator
         // bookkeeping should still fit in one page.
