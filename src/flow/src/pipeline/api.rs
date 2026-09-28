@@ -1,7 +1,7 @@
 use crate::catalog::Catalog;
 use crate::codec::{CompressionCodec, SinkEncryptionConfig};
-pub use crate::planner::sink::SinkRetryConfig;
 use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig, SinkOutputConfig};
+pub use crate::planner::sink::{SinkRetryConfig, SinkRetryUpTo};
 use crate::template::ConnectorString;
 use crate::PipelineRegistries;
 use std::collections::{BTreeMap, HashMap};

@@ -14,6 +14,9 @@ Some deployments need to write streaming VSS signal values to a kura server. vel
 Kura sink that consumes decoded rows (`Collection` / `Tuple`) and publishes updates using the
 [yoriito VISS v1 producer](https://github.com/yoriito/yoriito-viss) gRPC `SetCurrent` RPC.
 
+The Kura sink sends collections directly. Its connector errors do not currently pass through the
+encoded delivery [retry policy](../retry.md).
+
 Key requirements:
 
 - Sink consumes decoded values directly (no byte encoding step).

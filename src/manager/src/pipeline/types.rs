@@ -4,8 +4,8 @@ use flow::codec::{
     SinkEncryptionConfig,
 };
 use flow::pipeline::{
-    HttpBodyConfig, HttpMultipartConfig, SinkRetryConfig, SourceDefinition, SourceInputConfig,
-    SourceInputMode, SourceOnChangeConfig,
+    HttpBodyConfig, HttpMultipartConfig, SinkRetryConfig, SinkRetryUpTo, SourceDefinition,
+    SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
 };
 use flow::planner::sink::{
     CommonSinkProps, SinkDeltaOutputConfig, SinkOutputConfig, SinkOutputMode,
@@ -507,6 +507,8 @@ pub struct SinkDeliveryConfigRequest {
 #[serde(deny_unknown_fields)]
 pub struct SinkRetryConfigRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_up_to: Option<SinkRetryUpTo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub max_attempts: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub initial_backoff_ms: Option<u64>,
@@ -517,11 +519,16 @@ pub struct SinkRetryConfigRequest {
 }
 
 impl SinkRetryConfigRequest {
-    pub(super) fn to_retry_config(&self) -> Result<SinkRetryConfig, String> {
-        let mut config = SinkRetryConfig {
-            max_attempts: self.max_attempts,
-            ..SinkRetryConfig::default()
-        };
+    pub(super) fn to_retry_config(
+        &self,
+        mut config: SinkRetryConfig,
+    ) -> Result<SinkRetryConfig, String> {
+        if let Some(retry_up_to) = self.retry_up_to {
+            config.retry_up_to = retry_up_to;
+        }
+        if let Some(max_attempts) = self.max_attempts {
+            config.max_attempts = Some(max_attempts);
+        }
         if let Some(initial_backoff_ms) = self.initial_backoff_ms {
             config.initial_backoff_ms = initial_backoff_ms;
         }

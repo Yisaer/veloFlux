@@ -290,8 +290,9 @@ combined with OR semantics.
 `type == "http"`:
 
 Delivers encoded payloads to a remote HTTP endpoint. Each delivery unit is sent as a
-single HTTP request. The sink supports configurable retry with exponential backoff
-and random jitter for transient failures (network errors, 5xx, 429).
+single HTTP request. The common sink-level `retry` object controls eligible error classes and
+the attempt count independently. Retry uses deterministic exponential backoff; `jitter` is
+accepted but is not applied yet.
 
 - `url: string` (required) — target URL (e.g. `https://example.com/api/metrics`)
 - Optional `method: string` (default: `"POST"`) — HTTP method: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`
@@ -317,6 +318,17 @@ and random jitter for transient failures (network errors, 5xx, 429).
   retries, doubles after each failed attempt.
 - Optional `retry_max_backoff_ms: number` (default: `30000`) — upper bound on backoff duration.
 
+The common sink-level `retry.retry_up_to` accepts `transient`, `uncertain` (default), or `all`.
+`transient` retries connect/timeout/408/429/502/503/504 failures; `uncertain` also retries
+other reqwest send failures and ambiguous remote responses such as 500 and 404. `all` also retries
+`Permanent` delivery errors; startup validation errors still fail before delivery retry begins.
+The shared `retry.max_attempts` includes the first attempt, defaults to one attempt, and rejects
+`0`. The legacy HTTP `retry_*` fields above still configure the same shared attempt count and
+backoff. An empty common `retry` object or `max_attempts: null` leaves a legacy
+`retry_max_attempts` value in place; set `retry.max_attempts` to `1` to make a single attempt.
+The sink retry processor applies to encoded deliveries; collection-native sinks currently
+send each collection once.
+
 **Example — basic JSON POST:**
 
 ```json
@@ -339,10 +351,13 @@ and random jitter for transient failures (network errors, 5xx, 429).
     "url": "https://example.com/api/submit",
     "method": "PUT",
     "timeout_secs": 10,
-    "auth": { "type": "bearer", "token": "store:submit-api-token" },
-    "retry_max_attempts": 3,
-    "retry_backoff_ms": 500,
-    "retry_max_backoff_ms": 10000
+    "auth": { "type": "bearer", "token": "store:submit-api-token" }
+  },
+  "retry": {
+    "retry_up_to": "uncertain",
+    "max_attempts": 3,
+    "initial_backoff_ms": 500,
+    "max_backoff_ms": 10000
   },
   "encoder": { "type": "json", "props": {} }
 }

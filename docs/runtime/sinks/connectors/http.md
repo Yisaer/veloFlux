@@ -39,6 +39,7 @@ HTTP sink definitions accept:
 - Optional `max_body_size` (default: 64 MiB) — single-delivery body limit
 - Optional `body` (default: `{ "type": "raw" }`) — raw or multipart request body mode
 - Optional common sink-level `retry` config:
+  - `retry_up_to` (default: `uncertain`) — `transient`, `uncertain`, or `all`; selects eligible errors
   - `max_attempts` (default: none) — maximum delivery attempts including the first
   - `initial_backoff_ms` (default: `1000`) — initial backoff, doubles each retry
   - `max_backoff_ms` (default: `30000`) — backoff upper bound
@@ -131,9 +132,10 @@ finish_delivery()
   └─ raw: send buffer as the complete HTTP body
   └─ multipart: send buffer as one file part with static text parts
      └─ on 2xx: return DeliveryResult
-     └─ on 5xx/429: return SinkConnectorError::Transient
-     └─ on 4xx (not 429): return SinkConnectorError::Permanent
-     └─ on network error: return SinkConnectorError::Transient
+     └─ on 408/429/502/503/504: return SinkConnectorError::Transient
+     └─ on 500/404/other non-success status: return SinkConnectorError::Uncertain
+     └─ on connect/timeout error: return SinkConnectorError::Transient
+     └─ on other reqwest send error: return SinkConnectorError::Uncertain
 
 abort_delivery()
   └─ buffer.clear()                 // discard partial delivery
@@ -145,20 +147,21 @@ Retry is implemented by `SinkProcessor`, not by the HTTP connector. The HTTP con
 request per `finish_delivery()` call and classifies failures so the processor can make the retry
 decision.
 
-Retryable HTTP failures include:
+HTTP error classification and retry eligibility:
 
-| Category | Examples | Retried |
-|---|---|---|
-| Network failures | connection refused, DNS resolution, timeout | ✅ |
-| Server errors | 500, 502, 503, 504 | ✅ |
-| Rate limiting | 429 Too Many Requests | ✅ |
-| Client errors | 400, 401, 403, 404 | ❌ |
+| Class | Examples | `transient` | `uncertain` (default) | `all` |
+|---|---|---|---|---|
+| `Transient` | connect failure, timeout, 408, 429, 502, 503, 504 | retry | retry | retry |
+| `Uncertain` | other reqwest send failures; 500, 404, other remote non-success responses | stop | retry | retry |
+| `Permanent` | invalid per-delivery template or oversized payload | stop | stop | retry |
+
+Invalid static URLs fail during connector startup, before delivery retry begins.
 
 Retry uses deterministic exponential backoff:
 
 1. First attempt fails → wait `initial_backoff_ms`
 2. Backoff doubles each attempt, capped at `max_backoff_ms`
-3. Loop until success or `max_attempts` exhausted
+3. Loop until success, an ineligible error, or `max_attempts` exhausted
 
 When retry is not configured (`retry.max_attempts` unset), each delivery is attempted exactly once.
 
@@ -226,11 +229,12 @@ envelope overhead.
 ## Error Handling
 
 - URL validation occurs in `ready()`. Invalid URLs are rejected before the pipeline is started.
-- Permanent errors (4xx client errors) are propagated as `SinkConnectorError::Permanent`.
-- Transient errors (network errors, 5xx, 429) are propagated as `SinkConnectorError::Transient`.
-- Connector errors are classified for logs and metrics. The processor retries every connector
-  delivery error until `max_attempts` is exhausted.
-- Exhausted retries are logged, then the delivery is dropped and processing continues.
+- Proven local validation failures are propagated as `SinkConnectorError::Permanent`.
+- Connect/timeout/408/429/502/503/504 failures are propagated as `Transient`.
+- Other reqwest send errors are propagated as `Uncertain` because the remote outcome may be unknown.
+- Other remote non-success responses, including 500 and 404, are propagated as `Uncertain`.
+- The processor applies `retry_up_to` and `max_attempts` independently. Ineligible errors or
+  exhausted retries are logged; ordinary deliveries are dropped and processing continues.
 
 ## Testing
 

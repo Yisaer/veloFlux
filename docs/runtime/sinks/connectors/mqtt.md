@@ -195,6 +195,18 @@ See:
 
 Connection establishment is lazy. The sink initializes its client on `ready` or first send.
 
+For encoded deliveries, the connector reports these classes to the common
+[sink retry policy](../retry.md):
+
+| Class | Examples |
+|---|---|
+| `Transient` | Disconnected or not yet connected, outgoing limit unknown before CONNACK, publish API failure. |
+| `Uncertain` | Unclassified `Other` errors, including client acquisition or internal state failures. |
+| `Permanent` | Invalid topic, QoS, or user properties; publish packet over the current connection or MQTT protocol size limit. |
+
+The connection limit is treated as a hard bound for the current delivery. Startup failures during
+`ready` fail before the delivery retry policy applies.
+
 Standalone sink behavior:
 
 - background event loop tracks connection state and reconnects with exponential backoff
@@ -209,8 +221,7 @@ Shared-client-backed sink behavior:
 - close only releases the acquired shared handle; the underlying shared client remains alive until
   all holders release it
 
-At the sink-processor layer, repeated readiness failures are logged and data may be dropped until
-the connector becomes ready again.
+An error from `ready` fails sink startup. Delivery errors follow `retry_up_to` and `max_attempts`.
 
 ## Testing Guidance
 

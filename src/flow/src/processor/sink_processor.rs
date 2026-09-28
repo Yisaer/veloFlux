@@ -2,10 +2,11 @@
 use crate::checkpoint::{
     CheckpointMode, CheckpointSnapshotCollector, CheckpointState, OperatorSnapshot,
 };
+use crate::connector::sink::SinkConnectorErrorClass;
 use crate::connector::{SinkConnector, SinkConnectorError};
 use crate::model::Collection;
 use crate::planner::physical::DataDomain;
-use crate::planner::sink::SinkRetryConfig;
+use crate::planner::sink::{SinkRetryConfig, SinkRetryUpTo};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
@@ -362,6 +363,14 @@ impl SinkProcessor {
         retry_config.max_attempts.unwrap_or(1).max(1)
     }
 
+    fn should_retry_error(retry_up_to: SinkRetryUpTo, err: &SinkConnectorError) -> bool {
+        match err.class() {
+            SinkConnectorErrorClass::Transient => true,
+            SinkConnectorErrorClass::Uncertain => retry_up_to != SinkRetryUpTo::Transient,
+            SinkConnectorErrorClass::Permanent => retry_up_to == SinkRetryUpTo::All,
+        }
+    }
+
     fn checkpoint_state(deliveries: &VecDeque<PendingDelivery>) -> CheckpointState {
         let deliveries = deliveries
             .iter()
@@ -522,7 +531,10 @@ impl SinkProcessor {
                 connector.connector.record_message_out();
                 DeliveryAttemptOutcome::Delivered
             }
-            Err(err) if pending.attempt < Self::effective_max_attempts(retry_config) => {
+            Err(err)
+                if pending.attempt < Self::effective_max_attempts(retry_config)
+                    && Self::should_retry_error(retry_config.retry_up_to, &err) =>
+            {
                 tracing::warn!(
                     processor_id = %processor_id,
                     attempt = %pending.attempt,
@@ -542,11 +554,18 @@ impl SinkProcessor {
                 DeliveryAttemptOutcome::RetryPending
             }
             Err(err) => {
+                let stop_reason = if Self::should_retry_error(retry_config.retry_up_to, &err) {
+                    "attempts exhausted"
+                } else {
+                    "ineligible under retry policy"
+                };
                 if pending.from_checkpoint {
                     tracing::error!(
                         processor_id = %processor_id,
                         attempt = %pending.attempt,
                         max_attempts = %Self::effective_max_attempts(retry_config),
+                        retry_up_to = %retry_config.retry_up_to.as_str(),
+                        stop_reason = %stop_reason,
                         error = %err,
                         "restored sink delivery failed, stopping replay"
                     );
@@ -557,6 +576,8 @@ impl SinkProcessor {
                     processor_id = %processor_id,
                     attempt = %pending.attempt,
                     max_attempts = %Self::effective_max_attempts(retry_config),
+                    retry_up_to = %retry_config.retry_up_to.as_str(),
+                    stop_reason = %stop_reason,
                     error = %err,
                     "sink delivery failed, dropping delivery"
                 );

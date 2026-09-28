@@ -188,6 +188,13 @@ on the filesystem.
 The file type is determined by the encoder and pipeline context, not by the file sink. The connector
 does not infer suffixes from encoder, compression, or encryption settings.
 
+## Error Classification
+
+For encoded deliveries, an empty path, invalid filename pattern, or unresolved property template
+returns `Permanent`. File system I/O, collisions, clock, and internal state failures use `Other`,
+which the common [sink retry policy](../retry.md) treats as `Uncertain`. Configuration errors
+found during `ready` fail startup before delivery retry begins.
+
 ## Temporary Files
 
 Writes use a temporary directory under the output directory:

@@ -12,6 +12,9 @@ registry; planner and configuration behavior may still be covered by focused tes
 
 Some deployments need to forward streaming signal values into an Eclipse Kuksa DataBroker instance and update Vehicle Signal Specification (VSS) paths. veloFlux provides a Kuksa sink that consumes decoded rows (`Collection` / `Tuple`) and publishes updates to the broker using the `kuksa.val.v2` API via the `kuksa-rust-sdk`.
 
+The Kuksa sink sends collections directly. Its connector errors do not currently pass through the
+encoded delivery [retry policy](../retry.md).
+
 Key requirements:
 
 - Sink consumes decoded values directly (no byte encoding step).

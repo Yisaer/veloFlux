@@ -38,6 +38,13 @@ a connector error rather than waiting indefinitely.
 NNG pub/sub is best-effort and has no acknowledgements. A successful publish means the local NNG
 operation accepted the message; it does not prove that any subscriber received it.
 
+## Error Classification
+
+For encoded deliveries, invalid sink configuration or URL validation returns `Permanent`. Socket
+open, message construction, dial, disconnected, and publish failures use `Other` or `Unavailable`,
+which the common [sink retry policy](../retry.md) treats as `Uncertain`. Errors from `ready` fail
+startup before delivery retry begins.
+
 ## Embedded `inproc` deployments
 
 When veloFlux is embedded as a shared library, the sink may publish through an

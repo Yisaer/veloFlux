@@ -366,6 +366,7 @@ fn build_logical_node(plan: &Arc<LogicalPlan>) -> ExplainNode {
             }
             // Retry configuration (only emitted when explicitly configured)
             if let Some(max_attempts) = sink.retry.max_attempts {
+                info.push(format!("retry_up_to={}", sink.retry.retry_up_to.as_str()));
                 info.push(format!("retry_max_attempts={}", max_attempts));
                 info.push(format!(
                     "retry_initial_backoff_ms={}",
@@ -1149,6 +1150,10 @@ fn build_physical_node_with_prefix(
             }
             // Retry configuration (only emitted when explicitly configured)
             if let Some(max_attempts) = sink.connector.retry.max_attempts {
+                info.push(format!(
+                    "retry_up_to={}",
+                    sink.connector.retry.retry_up_to.as_str()
+                ));
                 info.push(format!("retry_max_attempts={}", max_attempts));
                 info.push(format!(
                     "retry_initial_backoff_ms={}",

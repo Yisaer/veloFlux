@@ -716,7 +716,8 @@ pub(crate) fn build_pipeline_definition(
             }
         }
         if let Some(retry) = sink_req.retry.as_ref() {
-            sink_definition = sink_definition.with_retry(retry.to_retry_config()?);
+            let retry_config = retry.to_retry_config(sink_definition.retry.clone())?;
+            sink_definition = sink_definition.with_retry(retry_config);
         }
         sink_definition.retry.validate()?;
         sinks.push(sink_definition);
@@ -805,7 +806,6 @@ mod tests {
     use super::*;
     use flow::FlowInstance;
     use flow::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
-    use flow::connector::MemoryTopicKind;
     use flow::secret::SecretString;
     use flow::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
     use serde_json::json;
@@ -866,6 +866,34 @@ mod tests {
         request.options.schedule =
             Some(serde_json::from_value(schedule).expect("deserialize pipeline schedule request"));
         request
+    }
+
+    #[tokio::test]
+    async fn common_retry_policy_preserves_legacy_http_attempts() {
+        let instance = test_instance();
+        let request: CreatePipelineRequest = serde_json::from_value(json!({
+            "id": "pipe_http_retry_merge",
+            "revision": 1,
+            "sql": "SELECT 1 AS a",
+            "sinks": [{
+                "id": "http_sink",
+                "type": "http",
+                "props": {
+                    "url": "http://localhost/upload",
+                    "retry_max_attempts": 5
+                },
+                "retry": { "retry_up_to": "transient" },
+                "encoder": { "type": "json" }
+            }]
+        }))
+        .expect("deserialize HTTP retry request");
+
+        let definition =
+            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
+                .expect("build pipeline definition");
+        let retry = &definition.sinks()[0].retry;
+        assert_eq!(retry.max_attempts, Some(5));
+        assert_eq!(retry.retry_up_to, flow::pipeline::SinkRetryUpTo::Transient);
     }
 
     #[test]

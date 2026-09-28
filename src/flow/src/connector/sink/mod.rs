@@ -36,7 +36,7 @@ pub trait SinkConnector: Send + Sync + 'static {
         &mut self,
         _properties: &crate::PropertyContext,
     ) -> Result<(), SinkConnectorError> {
-        Err(SinkConnectorError::Other(format!(
+        Err(SinkConnectorError::Permanent(format!(
             "connector `{}` does not support encoded delivery",
             self.id()
         )))
@@ -44,7 +44,7 @@ pub trait SinkConnector: Send + Sync + 'static {
 
     /// Write a chunk into the active encoded delivery.
     async fn write_chunk(&mut self, _bytes: &[u8]) -> Result<(), SinkConnectorError> {
-        Err(SinkConnectorError::Other(format!(
+        Err(SinkConnectorError::Permanent(format!(
             "connector `{}` does not support encoded delivery",
             self.id()
         )))
@@ -52,7 +52,7 @@ pub trait SinkConnector: Send + Sync + 'static {
 
     /// Finish the active encoded delivery.
     async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
-        Err(SinkConnectorError::Other(format!(
+        Err(SinkConnectorError::Permanent(format!(
             "connector `{}` does not support encoded delivery",
             self.id()
         )))
@@ -69,7 +69,7 @@ pub trait SinkConnector: Send + Sync + 'static {
         &mut self,
         _collection: &dyn Collection,
     ) -> Result<(), SinkConnectorError> {
-        Err(SinkConnectorError::Other(format!(
+        Err(SinkConnectorError::Permanent(format!(
             "connector `{}` does not support collection payloads",
             self.id()
         )))
@@ -86,28 +86,53 @@ pub trait SinkConnector: Send + Sync + 'static {
     }
 }
 
+/// Retry classes reported by sink connectors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SinkConnectorErrorClass {
+    Transient,
+    Uncertain,
+    Permanent,
+}
+
 /// Errors shared by sink connectors.
 #[derive(thiserror::Error, Debug)]
 pub enum SinkConnectorError {
-    /// Connector is not available anymore (e.g. channel closed).
-    /// This is permanent — the delivery must not be retried.
+    /// Connector availability is unknown (e.g. a channel closed).
+    /// The sink treats this as uncertain unless the connector uses a more specific class.
     #[error("connector unavailable: {0}")]
     Unavailable(String),
 
-    /// Transient failure — the delivery can be retried after backoff.
-    /// Examples: network timeout, connection refused, 5xx, 429.
+    /// Failure with strong evidence of recovery after backoff.
+    /// Examples: network timeout, connection refused, HTTP 408/429/502/503/504.
     #[error("transient failure: {0}")]
     Transient(String),
 
-    /// Permanent failure — the delivery must NOT be retried.
-    /// Examples: 400 Bad Request, 404 Not Found, invalid payload.
+    /// Failure whose future outcome cannot be determined from this response.
+    /// Examples: HTTP 500 and 404.
+    #[error("uncertain failure: {0}")]
+    Uncertain(String),
+
+    /// Replaying the same delivery under the current configuration cannot succeed.
+    /// Examples: invalid local URL, template, topic, or payload.
     #[error("permanent failure: {0}")]
     Permanent(String),
 
     /// Catch-all for errors that don't fall into the categories above.
-    /// Treated as permanent by default.
+    /// The sink treats this as uncertain until the connector provides a specific class.
     #[error("{0}")]
     Other(String),
+}
+
+impl SinkConnectorError {
+    pub fn class(&self) -> SinkConnectorErrorClass {
+        match self {
+            Self::Transient(_) => SinkConnectorErrorClass::Transient,
+            Self::Uncertain(_) | Self::Unavailable(_) | Self::Other(_) => {
+                SinkConnectorErrorClass::Uncertain
+            }
+            Self::Permanent(_) => SinkConnectorErrorClass::Permanent,
+        }
+    }
 }
 
 pub mod file;

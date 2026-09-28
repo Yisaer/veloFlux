@@ -85,6 +85,12 @@ Implementation note:
   `OutputLayout` as encoded sinks and performs no first-row discovery or name
   lookup fallback.
 
+## Error Classification
+
+The encoded bytes sink reports memory pub/sub open, publish, and internal state failures as
+`Other`; the common [sink retry policy](../retry.md) treats them as `Uncertain`. The collection
+sink sends collections directly and does not use this delivery retry policy.
+
 ## Drop / Lag Behavior (Subscribers)
 
 The implementation uses a bounded broadcast buffer (`capacity`). If subscribers cannot keep up,

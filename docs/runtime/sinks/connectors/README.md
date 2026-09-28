@@ -2,6 +2,10 @@
 
 This directory contains connector-specific sink behavior.
 
+Each encoded connector document describes the error classes it reports. The common
+[sink retry policy](../retry.md) decides which classes are eligible for retry; collection-native
+sinks currently use a direct send path.
+
 - `mqtt.md`: MQTT sink delivery behavior, shared-client binding, and output-feature interaction.
 - `http.md`: HTTP raw and multipart delivery, error classification, Content-Type handling, and
   delivery lifecycle.

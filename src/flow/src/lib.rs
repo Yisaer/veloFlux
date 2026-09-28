@@ -78,9 +78,9 @@ pub use pipeline::{
     MqttSinkProps, NngPubSubSinkProps, NopSinkProps, PipelineCronScheduleConfig,
     PipelineDefinition, PipelineError, PipelineOptions, PipelineRuntimeFailure,
     PipelineScheduleConfig, PipelineScheduleDatetimeRange, PipelineSnapshot, PipelineStatus,
-    PipelineStopMode, SinkDefinition, SinkProps, SinkRetryConfig, SinkType, SourceDefinition,
-    SourceInputConfig, SourceInputMode, SourceOnChangeConfig, VideoCodec, VideoContainer,
-    VideoRollingConfig, VideoSinkProps,
+    PipelineStopMode, SinkDefinition, SinkProps, SinkRetryConfig, SinkRetryUpTo, SinkType,
+    SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig, VideoCodec,
+    VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 pub use planner::create_physical_plan;
 pub use planner::explain::{ExplainReport, ExplainRow, PipelineExplain, PipelineExplainConfig};

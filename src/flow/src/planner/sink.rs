@@ -7,17 +7,38 @@ use crate::connector::sink::memory::MemorySinkConfig;
 use crate::connector::sink::mqtt::MqttSinkConfig;
 use crate::connector::sink::video::VideoSinkConfig;
 use crate::connector::NngPubSubSinkConfig;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Retry configuration for sink deliveries.
-///
-/// Shared across all sink connector types. When `max_attempts` is `None`,
-/// each delivery is attempted exactly once (no retry).
+/// Highest connector error class eligible for retry.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SinkRetryUpTo {
+    Transient,
+    #[default]
+    Uncertain,
+    All,
+}
+
+impl SinkRetryUpTo {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Transient => "transient",
+            Self::Uncertain => "uncertain",
+            Self::All => "all",
+        }
+    }
+}
+
+/// Retry configuration shared by all sink connector types.
+/// When `max_attempts` is `None`, each delivery is attempted once.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SinkRetryConfig {
+    /// Highest error class eligible for retry. Default: `Uncertain`.
+    pub retry_up_to: SinkRetryUpTo,
     /// Maximum delivery attempts including the first one.
     /// `None` means no retry. Default: `None` (single attempt).
     pub max_attempts: Option<usize>,
@@ -35,6 +56,7 @@ pub struct SinkRetryConfig {
 impl Default for SinkRetryConfig {
     fn default() -> Self {
         Self {
+            retry_up_to: SinkRetryUpTo::default(),
             max_attempts: None,
             initial_backoff_ms: 1000,
             max_backoff_ms: 30000,

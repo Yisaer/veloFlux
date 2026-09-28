@@ -5,6 +5,9 @@
 The video sink records video frame tuples to an external video output. It is a direct
 `Collection` / `Tuple` sink and does not use a veloFlux encoder stage.
 
+Its connector errors do not currently pass through the encoded delivery
+[retry policy](../retry.md).
+
 Implementation:
 - `src/flow/src/connector/sink/video.rs`
 - `src/flow/src/codec/video.rs`

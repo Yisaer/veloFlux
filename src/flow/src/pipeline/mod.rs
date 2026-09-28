@@ -23,8 +23,8 @@ pub use api::{
     PipelineCronScheduleConfig, PipelineDefinition, PipelineError, PipelineOptions,
     PipelineRuntimeFailure, PipelineScheduleConfig, PipelineScheduleDatetimeRange,
     PipelineSnapshot, PipelineStatus, PipelineStopMode, SinkDefinition, SinkProps, SinkRetryConfig,
-    SinkType, SourceDefinition, SourceInputConfig, SourceInputMode, SourceOnChangeConfig,
-    VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
+    SinkRetryUpTo, SinkType, SourceDefinition, SourceInputConfig, SourceInputMode,
+    SourceOnChangeConfig, VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 pub(crate) use context::PipelineContext;
 

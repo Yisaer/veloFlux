@@ -39,14 +39,14 @@ impl NngPubSubSinkConnector {
         if self.socket.is_some() {
             return Ok(());
         }
-        self.config
-            .validate()
-            .map_err(|err| SinkConnectorError::Other(format!("invalid nng pubsub sink: {err}")))?;
+        self.config.validate().map_err(|err| {
+            SinkConnectorError::Permanent(format!("invalid nng pubsub sink: {err}"))
+        })?;
         let transport = parse_nng_transport(&self.config.url).map_err(|err| {
-            SinkConnectorError::Other(format!("invalid nng pubsub sink url: {err}"))
+            SinkConnectorError::Permanent(format!("invalid nng pubsub sink url: {err}"))
         })?;
         let url = CString::new(self.config.url.as_str()).map_err(|err| {
-            SinkConnectorError::Other(format!(
+            SinkConnectorError::Permanent(format!(
                 "invalid nng url `{}`: {err}",
                 crate::connector::mask_url_userinfo(&self.config.url)
             ))

@@ -159,14 +159,21 @@ fn infer_content_type_for_encoder(encoder_kind: Option<&str>, is_ndjson: bool) -
     }
 }
 
-/// Returns `true` when the HTTP status code is transient and worth retrying.
+/// Returns `true` for statuses with strong evidence of recovery after backoff.
 fn is_transient_status(status: StatusCode) -> bool {
-    status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
-/// Returns `true` when a reqwest-level error represents a transient failure.
+/// Returns `true` for known transient reqwest failures.
 fn is_transient_reqwest_error(err: &reqwest::Error) -> bool {
-    err.is_timeout() || err.is_connect() || err.is_request()
+    err.is_timeout() || err.is_connect()
 }
 
 /// Supported HTTP methods.
@@ -250,12 +257,12 @@ impl HttpSinkConnector {
 
     fn validate_url(url: &str) -> Result<(), SinkConnectorError> {
         if url.trim().is_empty() {
-            return Err(SinkConnectorError::Other(
+            return Err(SinkConnectorError::Permanent(
                 "http sink requires a non-empty url".to_string(),
             ));
         }
         url::Url::parse(url).map_err(|err| {
-            SinkConnectorError::Other(format!("http sink has an invalid url: {err}"))
+            SinkConnectorError::Permanent(format!("http sink has an invalid url: {err}"))
         })?;
         Ok(())
     }
@@ -265,7 +272,7 @@ impl HttpSinkConnector {
             .timeout(self.config.timeout)
             .build()
             .map_err(|err| {
-                SinkConnectorError::Other(format!(
+                SinkConnectorError::Uncertain(format!(
                     "http sink `{}` failed to build http client: {err}",
                     self.id
                 ))
@@ -273,8 +280,8 @@ impl HttpSinkConnector {
     }
 
     /// Send a single HTTP request. Returns `Ok(())` on 2xx.
-    /// Errors are classified as `Transient` (5xx, 429, network errors) or
-    /// `Permanent` (4xx client errors).
+    /// HTTP responses are transient only for 408/429/502/503/504; other
+    /// non-success responses are uncertain because the remote state can change.
     async fn send_single_request(
         connector_id: &str,
         client: &Client,
@@ -300,7 +307,7 @@ impl HttpSinkConnector {
                     .file_name(config.file_name.clone())
                     .mime_str("application/octet-stream")
                     .map_err(|err| {
-                        SinkConnectorError::Other(format!(
+                        SinkConnectorError::Permanent(format!(
                             "http sink `{connector_id}` failed to build multipart file part: {err}"
                         ))
                     })?;
@@ -319,9 +326,7 @@ impl HttpSinkConnector {
                 return if is_transient_reqwest_error(&err) {
                     Err(SinkConnectorError::Transient(msg))
                 } else {
-                    // Non-timeout, non-connect reqwest errors are treated as
-                    // transient as well (e.g. DNS resolution may recover).
-                    Err(SinkConnectorError::Transient(msg))
+                    Err(SinkConnectorError::Uncertain(msg))
                 };
             }
         };
@@ -340,7 +345,7 @@ impl HttpSinkConnector {
         if is_transient_status(status) {
             Err(SinkConnectorError::Transient(message))
         } else {
-            Err(SinkConnectorError::Permanent(message))
+            Err(SinkConnectorError::Uncertain(message))
         }
     }
 }
@@ -357,7 +362,9 @@ impl SinkConnector for HttpSinkConnector {
 
     async fn ready(&mut self) -> Result<(), SinkConnectorError> {
         Self::validate_url(&self.config.url)?;
-        self.config.validate().map_err(SinkConnectorError::Other)?;
+        self.config
+            .validate()
+            .map_err(SinkConnectorError::Permanent)?;
         self.client = Some(self.build_client()?);
         Ok(())
     }
@@ -367,7 +374,7 @@ impl SinkConnector for HttpSinkConnector {
         properties: &crate::PropertyContext,
     ) -> Result<(), SinkConnectorError> {
         if self.delivery_active {
-            return Err(SinkConnectorError::Other(format!(
+            return Err(SinkConnectorError::Uncertain(format!(
                 "http sink `{}` already has an active delivery",
                 self.id
             )));
@@ -380,7 +387,7 @@ impl SinkConnector for HttpSinkConnector {
 
     async fn write_chunk(&mut self, bytes: &[u8]) -> Result<(), SinkConnectorError> {
         if !self.delivery_active {
-            return Err(SinkConnectorError::Other(format!(
+            return Err(SinkConnectorError::Uncertain(format!(
                 "http sink `{}` received a chunk without an active delivery",
                 self.id
             )));
@@ -390,7 +397,7 @@ impl SinkConnector for HttpSinkConnector {
         if new_len > self.config.max_body_size {
             self.buffer.clear();
             self.delivery_active = false;
-            return Err(SinkConnectorError::Other(format!(
+            return Err(SinkConnectorError::Permanent(format!(
                 "http sink `{}` body size {} exceeds max_body_size {}",
                 self.id, new_len, self.config.max_body_size
             )));
@@ -402,7 +409,7 @@ impl SinkConnector for HttpSinkConnector {
 
     async fn finish_delivery(&mut self) -> Result<DeliveryResult, SinkConnectorError> {
         if !self.delivery_active {
-            return Err(SinkConnectorError::Other(format!(
+            return Err(SinkConnectorError::Uncertain(format!(
                 "http sink `{}` finished without an active delivery",
                 self.id
             )));
@@ -410,7 +417,7 @@ impl SinkConnector for HttpSinkConnector {
         self.delivery_active = false;
 
         let client = self.client.as_ref().ok_or_else(|| {
-            SinkConnectorError::Other(format!(
+            SinkConnectorError::Uncertain(format!(
                 "http sink `{}` client is not initialized; call ready() first",
                 self.id
             ))
@@ -419,7 +426,7 @@ impl SinkConnector for HttpSinkConnector {
         let body_bytes: bytes::Bytes = std::mem::take(&mut self.buffer).into();
         let bytes_written = body_bytes.len() as u64;
         let delivery_config = self.delivery_config.take().ok_or_else(|| {
-            SinkConnectorError::Other(format!(
+            SinkConnectorError::Uncertain(format!(
                 "http sink `{}` has no config for active delivery",
                 self.id
             ))
@@ -450,7 +457,12 @@ impl SinkConnector for HttpSinkConnector {
 mod tests {
     use super::*;
     use crate::pipeline::HttpMultipartConfig;
-    use axum::{extract::Multipart, http::HeaderMap, routing::post, Router};
+    use axum::{
+        extract::{Multipart, Path},
+        http::HeaderMap,
+        routing::post,
+        Router,
+    };
     use std::collections::BTreeMap;
 
     #[test]
@@ -527,8 +539,8 @@ mod tests {
     }
 
     #[test]
-    fn transient_statuses_are_server_errors_and_429() {
-        assert!(is_transient_status(StatusCode::INTERNAL_SERVER_ERROR));
+    fn transient_statuses_have_strong_recovery_evidence() {
+        assert!(is_transient_status(StatusCode::REQUEST_TIMEOUT));
         assert!(is_transient_status(StatusCode::BAD_GATEWAY));
         assert!(is_transient_status(StatusCode::SERVICE_UNAVAILABLE));
         assert!(is_transient_status(StatusCode::GATEWAY_TIMEOUT));
@@ -536,7 +548,9 @@ mod tests {
     }
 
     #[test]
-    fn non_transient_statuses_are_client_errors_except_429() {
+    fn ambiguous_statuses_are_not_transient() {
+        assert!(!is_transient_status(StatusCode::INTERNAL_SERVER_ERROR));
+        assert!(!is_transient_status(StatusCode::NOT_IMPLEMENTED));
         assert!(!is_transient_status(StatusCode::BAD_REQUEST));
         assert!(!is_transient_status(StatusCode::NOT_FOUND));
         assert!(!is_transient_status(StatusCode::UNAUTHORIZED));
@@ -548,6 +562,58 @@ mod tests {
         assert!(!is_transient_status(StatusCode::OK));
         assert!(!is_transient_status(StatusCode::CREATED));
         assert!(!is_transient_status(StatusCode::NO_CONTENT));
+    }
+
+    #[tokio::test]
+    async fn http_responses_keep_500_and_404_in_the_same_uncertain_class() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind HTTP test listener");
+        let address = listener.local_addr().expect("listener address");
+        let app = Router::new().route(
+            "/:status",
+            post(|Path(status): Path<u16>| async move {
+                StatusCode::from_u16(status).expect("valid status")
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve HTTP test");
+        });
+        let client = Client::new();
+
+        for status in [408, 429, 502, 503, 504] {
+            let config = HttpSinkConfig::new(format!("http://{address}/{status}"));
+            let error = HttpSinkConnector::send_single_request(
+                "status-test",
+                &client,
+                &config,
+                bytes::Bytes::new(),
+            )
+            .await
+            .expect_err("HTTP error expected");
+            assert!(
+                matches!(error, SinkConnectorError::Transient(_)),
+                "{status}"
+            );
+        }
+        for status in [400, 404, 500, 501] {
+            let config = HttpSinkConfig::new(format!("http://{address}/{status}"));
+            let error = HttpSinkConnector::send_single_request(
+                "status-test",
+                &client,
+                &config,
+                bytes::Bytes::new(),
+            )
+            .await
+            .expect_err("HTTP error expected");
+            assert!(
+                matches!(error, SinkConnectorError::Uncertain(_)),
+                "{status}"
+            );
+        }
+
+        server.abort();
     }
 
     #[test]

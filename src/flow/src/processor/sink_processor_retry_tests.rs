@@ -2,9 +2,13 @@
 
 #[cfg(test)]
 mod tests {
-    use super::super::ConnectorBinding;
+    use super::super::{
+        CompletedDelivery, ConnectorBinding, DeliveryAttemptOutcome, PendingDelivery,
+    };
     use crate::connector::sink::{DeliveryResult, SinkConnector, SinkConnectorError};
-    use crate::planner::sink::SinkRetryConfig;
+    use crate::planner::physical::DataDomain;
+    use crate::planner::sink::{SinkRetryConfig, SinkRetryUpTo};
+    use crate::processor::data_metrics::SinkMetrics;
     use crate::processor::{
         EncodedDeliveryFlags, Processor, ProcessorStats, SinkProcessor, StreamData,
     };
@@ -25,10 +29,15 @@ mod tests {
         SinkConnectorError::Transient(msg.into())
     }
 
+    fn uncertain(msg: &str) -> SinkConnectorError {
+        SinkConnectorError::Uncertain(msg.into())
+    }
+
     /// A connector that fails `fail_count` times before forwarding payloads.
     struct RetryMockConnector {
         fail_count: Arc<AtomicUsize>,
-        fail_with_kind: &'static str, // "transient" or "permanent"
+        attempt_count: Arc<AtomicUsize>,
+        fail_with_kind: &'static str,
         sender: mpsc::Sender<Vec<u8>>,
         buffer: Option<Vec<u8>>,
         observed_properties: Arc<Mutex<Vec<String>>>,
@@ -52,6 +61,7 @@ mod tests {
             (
                 Self {
                     fail_count: Arc::new(AtomicUsize::new(fail_count)),
+                    attempt_count: Arc::new(AtomicUsize::new(0)),
                     fail_with_kind,
                     sender,
                     buffer: None,
@@ -73,6 +83,7 @@ mod tests {
         fn build_error(&self) -> SinkConnectorError {
             match self.fail_with_kind {
                 "transient" => transient("injected failure"),
+                "uncertain" => uncertain("injected failure"),
                 "permanent" => permanent("bad request"),
                 _ => permanent("unknown"),
             }
@@ -173,8 +184,10 @@ mod tests {
                 .take()
                 .ok_or_else(|| permanent("retry_mock: finish without active delivery"))?;
             let bytes_written = payload.len() as u64;
+            self.attempt_count.fetch_add(1, Ordering::Relaxed);
 
-            if self.fail_count.fetch_sub(1, Ordering::Relaxed) > 0 {
+            if self.fail_count.load(Ordering::Relaxed) > 0 {
+                self.fail_count.fetch_sub(1, Ordering::Relaxed);
                 if let Some(registry) = &self.update_registry_after_failure {
                     registry
                         .apply_override("vin", crate::secret::SecretString::new("VIN-UPDATED"))
@@ -282,9 +295,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn permanent_failure_is_retried_then_dropped() {
-        let (connector, handle) = RetryMockConnector::new(5, "permanent");
+    async fn permanent_failure_respects_retry_policy() {
+        for (retry_up_to, expected_attempts) in [
+            (SinkRetryUpTo::Uncertain, 1),
+            (SinkRetryUpTo::Transient, 1),
+            (SinkRetryUpTo::All, 3),
+        ] {
+            let (connector, handle) = RetryMockConnector::new(5, "permanent");
+            let attempts = Arc::clone(&connector.attempt_count);
 
+            let mut processor = SinkProcessor::new("retry_sink");
+            let stats = Arc::new(ProcessorStats::default());
+            processor.set_stats(Arc::clone(&stats));
+            processor.set_retry_config(SinkRetryConfig {
+                retry_up_to,
+                max_attempts: Some(3),
+                initial_backoff_ms: 10,
+                max_backoff_ms: 100,
+                ..Default::default()
+            });
+            processor.add_connector(Box::new(connector));
+
+            let (tx, rx) = tokio::sync::broadcast::channel(8);
+            processor.add_input(rx);
+            let mut start = processor.start(&test_spawner());
+            let ready = start.take_ready().expect("ready");
+            ready.await.expect("ready ok").expect("processor ready");
+
+            let payload = br#"[{"a":42}]"#;
+            for data in make_encoded_delivery(payload) {
+                let _ = tx.send(data);
+            }
+            let _ = tx.send(StreamData::stream_end());
+
+            drive_and_assert(start.handle, handle, false).await;
+            assert_message_metrics(stats.as_ref(), 0, 1, 0);
+            assert_eq!(
+                attempts.load(Ordering::Relaxed),
+                expected_attempts,
+                "retry_up_to={retry_up_to:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn default_uncertain_policy_retries_uncertain_failure() {
+        let (connector, handle) = RetryMockConnector::new(2, "uncertain");
+        let attempts = Arc::clone(&connector.attempt_count);
         let mut processor = SinkProcessor::new("retry_sink");
         let stats = Arc::new(ProcessorStats::default());
         processor.set_stats(Arc::clone(&stats));
@@ -299,19 +356,97 @@ mod tests {
         let (tx, rx) = tokio::sync::broadcast::channel(8);
         processor.add_input(rx);
         let mut start = processor.start(&test_spawner());
-        let ready = start.take_ready().expect("ready");
-        ready.await.expect("ready ok").expect("processor ready");
-
+        start
+            .take_ready()
+            .expect("ready")
+            .await
+            .expect("ready ok")
+            .expect("processor ready");
         let payload = br#"[{"a":42}]"#;
         for data in make_encoded_delivery(payload) {
             let _ = tx.send(data);
         }
         let _ = tx.send(StreamData::stream_end());
 
-        // All connector errors are retried. Exhausted attempts drop the delivery
-        // and allow the processor to consume the terminal signal.
+        drive_and_assert(start.handle, handle, true).await;
+        assert_message_metrics(stats.as_ref(), 1, 0, payload.len() as u64);
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn transient_only_policy_drops_uncertain_after_first_attempt() {
+        let (connector, handle) = RetryMockConnector::new(5, "uncertain");
+        let attempts = Arc::clone(&connector.attempt_count);
+        let mut processor = SinkProcessor::new("retry_sink");
+        let stats = Arc::new(ProcessorStats::default());
+        processor.set_stats(Arc::clone(&stats));
+        processor.set_retry_config(SinkRetryConfig {
+            retry_up_to: SinkRetryUpTo::Transient,
+            max_attempts: Some(3),
+            initial_backoff_ms: 10,
+            max_backoff_ms: 100,
+            ..Default::default()
+        });
+        processor.add_connector(Box::new(connector));
+
+        let (tx, rx) = tokio::sync::broadcast::channel(8);
+        processor.add_input(rx);
+        let mut start = processor.start(&test_spawner());
+        start
+            .take_ready()
+            .expect("ready")
+            .await
+            .expect("ready ok")
+            .expect("processor ready");
+        for data in make_encoded_delivery(br#"[{"a":42}]"#) {
+            let _ = tx.send(data);
+        }
+        let _ = tx.send(StreamData::stream_end());
+
         drive_and_assert(start.handle, handle, false).await;
         assert_message_metrics(stats.as_ref(), 0, 1, 0);
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn restored_delivery_stops_replay_on_ineligible_error() {
+        let config = SinkRetryConfig {
+            retry_up_to: SinkRetryUpTo::Transient,
+            max_attempts: Some(3),
+            ..Default::default()
+        };
+        let (connector, _) = RetryMockConnector::new(0, "uncertain");
+        let mut binding = ConnectorBinding {
+            connector: Box::new(connector),
+            active_delivery: false,
+        };
+        let stats = ProcessorStats::default();
+        let metrics = SinkMetrics::new(&stats, DataDomain::Message);
+        let payload = bytes::Bytes::from_static(b"payload");
+        let mut pending = PendingDelivery::new(
+            CompletedDelivery {
+                payload,
+                forward_events: Vec::new(),
+            },
+            crate::PropertyContext::default(),
+            &config,
+        );
+        pending.from_checkpoint = true;
+        pending.attempt = 1;
+
+        let outcome = SinkProcessor::handle_delivery_attempt_result(
+            "retry_sink",
+            &stats,
+            &mut binding,
+            &config,
+            &mut pending,
+            &metrics,
+            Err(uncertain("remote outcome unknown")),
+        );
+
+        assert!(matches!(outcome, DeliveryAttemptOutcome::ReplayFailed(_)));
+        assert!(pending.retry_at.is_none());
+        assert_eq!(stats.snapshot().custom["messages_dropped"], 0);
     }
 
     #[tokio::test]

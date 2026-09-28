@@ -101,7 +101,7 @@ impl FileSinkConnector {
     fn validate_config(&self) -> Result<(), SinkConnectorError> {
         validate_file_sink_path(&self.config.path)?;
         validate_filename_pattern(self.config.filename_pattern.expose())
-            .map_err(SinkConnectorError::Other)?;
+            .map_err(SinkConnectorError::Permanent)?;
         Ok(())
     }
 
@@ -696,7 +696,7 @@ enum PublishResult {
 
 fn validate_file_sink_path(path: &str) -> Result<(), SinkConnectorError> {
     if path.trim().is_empty() {
-        return Err(SinkConnectorError::Other(
+        return Err(SinkConnectorError::Permanent(
             "file sink requires non-empty path".to_string(),
         ));
     }
