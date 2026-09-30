@@ -755,6 +755,7 @@ pub struct PipelineSnapshot {
     pub definition: Arc<PipelineDefinition>,
     pub streams: Vec<String>,
     pub status: PipelineStatus,
+    pub last_runtime_error: Option<PipelineRuntimeFailure>,
 }
 
 /// Stores all registered pipelines and manages their lifecycle.

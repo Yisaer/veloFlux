@@ -128,7 +128,7 @@ curl -X POST \
 - The import API is defined as **full replace**, not partial upsert.
 - Use `GET /storage/export?bundle_version=<version>` before import when a complete
   restorable backup is required.
-- Pipeline runtime failure markers are not part of the import/export artifact. Imported pipeline
+- Pipeline runtime status and errors are not persisted or included in the import/export artifact. Imported pipeline
   `run_state` is desired state only; runtime failed state is managed by the running manager.
 - Because runtime reconciliation is out of scope for this endpoint, a restart or a separate runtime
   apply workflow may still be required after import.

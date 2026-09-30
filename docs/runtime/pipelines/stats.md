@@ -155,7 +155,7 @@ Current error surface:
 - `400` when the pipeline exists but stats cannot be collected, for example because the pipeline is
   not running
 - `400` when the pipeline is failed; the error includes the failed processor and reason from the
-  runtime failure marker when available
+  runtime error when available
 - `504` on timeout
 
 Processor-local failures do not turn the whole stats request into an error automatically. They are

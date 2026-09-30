@@ -92,8 +92,8 @@ JSON formatting and object field order do not affect equality.
 `false`. When set to `true`, the manager stops running pipelines that reference the stream,
 replaces the stream, rebuilds all affected pipeline runtimes against the updated catalog, and
 restores non-scheduled pipelines according to their stored desired state. Scheduled pipelines with
-schedule control enabled are left in `ScheduledStopped` for patrol reconciliation; manually stopped
-scheduled pipelines remain `Stopped`. This runtime rebuild does not change pipeline specifications
+desired state `running` are left with runtime status `scheduled_stopped` for patrol reconciliation;
+manually stopped scheduled pipelines remain `stopped`. This runtime rebuild does not change pipeline specifications
 or revisions.
 
 Pipeline recovery after a successful stream replacement is non-transactional. Rebuild and start

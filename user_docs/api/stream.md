@@ -172,8 +172,9 @@ revision. Runtime behavior depends on the pipeline lifecycle state:
 
 - A non-scheduled pipeline whose desired state is `Running` is rebuilt and started immediately.
 - A non-scheduled stopped pipeline is rebuilt and remains stopped.
-- A scheduled pipeline is rebuilt with desired state `ScheduledStopped`. The patrol scheduler
-  evaluates its schedule during a later patrol and starts it when the schedule is active.
+- A scheduled pipeline is rebuilt with persisted desired state `Running`. The runtime is left
+  stopped for patrol reconciliation, and the API reports `scheduled_stopped` until patrol starts
+  it in an active schedule window.
 
 Once the stream has been replaced successfully, pipeline recovery is non-transactional. A pipeline
 rebuild or start failure does not roll back the stream and does not stop recovery of other
@@ -211,7 +212,8 @@ Pipeline result statuses are:
 
 - `restarted`: the pipeline was rebuilt and started successfully.
 - `rebuilt_stopped`: the pipeline was rebuilt and retained its stopped state.
-- `scheduled_stopped`: the scheduled pipeline was rebuilt and left for patrol reconciliation.
+- `scheduled_stopped`: the scheduled pipeline has desired state `Running`, but its current
+  schedule window is not active or patrol has not started the runtime yet.
 - `rebuild_failed`: the pipeline could not be rebuilt against the updated stream.
 - `start_failed`: the pipeline was rebuilt but could not be started.
 

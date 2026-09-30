@@ -432,41 +432,6 @@ async fn restore_pipeline(
 
     let is_scheduled = req.options.schedule.is_some();
     if is_scheduled {
-        let desired_state = storage
-            .get_pipeline_run_state(&pipeline.id)
-            .map_err(|e| e.to_string())?
-            .map(|state| state.desired_state)
-            .unwrap_or(storage::StoredPipelineDesiredState::ScheduledStopped);
-        if !matches!(desired_state, storage::StoredPipelineDesiredState::Stopped) {
-            storage
-                .put_pipeline_run_state(storage::StoredPipelineRunState {
-                    pipeline_id: pipeline.id.clone(),
-                    desired_state: storage::StoredPipelineDesiredState::ScheduledStopped,
-                })
-                .map_err(|e| e.to_string())?;
-        }
-    }
-
-    if let Some(failure) = storage
-        .get_pipeline_runtime_failure(&pipeline.id)
-        .map_err(|e| e.to_string())?
-        .filter(|failure| failure.revision == pipeline.revision)
-    {
-        instance
-            .mark_pipeline_failed(&pipeline.id)
-            .map_err(|e| e.to_string())?;
-        tracing::warn!(
-            pipeline_id = %pipeline.id,
-            revision = pipeline.revision,
-            processor_id = %failure.processor_id,
-            processor_kind = %failure.processor_kind,
-            reason = %failure.reason,
-            "skipping pipeline auto-start because it has a persisted runtime failure"
-        );
-        return Ok(());
-    }
-
-    if is_scheduled {
         return Ok(());
     }
 
@@ -896,7 +861,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hydrate_running_pipeline_with_failure_marker_restores_failed_without_starting() {
+    async fn hydrate_running_pipeline_resets_runtime_failure() {
         let dir = tempdir().unwrap();
         let storage = StorageManager::new(dir.path()).unwrap();
         let instance = FlowInstance::new(
@@ -921,17 +886,29 @@ mod tests {
                 desired_state: storage::StoredPipelineDesiredState::Running,
             })
             .expect("store run state");
-        storage
-            .put_pipeline_runtime_failure(storage::StoredPipelineRuntimeFailure {
-                pipeline_id: stored_pipeline.id.clone(),
-                revision: stored_pipeline.revision,
-                failed_at_ms: 1234,
-                processor_id: "PhysicalFilter_1".to_string(),
-                processor_kind: "filter".to_string(),
-                reason: "processor task failed".to_string(),
-            })
-            .expect("store failure marker");
 
+        hydrate_runtime_from_storage(&storage, &instances)
+            .await
+            .expect("hydrate first process");
+        instances
+            .default_instance()
+            .stop_pipeline(
+                "failed_pipe",
+                flow::pipeline::PipelineStopMode::Quick,
+                std::time::Duration::from_secs(5),
+            )
+            .await
+            .expect("stop first process");
+        instances
+            .default_instance()
+            .mark_pipeline_failed("failed_pipe", "old_attempt", "old failure".to_string())
+            .expect("fail old runtime");
+        let instances = FlowInstances::new(
+            FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+                "default", None,
+            ))
+            .expect("new process instance"),
+        );
         hydrate_runtime_from_storage(&storage, &instances)
             .await
             .expect("hydrate runtime from storage");
@@ -941,7 +918,8 @@ mod tests {
             .iter()
             .find(|snapshot| snapshot.definition.id() == "failed_pipe")
             .expect("failed pipeline restored");
-        assert_eq!(snapshot.status, flow::pipeline::PipelineStatus::Failed);
+        assert_eq!(snapshot.status, flow::pipeline::PipelineStatus::Running);
+        assert!(snapshot.last_runtime_error.is_none());
     }
 
     #[tokio::test]
@@ -976,7 +954,7 @@ mod tests {
         storage
             .put_pipeline_run_state(storage::StoredPipelineRunState {
                 pipeline_id: stored_pipeline.id.clone(),
-                desired_state: storage::StoredPipelineDesiredState::ScheduledRunning,
+                desired_state: storage::StoredPipelineDesiredState::Running,
             })
             .expect("store scheduled running state");
 
@@ -990,7 +968,7 @@ mod tests {
             .expect("run state exists");
         assert_eq!(
             run_state.desired_state,
-            storage::StoredPipelineDesiredState::ScheduledStopped
+            storage::StoredPipelineDesiredState::Running
         );
         let snapshot = instances
             .default_instance()

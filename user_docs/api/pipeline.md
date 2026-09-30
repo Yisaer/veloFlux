@@ -58,8 +58,26 @@ Response:
 
 `GET /pipelines/:id`
 
-Returns persisted pipeline spec, current status, and desired run state when it differs from the
-current status.
+Returns the persisted pipeline spec and one unified real-time lifecycle status. The manager
+persists only the user's desired state (`running` or `stopped`) before asking runtime to converge.
+If runtime cannot converge, the status becomes `failed` and a in-memory runtime error
+is exposed; the desired state is not changed. For scheduled pipelines,
+`scheduled_running`, `scheduled_stopped`, and `scheduled_end` describe derived scheduler state.
+
+For example, after a datetime-range-only schedule reaches its end and patrol finishes graceful
+shutdown, the pipeline is returned as:
+
+```json
+{
+  "status": "scheduled_end"
+}
+```
+
+This means the runtime has stopped and the finite schedule has ended permanently for the current
+revision; patrol will not start it again. A schedule that is temporarily outside its window but
+still has a future window is `scheduled_stopped`. A manually stopped scheduled pipeline instead has
+`status: "stopped"`, which disables schedule patrol. During graceful shutdown, the status may
+temporarily be `stopping`.
 
 Response:
 
@@ -91,12 +109,10 @@ Response:
 `POST /pipelines/:id/start`
 
 For an unscheduled pipeline, persists desired state as `running` and starts runtime execution.
-For a scheduled pipeline, re-enables schedule control by persisting `scheduled_stopped`; the
-patrol scheduler starts it during a later patrol when the schedule is active.
-Starting a failed pipeline is an explicit retry; a successful start clears the runtime failure
-marker for unscheduled pipelines. For a scheduled pipeline, `start` only re-enables schedule
-control and does not clear an existing runtime failure marker. Use `stop` to clear the marker, then
-`start` to re-enable schedule control.
+For a scheduled pipeline, re-enables schedule control by persisting desired state `running`; the
+patrol scheduler derives `scheduled_running`, `scheduled_stopped`, or `scheduled_end` from the
+current schedule window. Starting a failed pipeline is an explicit retry and clears the current
+runtime error before convergence, including for scheduled pipelines.
 
 Response:
 
@@ -109,7 +125,7 @@ Response:
 `POST /pipelines/:id/stop?mode=quick|graceful&timeout_ms=5000`
 
 Persists desired state as `stopped` and stops runtime execution. For a scheduled pipeline, this
-also disables schedule patrol until a later manual start. The runtime failure marker is cleared.
+also disables schedule patrol until a later manual start. The runtime error is cleared.
 If graceful shutdown is selected, the runtime may temporarily report `stopping` while already
 accepted data is drained; schedule patrol does not restart a runtime in this state.
 
@@ -192,8 +208,10 @@ Response:
 
 `schedule` declares automatic pipeline start/stop windows. The scheduler owns the lifecycle while
 the schedule is enabled. Manual `stop` disables schedule patrol and enters `stopped`; manual
-`start` re-enables schedule control and enters `scheduled_stopped`, leaving the next runtime start
-to patrol. When a schedule window ends, patrol uses graceful shutdown by default. The runtime
+`start` re-enables schedule control by persisting desired state `running`. The resulting runtime
+status is derived from the current schedule window and may be `scheduled_running`,
+`scheduled_stopped`, or `scheduled_end`; patrol performs the runtime convergence. When a schedule
+window ends, patrol uses graceful shutdown by default. The runtime
 transitions through `stopping` until shutdown completes; this transient runtime state is not
 persisted as a desired state.
 
@@ -226,28 +244,30 @@ At least one scheduling mode must be present: `cron` with `duration_secs`, or on
 
 ```text
 cron only:              (cron_fire, cron_fire + duration_secs)
-datetime ranges only:   any (begin_timestamp_ms, end_timestamp_ms)
+datetime ranges only:   any [begin_timestamp_ms, end_timestamp_ms)
 cron and ranges:        (cron_fire, cron_fire + duration_secs) intersect any datetime_range
 ```
 
 If `cron` matches but `datetime_ranges` is non-empty and the current timestamp is outside every
 range, the pipeline does not start. If a cron window crosses the end of a matched datetime range,
-the pipeline stops at the range end.
+the pipeline stops at the range end. When all configured datetime ranges have ended, the pipeline
+enters `scheduled_end` and patrol will not schedule it again for the current pipeline revision.
 
-On create, a scheduled pipeline first enters `scheduled_stopped`. Upsert and process restart retain
-manual `stopped`; otherwise they enter `scheduled_stopped`. The patrol scheduler evaluates the
-current window before starting it.
+On create, a scheduled pipeline persists desired state `running`. Upsert and process restart retain
+the two-value desired state. The patrol scheduler evaluates the current window before starting it;
+`scheduled_stopped` and `scheduled_end` are computed runtime statuses, not persisted states.
 
 ### `PipelineDatetimeRangeRequest`
 
-Datetime ranges use `(begin_timestamp_ms, end_timestamp_ms)` semantics. Multiple ranges are
-combined with OR semantics.
+Datetime ranges use `[begin_timestamp_ms, end_timestamp_ms)` semantics: the begin timestamp is
+included and the end timestamp is excluded. Multiple ranges are combined with OR semantics.
 
 - `begin_timestamp_ms: number` (required): non-negative Unix timestamp in milliseconds.
 - `end_timestamp_ms: number` (required): non-negative Unix timestamp in milliseconds and greater
   than `begin_timestamp_ms`.
 - At most 128 normalized ranges are accepted. Ranges are sorted and overlapping ranges are merged
-  before persistence. Adjacent ranges remain separate so their shared open boundary stays inactive.
+  before persistence. Adjacent ranges remain separate; with `[begin_timestamp_ms, end_timestamp_ms)`
+  semantics, their shared timestamp belongs to the later range and is therefore active.
 
 ### `CreatePipelineSinkRequest`
 
@@ -397,25 +417,26 @@ userinfo, or `Authorization`/`Cookie` in plain `headers`) are always rejected re
 
 - `id: string`
 - `revision: number`
-- `status: string` (`running`, `stopping`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
+- `status: string` (`running`, `stopping`, `stopped`, `scheduled_running`, `scheduled_stopped`,
+  `scheduled_end`, or `failed`)
 
 ### `ListPipelineItem`
 
 - `id: string`
 - `revision: number`
-- `status: string` (`running`, `stopping`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
-- `desired_status: string` (optional; present when stored desired state differs from `status`)
-- `last_runtime_error: PipelineRuntimeFailure` (optional; present when a matching runtime failure
-  marker exists)
+- `status: string` (`running`, `stopping`, `stopped`, `scheduled_running`, `scheduled_stopped`,
+  `scheduled_end`, or `failed`)
+- `last_runtime_error: PipelineRuntimeFailure` (optional; present for the current runtime failure
+  context, not as a historical error record)
 
 ### `GetPipelineResponse`
 
 - `id: string`
 - `revision: number`
-- `status: string` (`running`, `stopping`, `stopped`, `scheduled_running`, `scheduled_stopped`, or `failed`)
-- `desired_status: string` (optional; present when stored desired state differs from `status`)
-- `last_runtime_error: PipelineRuntimeFailure` (optional; present when a matching runtime failure
-  marker exists)
+- `status: string` (`running`, `stopping`, `stopped`, `scheduled_running`, `scheduled_stopped`,
+  `scheduled_end`, or `failed`)
+- `last_runtime_error: PipelineRuntimeFailure` (optional; present for the current runtime failure
+  context, not as a historical error record)
 - `spec: CreatePipelineRequest`
 - `schedule_status: ScheduleStatus` (optional; present when `spec.options.schedule` is present)
 

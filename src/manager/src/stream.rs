@@ -3,7 +3,6 @@ use crate::audit::ResourceMutationLog;
 use crate::instances::DEFAULT_FLOW_INSTANCE_ID;
 use crate::pipeline::{
     AppState, CreatePipelineRequest, build_pipeline_definition,
-    persist_generic_runtime_failure_marker, persist_start_failure_marker,
     referenced_streams_from_pipeline_sql,
 };
 use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
@@ -41,10 +40,7 @@ use flow::{
     Int16Type, Int32Type, Int64Type, ListType, ProtoDescriptorBundle, StringType, StructField,
     StructType, TimestampType, Uint8Type, Uint16Type, Uint32Type, Uint64Type,
 };
-use storage::{
-    StorageError, StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState,
-    StoredPipelineRunState,
-};
+use storage::{StorageError, StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState};
 
 #[derive(Deserialize, Serialize, Clone)]
 pub struct CreateStreamRequest {
@@ -154,7 +150,6 @@ pub(crate) struct PipelineRestartResult {
 
 struct AffectedPipeline {
     id: String,
-    revision: u64,
     flow_instance_id: String,
     request: CreatePipelineRequest,
     desired_state: StoredPipelineDesiredState,
@@ -196,7 +191,6 @@ fn collect_pipelines_referencing_stream(
 
         affected.push(AffectedPipeline {
             id: stored.id,
-            revision: stored.revision,
             flow_instance_id,
             request,
             desired_state,
@@ -221,23 +215,6 @@ async fn stop_affected_pipelines(
                     pipeline.flow_instance_id
                 )
             })?;
-
-        if pipeline.request.options.schedule.is_some()
-            && !matches!(pipeline.desired_state, StoredPipelineDesiredState::Stopped)
-        {
-            state
-                .storage
-                .put_pipeline_run_state(StoredPipelineRunState {
-                    pipeline_id: pipeline.id.clone(),
-                    desired_state: StoredPipelineDesiredState::ScheduledStopped,
-                })
-                .map_err(|err| {
-                    format!(
-                        "failed to mark scheduled pipeline {} stopped: {err}",
-                        pipeline.id
-                    )
-                })?;
-        }
 
         if matches!(pipeline.runtime_status, Some(PipelineStatus::Running)) {
             instance
@@ -265,6 +242,15 @@ async fn rebuild_affected_pipeline(
                 pipeline.flow_instance_id
             )
         })?;
+
+    let definition = build_pipeline_definition(
+        &pipeline.request,
+        instance.encoder_registry().as_ref(),
+        instance.as_ref(),
+    )?;
+    instance
+        .explain_pipeline(flow::ExplainPipelineTarget::Definition(&definition))
+        .map_err(|err| format!("failed to validate pipeline {}: {err}", pipeline.id))?;
     match instance.delete_pipeline(&pipeline.id).await {
         Ok(()) | Err(PipelineError::NotFound(_)) => {}
         Err(err) => {
@@ -275,14 +261,6 @@ async fn rebuild_affected_pipeline(
         }
     }
 
-    let definition = build_pipeline_definition(
-        &pipeline.request,
-        instance.encoder_registry().as_ref(),
-        instance.as_ref(),
-    )?;
-    instance
-        .explain_pipeline(flow::ExplainPipelineTarget::Definition(&definition))
-        .map_err(|err| format!("failed to validate pipeline {}: {err}", pipeline.id))?;
     instance
         .create_pipeline(flow::CreatePipelineRequest::new(definition))
         .map_err(|err| format!("failed to rebuild pipeline {}: {err}", pipeline.id))?;
@@ -296,13 +274,13 @@ async fn rebuild_and_restore_affected_pipelines(
     let mut results = Vec::with_capacity(pipelines.len());
     for pipeline in pipelines {
         if let Err(err) = rebuild_affected_pipeline(state, pipeline).await {
-            persist_generic_runtime_failure_marker(
-                state.storage.as_ref(),
-                &pipeline.id,
-                pipeline.revision,
-                "stream_update_rebuild",
-                err.clone(),
-            );
+            if let Some(instance) = state.local_instance(&pipeline.flow_instance_id) {
+                let _ = instance.mark_pipeline_failed(
+                    &pipeline.id,
+                    "stream_update_rebuild",
+                    err.clone(),
+                );
+            }
             results.push(PipelineRestartResult {
                 id: pipeline.id.clone(),
                 status: "rebuild_failed",
@@ -311,9 +289,8 @@ async fn rebuild_and_restore_affected_pipelines(
             continue;
         }
 
-        let _ = state.storage.delete_pipeline_runtime_failure(&pipeline.id);
         if pipeline.request.options.schedule.is_some()
-            && !matches!(pipeline.desired_state, StoredPipelineDesiredState::Stopped)
+            && matches!(pipeline.desired_state, StoredPipelineDesiredState::Running)
         {
             results.push(PipelineRestartResult {
                 id: pipeline.id.clone(),
@@ -338,13 +315,6 @@ async fn rebuild_and_restore_affected_pipelines(
                     "flow instance {} is not available in runtime",
                     pipeline.flow_instance_id
                 );
-                persist_generic_runtime_failure_marker(
-                    state.storage.as_ref(),
-                    &pipeline.id,
-                    pipeline.revision,
-                    "stream_update_restart",
-                    err.clone(),
-                );
                 results.push(PipelineRestartResult {
                     id: pipeline.id.clone(),
                     status: "start_failed",
@@ -362,12 +332,6 @@ async fn rebuild_and_restore_affected_pipelines(
                 });
             }
             Err(err) => {
-                persist_start_failure_marker(
-                    state.storage.as_ref(),
-                    &pipeline.id,
-                    pipeline.revision,
-                    &err,
-                );
                 results.push(PipelineRestartResult {
                     id: pipeline.id.clone(),
                     status: "start_failed",
@@ -3366,5 +3330,43 @@ mod tests {
             .expect("read response body");
         let message = String::from_utf8(body.to_vec()).expect("utf8 body");
         assert!(message.contains("stream name"), "got: {message}");
+    }
+
+    #[tokio::test]
+    async fn stream_rebuild_failure_is_visible_in_current_runtime() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let state = build_state(&temp, vec![sample_default_instance_spec()]);
+        let request = mock_stream_request("rebuild_src");
+        let response = create_stream_handler(State(state.clone()), Json(request))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let instance = state.instances.default_instance();
+        let request = pipeline_request("rebuild_pipe", "rebuild_src");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            instance.as_ref(),
+        )
+        .expect("definition");
+        instance
+            .create_pipeline(flow::CreatePipelineRequest::new(definition))
+            .expect("runtime");
+        let mut changed_request = request;
+        changed_request.sql = "SELECT * FROM missing_stream".to_string();
+        let affected = AffectedPipeline {
+            id: "rebuild_pipe".to_string(),
+            flow_instance_id: "default".to_string(),
+            request: changed_request,
+            desired_state: StoredPipelineDesiredState::Running,
+            runtime_status: Some(PipelineStatus::Stopped),
+        };
+        let results = rebuild_and_restore_affected_pipelines(&state, &[affected]).await;
+        assert_eq!(results[0].status, "rebuild_failed");
+        let snapshot = instance.list_pipelines().pop().expect("retained runtime");
+        assert_eq!(snapshot.status, PipelineStatus::Failed);
+        let error = snapshot.last_runtime_error.expect("current rebuild error");
+        assert_eq!(error.processor_kind, "stream_update_rebuild");
+        assert!(error.reason.contains("missing_stream"));
     }
 }

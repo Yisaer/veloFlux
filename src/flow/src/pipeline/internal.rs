@@ -179,6 +179,7 @@ pub(super) struct ManagedPipeline {
     pipeline: Option<ProcessorPipeline>,
     streams: Vec<String>,
     status: PipelineStatus,
+    last_runtime_error: Option<PipelineRuntimeFailure>,
 }
 
 impl ManagedPipeline {
@@ -187,6 +188,24 @@ impl ManagedPipeline {
             definition: Arc::clone(&self.definition),
             streams: self.streams.clone(),
             status: self.status,
+            last_runtime_error: self.last_runtime_error.clone(),
+        }
+    }
+
+    fn fail(&mut self, pipeline_id: &str, kind: &str, reason: String) {
+        self.status = PipelineStatus::Failed;
+        self.pipeline = None;
+        if self.last_runtime_error.is_none() {
+            self.last_runtime_error = Some(PipelineRuntimeFailure {
+                pipeline_id: pipeline_id.to_string(),
+                failed_at_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+                    .unwrap_or(0),
+                processor_id: "pipeline_runtime".to_string(),
+                processor_kind: kind.to_string(),
+                reason,
+            });
         }
     }
 }
@@ -207,13 +226,6 @@ impl PipelineManager {
 
     pub(crate) fn replace_registries(&self, registries: PipelineRegistries) {
         *self.registries.write() = registries;
-    }
-
-    pub(crate) fn set_pipeline_failure_reporter(
-        &self,
-        reporter: super::context::PipelineFailureReporter,
-    ) {
-        self.context.set_pipeline_failure_reporter(reporter);
     }
 
     pub(crate) fn set_checkpoint_store(&self, store: Arc<dyn crate::checkpoint::CheckpointStore>) {
@@ -260,6 +272,7 @@ impl PipelineManager {
             pipeline: Some(pipeline),
             streams,
             status: PipelineStatus::Stopped,
+            last_runtime_error: None,
         };
         let snapshot = entry.snapshot();
         guard.insert(pipeline_id, entry);
@@ -305,6 +318,32 @@ impl PipelineManager {
 
     /// Start the pipeline runtime if not already running.
     pub async fn start_pipeline(&self, pipeline_id: &str) -> Result<(), PipelineError> {
+        {
+            let mut guard = self.pipelines.write();
+            let entry = guard
+                .get_mut(pipeline_id)
+                .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
+            if matches!(entry.status, PipelineStatus::Running) {
+                return Ok(());
+            }
+            if matches!(entry.status, PipelineStatus::Stopping) {
+                return Err(PipelineError::Runtime(format!(
+                    "pipeline {pipeline_id} is stopping"
+                )));
+            }
+            entry.last_runtime_error = None;
+        }
+        let result = self.start_runtime(pipeline_id).await;
+        if let Err(err) = &result {
+            let mut guard = self.pipelines.write();
+            if let Some(entry) = guard.get_mut(pipeline_id) {
+                entry.fail(pipeline_id, "pipeline_start", err.to_string());
+            }
+        }
+        result
+    }
+
+    async fn start_runtime(&self, pipeline_id: &str) -> Result<(), PipelineError> {
         let mut pipeline = {
             let mut guard = self.pipelines.write();
             let entry = guard
@@ -354,22 +393,15 @@ impl PipelineManager {
         };
 
         let pipelines = Arc::clone(&self.pipelines);
-        let external_reporter = self.context.pipeline_failure_reporter();
         let failure_handler = Arc::new(move |failure: PipelineRuntimeFailure| {
-            let mut marked_failed = false;
-            {
-                let mut guard = pipelines.write();
-                if let Some(entry) = guard.get_mut(&failure.pipeline_id) {
-                    if matches!(entry.status, PipelineStatus::Running) {
-                        entry.status = PipelineStatus::Failed;
-                        entry.pipeline = None;
-                        marked_failed = true;
-                    }
-                }
-            }
-            if marked_failed {
-                if let Some(reporter) = external_reporter.as_ref() {
-                    reporter(failure);
+            let mut guard = pipelines.write();
+            if let Some(entry) = guard.get_mut(&failure.pipeline_id) {
+                if matches!(entry.status, PipelineStatus::Running) {
+                    tracing::error!(pipeline_id = %failure.pipeline_id, error = %failure.reason,
+                        processor_id = %failure.processor_id, "pipeline runtime failed");
+                    entry.status = PipelineStatus::Failed;
+                    entry.pipeline = None;
+                    entry.last_runtime_error = Some(failure);
                 }
             }
         });
@@ -397,7 +429,7 @@ impl PipelineManager {
             }
             Err(err) => {
                 entry.pipeline = None;
-                entry.status = PipelineStatus::Stopped;
+                entry.fail(pipeline_id, "pipeline_start", err.to_string());
                 Err(err)
             }
         }
@@ -421,6 +453,7 @@ impl PipelineManager {
             }
             if !matches!(entry.status, PipelineStatus::Running) {
                 entry.status = PipelineStatus::Stopped;
+                entry.last_runtime_error = None;
                 return Ok(());
             }
             entry.status = PipelineStatus::Stopping;
@@ -435,15 +468,30 @@ impl PipelineManager {
             .get_mut(pipeline_id)
             .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
         entry.status = PipelineStatus::Stopped;
+        entry.last_runtime_error = None;
         result
     }
 
-    pub(crate) fn mark_pipeline_failed(&self, pipeline_id: &str) -> Result<(), PipelineError> {
+    pub(crate) fn mark_pipeline_failed(
+        &self,
+        pipeline_id: &str,
+        kind: &str,
+        reason: String,
+    ) -> Result<(), PipelineError> {
         let mut guard = self.pipelines.write();
         let entry = guard
             .get_mut(pipeline_id)
             .ok_or_else(|| PipelineError::NotFound(pipeline_id.to_string()))?;
-        entry.status = PipelineStatus::Failed;
+        if matches!(
+            entry.status,
+            PipelineStatus::Running | PipelineStatus::Stopping
+        ) {
+            return Err(PipelineError::Runtime(format!(
+                "pipeline {pipeline_id} must be stopped before recording a rebuild failure"
+            )));
+        }
+        entry.last_runtime_error = None;
+        entry.fail(pipeline_id, kind, reason);
         Ok(())
     }
 
@@ -1401,5 +1449,39 @@ mod file_sink_tests {
             err.contains("expected encoded bytes for file"),
             "unexpected error: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    #[test]
+    fn generic_startup_error_preserves_processor_root_cause() {
+        let failure = PipelineRuntimeFailure {
+            pipeline_id: "pipe".to_string(),
+            failed_at_ms: 123,
+            processor_id: "filter_1".to_string(),
+            processor_kind: "filter".to_string(),
+            reason: "processor failure".to_string(),
+        };
+        let mut entry = ManagedPipeline {
+            definition: Arc::new(PipelineDefinition::new(
+                "pipe",
+                "SELECT * FROM src",
+                Vec::new(),
+            )),
+            pipeline: None,
+            streams: vec!["src".to_string()],
+            status: PipelineStatus::Failed,
+            last_runtime_error: Some(failure.clone()),
+        };
+        entry.fail(
+            "pipe",
+            "pipeline_start",
+            "generic startup error".to_string(),
+        );
+        assert_eq!(entry.snapshot().last_runtime_error, Some(failure));
+        assert_eq!(entry.snapshot().status, PipelineStatus::Failed);
     }
 }

@@ -5,21 +5,16 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
-use flow::pipeline::{PipelineError, PipelineStopMode};
+use flow::pipeline::{PipelineError, PipelineStatus, PipelineStopMode};
 use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
-use storage::{
-    StorageError, StoredPipelineDesiredState, StoredPipelineRunState, StoredPipelineRuntimeFailure,
-};
+use storage::{StorageError, StoredPipelineDesiredState, StoredPipelineRunState};
 use tokio::sync::{OwnedSemaphorePermit, TryAcquireError};
 
 const EXPLAIN_THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
 type PipelineHandlerError = Box<axum::response::Response>;
 
 use super::context::shared_mqtt_connector_keys_from_pipeline_request;
-use super::runtime_failure::{
-    matching_runtime_failure as matching_runtime_failure_marker, persist_start_failure_marker,
-};
 use super::spec::{
     build_pipeline_definition, referenced_streams_from_pipeline_sql, status_label,
     validate_create_request,
@@ -89,32 +84,16 @@ fn stream_refs_busy_response(streams: &BTreeSet<String>) -> axum::response::Resp
         .into_response()
 }
 
-fn stored_state_label(state: Option<StoredPipelineRunState>) -> String {
-    match state.map(|s| s.desired_state) {
-        Some(StoredPipelineDesiredState::Running) => "running".to_string(),
-        Some(StoredPipelineDesiredState::ScheduledRunning) => "scheduled_running".to_string(),
-        Some(StoredPipelineDesiredState::ScheduledStopped) => "scheduled_stopped".to_string(),
-        _ => "stopped".to_string(),
-    }
-}
-
 fn desired_state_after_upsert(
     is_scheduled: bool,
     old_desired_state: StoredPipelineDesiredState,
 ) -> StoredPipelineDesiredState {
-    match (is_scheduled, old_desired_state) {
-        (true, StoredPipelineDesiredState::Stopped) => StoredPipelineDesiredState::Stopped,
-        (true, _) => StoredPipelineDesiredState::ScheduledStopped,
-        (
-            false,
-            StoredPipelineDesiredState::Running | StoredPipelineDesiredState::ScheduledRunning,
-        ) => StoredPipelineDesiredState::Running,
-        (false, _) => StoredPipelineDesiredState::Stopped,
-    }
+    let _ = is_scheduled;
+    old_desired_state
 }
 
 fn runtime_failure_response(
-    failure: &StoredPipelineRuntimeFailure,
+    failure: &flow::pipeline::PipelineRuntimeFailure,
 ) -> PipelineRuntimeFailureResponse {
     PipelineRuntimeFailureResponse {
         processor_id: failure.processor_id.clone(),
@@ -124,30 +103,41 @@ fn runtime_failure_response(
     }
 }
 
-fn matching_runtime_failure(
-    state: &AppState,
-    pipeline_id: &str,
-    revision: u64,
-) -> Result<Option<StoredPipelineRuntimeFailure>, String> {
-    matching_runtime_failure_marker(state.storage.as_ref(), pipeline_id, revision)
-}
-
 fn status_response_parts(
-    desired_status: String,
+    desired_state: StoredPipelineDesiredState,
+    is_scheduled: bool,
+    schedule_ended: bool,
     runtime_status: Option<String>,
-    failure: Option<&StoredPipelineRuntimeFailure>,
-) -> (
-    String,
-    Option<String>,
-    Option<PipelineRuntimeFailureResponse>,
-) {
-    let status = failure
-        .map(|_| "failed".to_string())
-        .or(runtime_status)
-        .unwrap_or_else(|| desired_status.clone());
-    let desired_status = (desired_status != status).then_some(desired_status);
-    let failure = failure.map(runtime_failure_response);
-    (status, desired_status, failure)
+    failure: Option<&flow::pipeline::PipelineRuntimeFailure>,
+) -> (String, Option<PipelineRuntimeFailureResponse>) {
+    let status = if runtime_status.as_deref() == Some("stopping") {
+        "stopping"
+    } else if is_scheduled {
+        if matches!(desired_state, StoredPipelineDesiredState::Stopped) {
+            "stopped"
+        } else if runtime_status.as_deref() == Some("failed") {
+            "failed"
+        } else if runtime_status.as_deref() == Some("running") {
+            "scheduled_running"
+        } else if !schedule_ended {
+            "scheduled_stopped"
+        } else {
+            "scheduled_end"
+        }
+    } else if matches!(desired_state, StoredPipelineDesiredState::Stopped) {
+        match runtime_status.as_deref() {
+            Some("running") => "running",
+            Some("failed") | None => "stopped",
+            _ => "stopped",
+        }
+    } else if runtime_status.as_deref() == Some("failed") {
+        "failed"
+    } else if runtime_status.as_deref() == Some("running") {
+        "running"
+    } else {
+        "stopped"
+    };
+    (status.to_string(), failure.map(runtime_failure_response))
 }
 
 /// Validate a `:id` path segment against the resource-id grammar before any
@@ -172,6 +162,27 @@ fn local_instance_response(
                 .into_response(),
         )
     })
+}
+
+fn runtime_snapshot(
+    state: &AppState,
+    flow_instance_id: &str,
+    pipeline_id: &str,
+) -> Option<flow::pipeline::PipelineSnapshot> {
+    state.local_instance(flow_instance_id).and_then(|instance| {
+        instance
+            .list_pipelines()
+            .into_iter()
+            .find(|snapshot| snapshot.definition.id() == pipeline_id)
+    })
+}
+
+fn runtime_status(
+    state: &AppState,
+    flow_instance_id: &str,
+    pipeline_id: &str,
+) -> Option<PipelineStatus> {
+    runtime_snapshot(state, flow_instance_id, pipeline_id).map(|snapshot| snapshot.status)
 }
 
 async fn resolve_pipeline_spec(
@@ -401,7 +412,7 @@ pub async fn create_pipeline_handler(
     let pipeline_id = snapshot.definition.id().to_string();
     let mut status = status_label(snapshot.status);
 
-    if query.start {
+    if query.start && req.options.schedule.is_none() {
         if let Err(err) = state
             .storage
             .put_pipeline_run_state(StoredPipelineRunState {
@@ -417,7 +428,6 @@ pub async fn create_pipeline_handler(
         } else {
             match instance.start_pipeline(&pipeline_id).await {
                 Ok(_) => {
-                    let _ = state.storage.delete_pipeline_runtime_failure(&pipeline_id);
                     status = "running".to_string();
                 }
                 Err(err) => {
@@ -425,12 +435,6 @@ pub async fn create_pipeline_handler(
                         pipeline_id = %pipeline_id,
                         error = %err,
                         "failed to start pipeline after create with start=true"
-                    );
-                    persist_start_failure_marker(
-                        state.storage.as_ref(),
-                        &pipeline_id,
-                        req.revision,
-                        &err,
                     );
                     status = "failed".to_string();
                 }
@@ -441,7 +445,7 @@ pub async fn create_pipeline_handler(
             .storage
             .put_pipeline_run_state(StoredPipelineRunState {
                 pipeline_id: pipeline_id.clone(),
-                desired_state: StoredPipelineDesiredState::ScheduledStopped,
+                desired_state: StoredPipelineDesiredState::Running,
             })
         {
             tracing::error!(
@@ -450,7 +454,14 @@ pub async fn create_pipeline_handler(
                 "failed to persist scheduled desired state after create"
             );
         } else {
-            status = "scheduled_stopped".to_string();
+            status = if super::scheduler::schedule_has_ended(
+                req.options.schedule.as_ref().expect("schedule exists"),
+                chrono::Utc::now(),
+            ) {
+                "scheduled_end".to_string()
+            } else {
+                "scheduled_stopped".to_string()
+            };
         }
     }
 
@@ -558,8 +569,32 @@ pub async fn upsert_pipeline_handler(
                 Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
             };
             if old_spec == new_spec {
-                let status =
-                    stored_state_label(state.storage.get_pipeline_run_state(&id).unwrap_or(None));
+                let desired_state = state
+                    .storage
+                    .get_pipeline_run_state(&id)
+                    .unwrap_or(None)
+                    .map(|state| state.desired_state)
+                    .unwrap_or(StoredPipelineDesiredState::Stopped);
+                let flow_instance_id =
+                    defaulted_flow_instance_id(old_req.flow_instance_id.as_deref())
+                        .unwrap_or_else(|_| DEFAULT_FLOW_INSTANCE_ID.to_string());
+                let snapshot = runtime_snapshot(&state, &flow_instance_id, &id);
+                let runtime_status = snapshot
+                    .as_ref()
+                    .map(|snapshot| status_label(snapshot.status));
+                let failure = snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.last_runtime_error.as_ref());
+                let status = status_response_parts(
+                    desired_state,
+                    old_req.options.schedule.is_some(),
+                    old_req.options.schedule.as_ref().is_some_and(|schedule| {
+                        super::scheduler::schedule_has_ended(schedule, chrono::Utc::now())
+                    }),
+                    runtime_status,
+                    failure,
+                )
+                .0;
                 return Json(CreatePipelineResponse {
                     id,
                     revision: stored.revision,
@@ -716,22 +751,33 @@ pub async fn upsert_pipeline_handler(
             .into_response();
     }
 
-    if matches!(
-        desired_state,
-        StoredPipelineDesiredState::Running | StoredPipelineDesiredState::ScheduledRunning
-    ) && let Err(err) = instance.start_pipeline(&id).await
+    if matches!(desired_state, StoredPipelineDesiredState::Running)
+        && create_req.options.schedule.is_none()
+        && let Err(err) = instance.start_pipeline(&id).await
     {
-        tracing::error!(
-            pipeline_id = %id,
-            error = %err,
-            "failed to start pipeline after upsert"
-        );
-        persist_start_failure_marker(state.storage.as_ref(), &id, create_req.revision, &err);
-    } else {
-        let _ = state.storage.delete_pipeline_runtime_failure(&id);
+        tracing::error!(pipeline_id = %id, error = %err, "failed to start pipeline after upsert");
     }
 
-    let status = stored_state_label(state.storage.get_pipeline_run_state(&id).unwrap_or(None));
+    let snapshot = runtime_snapshot(&state, &flow_instance_id, &id);
+    let runtime_status = snapshot
+        .as_ref()
+        .map(|snapshot| status_label(snapshot.status));
+    let failure = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.last_runtime_error.as_ref());
+    let (status, _) = status_response_parts(
+        desired_state,
+        create_req.options.schedule.is_some(),
+        create_req
+            .options
+            .schedule
+            .as_ref()
+            .is_some_and(|schedule| {
+                super::scheduler::schedule_has_ended(schedule, chrono::Utc::now())
+            }),
+        runtime_status,
+        failure,
+    );
     audit.log_success();
     Json(CreatePipelineResponse {
         id,
@@ -801,34 +847,36 @@ pub async fn get_pipeline_handler(
         .schedule
         .as_ref()
         .map(super::scheduler::compute_schedule_status);
-    let desired_status = stored_state_label(run_state);
-    let failure = match matching_runtime_failure(&state, &id, stored.revision) {
-        Ok(failure) => failure,
-        Err(err) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
-        }
-    };
-    let runtime_status = state
-        .local_instance(
-            spec.flow_instance_id
-                .as_deref()
-                .unwrap_or(DEFAULT_FLOW_INSTANCE_ID),
-        )
-        .and_then(|instance| {
-            instance
-                .list_pipelines()
-                .into_iter()
-                .find(|snapshot| snapshot.definition.id() == id)
-                .map(|snapshot| status_label(snapshot.status))
-        });
-    let (status, desired_status, last_runtime_error) =
-        status_response_parts(desired_status, runtime_status, failure.as_ref());
+    let desired_state = run_state
+        .map(|state| state.desired_state)
+        .unwrap_or(StoredPipelineDesiredState::Stopped);
+    let snapshot = runtime_snapshot(
+        &state,
+        spec.flow_instance_id
+            .as_deref()
+            .unwrap_or(DEFAULT_FLOW_INSTANCE_ID),
+        &id,
+    );
+    let runtime_status = snapshot
+        .as_ref()
+        .map(|snapshot| status_label(snapshot.status));
+    let failure = snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.last_runtime_error.as_ref());
+    let (status, last_runtime_error) = status_response_parts(
+        desired_state,
+        spec.options.schedule.is_some(),
+        spec.options.schedule.as_ref().is_some_and(|schedule| {
+            super::scheduler::schedule_has_ended(schedule, chrono::Utc::now())
+        }),
+        runtime_status,
+        failure,
+    );
 
     Json(GetPipelineResponse {
         id: id.clone(),
         revision: stored.revision,
         status,
-        desired_status,
         last_runtime_error,
         spec,
         schedule_status,
@@ -919,30 +967,40 @@ pub async fn collect_pipeline_stats_handler(
         }
     };
 
-    let (flow_instance_id, pipeline_req) = match resolve_pipeline_spec(&state, &id).await {
+    let (flow_instance_id, _) = match resolve_pipeline_spec(&state, &id).await {
         Ok(result) => result,
         Err(resp) => return *resp,
     };
-    match matching_runtime_failure(&state, &id, pipeline_req.revision) {
-        Ok(Some(failure)) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "pipeline {id} is failed: processor {} ({}) exited: {}",
-                    failure.processor_id, failure.processor_kind, failure.reason
-                ),
-            )
-                .into_response();
-        }
-        Ok(None) => {}
-        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
-    }
-
     let timeout = Duration::from_millis(query.timeout_ms);
     let instance = match local_instance_response(&state, &flow_instance_id) {
         Ok(instance) => instance,
         Err(resp) => return *resp,
     };
+    let snapshot = runtime_snapshot(&state, &flow_instance_id, &id);
+    if snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.status == PipelineStatus::Failed)
+    {
+        match snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.last_runtime_error.as_ref())
+        {
+            Some(failure) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "pipeline {id} is failed: processor {} ({}) exited: {}",
+                        failure.processor_id, failure.processor_kind, failure.reason
+                    ),
+                )
+                    .into_response();
+            }
+            None => {
+                return (StatusCode::BAD_REQUEST, format!("pipeline {id} is failed"))
+                    .into_response();
+            }
+        }
+    }
     match instance.collect_pipeline_stats(&id, timeout).await {
         Ok(stats) => {
             let stats = stats
@@ -999,30 +1057,6 @@ pub async fn start_pipeline_handler(
         Some(pipeline_req.revision),
     );
 
-    if pipeline_req.options.schedule.is_some() {
-        if let Err(err) = state
-            .storage
-            .put_pipeline_run_state(StoredPipelineRunState {
-                pipeline_id: id.clone(),
-                desired_state: StoredPipelineDesiredState::ScheduledStopped,
-            })
-        {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to persist pipeline {id} desired state: {err}"),
-            )
-                .into_response();
-        }
-        audit.log_success();
-        return (StatusCode::OK, format!("pipeline {id} scheduling enabled")).into_response();
-    }
-
-    let _shared_mqtt_permits =
-        match try_acquire_shared_mqtt_pipeline_ops(&state, &id, &pipeline_req).await {
-            Ok(permits) => permits,
-            Err(resp) => return *resp,
-        };
-
     if let Err(err) = state
         .storage
         .put_pipeline_run_state(StoredPipelineRunState {
@@ -1037,33 +1071,64 @@ pub async fn start_pipeline_handler(
             .into_response();
     }
 
+    if matches!(
+        runtime_status(&state, &flow_instance_id, &id),
+        Some(PipelineStatus::Stopping)
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            format!("pipeline {id} is stopping; wait for stopping to finish"),
+        )
+            .into_response();
+    }
+
+    if pipeline_req.options.schedule.is_some() {
+        if matches!(
+            runtime_status(&state, &flow_instance_id, &id),
+            Some(PipelineStatus::Failed)
+        ) {
+            let instance = match local_instance_response(&state, &flow_instance_id) {
+                Ok(instance) => instance,
+                Err(resp) => return *resp,
+            };
+            if let Err(err) = instance
+                .stop_pipeline(&id, PipelineStopMode::Quick, Duration::from_secs(5))
+                .await
+            {
+                let message = format!(
+                    "failed to reset pipeline {id} runtime before scheduled recovery: {err}"
+                );
+                audit.log_failure(&message);
+                return (StatusCode::INTERNAL_SERVER_ERROR, message).into_response();
+            }
+        }
+        audit.log_success();
+        return (StatusCode::OK, format!("pipeline {id} scheduling enabled")).into_response();
+    }
+
+    let _shared_mqtt_permits =
+        match try_acquire_shared_mqtt_pipeline_ops(&state, &id, &pipeline_req).await {
+            Ok(permits) => permits,
+            Err(resp) => return *resp,
+        };
+
     let instance = match local_instance_response(&state, &flow_instance_id) {
         Ok(instance) => instance,
         Err(resp) => return *resp,
     };
     match instance.start_pipeline(&id).await {
         Ok(_) => {
-            let _ = state.storage.delete_pipeline_runtime_failure(&id);
             audit.log_success();
             (StatusCode::OK, format!("pipeline {id} started")).into_response()
         }
         Err(PipelineError::NotFound(_)) => {
-            let _ = state
-                .storage
-                .put_pipeline_run_state(StoredPipelineRunState {
-                    pipeline_id: id.clone(),
-                    desired_state: StoredPipelineDesiredState::Stopped,
-                });
             (StatusCode::NOT_FOUND, format!("pipeline {id} not found")).into_response()
         }
-        Err(err) => {
-            persist_start_failure_marker(state.storage.as_ref(), &id, pipeline_req.revision, &err);
-            (
-                StatusCode::BAD_REQUEST,
-                format!("failed to start pipeline {id}: {err}"),
-            )
-                .into_response()
-        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            format!("failed to start pipeline {id}: {err}"),
+        )
+            .into_response(),
     }
 }
 
@@ -1117,19 +1182,28 @@ pub async fn stop_pipeline_handler(
             .into_response();
     }
 
+    if matches!(
+        runtime_status(&state, &flow_instance_id, &id),
+        Some(PipelineStatus::Stopping)
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            format!("pipeline {id} is stopping; wait for stopping to finish"),
+        )
+            .into_response();
+    }
+
     let instance = match local_instance_response(&state, &flow_instance_id) {
         Ok(instance) => instance,
         Err(resp) => return *resp,
     };
     match instance.stop_pipeline(&id, mode, timeout).await {
         Ok(_) => {
-            let _ = state.storage.delete_pipeline_runtime_failure(&id);
             audit.log_success();
             (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
         }
         Err(PipelineError::NotFound(_)) => {
             if is_scheduled {
-                let _ = state.storage.delete_pipeline_runtime_failure(&id);
                 audit.log_success();
                 (StatusCode::OK, format!("pipeline {id} stopped")).into_response()
             } else {
@@ -1238,13 +1312,10 @@ pub async fn delete_pipeline_handler(
 }
 
 pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse {
-    let mut runtime_status = HashMap::new();
+    let mut runtime_snapshots = HashMap::new();
     for (_, instance) in state.instances.instances_snapshot() {
         for snapshot in instance.list_pipelines() {
-            runtime_status.insert(
-                snapshot.definition.id().to_string(),
-                status_label(snapshot.status),
-            );
+            runtime_snapshots.insert(snapshot.definition.id().to_string(), snapshot);
         }
     }
 
@@ -1278,8 +1349,10 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
                     };
                 spec.flow_instance_id = Some(flow_instance_id.clone());
 
-                let desired_status = match state.storage.get_pipeline_run_state(&entry.id) {
-                    Ok(run_state) => stored_state_label(run_state),
+                let desired_state = match state.storage.get_pipeline_run_state(&entry.id) {
+                    Ok(run_state) => run_state
+                        .map(|state| state.desired_state)
+                        .unwrap_or(StoredPipelineDesiredState::Stopped),
                     Err(err) => {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1288,18 +1361,22 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
                             .into_response();
                     }
                 };
-                let failure = match matching_runtime_failure(&state, &entry.id, entry.revision) {
-                    Ok(failure) => failure,
-                    Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
-                };
-                let runtime_status = runtime_status.get(&entry.id).cloned();
-                let (status, desired_status, last_runtime_error) =
-                    status_response_parts(desired_status, runtime_status, failure.as_ref());
+                let snapshot = runtime_snapshots.get(&entry.id);
+                let runtime_status = snapshot.map(|snapshot| status_label(snapshot.status));
+                let failure = snapshot.and_then(|snapshot| snapshot.last_runtime_error.as_ref());
+                let (status, last_runtime_error) = status_response_parts(
+                    desired_state,
+                    spec.options.schedule.is_some(),
+                    spec.options.schedule.as_ref().is_some_and(|schedule| {
+                        super::scheduler::schedule_has_ended(schedule, chrono::Utc::now())
+                    }),
+                    runtime_status,
+                    failure,
+                );
                 list.push(ListPipelineItem {
                     id: entry.id,
                     revision: entry.revision,
                     status,
-                    desired_status,
                     last_runtime_error,
                     flow_instance_id,
                 });
@@ -1318,10 +1395,10 @@ pub async fn list_pipelines(State(state): State<AppState>) -> impl IntoResponse 
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_pipeline_stats_handler, create_pipeline_handler, desired_state_after_upsert,
-        list_pipelines, start_pipeline_handler,
+        build_pipeline_definition, collect_pipeline_stats_handler, create_pipeline_handler,
+        desired_state_after_upsert, list_pipelines, runtime_snapshot, start_pipeline_handler,
+        status_response_parts,
     };
-    use crate::pipeline::runtime_failure::persist_start_failure_marker;
     use crate::pipeline::{AppState, CreatePipelineRequest, types};
     use crate::storage_bridge::{
         stored_mqtt_from_config, stored_pipeline_from_request, stored_stream_from_request,
@@ -1338,12 +1415,8 @@ mod tests {
         response::IntoResponse,
     };
     use flow::connector::SharedMqttClientConfig;
-    use flow::pipeline::PipelineError;
     use serde_json::{Map as JsonMap, Value as JsonValue};
-    use storage::{
-        StoredMemoryTopic, StoredMemoryTopicKind, StoredPipelineDesiredState,
-        StoredPipelineRuntimeFailure,
-    };
+    use storage::{StoredMemoryTopic, StoredMemoryTopicKind, StoredPipelineDesiredState};
 
     fn default_flow_instance_spec() -> crate::FlowInstanceSpec {
         crate::FlowInstanceSpec {
@@ -1353,19 +1426,119 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_upsert_resets_previous_running_state() {
+    fn upsert_preserves_desired_state_for_scheduled_pipeline() {
         assert_eq!(
-            desired_state_after_upsert(true, StoredPipelineDesiredState::ScheduledRunning),
-            StoredPipelineDesiredState::ScheduledStopped
+            desired_state_after_upsert(true, StoredPipelineDesiredState::Running),
+            StoredPipelineDesiredState::Running
         );
         assert_eq!(
             desired_state_after_upsert(true, StoredPipelineDesiredState::Running),
-            StoredPipelineDesiredState::ScheduledStopped
+            StoredPipelineDesiredState::Running
         );
         assert_eq!(
             desired_state_after_upsert(true, StoredPipelineDesiredState::Stopped),
             StoredPipelineDesiredState::Stopped
         );
+    }
+
+    #[test]
+    fn status_response_uses_runtime_and_schedule_state() {
+        let cases = [
+            (
+                "ordinary running",
+                StoredPipelineDesiredState::Running,
+                false,
+                false,
+                Some("running"),
+                None,
+                "running",
+            ),
+            (
+                "ordinary stopping",
+                StoredPipelineDesiredState::Running,
+                false,
+                false,
+                Some("stopping"),
+                None,
+                "stopping",
+            ),
+            (
+                "ordinary failed",
+                StoredPipelineDesiredState::Running,
+                false,
+                false,
+                Some("failed"),
+                None,
+                "failed",
+            ),
+            (
+                "scheduled running",
+                StoredPipelineDesiredState::Running,
+                true,
+                false,
+                Some("running"),
+                None,
+                "scheduled_running",
+            ),
+            (
+                "scheduled stopped before a future window",
+                StoredPipelineDesiredState::Running,
+                true,
+                false,
+                Some("stopped"),
+                None,
+                "scheduled_stopped",
+            ),
+            (
+                "scheduled end",
+                StoredPipelineDesiredState::Running,
+                true,
+                true,
+                Some("stopped"),
+                None,
+                "scheduled_end",
+            ),
+            (
+                "manually stopped scheduled pipeline",
+                StoredPipelineDesiredState::Stopped,
+                true,
+                false,
+                Some("stopped"),
+                None,
+                "stopped",
+            ),
+            (
+                "manually stopped scheduled pipeline while runtime is still running",
+                StoredPipelineDesiredState::Stopped,
+                true,
+                false,
+                Some("running"),
+                None,
+                "stopped",
+            ),
+            (
+                "manually stopped failed pipeline",
+                StoredPipelineDesiredState::Stopped,
+                false,
+                false,
+                Some("failed"),
+                None,
+                "stopped",
+            ),
+        ];
+
+        for (name, desired_state, is_scheduled, schedule_ended, runtime, failure, expected) in cases
+        {
+            let (status, error) = status_response_parts(
+                desired_state,
+                is_scheduled,
+                schedule_ended,
+                runtime.map(str::to_string),
+                failure,
+            );
+            assert_eq!(status, expected, "unexpected status for {name}");
+            assert!(error.is_none(), "unexpected runtime error for {name}");
+        }
     }
 
     fn shared_mqtt_cfg(key: &str) -> SharedMqttClientConfig {
@@ -1502,50 +1675,6 @@ mod tests {
         .expect("decode history table request")
     }
 
-    fn seed_failed_marker(state: &AppState, pipeline_id: &str, revision: u64) {
-        state
-            .storage
-            .put_pipeline_runtime_failure(StoredPipelineRuntimeFailure {
-                pipeline_id: pipeline_id.to_string(),
-                revision,
-                failed_at_ms: 1234,
-                processor_id: "PhysicalFilter_1".to_string(),
-                processor_kind: "filter".to_string(),
-                reason: "boom".to_string(),
-            })
-            .expect("persist failure marker");
-    }
-
-    #[test]
-    fn start_failure_marker_preserves_existing_processor_marker() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
-        let state = AppState::new(
-            crate::new_default_flow_instance(),
-            storage,
-            vec![default_flow_instance_spec()],
-            0,
-        )
-        .expect("build app state");
-        seed_failed_marker(&state, "startup_failed_pipe", 1);
-
-        persist_start_failure_marker(
-            state.storage.as_ref(),
-            "startup_failed_pipe",
-            1,
-            &PipelineError::Runtime("generic startup failure".to_string()),
-        );
-
-        let marker = state
-            .storage
-            .get_pipeline_runtime_failure("startup_failed_pipe")
-            .expect("read failure marker")
-            .expect("failure marker exists");
-        assert_eq!(marker.processor_id, "PhysicalFilter_1");
-        assert_eq!(marker.processor_kind, "filter");
-        assert_eq!(marker.reason, "boom");
-    }
-
     async fn seed_memory_stream(state: &AppState, stream: &str, topic: &str) {
         state
             .storage
@@ -1588,7 +1717,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_pipeline_reports_failed_marker() {
+    async fn list_pipeline_reports_runtime_failure() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
         let state = AppState::new(
@@ -1613,7 +1742,20 @@ mod tests {
                 desired_state: storage::StoredPipelineDesiredState::Running,
             })
             .expect("persist run state");
-        seed_failed_marker(&state, "failed_pipe", 1);
+        seed_memory_stream(&state, "src", "list_topic").await;
+        let instance = state.instances.default_instance();
+        let definition = build_pipeline_definition(
+            &pipeline_req,
+            instance.encoder_registry().as_ref(),
+            instance.as_ref(),
+        )
+        .expect("definition");
+        instance
+            .create_pipeline(flow::CreatePipelineRequest::new(definition))
+            .expect("runtime");
+        instance
+            .mark_pipeline_failed("failed_pipe", "filter", "boom".to_string())
+            .expect("fail runtime");
 
         let response = list_pipelines(State(state)).await.into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -1626,10 +1768,9 @@ mod tests {
             .and_then(|items| items.first())
             .expect("one list item");
         assert_eq!(item["status"], "failed");
-        assert_eq!(item["desired_status"], "running");
         assert_eq!(
             item["last_runtime_error"]["processor_id"],
-            "PhysicalFilter_1"
+            "pipeline_runtime"
         );
         assert_eq!(item["last_runtime_error"]["processor_kind"], "filter");
         assert_eq!(item["last_runtime_error"]["reason"], "boom");
@@ -1654,7 +1795,22 @@ mod tests {
                     .expect("serialize stored pipeline request"),
             )
             .expect("persist pipeline");
-        seed_failed_marker(&state, "failed_stats_pipe", 1);
+        seed_memory_stream(&state, "src", "input_topic").await;
+        let instance = state
+            .local_instance("default")
+            .expect("default flow instance");
+        let definition = build_pipeline_definition(
+            &pipeline_req,
+            instance.encoder_registry().as_ref(),
+            instance.as_ref(),
+        )
+        .expect("build pipeline definition");
+        instance
+            .create_pipeline(flow::CreatePipelineRequest::new(definition))
+            .expect("create runtime pipeline");
+        instance
+            .mark_pipeline_failed("failed_stats_pipe", "filter", "boom".to_string())
+            .expect("mark runtime pipeline failed");
 
         let response = collect_pipeline_stats_handler(
             State(state),
@@ -1669,13 +1825,67 @@ mod tests {
             .expect("read stats body");
         let message = String::from_utf8(body.to_vec()).expect("utf8 stats body");
         assert!(message.contains("failed_stats_pipe"), "got: {message}");
-        assert!(message.contains("PhysicalFilter_1"), "got: {message}");
+        assert!(message.contains("pipeline_runtime"), "got: {message}");
         assert!(message.contains("filter"), "got: {message}");
         assert!(message.contains("boom"), "got: {message}");
     }
 
     #[tokio::test]
-    async fn start_failed_pipeline_clears_marker_on_success() {
+    async fn stats_recovered_pipeline_succeeds() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![default_flow_instance_spec()],
+            0,
+        )
+        .expect("build app state");
+        let pipeline_req = nop_pipeline_request("recovered_stats_pipe", "src");
+        state
+            .storage
+            .create_pipeline(
+                stored_pipeline_from_request(&pipeline_req)
+                    .expect("serialize stored pipeline request"),
+            )
+            .expect("persist pipeline");
+        seed_memory_stream(&state, "src", "input_topic").await;
+        let instance = state
+            .local_instance("default")
+            .expect("default flow instance");
+        let definition = build_pipeline_definition(
+            &pipeline_req,
+            instance.encoder_registry().as_ref(),
+            instance.as_ref(),
+        )
+        .expect("build pipeline definition");
+        instance
+            .create_pipeline(flow::CreatePipelineRequest::new(definition))
+            .expect("create runtime pipeline");
+        instance
+            .mark_pipeline_failed(
+                "recovered_stats_pipe",
+                "old_attempt",
+                "old error".to_string(),
+            )
+            .expect("fail runtime");
+        instance
+            .start_pipeline("recovered_stats_pipe")
+            .await
+            .expect("start recovered pipeline");
+
+        let response = collect_pipeline_stats_handler(
+            State(state),
+            Path("recovered_stats_pipe".to_string()),
+            Query(types::CollectStatsQuery::default()),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn start_failed_pipeline_clears_error_on_success() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage");
         let state = AppState::new(
@@ -1696,17 +1906,20 @@ mod tests {
         .await
         .into_response();
         assert_eq!(create_response.status(), StatusCode::CREATED);
-        seed_failed_marker(&state, "retry_pipe", 1);
+        state
+            .instances
+            .default_instance()
+            .mark_pipeline_failed("retry_pipe", "old_attempt", "old error".to_string())
+            .expect("fail runtime");
 
         let response = start_pipeline_handler(State(state.clone()), Path("retry_pipe".to_string()))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(
-            state
-                .storage
-                .get_pipeline_runtime_failure("retry_pipe")
-                .expect("read failure marker")
+            runtime_snapshot(&state, "default", "retry_pipe")
+                .expect("snapshot")
+                .last_runtime_error
                 .is_none()
         );
         let run_state = state
@@ -1786,8 +1999,8 @@ mod tests {
                 .storage
                 .get_pipeline_run_state("pipe_busy")
                 .expect("read pipeline run state")
-                .is_none(),
-            "busy shared mqtt key must reject start before mutating desired state"
+                .is_some(),
+            "start persists desired state before checking shared mqtt operation readiness"
         );
     }
 
@@ -1857,8 +2070,8 @@ mod tests {
                 .storage
                 .get_pipeline_run_state("pipe_busy_sink")
                 .expect("read pipeline run state")
-                .is_none(),
-            "busy shared mqtt sink key must reject start before mutating desired state"
+                .is_some(),
+            "start persists desired state before checking shared mqtt operation readiness"
         );
     }
 

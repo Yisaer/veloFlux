@@ -166,8 +166,6 @@ pub struct ListPipelineItem {
     pub revision: u64,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub desired_status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub last_runtime_error: Option<PipelineRuntimeFailureResponse>,
     pub flow_instance_id: String,
 }
@@ -177,8 +175,6 @@ pub struct GetPipelineResponse {
     pub id: String,
     pub revision: u64,
     pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub desired_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_runtime_error: Option<PipelineRuntimeFailureResponse>,
     pub spec: CreatePipelineRequest,

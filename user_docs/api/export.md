@@ -81,8 +81,6 @@ curl -sOJ 'http://127.0.0.1:8080/storage/export?bundle_version=2026.07.24-1'
 - `run_state: StoredPipelineDesiredState`
   - `Stopped`
   - `Running`
-  - `ScheduledStopped`
-  - `ScheduledRunning`
 
 ### `ExportUdf`
 
@@ -144,7 +142,7 @@ resource set, send the ZIP to the import API instead.
 - `streams` are exported using the same shape as `CreateStreamRequest`.
 - `tables` use the `CreateTableRequest` shape.
 - `pipelines` use the `CreatePipelineRequest` shape with inline `run_state`.
-- Pipeline runtime failure markers are operational state and are not exported. Exported
+- Pipeline runtime status and errors are in-memory state and are not exported. Exported
   `run_state` records the desired run state, not whether a live runtime is currently failed.
 - The exported arrays are sorted by stable identifiers to make the output easier to diff.
 - The bundle is intended for future import / migration workflows, not for runtime checkpoint recovery.

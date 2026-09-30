@@ -29,7 +29,8 @@ The supported range is `1..=9007199254740991`. Timestamp revisions in seconds,
 milliseconds, or microseconds fit this range. Producers are responsible for
 monotonic assignment and clock rollback handling.
 
-Pipeline revision covers its definition and inline `run_state`. When an incoming
+Pipeline revision covers its definition and inline `run_state`. The inline pipeline
+`run_state` contains only the user's desired `Running` or `Stopped` intent. When an incoming
 pipeline wins, both values apply. When it loses, both are ignored. Operational
 start and stop requests change desired run state without changing revision.
 
@@ -118,12 +119,10 @@ start failure, or later processor failure does not roll back a statically valid
 artifact. The resource, revision, and pipeline desired run state remain stored;
 runtime status reports the real error.
 
-Processor-fatal pipeline failures are persisted separately from the inline
-`run_state`. If a stored pipeline revision has a matching runtime failure
-marker, startup hydration restores the pipeline definition but keeps the
-runtime status as `failed` instead of auto-starting it. The operator must
-explicitly start the pipeline to retry it, or stop/delete it to clear the failed
-runtime state.
+Pipeline failures are held only in the current runtime, separately from persisted
+`run_state`. Startup hydration creates fresh runtime state from the pipeline
+definition and its desired state. A desired-running pipeline is retried without
+restoring an old failure; a new failure records its reason and timestamp in memory.
 
 Every resource result is one of:
 
@@ -163,6 +162,7 @@ hydration or planning failure; it does not roll back the schema.
 
 If a pipeline and its `run_state: "Running"` are applied but its connector
 cannot reach a broker, the pipeline artifact, revision, and desired state remain
-stored. Runtime status reports the connector failure. If that failure is stored
-as a runtime failure marker for the same revision, later startup hydration keeps
-the pipeline failed until an explicit operator lifecycle action is made.
+stored. Runtime status reports the connector failure; failure is not rewritten into
+the two-value desired state. On a later startup, hydration creates a fresh runtime
+and retries pipelines whose desired state is `running`. A failure of that new
+attempt records its own error in memory.

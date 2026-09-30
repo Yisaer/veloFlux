@@ -71,9 +71,9 @@ when the pipeline is applied.
 ## Schedule Options
 
 Pipeline schedules are declared inside `options.schedule` when creating or upserting a pipeline.
-The scheduler owns the lifecycle while the schedule is enabled. Manual `stop` disables schedule
-patrol and enters `Stopped`; manual `start` re-enables schedule control and enters
-`ScheduledStopped`, leaving the next runtime start to patrol.
+The scheduler owns the lifecycle while desired state is `running`. Manual `stop` persists
+`stopped` and disables schedule patrol; manual `start` persists `running` and leaves the next
+runtime decision to patrol.
 
 ```json
 {
@@ -123,50 +123,62 @@ If the cron window crosses the end of the matched datetime range, the pipeline i
 range end. `GET /pipelines/:id` returns `schedule_status.auto_stop_at` as the effective current
 window end, not just the raw cron duration end. Patrol-triggered stops use graceful shutdown by
 default so already accepted data can be drained and finalized before the runtime exits.
+When all configured datetime ranges have ended, the pipeline enters `scheduled_end`; patrol will
+not schedule that pipeline again for the current revision.
 
-On create, a scheduled pipeline first enters `ScheduledStopped`. Upsert and process restart retain
-manual `Stopped`; otherwise they enter `ScheduledStopped`. The patrol scheduler evaluates the
-current window before starting it; a persisted `ScheduledRunning` value is not used to bypass the
-current schedule.
+On create, a scheduled pipeline enables schedule control with desired state `running`. Upsert and
+process restart preserve the two-value desired state. The patrol scheduler derives the current
+runtime status from the schedule window; no scheduler status is persisted to bypass evaluation.
 
-Scheduled pipeline desired state is stored separately from manual lifecycle state:
+Only the user's desired run state is stored separately from the runtime:
 
-- `ScheduledRunning`: the effective schedule window currently expects the pipeline to run.
-- `ScheduledStopped`: the effective schedule window currently expects the pipeline to stop.
-- `Stopped`: schedule control is manually disabled; patrol skips the pipeline.
+- `Running`: the user wants the pipeline to run; scheduled pipelines remain under patrol control.
+- `Stopped`: the user has manually stopped the pipeline; patrol skips it.
 
-REST responses expose these states as `scheduled_running` and `scheduled_stopped`.
+REST responses expose real-time `status` values. For non-scheduled pipelines, the runtime values
+are `running`, `stopping`, `stopped`, and `failed`. Scheduled pipelines use
+`scheduled_running`, `scheduled_stopped`, `scheduled_end`, `stopped`, `stopping`, and `failed`;
+they never expose the ordinary `running` status. None of these values is persisted as desired
+state.
 
 During a graceful patrol stop, the runtime may temporarily report `stopping`. This is an
 in-memory transition state and is not persisted as a desired state. Patrol treats `stopping` as
 an operation in progress and does not start the runtime again until the stop has completed. A
-manual stop persists `Stopped` immediately to disable schedule control, while the runtime may
+manual stop persists desired state `stopped` immediately to disable schedule control, while the runtime may
 remain `stopping` until graceful shutdown finishes. A manual start received during this transition
 is rejected as busy; retrying it after the stop completes only re-enables schedule control, and the
 next patrol decides whether the runtime should start.
 
-## Runtime Failure Status
+## Pipeline Status
 
-Pipeline list and get responses expose the current runtime status when it differs from the stored
-desired state. A pipeline can report:
+Pipeline list and get responses expose one unified lifecycle status. The manager persists the
+two-value control state before asking runtime to converge. If runtime cannot converge, the runtime
+status becomes `failed` and the current error is recorded in memory; desired state remains
+either `running` or `stopped`. A pipeline can report:
 
 - `running`
 - `stopping`
 - `stopped`
 - `scheduled_running`
 - `scheduled_stopped`
+- `scheduled_end`
 - `failed`
 
-`failed` means a processor task returned an error, panicked, or exited unexpectedly while the
-pipeline was expected to run. When this happens, the pipeline supervisor aborts the remaining
-processor tasks and records a runtime failure marker for the current pipeline revision.
+`failed` means startup or rebuild failed, or a processor task returned an error, panicked, or
+exited unexpectedly while the pipeline was expected to run. For processor failures, the pipeline
+supervisor aborts the remaining tasks and records the root cause in the current runtime snapshot.
 
-Responses may include these additional fields:
+`running`, `stopping`, `stopped`, and `failed` describe runtime lifecycle states for ordinary
+pipelines. `scheduled_running`, `scheduled_stopped`, and `scheduled_end` describe scheduler-derived
+states for scheduled pipelines.
+The status is computed from the persisted desired state, the schedule window, and the runtime.
+Manual stop changes desired state to `stopped` and disables patrol. Manual start changes desired
+state to `running`; patrol then derives `scheduled_running`, `scheduled_stopped`, or
+`scheduled_end` from the current schedule.
 
-- `desired_status`: present when the stored desired state differs from `status`, such as a failed
-  pipeline that is still desired to be `running` or `scheduled_running`
-- `last_runtime_error`: present when a matching runtime failure marker exists for the current
-  revision
+Responses may include `last_runtime_error` when the current runtime has a current failure context.
+It describes the current runtime failure attempt; it is not a historical error record. A new
+startup attempt replaces the previous context, and a successful recovery clears it.
 
 `last_runtime_error` has this shape:
 
@@ -179,14 +191,50 @@ Responses may include these additional fields:
 }
 ```
 
-Startup hydration restores a failed pipeline definition but does not auto-start a revision with a
-matching runtime failure marker. Scheduled patrol also skips auto-start while the matching marker is
-present. A manual start is treated as an explicit retry for unscheduled pipelines and clears the
-marker only after a successful runtime start. For scheduled pipelines, manual start only re-enables
-schedule control; patrol performs the later runtime start. Manual stop clears the marker, writes
-desired state `stopped`, and disables schedule patrol. Delete removes the stored pipeline and the
-marker.
+Startup hydration creates fresh runtime state from the pipeline definition and desired state.
+Runtime errors are not persisted and do not survive restart. A new startup failure records
+its reason and timestamp in the current runtime snapshot. Within the same process, the current runtime `failed` status prevents
+scheduled patrol from retrying repeatedly. A manual start is an explicit retry and clears the
+current failure context before runtime convergence; for scheduled pipelines, patrol performs the
+later runtime start. Manual stop clears the failure context, writes desired state `stopped`, and
+disables schedule patrol. Delete removes the stored pipeline and the failure context.
 
 `GET /pipelines/:id/stats` is only available for a running pipeline. For a failed pipeline, the
 endpoint returns `400 Bad Request` with the failed processor and reason instead of returning stale
 processor counters.
+
+### Runtime convergence matrix
+
+The manager persists `desired_state` before attempting runtime convergence. If the current runtime
+status is `stopping`, lifecycle operations return `409 Conflict` and the caller must wait for the
+stop to finish.
+
+For non-scheduled pipelines:
+
+| desired_state | Current status | Expected behavior |
+| --- | --- | --- |
+| `running` | `running` | Already converged; return success. |
+| `running` | `stopped` | Start the runtime; expose `running` after success. |
+| `running` | `stopping` | Return `409 Conflict` and wait for stopping to finish. |
+| `running` | `failed` | Clear the runtime error and retry start; keep `failed` if the retry fails. |
+| `stopped` | `stopped` | Already converged; return success. |
+| `stopped` | `running` | Stop the runtime; expose `stopped` after success. |
+| `stopped` | `stopping` | Return `409 Conflict` and wait for stopping to finish. |
+| `stopped` | `failed` | Do not retry runtime start; converge to `stopped`. |
+
+For scheduled pipelines:
+
+| desired_state | Current status | Expected behavior |
+| --- | --- | --- |
+| `running` | `scheduled_running` | Already converged; skip the operation. |
+| `running` | `scheduled_stopped` | Remain `scheduled_stopped`; patrol starts the runtime in a valid window. |
+| `running` | `scheduled_end` | Remain `scheduled_end`; patrol does not schedule the current revision again. |
+| `running` | `stopped` | Derive `scheduled_stopped` when a future window exists, or `scheduled_end` when all windows have ended. |
+| `running` | `stopping` | Return `409 Conflict` and wait for stopping to finish. |
+| `running` | `failed` | Clear the runtime error and derive `scheduled_stopped` or `scheduled_end`; patrol may retry in a later valid window. |
+| `stopped` | `scheduled_running` | Stop the runtime; expose `stopped` and disable patrol. |
+| `stopped` | `scheduled_stopped` | Convert to `stopped` and disable patrol. |
+| `stopped` | `scheduled_end` | Convert to `stopped` and disable patrol. |
+| `stopped` | `stopped` | Already converged; return success. |
+| `stopped` | `stopping` | Return `409 Conflict` and wait for stopping to finish. |
+| `stopped` | `failed` | Do not retry runtime start; converge to `stopped`. |

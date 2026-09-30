@@ -537,3 +537,82 @@ fn shared_stream_pipeline_uses_full_schema_for_column_indices() {
             .expect("shared stream should not require datasource connectors");
     });
 }
+
+#[tokio::test]
+async fn startup_failure_replaces_old_error_and_recovery_clears_it() {
+    let catalog = Arc::new(Catalog::new());
+    let stream = StreamDefinition::new(
+        "retry_src",
+        Arc::new(Schema::new(vec![ColumnSchema::new(
+            "retry_src".to_string(),
+            "value".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        )])),
+        StreamProps::Memory(crate::catalog::MemoryStreamProps::new("retry_input")),
+        StreamDecoderConfig::json(),
+    );
+    catalog.upsert(stream.clone());
+    let spawner = TaskSpawner::from_handle(tokio::runtime::Handle::current());
+    let memory = MemoryPubSubRegistry::new();
+    memory
+        .declare_topic("retry_input", crate::connector::MemoryTopicKind::Bytes, 16)
+        .expect("declare input");
+    let context = crate::pipeline::PipelineContext::new(
+        "default",
+        Arc::new(SharedStreamRegistry::new(spawner.clone())),
+        MqttClientManager::new("default", spawner.clone()),
+        memory,
+        spawner,
+    );
+    let manager = PipelineManager::new(
+        Arc::clone(&catalog),
+        context,
+        PipelineRegistries::new_with_builtin(),
+    );
+    manager
+        .create_pipeline(CreatePipelineRequest::new(PipelineDefinition::new(
+            "retry_pipe",
+            "SELECT value FROM retry_src",
+            vec![SinkDefinition::new(
+                "sink",
+                SinkType::Nop,
+                SinkProps::Nop(NopSinkProps::default()),
+            )],
+        )))
+        .expect("create pipeline");
+    manager
+        .mark_pipeline_failed("retry_pipe", "old_attempt", "old error".to_string())
+        .expect("record old error");
+    catalog.remove("retry_src").expect("remove stream");
+    let error = manager
+        .start_pipeline("retry_pipe")
+        .await
+        .expect_err("new build must fail");
+    let snapshot = manager.list().pop().expect("snapshot");
+    assert_eq!(snapshot.status, PipelineStatus::Failed);
+    let failure = snapshot.last_runtime_error.expect("current error");
+    assert_eq!(failure.reason, error.to_string());
+    assert_ne!(failure.reason, "old error");
+    catalog.upsert(stream);
+    manager
+        .start_pipeline("retry_pipe")
+        .await
+        .expect("retry after repair");
+    let snapshot = manager.list().pop().expect("snapshot");
+    assert_eq!(snapshot.status, PipelineStatus::Running);
+    assert!(snapshot.last_runtime_error.is_none());
+    manager
+        .stop_pipeline(
+            "retry_pipe",
+            PipelineStopMode::Quick,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("stop runtime");
+    assert!(manager
+        .list()
+        .pop()
+        .expect("snapshot")
+        .last_runtime_error
+        .is_none());
+}

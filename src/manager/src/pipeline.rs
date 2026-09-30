@@ -1,7 +1,6 @@
 mod context;
 mod handlers;
 mod remote;
-mod runtime_failure;
 pub(crate) mod scheduler;
 mod spec;
 pub(crate) mod state;
@@ -15,9 +14,6 @@ pub use handlers::{
 pub use state::AppState;
 pub use types::CreatePipelineRequest;
 
-pub(crate) use runtime_failure::{
-    persist_generic_runtime_failure_marker, persist_start_failure_marker,
-};
 pub(crate) use spec::{
     build_pipeline_definition, referenced_streams_from_pipeline_sql, status_label,
     validate_create_request,
