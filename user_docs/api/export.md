@@ -84,6 +84,15 @@ curl -sOJ 'http://127.0.0.1:8080/storage/export?bundle_version=2026.07.24-1'
   - `ScheduledStopped`
   - `ScheduledRunning`
 
+### `ExportUdf`
+
+- `name: string` — canonical UDF name
+- `revision: number` — persisted resource revision
+- `wasm_sha256: string` — SHA-256 of the referenced WASM binary
+
+The manifest stores UDF metadata only. The corresponding binary is stored as
+`wasm_files/<wasm_sha256>.wasm` in the ZIP bundle.
+
 ## Export, Edit, and Use as an Init Directory
 
 Export, import, and startup initialization use the same canonical resource

@@ -70,6 +70,10 @@ not a runtime checkpoint restore mechanism.
 - `udfs: ExportUdf[]`
 - `tables: ExportTable[]`
 
+Each `ExportUdf` contains `name`, `revision`, and `wasm_sha256`. The matching
+`wasm_files/<wasm_sha256>.wasm` file must be present in the archive. Imported
+WASM modules are validated as batch-only UDFs before they are installed.
+
 ## Validation
 
 The import request is rejected with `400 Bad Request` if:

@@ -1,7 +1,7 @@
-use crate::abi::{deserialize_result, serialize_args};
+use crate::abi::{deserialize_batch_result, serialize_batch_args};
 use crate::metadata::UdfMetadata;
 use datatypes::Value;
-use flow::expr::custom_func::CustomFunc;
+use flow::expr::custom_func::{BatchFunc, CustomFunc};
 use flow::expr::func::EvalError;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Engine, InstancePre, Memory, Store, TypedFunc};
@@ -19,7 +19,7 @@ pub struct WasmUdf {
     engine: Engine,
     /// Pre-linked instantiation plan reused by processor-owned runtimes.
     instance_pre: InstancePre<()>,
-    /// Epoch ticks allowed for one `eval_row` call.
+    /// Epoch ticks allowed for one batch call.
     epoch_ticks_per_call: u64,
 }
 
@@ -34,7 +34,7 @@ impl std::fmt::Debug for WasmUdf {
 }
 
 impl WasmUdf {
-    /// Default epoch budget per `eval_row` call.
+    /// Default epoch budget per batch call.
     pub const DEFAULT_EPOCH_TICKS_PER_CALL: u64 = 10;
 
     /// Create a new WasmUdf.
@@ -118,28 +118,20 @@ impl WasmUdf {
 }
 
 impl CustomFunc for WasmUdf {
-    fn bind_runtime(&self) -> Result<Option<Arc<dyn CustomFunc>>, String> {
+    fn is_batch(&self) -> bool {
+        true
+    }
+
+    fn bind_batch_runtime(&self) -> Result<Option<Arc<dyn BatchFunc>>, String> {
         self.create_runtime()
             .map(|runtime| {
                 Some(Arc::new(BoundWasmUdf {
                     name: self.name.clone(),
                     metadata: self.metadata.clone(),
                     runtime: Mutex::new(runtime),
-                }) as Arc<dyn CustomFunc>)
+                }) as Arc<dyn BatchFunc>)
             })
             .map_err(|error| error.to_string())
-    }
-
-    fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
-        let expected = self.metadata.args.len();
-        let actual = args.len();
-        if expected > 0 && actual != expected {
-            return Err(EvalError::TypeMismatch {
-                expected: format!("{} arguments", expected),
-                actual: format!("{} arguments", actual),
-            });
-        }
-        Ok(())
     }
 
     fn name(&self) -> &str {
@@ -157,7 +149,7 @@ impl WasmUdf {
 pub struct WasmUdfRuntime {
     store: Store<()>,
     memory: Memory,
-    udf_row: TypedFunc<(i32, i32), i32>,
+    udf_batch: TypedFunc<(i32, i32), i32>,
     epoch_ticks_per_call: u64,
 }
 
@@ -182,29 +174,25 @@ impl std::fmt::Debug for BoundWasmUdf {
     }
 }
 
-impl CustomFunc for BoundWasmUdf {
-    fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
+impl BatchFunc for BoundWasmUdf {
+    fn eval_batch(
+        &self,
+        args: &[Vec<Value>],
+        row_count: usize,
+    ) -> Result<Vec<Result<Value, EvalError>>, EvalError> {
         let expected = self.metadata.args.len();
-        if expected > 0 && args.len() != expected {
+        if args.len() != expected {
             return Err(EvalError::TypeMismatch {
                 expected: format!("{} arguments", expected),
                 actual: args.len().to_string(),
             });
         }
-        Ok(())
-    }
-
-    fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
         self.runtime
             .lock()
             .map_err(|_| EvalError::NotImplemented {
                 feature: "WASM UDF runtime lock poisoned".to_string(),
             })?
-            .eval_row(args)
-    }
-
-    fn name(&self) -> &str {
-        &self.name
+            .eval_batch(args, row_count)
     }
 }
 
@@ -224,15 +212,15 @@ impl WasmUdfRuntime {
                 .ok_or_else(|| EvalError::NotImplemented {
                     feature: "missing WASM memory export".to_string(),
                 })?;
-        let udf_row = instance
-            .get_typed_func(&mut store, "udf_row")
+        let udf_batch = instance
+            .get_typed_func(&mut store, "udf_batch")
             .map_err(|e| EvalError::NotImplemented {
-                feature: format!("udf_row function: {e}"),
+                feature: format!("udf_batch function: {e}"),
             })?;
         Ok(Self {
             store,
             memory,
-            udf_row,
+            udf_batch,
             epoch_ticks_per_call: udf.epoch_ticks_per_call,
         })
     }
@@ -245,8 +233,12 @@ impl WasmUdfRuntime {
             })
     }
 
-    fn eval_row(&mut self, args: &[Value]) -> Result<Value, EvalError> {
-        let result = self.eval_row_inner(args);
+    fn eval_batch(
+        &mut self,
+        args: &[Vec<Value>],
+        row_count: usize,
+    ) -> Result<Vec<Result<Value, EvalError>>, EvalError> {
+        let result = self.eval_batch_inner(args, row_count);
         let reset_result = self.reset_scratch_arena();
 
         match (result, reset_result) {
@@ -256,14 +248,19 @@ impl WasmUdfRuntime {
         }
     }
 
-    fn eval_row_inner(&mut self, args: &[Value]) -> Result<Value, EvalError> {
+    fn eval_batch_inner(
+        &mut self,
+        args: &[Vec<Value>],
+        row_count: usize,
+    ) -> Result<Vec<Result<Value, EvalError>>, EvalError> {
         self.store.set_epoch_deadline(self.epoch_ticks_per_call);
 
         // Serialize arguments to JSON
-        let input_json = serialize_args(args).map_err(|e| EvalError::TypeMismatch {
-            expected: "serializable arguments".to_string(),
-            actual: e.to_string(),
-        })?;
+        let input_json =
+            serialize_batch_args(args, row_count).map_err(|e| EvalError::TypeMismatch {
+                expected: "serializable arguments".to_string(),
+                actual: e.to_string(),
+            })?;
 
         let input_len = input_json.len() as i32;
 
@@ -284,7 +281,7 @@ impl WasmUdfRuntime {
 
         // Call the UDF
         let result_ptr = self
-            .udf_row
+            .udf_batch
             .call(&mut self.store, (input_ptr, input_len))
             .map_err(|e| EvalError::NotImplemented {
                 feature: format!("UDF evaluation failed or timed out: {e}"),
@@ -292,7 +289,7 @@ impl WasmUdfRuntime {
 
         if result_ptr == 0 {
             return Err(EvalError::NotImplemented {
-                feature: "udf_row returned null".to_string(),
+                feature: "udf_batch returned null".to_string(),
             });
         }
 
@@ -322,10 +319,20 @@ impl WasmUdfRuntime {
                 feature: format!("failed to read result: {e}"),
             })?;
 
-        deserialize_result(&result_buf).map_err(|e| EvalError::TypeMismatch {
-            expected: "valid JSON result".to_string(),
-            actual: e.to_string(),
-        })
+        let batch_results =
+            deserialize_batch_result(&result_buf).map_err(|e| EvalError::TypeMismatch {
+                expected: "valid JSON result".to_string(),
+                actual: e.to_string(),
+            })?;
+        Ok(batch_results
+            .into_iter()
+            .map(|result| {
+                result.map_err(|error| EvalError::TypeMismatch {
+                    expected: "successful UDF result".to_string(),
+                    actual: error.to_string(),
+                })
+            })
+            .collect())
     }
 }
 
@@ -335,9 +342,8 @@ mod tests {
     use crate::engine::WasmEngine;
     use datatypes::Value;
 
-    /// A minimal WASM module that properly implements the UDF protocol.
-    /// It returns a JSON-encoded copy of the first argument (identity).
-    fn identity_wasm_module() -> Vec<u8> {
+    /// A minimal WASM module that returns two batch values.
+    fn batch_wasm_module() -> Vec<u8> {
         wat::parse_str(
             r#"
             (module
@@ -346,32 +352,31 @@ mod tests {
                 (memory (export "memory") 1 256)
                 (data (i32.const 0) "\00\00\00\00")
 
-                ;; Metadata JSON at offset 128 (exactly 138 bytes)
-                (data (i32.const 128) "{\"abi_version\":1,\"name\":\"test_udf\",\"description\":\"identity\",\"args\":[{\"name\":\"x\",\"type\":\"any\"}],\"return_type\":\"any\",\"execution_mode\":\"row\"}")
+                (data (i32.const 128) "{\"abi_version\":1,\"name\":\"test_udf\",\"description\":\"batch\",\"args\":[{\"name\":\"x\",\"type\":\"any\"}],\"return_type\":\"any\",\"execution_mode\":\"batch\"}")
+                (data (i32.const 32768) "{\"values\":[42,43]}")
 
                 (func (export "udf_metadata_ptr") (result i32)
                     i32.const 128)
                 (func (export "udf_metadata_len") (result i32)
-                    i32.const 138)
+                    i32.const 137)
 
-                ;; udf_row: allocates output, writes length header + copies data
-                (func (export "udf_row") (param $input_ptr i32) (param $input_len i32) (result i32)
+                (func (export "udf_batch") (param i32) (param i32) (result i32)
                     (local $buf i32)
-                    local.get $input_len
+                    i32.const 18
                     i32.const 4
                     i32.add
                     call $alloc
                     local.set $buf
 
                     local.get $buf
-                    local.get $input_len
+                    i32.const 18
                     i32.store
 
                     local.get $buf
                     i32.const 4
                     i32.add
-                    local.get $input_ptr
-                    local.get $input_len
+                    i32.const 32768
+                    i32.const 18
                     memory.copy
 
                     local.get $buf
@@ -391,14 +396,14 @@ mod tests {
                 (import "host" "alloc" (func $alloc (param i32) (result i32)))
 
                 (memory (export "memory") 1 1)
-                (data (i32.const 128) "{\"abi_version\":1,\"name\":\"loop_udf\",\"description\":\"loop\",\"args\":[],\"return_type\":\"any\",\"execution_mode\":\"row\"}")
+                (data (i32.const 128) "{\"abi_version\":1,\"name\":\"loop_udf\",\"description\":\"loop\",\"args\":[],\"return_type\":\"any\",\"execution_mode\":\"batch\"}")
 
                 (func (export "udf_metadata_ptr") (result i32)
                     i32.const 128)
                 (func (export "udf_metadata_len") (result i32)
-                    i32.const 109)
+                    i32.const 111)
 
-                (func (export "udf_row") (param i32) (param i32) (result i32)
+                (func (export "udf_batch") (param i32) (param i32) (result i32)
                     (loop
                         br 0)
                     unreachable)
@@ -410,67 +415,67 @@ mod tests {
     }
 
     #[test]
-    fn identity_udf_int64() {
+    fn batch_udf_returns_all_rows() {
         let engine = WasmEngine::new().expect("create engine");
-        let wasm = identity_wasm_module();
+        let wasm = batch_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
         let udf = udf
-            .bind_runtime()
+            .bind_batch_runtime()
             .expect("bind runtime")
             .expect("WASM runtime");
 
         let input = vec![Value::Int64(42)];
-        let result = udf.eval_row(&input).expect("eval_row");
-        assert_eq!(result, Value::Int64(42));
+        let result = udf.eval_batch(&[input], 1).expect("eval_batch");
+        assert_eq!(result, vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))]);
     }
 
     #[test]
-    fn identity_udf_string() {
+    fn batch_udf_accepts_string_input() {
         let engine = WasmEngine::new().expect("create engine");
-        let wasm = identity_wasm_module();
+        let wasm = batch_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
         let udf = udf
-            .bind_runtime()
+            .bind_batch_runtime()
             .expect("bind runtime")
             .expect("WASM runtime");
 
         let input = vec![Value::String("hello wasm".to_string())];
-        let result = udf.eval_row(&input).expect("eval_row");
-        assert_eq!(result, Value::String("hello wasm".to_string()));
+        let result = udf.eval_batch(&[input], 1).expect("eval_batch");
+        assert_eq!(result, vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))]);
     }
 
     #[test]
-    fn identity_udf_float64() {
+    fn batch_udf_accepts_float_input() {
         let engine = WasmEngine::new().expect("create engine");
-        let wasm = identity_wasm_module();
+        let wasm = batch_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
         let udf = udf
-            .bind_runtime()
+            .bind_batch_runtime()
             .expect("bind runtime")
             .expect("WASM runtime");
 
         let input = vec![Value::Float64(3.14)];
-        let result = udf.eval_row(&input).expect("eval_row");
-        assert_eq!(result, Value::Float64(3.14));
+        let result = udf.eval_batch(&[input], 1).expect("eval_batch");
+        assert_eq!(result, vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))]);
     }
 
     #[test]
-    fn identity_udf_bool() {
+    fn batch_udf_accepts_bool_input() {
         let engine = WasmEngine::new().expect("create engine");
-        let wasm = identity_wasm_module();
+        let wasm = batch_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
         let udf = udf
-            .bind_runtime()
+            .bind_batch_runtime()
             .expect("bind runtime")
             .expect("WASM runtime");
 
         let input = vec![Value::Bool(true)];
-        let result = udf.eval_row(&input).expect("eval_row");
-        assert_eq!(result, Value::Bool(true));
+        let result = udf.eval_batch(&[input], 1).expect("eval_batch");
+        assert_eq!(result, vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))]);
 
         let input = vec![Value::Bool(false)];
-        let result = udf.eval_row(&input).expect("eval_row");
-        assert_eq!(result, Value::Bool(false));
+        let result = udf.eval_batch(&[input], 1).expect("eval_batch");
+        assert_eq!(result, vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))]);
     }
 
     // ── multiple calls, no state leak ──────────────────────────────
@@ -478,33 +483,37 @@ mod tests {
     #[test]
     fn multiple_calls_no_state_leak() {
         let engine = WasmEngine::new().expect("create engine");
-        let wasm = identity_wasm_module();
+        let wasm = batch_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
         let udf = udf
-            .bind_runtime()
+            .bind_batch_runtime()
             .expect("bind runtime")
             .expect("WASM runtime");
 
         for i in 0..10 {
             let input = vec![Value::Int64(i)];
-            let result = udf.eval_row(&input).expect("eval_row");
-            assert_eq!(result, Value::Int64(i), "failed at iteration {i}");
+            let result = udf.eval_batch(&[input], 1).expect("eval_batch");
+            assert_eq!(
+                result,
+                vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))],
+                "failed at iteration {i}"
+            );
         }
     }
 
     #[test]
     fn repeated_calls_reuse_linear_memory() {
         let engine = WasmEngine::new().expect("create engine");
-        let wasm = identity_wasm_module();
+        let wasm = batch_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
         let mut runtime = WasmUdfRuntime::new(&udf).expect("create runtime");
         let initial_pages = runtime.memory.size(&runtime.store);
 
         for i in 0..10_000 {
             let result = runtime
-                .eval_row(&[Value::Int64(i)])
-                .expect("eval_row should reuse scratch memory");
-            assert_eq!(result, Value::Int64(i));
+                .eval_batch(&[vec![Value::Int64(i), Value::Int64(i + 1)]], 2)
+                .expect("eval_batch should reuse scratch memory");
+            assert_eq!(result, vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))]);
         }
 
         assert_eq!(runtime.memory.size(&runtime.store), initial_pages);
@@ -516,25 +525,25 @@ mod tests {
         let wasm = looping_wasm_module();
         let udf = engine.instantiate("loop_udf", &wasm).expect("instantiate");
         let udf = udf
-            .bind_runtime()
+            .bind_batch_runtime()
             .expect("bind runtime")
             .expect("WASM runtime");
 
         let error = udf
-            .eval_row(&[])
+            .eval_batch(&[], 0)
             .expect_err("infinite call should time out");
         assert!(error.to_string().contains("timed out"));
     }
 
-    // ── large data (triggers memory growth) ───────────────────────
+    // ── large batch input ─────────────────────────────────────────
 
     #[test]
-    fn large_string_roundtrip() {
+    fn large_batch_input_is_serialized() {
         let engine = WasmEngine::new().expect("create engine");
-        let wasm = identity_wasm_module();
+        let wasm = batch_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
         let udf = udf
-            .bind_runtime()
+            .bind_batch_runtime()
             .expect("bind runtime")
             .expect("WASM runtime");
 
@@ -542,20 +551,25 @@ mod tests {
         // bookkeeping should still fit in one page.
         let big = "x".repeat(10_000);
         let input = vec![Value::String(big.clone())];
-        let result = udf.eval_row(&input).expect("eval_row");
-        assert_eq!(result, Value::String(big));
+        let result = udf.eval_batch(&[input], 1).expect("eval_batch");
+        assert_eq!(result, vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))]);
     }
 
-    // ── validate_row happy path ────────────────────────────────────
+    // ── batch argument validation ─────────────────────────────────
 
     #[test]
-    fn validate_row_accepts_correct_arity() {
+    fn batch_runtime_rejects_wrong_arity() {
         let engine = WasmEngine::new().expect("create engine");
-        let wasm = identity_wasm_module();
+        let wasm = batch_wasm_module();
         let udf = engine.instantiate("test_udf", &wasm).expect("instantiate");
+        let udf = udf
+            .bind_batch_runtime()
+            .expect("bind batch runtime")
+            .expect("WASM runtime");
 
-        // Metadata declares 1 arg; passing exactly 1 arg should pass.
-        udf.validate_row(&[Value::Int64(1)])
-            .expect("1 arg should be accepted");
+        let error = udf
+            .eval_batch(&[], 0)
+            .expect_err("missing batch argument should fail");
+        assert!(error.to_string().contains("1 arguments"));
     }
 }

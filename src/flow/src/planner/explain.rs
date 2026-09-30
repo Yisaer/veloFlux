@@ -1005,6 +1005,20 @@ fn build_physical_node_with_prefix(
             });
             info.push(format!("temps=[{}]", temps));
         }
+        PhysicalPlan::WasmUdfCompute(compute) => {
+            let temps = format_semicolon_items(
+                &compute.evaluations,
+                EXPLAIN_MAX_LIST_ITEMS,
+                |evaluation| {
+                    format!(
+                        "{} = {}",
+                        evaluation.output_column,
+                        format_expr_for_explain(&evaluation.original_expr)
+                    )
+                },
+            );
+            info.push(format!("temps=[{}]", temps));
+        }
         PhysicalPlan::Order(order) => {
             let keys = format_semicolon_items(&order.keys, EXPLAIN_MAX_LIST_ITEMS, |key| {
                 format!(

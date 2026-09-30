@@ -34,6 +34,7 @@ pub mod physical_source_change_gate;
 pub mod physical_stateful_function;
 pub mod physical_streaming_aggregation;
 pub mod physical_table_scan;
+pub mod physical_wasm_udf_compute;
 pub mod physical_watermark;
 pub mod physical_window;
 pub mod pipeline_state_usage;
@@ -69,6 +70,7 @@ pub use physical_source_change_gate::PhysicalSourceChangeGate;
 pub use physical_stateful_function::{PartitionGroupKey, PhysicalStatefulFunction, StatefulCall};
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
 pub use physical_table_scan::{PhysicalTableScan, PhysicalTableScanSpec};
+pub use physical_wasm_udf_compute::{PhysicalWasmUdfCompute, PhysicalWasmUdfEvaluation};
 pub use physical_watermark::{PhysicalWatermark, WatermarkConfig};
 pub use physical_window::{
     PhysicalCountWindow, PhysicalEosWindow, PhysicalSlidingWindow, PhysicalStateWindow,
@@ -95,6 +97,7 @@ pub enum PhysicalPlan {
     Filter(PhysicalFilter),
     LookupJoin(PhysicalLookupJoin),
     Compute(PhysicalCompute),
+    WasmUdfCompute(PhysicalWasmUdfCompute),
     Order(PhysicalOrder),
     Project(PhysicalProject),
     RowDiff(PhysicalRowDiff),
@@ -154,6 +157,7 @@ impl PhysicalPlan {
                     field.compiled_expr.bind_custom_functions(bindings);
                 }
             }
+            PhysicalPlan::WasmUdfCompute(_) => {}
             PhysicalPlan::Order(plan) => {
                 for key in &mut plan.keys {
                     key.compiled_expr.bind_custom_functions(bindings);
@@ -270,6 +274,7 @@ impl PhysicalPlan {
             PhysicalPlan::Filter(plan) => plan.base.children(),
             PhysicalPlan::LookupJoin(plan) => plan.base.children(),
             PhysicalPlan::Compute(plan) => plan.base.children(),
+            PhysicalPlan::WasmUdfCompute(plan) => plan.base.children(),
             PhysicalPlan::Order(plan) => plan.base.children(),
             PhysicalPlan::Project(plan) => plan.base.children(),
             PhysicalPlan::RowDiff(plan) => plan.base.children(),
@@ -315,6 +320,7 @@ impl PhysicalPlan {
             PhysicalPlan::Filter(_) => "PhysicalFilter",
             PhysicalPlan::LookupJoin(_) => "PhysicalLookupJoin",
             PhysicalPlan::Compute(_) => "PhysicalCompute",
+            PhysicalPlan::WasmUdfCompute(_) => "PhysicalWasmUdfCompute",
             PhysicalPlan::Order(_) => "PhysicalOrder",
             PhysicalPlan::Project(_) => "PhysicalProject",
             PhysicalPlan::RowDiff(_) => "PhysicalRowDiff",
@@ -359,6 +365,7 @@ impl PhysicalPlan {
             PhysicalPlan::Filter(plan) => plan.base.index(),
             PhysicalPlan::LookupJoin(plan) => plan.base.index(),
             PhysicalPlan::Compute(plan) => plan.base.index(),
+            PhysicalPlan::WasmUdfCompute(plan) => plan.base.index(),
             PhysicalPlan::Order(plan) => plan.base.index(),
             PhysicalPlan::Project(plan) => plan.base.index(),
             PhysicalPlan::RowDiff(plan) => plan.base.index(),

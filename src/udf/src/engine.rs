@@ -92,8 +92,13 @@ impl WasmEngine {
 
         // Verify required exports exist
         instance
-            .get_typed_func::<(i32, i32), i32>(&mut store, "udf_row")
-            .map_err(|_| WasmError::MissingExport("udf_row"))?;
+            .get_typed_func::<(i32, i32), i32>(&mut store, "udf_batch")
+            .map_err(|_| WasmError::MissingExport("udf_batch"))?;
+        if instance.get_func(&mut store, "udf_row").is_some() {
+            return Err(WasmError::InvalidMetadata(
+                "legacy udf_row export is not supported".to_string(),
+            ));
+        }
         instance
             .get_memory(&mut store, "memory")
             .ok_or(WasmError::MissingExport("memory"))?;
@@ -252,9 +257,9 @@ fn validate_metadata(metadata: &UdfMetadata) -> Result<(), WasmError> {
             metadata.abi_version
         )));
     }
-    if metadata.execution_mode != UdfExecutionMode::Row {
+    if metadata.execution_mode != UdfExecutionMode::Batch {
         return Err(WasmError::InvalidMetadata(
-            "only row execution mode is supported in this implementation".to_string(),
+            "only batch execution mode is supported".to_string(),
         ));
     }
     if metadata.name.trim().is_empty() {
@@ -314,37 +319,16 @@ mod tests {
                 (memory (export "memory") 1 256)
                 (data (i32.const 0) "\00\00\00\00")
 
-                ;; Metadata JSON at offset 128 (exactly 117 bytes)
-                (data (i32.const 128) "{\"abi_version\":1,\"name\":\"test_udf\",\"description\":\"minimal test\",\"args\":[],\"return_type\":\"any\",\"execution_mode\":\"row\"}")
+                ;; Metadata JSON at offset 128 (exactly 119 bytes)
+                (data (i32.const 128) "{\"abi_version\":1,\"name\":\"test_udf\",\"description\":\"minimal test\",\"args\":[],\"return_type\":\"any\",\"execution_mode\":\"batch\"}")
 
                 (func (export "udf_metadata_ptr") (result i32)
                     i32.const 128)
                 (func (export "udf_metadata_len") (result i32)
-                    i32.const 117)
+                    i32.const 119)
 
-                ;; udf_row: allocates output, writes length header + copies data
-                (func (export "udf_row") (param $input_ptr i32) (param $input_len i32) (result i32)
-                    (local $buf i32)
-                    local.get $input_len
-                    i32.const 4
-                    i32.add
-                    call $alloc
-                    local.set $buf
-
-                    local.get $buf
-                    local.get $input_len
-                    i32.store
-
-                    local.get $buf
-                    i32.const 4
-                    i32.add
-                    local.get $input_ptr
-                    local.get $input_len
-                    memory.copy
-
-                    local.get $buf
-                    i32.const 4
-                    i32.add)
+                (func (export "udf_batch") (param i32) (param i32) (result i32)
+                    i32.const 0)
             )
             "#,
         )

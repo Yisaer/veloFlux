@@ -49,6 +49,7 @@ pub mod stream_data;
 pub mod streaming_aggregation_processor;
 pub mod table_scan_processor;
 pub mod tumbling_window_processor;
+pub mod wasm_udf_compute_processor;
 pub mod watermark_processor;
 pub(crate) mod window_metadata;
 pub(crate) mod window_partition;
@@ -103,4 +104,5 @@ pub use streaming_aggregation_processor::{
 };
 pub use table_scan_processor::TableScanProcessor;
 pub use tumbling_window_processor::TumblingWindowProcessor;
+pub use wasm_udf_compute_processor::WasmUdfComputeProcessor;
 pub use watermark_processor::WatermarkProcessor;

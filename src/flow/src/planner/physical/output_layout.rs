@@ -224,6 +224,24 @@ impl PhysicalPlan {
                 Ok(layout)
             }
 
+            PhysicalPlan::WasmUdfCompute(plan) => {
+                let mut layout = passthrough_single_child(self)?;
+                for evaluation in &plan.evaluations {
+                    let name: Arc<str> = Arc::from(evaluation.output_column.as_str());
+                    let affiliate_index = layout.affiliate_len;
+                    layout.affiliate_len += 1;
+                    layout.output.columns = append_column(
+                        &layout.output.columns,
+                        OutputColumnLayout {
+                            name,
+                            data_type: ConcreteDatatype::Null,
+                            value_ref: OutputValueRef::Affiliate { affiliate_index },
+                        },
+                    );
+                }
+                Ok(layout)
+            }
+
             PhysicalPlan::StatefulFunction(plan) => {
                 let mut layout = passthrough_single_child(self)?;
                 for call in &plan.calls {

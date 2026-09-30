@@ -26,7 +26,6 @@ pub struct UdfMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UdfExecutionMode {
-    Row,
     Batch,
 }
 

@@ -13,11 +13,33 @@ use datatypes::Value;
 
 pub use registry::{CustomFuncBindings, CustomFuncRegistry};
 
+/// Processor-owned implementation for collection-level custom functions.
+pub trait BatchFunc: Send + Sync + std::fmt::Debug {
+    /// Evaluate one complete collection batch. Every argument vector and the returned vector
+    /// must have the same row alignment.
+    /// The outer error represents a batch-level failure. An inner error represents a
+    /// row-level failure and must preserve its row position in the returned vector.
+    fn eval_batch(
+        &self,
+        args: &[Vec<Value>],
+        row_count: usize,
+    ) -> Result<Vec<Result<Value, EvalError>>, EvalError>;
+}
+
 /// Custom function that can be implemented by users
 /// This trait allows users to define their own functions for evaluation
 pub trait CustomFunc: Send + Sync + std::fmt::Debug {
+    /// Whether this definition must be lowered to the collection-level batch path.
+    fn is_batch(&self) -> bool {
+        false
+    }
     /// Create a processor-bound implementation for this function.
     fn bind_runtime(&self) -> Result<Option<std::sync::Arc<dyn CustomFunc>>, String> {
+        Ok(None)
+    }
+
+    /// Create a processor-bound collection-level implementation for this function.
+    fn bind_batch_runtime(&self) -> Result<Option<std::sync::Arc<dyn BatchFunc>>, String> {
         Ok(None)
     }
 
@@ -30,7 +52,11 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
     /// # Returns
     ///
     /// Returns Ok(()) if arguments are valid for per-row processing, or an error otherwise.
-    fn validate_row(&self, args: &[Value]) -> Result<(), EvalError>;
+    fn validate_row(&self, _args: &[Value]) -> Result<(), EvalError> {
+        Err(EvalError::NotImplemented {
+            feature: "custom function does not support row evaluation".to_string(),
+        })
+    }
 
     /// Evaluate the function with row arguments (one row per call).
     ///

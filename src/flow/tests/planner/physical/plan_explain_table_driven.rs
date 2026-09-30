@@ -2545,6 +2545,129 @@ fn plan_explain_custom_udf_call() {
     );
 }
 
+/// A test-only batch UDF used to verify physical WASM UDF lowering.
+#[derive(Debug, Clone)]
+struct BatchDoubleUdf;
+
+impl CustomFunc for BatchDoubleUdf {
+    fn is_batch(&self) -> bool {
+        true
+    }
+
+    fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
+        if args.len() != 1 {
+            return Err(EvalError::TypeMismatch {
+                expected: "1 argument".to_string(),
+                actual: format!("{} arguments", args.len()),
+            });
+        }
+        Ok(())
+    }
+
+    fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
+        match &args[0] {
+            Value::Int64(v) => Ok(Value::Int64(v * 2)),
+            other => Err(EvalError::TypeMismatch {
+                expected: "int64".to_string(),
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "batch_double"
+    }
+}
+
+struct WasmUdfBatchPlanExplainCase {
+    name: &'static str,
+    sql: &'static str,
+    expected: &'static str,
+}
+
+/// Verify physical lowering of batch WASM UDFs with JSON EXPLAIN output.
+#[test]
+fn plan_explain_wasm_udf_batch_table_driven() {
+    let custom_registry =
+        flow::CustomFuncRegistry::with_builtins_and_wasm(vec![Arc::new(BatchDoubleUdf)])
+            .expect("register test batch UDF");
+    let registries = PipelineRegistries::new(
+        flow::connector::ConnectorRegistry::with_builtin_sinks(
+            flow::connector::MemoryPubSubRegistry::new(),
+        ),
+        flow::EncoderRegistry::with_builtin_encoders(),
+        flow::DecoderRegistry::with_builtin_decoders(),
+        flow::AggregateFunctionRegistry::with_builtins(),
+        flow::StatefulFunctionRegistry::with_builtins(),
+        custom_registry,
+        flow::EventtimeTypeRegistry::with_builtin_types(),
+        Arc::new(flow::MergerRegistry::new()),
+    );
+    let cases = [
+        WasmUdfBatchPlanExplainCase {
+            name: "projection",
+            sql: "SELECT batch_double(a) AS result FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[batch_double(a) as result]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalWasmUdfCompute_2","info":["temps=[__vf_wasm_1 = batch_double(a)]"],"operator":"PhysicalWasmUdfCompute"}],"id":"PhysicalProject_3","info":["fields=[__vf_wasm_1 as result]"],"operator":"PhysicalProject"}}"##,
+        },
+        WasmUdfBatchPlanExplainCase {
+            name: "filter",
+            sql: "SELECT a FROM stream WHERE batch_double(a) > 10",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=batch_double(a) > 10"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalWasmUdfCompute_2","info":["temps=[__vf_wasm_1 = batch_double(a)]"],"operator":"PhysicalWasmUdfCompute"}],"id":"PhysicalFilter_3","info":["predicate=__vf_wasm_1 > 10"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_4","info":["fields=[a]"],"operator":"PhysicalProject"}}"##,
+        },
+        WasmUdfBatchPlanExplainCase {
+            name: "filter_and_projection",
+            sql: "SELECT batch_double(a) AS result FROM stream WHERE batch_double(a) > 10",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=batch_double(a) > 10"],"operator":"Filter"}],"id":"Project_2","info":["fields=[batch_double(a) as result]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalWasmUdfCompute_2","info":["temps=[__vf_wasm_1 = batch_double(a)]"],"operator":"PhysicalWasmUdfCompute"}],"id":"PhysicalFilter_3","info":["predicate=__vf_wasm_1 > 10"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_4","info":["fields=[__vf_wasm_1 as result]"],"operator":"PhysicalProject"}}"##,
+        },
+        WasmUdfBatchPlanExplainCase {
+            name: "multiple_projection_udfs",
+            sql: "SELECT batch_double(a) AS x, batch_double(b) AS y FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[batch_double(a) as x; batch_double(b) as y]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalWasmUdfCompute_2","info":["temps=[__vf_wasm_1 = batch_double(a); __vf_wasm_2 = batch_double(b)]"],"operator":"PhysicalWasmUdfCompute"}],"id":"PhysicalProject_3","info":["fields=[__vf_wasm_1 as x; __vf_wasm_2 as y]"],"operator":"PhysicalProject"}}"##,
+        },
+        WasmUdfBatchPlanExplainCase {
+            name: "nested_udf",
+            sql: "SELECT batch_double(batch_double(a)) AS result FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[batch_double(batch_double(a)) as result]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalWasmUdfCompute_2","info":["temps=[__vf_wasm_1 = batch_double(a); __vf_wasm_2 = batch_double(__vf_wasm_1)]"],"operator":"PhysicalWasmUdfCompute"}],"id":"PhysicalProject_3","info":["fields=[__vf_wasm_2 as result]"],"operator":"PhysicalProject"}}"##,
+        },
+        WasmUdfBatchPlanExplainCase {
+            name: "aggregation_argument",
+            sql: "SELECT sum(batch_double(a)) AS result FROM stream",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Aggregation_1","info":["aggregates=[sum(batch_double(a)) -> col_1]"],"operator":"Aggregation"}],"id":"Project_2","info":["fields=[col_1 as result]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalWasmUdfCompute_2","info":["temps=[__vf_wasm_1 = batch_double(a)]"],"operator":"PhysicalWasmUdfCompute"}],"id":"PhysicalAggregation_3","info":["calls=[sum(__vf_wasm_1) -> col_1]"],"operator":"PhysicalAggregation"}],"id":"PhysicalProject_4","info":["fields=[col_1 as result]"],"operator":"PhysicalProject"}}"##,
+        },
+    ];
+
+    for case in cases {
+        let stream_defs = setup_streams();
+        let select_stmt = parse_sql(case.sql).expect("parse sql");
+        let bindings = bindings_for_select(&select_stmt, &stream_defs);
+        let logical_plan =
+            create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical plan");
+        let (logical_plan, bindings) = flow::optimize_logical_plan(logical_plan, &bindings);
+        let physical_plan =
+            flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
+                .expect("physical plan");
+        let physical_plan = flow::optimize_physical_plan(
+            physical_plan,
+            registries.encoder_registry().as_ref(),
+            registries.aggregate_registry(),
+        );
+        let explain = PipelineExplain::new(
+            logical_plan,
+            physical_plan,
+            PipelineExplainConfig::default(),
+        );
+
+        println!("case={}: {}", case.name, case.sql);
+        println!("{}", explain.to_pretty_string());
+        assert_eq!(
+            explain.to_json().to_string(),
+            case.expected,
+            "unexpected EXPLAIN JSON for {}",
+            case.name
+        );
+    }
+}
+
 /// Verify that EXPLAIN output shows `decoder=protobuf` for a stream using protobuf decoder.
 #[test]
 fn plan_explain_shows_protobuf_decoder() {

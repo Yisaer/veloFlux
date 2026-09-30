@@ -13,6 +13,7 @@ use crate::planner::logical::{
 };
 use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
+use crate::planner::physical::physical_wasm_udf_compute::PhysicalWasmUdfEvaluation;
 use crate::planner::physical::{
     DataDomain, LookupJoinKeySlot, PartitionGroupKey, PhysicalAggregation, PhysicalBatch,
     PhysicalCompute, PhysicalDataSink, PhysicalDataSource, PhysicalDecoder,
@@ -31,8 +32,9 @@ use crate::processor::processor_state::ProcessorState;
 use crate::shared_stream::SharedStreamRegistry;
 use crate::PipelineRegistries;
 use datatypes::{ConcreteDatatype, Schema};
-use sqlparser::ast::Expr;
+use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, VisitMut, VisitorMut};
 use std::collections::{HashMap, HashSet};
+use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,6 +44,146 @@ pub struct PhysicalPlanBuildOptions {
     pub eventtime_late_tolerance: Duration,
     /// Slot versions per shared source, computed by [`apply_shared_stream_slot_schemas`].
     pub shared_slot_versions: HashMap<String, u64>,
+}
+
+struct WasmUdfLowerer<'a> {
+    bindings: &'a SchemaBinding,
+    registry: &'a crate::expr::custom_func::CustomFuncRegistry,
+    state: &'a mut WasmUdfLoweringState,
+    evaluations: Vec<PhysicalWasmUdfEvaluation>,
+}
+
+struct WasmUdfLoweringState {
+    next_id: usize,
+    outputs: HashMap<String, String>,
+}
+
+impl WasmUdfLoweringState {
+    fn new() -> Self {
+        Self {
+            next_id: 1,
+            outputs: HashMap::new(),
+        }
+    }
+}
+
+impl<'a> WasmUdfLowerer<'a> {
+    fn new(
+        registry: &'a crate::expr::custom_func::CustomFuncRegistry,
+        bindings: &'a SchemaBinding,
+        state: &'a mut WasmUdfLoweringState,
+    ) -> Self {
+        Self {
+            registry,
+            bindings,
+            state,
+            evaluations: Vec::new(),
+        }
+    }
+
+    fn lower(&mut self, expr: &mut Expr) -> Result<(), String> {
+        let mut visitor = WasmUdfExprRewriter { lowerer: self };
+        match VisitMut::visit(expr, &mut visitor) {
+            ControlFlow::Continue(()) => Ok(()),
+            ControlFlow::Break(error) => Err(error),
+        }
+    }
+}
+
+struct WasmUdfExprRewriter<'a, 'b> {
+    lowerer: &'a mut WasmUdfLowerer<'b>,
+}
+
+impl VisitorMut for WasmUdfExprRewriter<'_, '_> {
+    type Break = String;
+
+    fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
+        let Expr::Function(function) = expr else {
+            return ControlFlow::Continue(());
+        };
+        let name = function.name.to_string().to_lowercase();
+        let Some(udf) = self.lowerer.registry.get(&name) else {
+            return ControlFlow::Continue(());
+        };
+        if !udf.is_batch() {
+            return ControlFlow::Continue(());
+        }
+        let args = match function
+            .args
+            .iter()
+            .map(|arg| match arg {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))
+                | FunctionArg::Named {
+                    arg: FunctionArgExpr::Expr(expr),
+                    ..
+                } => Ok(expr.clone()),
+                _ => Err(format!(
+                    "WASM UDF '{name}' only supports expression arguments"
+                )),
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(args) => args,
+            Err(error) => return ControlFlow::Break(error),
+        };
+        let original = expr.clone();
+        let key = format!("{original:?}");
+        if let Some(output_column) = self.lowerer.state.outputs.get(&key) {
+            *expr = Expr::Identifier(sqlparser::ast::Ident::new(output_column));
+            return ControlFlow::Continue(());
+        }
+        let output_column = format!("__vf_wasm_{}", self.lowerer.state.next_id);
+        self.lowerer.state.next_id += 1;
+        let args = match args
+            .into_iter()
+            .map(|arg| {
+                crate::expr::sql_conversion::convert_expr_to_scalar_with_bindings_and_custom_registry(
+                    &arg,
+                    self.lowerer.bindings,
+                    self.lowerer.registry,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>() {
+            Ok(args) => args,
+            Err(error) => return ControlFlow::Break(error),
+        };
+        self.lowerer.evaluations.push(PhysicalWasmUdfEvaluation {
+            output_column: output_column.clone(),
+            udf,
+            args,
+            original_expr: original,
+        });
+        self.lowerer
+            .state
+            .outputs
+            .insert(key, output_column.clone());
+        *expr = Expr::Identifier(sqlparser::ast::Ident::new(output_column));
+        ControlFlow::Continue(())
+    }
+}
+
+fn lower_wasm_udfs(
+    expressions: &mut [Expr],
+    child: Arc<PhysicalPlan>,
+    bindings: &SchemaBinding,
+    registry: &crate::expr::custom_func::CustomFuncRegistry,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Arc<PhysicalPlan>, String> {
+    let evaluations = {
+        let mut lowerer = WasmUdfLowerer::new(registry, bindings, &mut builder.wasm_udf_state);
+        for expression in expressions {
+            lowerer.lower(expression)?;
+        }
+        lowerer.evaluations
+    };
+    if evaluations.is_empty() {
+        return Ok(child);
+    }
+    let index = builder.allocate_index();
+    Ok(Arc::new(PhysicalPlan::WasmUdfCompute(
+        crate::planner::physical::PhysicalWasmUdfCompute::new(evaluations, child, index),
+    )))
 }
 
 impl Default for PhysicalPlanBuildOptions {
@@ -230,6 +372,7 @@ pub struct PhysicalPlanBuilder {
     /// Slot versions per shared source, populated by [`apply_shared_stream_slot_schemas`]
     /// before physical plan building.
     shared_slot_versions: HashMap<String, u64>,
+    wasm_udf_state: WasmUdfLoweringState,
 }
 
 impl PhysicalPlanBuilder {
@@ -239,6 +382,7 @@ impl PhysicalPlanBuilder {
             node_cache: std::collections::HashMap::new(),
             memory_collection_materialize_cache: std::collections::HashMap::new(),
             shared_slot_versions: HashMap::new(),
+            wasm_udf_state: WasmUdfLoweringState::new(),
         }
     }
 
@@ -248,6 +392,7 @@ impl PhysicalPlanBuilder {
             node_cache: std::collections::HashMap::new(),
             memory_collection_materialize_cache: std::collections::HashMap::new(),
             shared_slot_versions: HashMap::new(),
+            wasm_udf_state: WasmUdfLoweringState::new(),
         }
     }
 
@@ -592,10 +737,44 @@ fn create_physical_stateful_function_with_builder(
         physical_children.push(physical_child);
     }
 
+    let mut stateful_specs: Vec<_> = logical_stateful
+        .calls
+        .iter()
+        .map(|entry| entry.spec.clone())
+        .collect();
+    let custom_registry = registries.custom_func_registry();
+    let evaluations = {
+        let mut lowerer = WasmUdfLowerer::new(
+            custom_registry.as_ref(),
+            bindings,
+            &mut builder.wasm_udf_state,
+        );
+        for spec in &mut stateful_specs {
+            for expr in &mut spec.args {
+                lowerer.lower(expr)?;
+            }
+            if let Some(expr) = &mut spec.when {
+                lowerer.lower(expr)?;
+            }
+            for expr in &mut spec.partition_by {
+                lowerer.lower(expr)?;
+            }
+        }
+        lowerer.evaluations
+    };
+    if !evaluations.is_empty() {
+        let child = physical_children
+            .pop()
+            .ok_or_else(|| "stateful plan must have one child".to_string())?;
+        let index = builder.allocate_index();
+        physical_children.push(Arc::new(PhysicalPlan::WasmUdfCompute(
+            crate::planner::physical::PhysicalWasmUdfCompute::new(evaluations, child, index),
+        )));
+    }
+
     let mut calls = Vec::with_capacity(logical_stateful.calls.len());
-    for entry in &logical_stateful.calls {
+    for (entry, spec) in logical_stateful.calls.iter().zip(stateful_specs.iter()) {
         let output_column = &entry.output_column;
-        let spec = &entry.spec;
         let func_name = spec.func_name.clone();
         registries
             .stateful_registry()
@@ -707,7 +886,59 @@ fn create_physical_window_with_builder(
         physical_children.push(physical_child);
     }
 
-    let physical = match &logical_window.spec {
+    let mut window_spec = logical_window.spec.clone();
+    let custom_registry = registries.custom_func_registry();
+    let evaluations = {
+        let mut lowerer = WasmUdfLowerer::new(
+            custom_registry.as_ref(),
+            bindings,
+            &mut builder.wasm_udf_state,
+        );
+        match &mut window_spec {
+            LogicalWindowSpec::Tumbling { partition_by, .. }
+            | LogicalWindowSpec::Count { partition_by, .. } => {
+                for expr in partition_by {
+                    lowerer.lower(expr)?;
+                }
+            }
+            LogicalWindowSpec::Sliding {
+                partition_by,
+                trigger_condition,
+                ..
+            } => {
+                for expr in partition_by {
+                    lowerer.lower(expr)?;
+                }
+                if let Some(expr) = trigger_condition {
+                    lowerer.lower(expr)?;
+                }
+            }
+            LogicalWindowSpec::State {
+                open,
+                emit,
+                partition_by,
+            } => {
+                lowerer.lower(open)?;
+                lowerer.lower(emit)?;
+                for expr in partition_by {
+                    lowerer.lower(expr)?;
+                }
+            }
+            LogicalWindowSpec::Eos => {}
+        }
+        lowerer.evaluations
+    };
+    if !evaluations.is_empty() {
+        let child = physical_children
+            .pop()
+            .ok_or_else(|| "window plan must have one child".to_string())?;
+        let index = builder.allocate_index();
+        physical_children.push(Arc::new(PhysicalPlan::WasmUdfCompute(
+            crate::planner::physical::PhysicalWasmUdfCompute::new(evaluations, child, index),
+        )));
+    }
+
+    let physical = match &window_spec {
         LogicalWindowSpec::Tumbling {
             time_unit,
             length,
@@ -941,11 +1172,38 @@ fn create_physical_aggregation_with_builder(
         )?;
         physical_children.push(physical_child);
     }
+    let mut aggregate_mappings = logical_agg.aggregate_mappings.clone();
+    let mapping_keys: Vec<String> = aggregate_mappings.keys().cloned().collect();
+    let mut expressions: Vec<Expr> = mapping_keys
+        .iter()
+        .filter_map(|key| aggregate_mappings.get(key).cloned())
+        .collect();
+    expressions.extend(logical_agg.group_by_exprs.clone());
+    let child = physical_children
+        .pop()
+        .ok_or_else(|| "aggregation plan must have one child".to_string())?;
+    let child = lower_wasm_udfs(
+        &mut expressions,
+        child,
+        bindings,
+        registries.custom_func_registry().as_ref(),
+        builder,
+    )?;
+    let mut expression_iter = expressions.into_iter();
+    for key in mapping_keys {
+        let expression = aggregate_mappings
+            .get_mut(&key)
+            .ok_or_else(|| "missing aggregate mapping".to_string())?;
+        *expression = expression_iter
+            .next()
+            .ok_or_else(|| "missing lowered aggregate expression".to_string())?;
+    }
+    let group_by_exprs = expression_iter.collect::<Vec<_>>();
     let index = builder.allocate_index();
     let physical = PhysicalAggregation::new(
-        logical_agg.aggregate_mappings.clone(),
-        logical_agg.group_by_exprs.clone(),
-        physical_children,
+        aggregate_mappings,
+        group_by_exprs,
+        vec![child],
         index,
         bindings,
         registries.aggregate_registry().as_ref(),
@@ -1264,9 +1522,21 @@ fn create_physical_filter_with_builder_cached(
         physical_children.push(physical_child);
     }
 
+    let mut predicate = logical_filter.predicate.clone();
+    let child = physical_children
+        .pop()
+        .ok_or_else(|| "filter plan must have one child".to_string())?;
+    let child = lower_wasm_udfs(
+        std::slice::from_mut(&mut predicate),
+        child,
+        bindings,
+        registries.custom_func_registry().as_ref(),
+        builder,
+    )?;
+
     // Convert SQL Expr to ScalarExpr
     let mut scalar_predicate = convert_expr_to_scalar_with_bindings_and_custom_registry(
-        &logical_filter.predicate,
+        &predicate,
         bindings,
         registries.custom_func_registry().as_ref(),
     )
@@ -1287,12 +1557,7 @@ fn create_physical_filter_with_builder_cached(
     };
 
     let index = builder.allocate_index();
-    let mut physical_filter = PhysicalFilter::new(
-        logical_filter.predicate.clone(),
-        scalar_predicate,
-        physical_children,
-        index,
-    );
+    let mut physical_filter = PhysicalFilter::new(predicate, scalar_predicate, vec![child], index);
     physical_filter.processor_state = processor_state;
     physical_filter.pipeline_state_usage = pipeline_state_usage;
     Ok(Arc::new(PhysicalPlan::Filter(physical_filter)))
@@ -1318,20 +1583,36 @@ fn create_physical_order_with_builder_cached(
         physical_children.push(physical_child);
     }
 
+    let mut order_exprs: Vec<Expr> = logical_order
+        .items
+        .iter()
+        .map(|item| item.expr.clone())
+        .collect();
+    let child = physical_children
+        .pop()
+        .ok_or_else(|| "order plan must have one child".to_string())?;
+    let child = lower_wasm_udfs(
+        &mut order_exprs,
+        child,
+        bindings,
+        registries.custom_func_registry().as_ref(),
+        builder,
+    )?;
     let mut keys = Vec::with_capacity(logical_order.items.len());
-    for item in &logical_order.items {
+    for (item, expr) in logical_order.items.iter().zip(order_exprs) {
         let compiled_expr = convert_expr_to_scalar_with_bindings_and_custom_registry(
-            &item.expr,
+            &expr,
             bindings,
             registries.custom_func_registry().as_ref(),
         )
         .map_err(|e| format!("Failed to convert ORDER BY expression to scalar: {}", e))?;
         keys.push(PhysicalOrderKey {
-            original_expr: item.expr.clone(),
+            original_expr: expr,
             compiled_expr,
             asc: item.asc,
         });
     }
+    let physical_children = vec![child];
 
     let index = builder.allocate_index();
     let physical_order = PhysicalOrder::new(keys, physical_children, index);
@@ -1360,11 +1641,26 @@ fn create_physical_compute_with_builder_cached(
         physical_children.push(physical_child);
     }
 
+    let mut expressions: Vec<Expr> = logical_compute
+        .fields
+        .iter()
+        .map(|field| field.expr.clone())
+        .collect();
+    let child = physical_children
+        .pop()
+        .ok_or_else(|| "compute plan must have one child".to_string())?;
+    let child = lower_wasm_udfs(
+        &mut expressions,
+        child,
+        bindings,
+        registries.custom_func_registry().as_ref(),
+        builder,
+    )?;
     let mut physical_fields = Vec::new();
-    for logical_field in &logical_compute.fields {
+    for (logical_field, expression) in logical_compute.fields.iter().zip(expressions) {
         let physical_field = PhysicalComputeField::from_logical(
             logical_field.field_name.clone(),
-            logical_field.expr.clone(),
+            expression,
             bindings,
             registries.custom_func_registry().as_ref(),
         )?;
@@ -1372,7 +1668,7 @@ fn create_physical_compute_with_builder_cached(
     }
 
     let index = builder.allocate_index();
-    let physical_compute = PhysicalCompute::new(physical_fields, physical_children, index);
+    let physical_compute = PhysicalCompute::new(physical_fields, vec![child], index);
     Ok(Arc::new(PhysicalPlan::Compute(physical_compute)))
 }
 
@@ -1398,12 +1694,28 @@ fn create_physical_project_with_builder_cached(
         physical_children.push(physical_child);
     }
 
+    let mut expressions: Vec<Expr> = logical_project
+        .fields
+        .iter()
+        .map(|field| field.expr.clone())
+        .collect();
+    let child = physical_children
+        .pop()
+        .ok_or_else(|| "project plan must have one child".to_string())?;
+    let child = lower_wasm_udfs(
+        &mut expressions,
+        child,
+        bindings,
+        registries.custom_func_registry().as_ref(),
+        builder,
+    )?;
+
     // Convert logical fields to physical fields
     let mut physical_fields = Vec::new();
-    for logical_field in &logical_project.fields {
+    for (logical_field, expression) in logical_project.fields.iter().zip(expressions) {
         let physical_field = PhysicalProjectField::from_logical(
             logical_field.field_name.as_str(),
-            logical_field.expr.clone(),
+            expression,
             bindings,
             registries.custom_func_registry().as_ref(),
         )?;
@@ -1426,7 +1738,7 @@ fn create_physical_project_with_builder_cached(
     };
 
     let index = builder.allocate_index();
-    let mut physical_project = PhysicalProject::new(physical_fields, physical_children, index);
+    let mut physical_project = PhysicalProject::new(physical_fields, vec![child], index);
     physical_project.processor_state = processor_state;
     physical_project.pipeline_state_usage = pipeline_state_usage;
     Ok(Arc::new(PhysicalPlan::Project(physical_project)))

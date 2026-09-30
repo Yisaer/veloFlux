@@ -75,10 +75,11 @@ Hot-unregister is deferred to future work.
 
 ### Key design decisions
 
-1. **WASM UDFs integrate with the scalar expression system.** The registry stores a
-   shareable UDF definition, while the planner materializes batch-capable UDF subexpressions
-   into temporary columns. Processor-owned runtimes execute those columns without changing
-   the scalar semantics visible to SQL.
+1. **WASM UDFs integrate with the scalar expression system through physical lowering.** The
+   parser and logical plan retain the original UDF calls. During physical-plan construction,
+   WASM UDF subexpressions are materialized into temporary affiliate columns and the original
+   physical expression is rewritten to reference those columns. Processor-owned runtimes
+   execute the resulting collection-level batch evaluations without changing SQL semantics.
 
 2. **WASM runtime: wasmtime.** wasmtime is a pure-Rust, production-grade WASM runtime
    with JIT compilation. It provides sandbox isolation, epoch-based interruption for
@@ -89,10 +90,10 @@ Hot-unregister is deferred to future work.
    the serialized `StoredUdf` record (name, revision, file hash, metadata). This follows the same
    pattern as existing persisted resources (streams, pipelines, mqtt configs, memory topics).
 
-4. **Explicit execution mode.** Each WASM UDF declares exactly one execution mode in
-   metadata: `row` or `batch`. Row-mode UDFs use the row JSON ABI; batch-mode UDFs use
-   the vectorized batch JSON ABI and process multiple rows in one call. The host does
-   not infer or switch modes from the exports.
+4. **Batch-only execution.** Each WASM UDF declares `execution_mode: "batch"` in
+   metadata and exports `udf_batch`. The former row ABI was an implementation bridge for
+   the MVP and is not part of the supported contract. The host never evaluates a WASM UDF
+   through the row-level scalar evaluator.
 
 ## Storage Design
 
@@ -148,7 +149,7 @@ WASM binaries are stored under `<base_dir>/wasm_files/<sha256>.wasm`.
 |----------|-------------------|------------------------------------|
 | `POST`   | `/udfs/upload`    | Upload a new WASM UDF              |
 | `GET`    | `/udfs`           | List all registered UDFs           |
-| `GET`    | `/udfs/:name`     | Get UDF metadata                   |
+| `GET`    | `/udfs/:name`     | Get a persisted UDF record         |
 | `DELETE` | `/udfs/:name`     | Delete a UDF                       |
 
 ### POST `/udfs/upload`
@@ -165,18 +166,10 @@ Request: `multipart/form-data`
 Response `200 OK`:
 ```json
 {
-  "abi_version": 1,
   "name": "my_udf",
   "revision": 1,
   "wasm_sha256": "a1b2c3...",
-  "status": "registered",
-  "metadata": {
-    "abi_version": 1,
-    "description": "optional description from wasm metadata",
-    "args": [{"name": "input", "type": "string"}],
-    "return_type": "int64",
-    "execution_mode": "row"
-  }
+  "status": "registered"
 }
 ```
 
@@ -185,10 +178,9 @@ Server-side behaviour:
 2. Check for name collision with built-in functions and existing UDFs; return
    `409 Conflict` if already registered.
 3. Validate the WASM module: instantiate it with wasmtime, validate the metadata JSON,
-   verify the row execution export (`udf_row`) together with `udf_metadata_ptr`,
+   verify the batch execution export (`udf_batch`) together with `udf_metadata_ptr`,
    `udf_metadata_len`, and `memory`, verify `abi_version == 1`, and verify the memory
-   cap. Batch metadata is reserved for the later batch execution phase and is rejected
-   by the current row-only implementation.
+   cap.
 4. Write `<sha256>.wasm` to `wasm_files/`.
 5. Insert `StoredUdf` into the `udfs` redb table.
 6. Instantiate and hot-register the UDF into the running `CustomFuncRegistry` via
@@ -199,11 +191,13 @@ Server-side behaviour:
 
 ### GET `/udfs`
 
-Returns a list of all stored UDFs with their metadata (excluding WASM binary).
+Returns a list of all stored UDF records. Each item contains `name`, `revision`,
+`wasm_sha256`, and `size_bytes`; the WASM metadata JSON and binary are not
+returned by this endpoint.
 
 ### GET `/udfs/:name`
 
-Returns the full metadata for a single UDF.
+Returns the same persisted record shape as the list endpoint for a single UDF.
 
 ### DELETE `/udfs/:name`
 
@@ -286,21 +280,17 @@ src/udf/
 
 ### WASM ABI specification
 
-Each UDF `.wasm` file must export the metadata functions and exactly one execution
-function selected by `execution_mode`:
+Each UDF `.wasm` file must export the metadata functions and the batch execution
+function:
 
 ```wat
 (module
-  ;; For execution_mode: "row"
   ;; Parameters: i32 pointer to input JSON bytes, i32 byte length
   ;; Returns: i32 pointer to output JSON bytes. The 4-byte little-endian output length
   ;; is stored immediately before the returned data pointer.
-  (func (export "udf_row") (param i32 i32) (result i32))
-
-  ;; For execution_mode: "batch", use this instead of udf_row.
   ;; The JSON input contains column-oriented argument vectors.
   ;; The JSON output contains one result value per input row.
-  ;; (func (export "udf_batch") (param i32 i32) (result i32))
+  (func (export "udf_batch") (param i32 i32) (result i32))
 
   ;; Required memory export
   (memory (export "memory") 1)
@@ -343,7 +333,7 @@ trade-off between performance and interoperability:
    scalar from SQL's perspective: output element `i` corresponds to input row `i`.
 
 If a specific UDF is found to be JSON-bound (i.e. the serialization cost dominates),
-a future optimization could add a raw pointer-based ABI variant (`udf_row_raw`) that
+a future optimization could add a raw pointer-based ABI variant (`udf_batch_raw`) that
 passes typed arrays. But this adds complexity and should be driven by profiling data,
 not premature optimization.
 
@@ -358,7 +348,7 @@ processor-bound implementations:
 pub struct WasmUdfDefinition {
     name: String,
     metadata: UdfMetadata,
-    execution_mode: ExecutionMode, // Row or Batch
+    execution_mode: ExecutionMode, // Batch only
     engine: wasmtime::Engine,
     module: wasmtime::Module,
     instance_pre: wasmtime::InstancePre<()>,
@@ -374,14 +364,15 @@ pub struct BoundWasmUdf {
 ```
 
 `WasmUdfDefinition` is referenced by the physical plan through a stable UDF identity.
-When a processor is built, it replaces each WASM definition in its
-physical expressions with a private processor-bound function. That function owns the
-mutable wasmtime state and is never shared between pipelines or workers. Evaluation then
-uses the same function call path as built-ins; it does not pass a runtime parameter.
+During physical-plan construction, each WASM call is lowered into a
+`PhysicalWasmUdfCompute` evaluation that writes an affiliate column. The resulting physical
+expression contains only ordinary column references and scalar functions. The compute
+processor owns the private batch runtime and never exposes a WASM UDF through the row-level
+scalar function path.
 
 Built-in functions continue to use the existing immutable `CustomFunc` path. WASM calls
-are bound to their processor-owned runtime during physical processor construction, so
-`WasmUdf::eval_row` is not an execution path.
+are bound to their processor-owned batch runtime during physical processor construction;
+there is no `WasmUdf::eval_row` execution path.
 
 ### Definition and runtime ownership
 
@@ -426,7 +417,7 @@ Pipeline B
 `WasmUdfDefinition` contains immutable, shareable data: the `Engine`, compiled `Module`,
 `InstancePre`, execution mode, and validated metadata. Each processor creates one private
 bound runtime for each distinct UDF definition used by that processor. The runtime owns
-the mutable execution state and is reused for all rows or micro-batches processed by
+the mutable execution state and is reused for all collections processed by
 that processor. Different processors do not share a mutable `Instance`.
 
 For a stateless scalar UDF, multiple call sites of the same function inside one processor
@@ -450,7 +441,7 @@ Periodic reclamation by replacing an evaluator is optional deferred work.
 
 ### Safety limits
 
-- **WASM invocation timeout**: each row invocation or micro-batch has an execution
+- **WASM invocation timeout**: each collection invocation has an execution
   deadline. Epoch-based interruption terminates a call that exceeds its deadline and
   returns a timeout error. The timeout is a best-effort execution deadline rather than
   an exact wall-clock guarantee.
@@ -524,12 +515,13 @@ After startup, hot-load replaces the immutable definition registry via `clone_an
 (write lock on upload only). Pipeline workers create their private evaluators when they
 are built; the registry never owns those mutable evaluators.
 
-### Batch execution and column materialization
+### Batch execution and physical-plan lowering
 
-Batch execution is implemented above the row-level expression evaluator. A single-row
-`eval_row` call cannot discover neighboring rows, so batching is not hidden inside
-`eval_row`. Instead, the planner extracts batch-capable WASM UDF subexpressions into
-ordered temporary columns and the compute processor evaluates those columns in batches.
+Batch execution is a physical-plan operation, not an alternative inside the row-level
+expression evaluator. The parser and logical plan retain the original WASM UDF calls. While
+building the physical plan, each expression-bearing physical node lowers the WASM calls in
+its expressions into an upstream `PhysicalWasmUdfCompute` node and replaces them with ordered
+temporary affiliate-column references.
 
 For example:
 
@@ -553,10 +545,6 @@ The processor-owned evaluator interface is conceptually:
 
 ```rust
 pub trait WasmUdfEvaluator {
-    fn validate_row(&self, args: &[Value]) -> Result<(), EvalError>;
-
-    fn eval_row(&mut self, args: &[Value]) -> Result<Value, EvalError>;
-
     /// Each argument vector has row_count elements. The result vector must also
     /// have row_count elements and preserve row alignment.
     fn eval_batch(&mut self, batch_args: &[Vec<Value>])
@@ -564,18 +552,17 @@ pub trait WasmUdfEvaluator {
 }
 ```
 
-Batch-mode definitions implement `eval_batch` through a `udf_batch` export.
+WASM UDF definitions implement `eval_batch` through a `udf_batch` export.
 The WASM function receives vectors for all scalar arguments and returns a vector. It
 must preserve row alignment: output element `i` depends only on input elements at
-index `i`. This is vectorized scalar evaluation, not cross-row aggregation. Row-mode
-definitions implement `eval_row` through `udf_row` and are evaluated one row at a time.
+index `i`. This is vectorized scalar evaluation, not cross-row aggregation.
 
-The `ComputeProcessor` evaluates temporary columns in dependency order. A batch is
-bounded (a micro-batch) so JSON size, scratch memory, latency, and timeout budget stay
-within configured limits. Batch-mode definitions must be materialized through this path;
-row-mode definitions remain on the row-level path. The processor creates and binds its
-runtime set when it is built; no mutable runtime is acquired from the global registry
-during row evaluation.
+The `WasmUdfComputeProcessor` receives one `Collection` and passes the complete collection
+to each batch evaluation. The collection is the batch boundary; the processor does not
+split it into smaller batches. Evaluations are ordered by their temporary-column
+dependencies, and all results preserve the input row count and row order. The processor
+creates and binds its runtime set when it is built; no mutable runtime is acquired from the
+global registry during scalar evaluation.
 
 Processor construction follows this sequence:
 
@@ -584,7 +571,7 @@ Processor construction follows this sequence:
    definition used by that processor.
 3. Replace the physical expression's WASM function references with the bound runtime
    functions.
-4. Reuse those runtimes for all rows or micro-batches handled by the processor.
+4. Reuse those runtimes for all collections handled by the processor.
 
 Built-in `CustomFunc` calls can continue through the existing scalar evaluator. A WASM
 call is resolved through its definition ID and runtime set entry, so the global registry
@@ -599,10 +586,9 @@ Every WASM UDF module must export:
 1. `memory`: WebAssembly linear memory
 2. `udf_metadata_ptr() -> i32` and `udf_metadata_len() -> i32`: pointers to a
    JSON metadata blob describing the function
-3. Exactly one execution export, selected by metadata:
-   - `udf_row(ptr: i32, len: i32) -> i32` for `execution_mode: "row"`;
+3. The batch execution export:
    - `udf_batch(ptr: i32, len: i32) -> i32` for `execution_mode: "batch"`.
-   A module must not declare one mode while exporting the other mode's entry point.
+   Row-mode modules and the `udf_row` export are not supported.
 
 ### Metadata format
 
@@ -627,21 +613,20 @@ Supported types: `"int"`, `"float"`, `"string"`, `"bool"`, `"timestamp"`,
 
 `abi_version` is part of the WASM artifact metadata and is the single source of truth
 for ABI selection. The current host accepts only version `1`; unsupported versions are
-rejected before the module is persisted or registered. The HTTP response, `StoredUdf`,
-and export/import records expose this validated metadata; they do not define a separate
-ABI version.
+rejected before the module is persisted or registered. `StoredUdf` retains the validated
+metadata JSON, while HTTP responses and export/import records expose only the persisted
+resource identity and WASM hash; they do not define a separate ABI version.
 
 ### ABI version 1 execution contract
 
 The host passes a pointer and byte length for one JSON input envelope to the
-mode-selected execution export. The export returns a pointer to JSON result bytes.
+`udf_batch` execution export. The export returns a pointer to JSON result bytes.
 The four bytes immediately before the returned data pointer contain the result byte
 length as a little-endian `i32`. The host reads the result immediately and owns the
 result bytes only for that invocation; a UDF must not retain input or output pointers
 after returning.
 
-For row mode, the input envelope contains one argument list and the result envelope
-contains one `Value`. For batch mode, the input is column-oriented:
+The input is column-oriented:
 
 ```json
 {
@@ -650,18 +635,46 @@ contains one `Value`. For batch mode, the input is column-oriented:
 }
 ```
 
-The batch result is:
+The result is:
 
 ```json
 {"values": [11, 22, 33]}
+```
+
+For row-level failures, the module may return a `results` array to preserve
+row alignment while reporting individual errors:
+
+```json
+{
+  "results": [
+    {"value": 11},
+    {"error": {"code": "invalid_argument", "message": "row-specific error"}},
+    {"value": 33}
+  ]
+}
+```
+
+The host keeps successful rows and drops rows with errors after recording the
+error. Batch-level ABI or runtime failures still fail the whole collection.
+
+Malformed envelopes, mismatched column lengths, missing arguments, and argument
+type errors return an error envelope instead of silently substituting defaults:
+
+```json
+{
+  "error": {
+    "code": "invalid_argument",
+    "message": "argument `a` at row 2 has an incompatible type"
+  }
+}
 ```
 
 Every argument vector and the result vector must contain exactly `row_count` elements.
 Output element `i` corresponds to input row `i`; batch mode is vectorized scalar
 evaluation, not cross-row aggregation.
 
-The host-provided allocator is used for invocation scratch buffers. Before each row or
-batch, the allocator reuses the scratch arena from its base. A larger request grows
+The host-provided allocator is used for invocation scratch buffers. Before each batch,
+the allocator reuses the scratch arena from its base. A larger request grows
 linear memory only by the required additional pages; a smaller later request reuses the
 existing capacity. The host resets the bump pointer after every invocation, including
 error paths. The module must not rely on scratch pointers remaining valid across
@@ -687,9 +700,9 @@ define_udf! {
 }
 ```
 
-The macro automatically generates the execution export selected by the UDF mode:
-- `udf_row(input_ptr, input_len)` for row mode, or `udf_batch(input_ptr, input_len)` for
-  batch mode — JSON deserialization → call user fn → serialize result(s)
+The macro automatically generates the batch execution export:
+- `udf_batch(input_ptr, input_len)` — JSON deserialization → call user fn for each row →
+  serialize result vector
 - `udf_metadata_ptr()` / `udf_metadata_len()` — metadata JSON blob
 - `memory` — WASM linear memory for the bump allocator
 
@@ -703,22 +716,14 @@ users of `veloflux-udf-sdk` never interact with it directly.
 
 ## Performance
 
-**Current implementation limitation (MVP):** Row-mode execution still serializes and
-deserializes JSON for every row. Store creation and module instantiation are not part of
-the row-level hot path: the processor binds one runtime per distinct UDF and reuses it.
-Batch ABI and column materialization remain a later optimization.
+Store creation and module instantiation are not part of the collection hot path: the
+processor binds one runtime per distinct UDF and reuses it. Each collection performs one
+JSON serialization, one `udf_batch` call, and one JSON deserialization per UDF evaluation,
+instead of repeating those operations for every row.
 
-**Selected optimization:** Move `Store`, `Instance`, `Memory`, and typed exports into a
-processor-owned bound runtime created by a processor-local `WasmRuntimeSet`. Share the
-compiled `Module` and `InstancePre` through a global `WasmUdfDefinition`, but instantiate
-the module only once per processor. The future batch runtime can then execute `udf_batch`
-for a bounded batch of rows,
-so each batch performs one JSON serialization, one WASM call, and one JSON
-deserialization instead of repeating those operations for every row.
-
-The planner materializes nested UDF calls into dependency-ordered temporary columns. For
-`wasm_udf(wasm_udf(a, b), c)`, the inner call produces `col_1` in one or more batches,
-and the outer call consumes `col_1` in subsequent batches. The final projection reads
+The physical planner materializes nested UDF calls into dependency-ordered temporary columns.
+For `wasm_udf(wasm_udf(a, b), c)`, the inner call produces `col_1` and the outer call
+consumes `col_1` in the same collection-level compute stage. The final projection reads
 the materialized result columns and performs any remaining scalar operations.
 
 The runtime must reuse its scratch arena before each batch. A trap or timeout is
@@ -769,10 +774,9 @@ network access for UDFs that need it, with explicit opt-in and capability contro
 ## Deployment contract
 
 The selected `abi_version` and `execution_mode` are required for every new WASM UDF.
-The host rejects modules whose metadata mode does not match the single execution export,
-whose metadata ABI version is not `1`, or whose input/output envelope is malformed. Row-mode
-and batch-mode modules are separate deployment artifacts; the host does not silently
-translate one mode into the other. Under the trusted-UDF model, a timeout or trap is
+The host accepts only `execution_mode: "batch"`, requires `udf_batch`, rejects the legacy
+`udf_row` export, rejects metadata whose ABI version is not `1`, and rejects malformed
+input/output envelopes. Under the trusted-UDF model, a timeout or trap is
 reported as an evaluation error and the evaluator is reused after scratch reset.
 
 The UDF registry and processor runtime set are separate lifecycle domains. Updating the

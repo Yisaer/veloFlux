@@ -8,6 +8,8 @@ pub enum AbiError {
     Serialize(#[from] serde_json::Error),
     #[error("unsupported JSON value type for conversion to veloFlux Value")]
     UnsupportedJsonType,
+    #[error("WASM UDF returned an error: {0}")]
+    UdfError(String),
 }
 
 /// Serialize a slice of `Value` args into a JSON byte vector.
@@ -17,6 +19,27 @@ pub fn serialize_args(args: &[Value]) -> Result<Vec<u8>, AbiError> {
         .map(value_to_json)
         .collect::<Result<Vec<_>, _>>()?;
     Ok(serde_json::to_vec(&json_args)?)
+}
+
+/// Serialize column-oriented batch arguments into the version 1 batch envelope.
+pub fn serialize_batch_args(args: &[Vec<Value>], row_count: usize) -> Result<Vec<u8>, AbiError> {
+    if args.iter().any(|column| column.len() != row_count) {
+        return Err(AbiError::UnsupportedJsonType);
+    }
+    let json_args: Vec<Vec<serde_json::Value>> = args
+        .iter()
+        .map(|column| {
+            column
+                .iter()
+                .map(value_to_json)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(
+        serde_json::json!({ "row_count": row_count, "args": json_args })
+            .to_string()
+            .into_bytes(),
+    )
 }
 
 /// Deserialize JSON bytes into a veloFlux `Value`.
@@ -31,6 +54,44 @@ pub fn deserialize_result(json_bytes: &[u8]) -> Result<Value, AbiError> {
         _ => &v,
     };
     json_to_value(v)
+}
+
+/// Deserialize a batch result envelope and preserve result row order.
+pub fn deserialize_batch_result(
+    json_bytes: &[u8],
+) -> Result<Vec<Result<Value, AbiError>>, AbiError> {
+    let envelope: serde_json::Value = serde_json::from_slice(json_bytes)?;
+    if let Some(message) = envelope
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return Err(AbiError::UdfError(message.to_string()));
+    }
+    if let Some(values) = envelope.get("values").and_then(serde_json::Value::as_array) {
+        return values.iter().map(json_to_value).map(Ok).collect();
+    }
+    let results = envelope
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or(AbiError::UnsupportedJsonType)?;
+    results
+        .iter()
+        .map(|result| {
+            if let Some(message) = result
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(serde_json::Value::as_str)
+            {
+                return Ok(Err(AbiError::UdfError(message.to_string())));
+            }
+            result
+                .get("value")
+                .ok_or(AbiError::UnsupportedJsonType)
+                .and_then(json_to_value)
+                .map(Ok)
+        })
+        .collect()
 }
 
 fn value_to_json(v: &Value) -> Result<serde_json::Value, AbiError> {

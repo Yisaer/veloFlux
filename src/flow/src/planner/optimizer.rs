@@ -451,6 +451,11 @@ fn rebuild_with_children(
             new.base.children = children;
             Arc::new(PhysicalPlan::Compute(new))
         }
+        PhysicalPlan::WasmUdfCompute(compute) => {
+            let mut new = compute.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::WasmUdfCompute(new))
+        }
         PhysicalPlan::Order(order) => {
             let mut new = order.clone();
             new.base.children = children;

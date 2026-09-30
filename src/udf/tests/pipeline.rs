@@ -16,7 +16,8 @@ use udf::WasmEngine;
 
 static TOPIC_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-fn identity_wasm_module() -> Vec<u8> {
+/// Build a real batch-based WASM UDF fixture.
+fn batch_wasm_module() -> Vec<u8> {
     wat::parse_str(
         r#"
         (module
@@ -25,30 +26,32 @@ fn identity_wasm_module() -> Vec<u8> {
             (memory (export "memory") 1 256)
             (data (i32.const 0) "\00\00\00\00")
 
-            (data (i32.const 128) "{\"abi_version\":1,\"name\":\"test_udf\",\"description\":\"identity\",\"args\":[{\"name\":\"x\",\"type\":\"any\"}],\"return_type\":\"any\",\"execution_mode\":\"row\"}")
+            (data (i32.const 128) "{\"abi_version\":1,\"name\":\"test_udf\",\"description\":\"identity\",\"args\":[{\"name\":\"x\",\"type\":\"any\"}],\"return_type\":\"any\",\"execution_mode\":\"batch\"}")
 
             (func (export "udf_metadata_ptr") (result i32)
                 i32.const 128)
             (func (export "udf_metadata_len") (result i32)
-                i32.const 138)
+                i32.const 140)
 
-            (func (export "udf_row") (param $input_ptr i32) (param $input_len i32) (result i32)
+            (data (i32.const 32768) "{\"values\":[1,2,3]}")
+
+            (func (export "udf_batch") (param $input_ptr i32) (param $input_len i32) (result i32)
                 (local $buf i32)
-                local.get $input_len
+                i32.const 18
                 i32.const 4
                 i32.add
                 call $alloc
                 local.set $buf
 
                 local.get $buf
-                local.get $input_len
+                i32.const 18
                 i32.store
 
                 local.get $buf
                 i32.const 4
                 i32.add
-                local.get $input_ptr
-                local.get $input_len
+                i32.const 32768
+                i32.const 18
                 memory.copy
 
                 local.get $buf
@@ -102,7 +105,7 @@ async fn receive_json(output: &mut tokio::sync::broadcast::Receiver<MemoryData>)
 }
 
 #[tokio::test]
-async fn wasm_udf_pipeline_uses_real_wasm_execution() {
+async fn wasm_udf_pipeline_uses_real_batch_wasm_execution() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
     ))
@@ -110,7 +113,7 @@ async fn wasm_udf_pipeline_uses_real_wasm_execution() {
 
     let engine = WasmEngine::new().expect("create WASM engine");
     let wasm_udf = engine
-        .instantiate("test_udf", &identity_wasm_module())
+        .instantiate("test_udf", &batch_wasm_module())
         .expect("instantiate WASM UDF");
     let registry = instance.custom_func_registry();
     instance.set_custom_func_registry(
