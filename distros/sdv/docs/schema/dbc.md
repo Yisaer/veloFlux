@@ -169,6 +169,13 @@ Multiplexed signals share the same bit positions but are activated by different 
 
 When `MuxSelector = 0`, only `Speed` is decoded. When `MuxSelector = 1`, only `Temperature` is decoded.
 
+Multiplexer metadata is retained from the complete DBC independently of the
+output schema. Direct decoding still resolves the selector and filters inactive
+groups when the selector column is omitted from the schema or decode projection.
+The selector is emitted only when requested. Across multiple frames, each mux
+group retains its newest signals, while common signals and an emitted selector
+come from the latest arriving frame.
+
 ---
 
 ## GBF Private Format Configuration

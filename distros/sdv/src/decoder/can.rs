@@ -309,7 +309,7 @@ pub struct SignalSpec {
 /// Specification for a CAN message containing multiple signals.
 pub struct MessageSpec {
     pub signals: Vec<SignalSpec>,
-    /// True if any signal in this message is a multiplexer.
+    /// True if the DBC message has a multiplexer, independent of output columns.
     /// Pre-computed at init time to skip multiplexer search for non-multiplex messages.
     pub has_multiplexer: bool,
     /// Dense per-decoder index used as a key into per-decode scratch tables
@@ -486,6 +486,7 @@ fn signal_last_bit(signal: &SignalSpec) -> Option<usize> {
     }
 }
 
+#[derive(Clone, Copy)]
 struct WindowFrameSlot {
     identity: FrameIdentity,
     start: u32,
@@ -498,11 +499,19 @@ struct WindowMuxKey {
     mux_value: i64,
 }
 
+#[derive(Clone, Copy)]
+enum FrameSignals {
+    All,
+    Common,
+    Mux(i64),
+}
+
 /// Shared DBC sampling-window state used by GBF and BusMirror mergers.
 pub struct DbcWindowAccumulator {
     decoder: CanDecoder,
     mux_resolver: Option<CanMuxKeyResolver>,
     payload_buf: Vec<u8>,
+    // Latest full frame per identity supplies common signals and the selector.
     frames: FrameIdentityMap<WindowFrameSlot>,
     mux_frames: HashMap<WindowMuxKey, WindowFrameSlot>,
     last_ts: u64,
@@ -555,9 +564,8 @@ impl DbcWindowAccumulator {
                 },
                 slot,
             );
-        } else {
-            self.frames.insert(identity, slot);
         }
+        self.frames.insert(identity, slot);
     }
 
     pub fn observe_timestamp(&mut self, timestamp: u64) {
@@ -576,18 +584,36 @@ impl DbcWindowAccumulator {
         let buffer = self.payload_buf.as_slice();
         let mut frames =
             Vec::with_capacity(self.frames.len().saturating_add(self.mux_frames.len()));
-        frames.extend(self.frames.values().map(|slot| DbcFrame {
-            timestamp: self.last_ts,
-            identity: slot.identity,
-            payload: &buffer[slot.start as usize..slot.start as usize + slot.len as usize],
+        let full_frame_signals = if self.mux_resolver.is_some() {
+            FrameSignals::Common
+        } else {
+            FrameSignals::All
+        };
+        frames.extend(self.frames.values().map(|slot| {
+            (
+                DbcFrame {
+                    timestamp: self.last_ts,
+                    identity: slot.identity,
+                    payload: &buffer[slot.start as usize..slot.start as usize + slot.len as usize],
+                },
+                full_frame_signals,
+            )
         }));
-        frames.extend(self.mux_frames.values().map(|slot| DbcFrame {
-            timestamp: self.last_ts,
-            identity: slot.identity,
-            payload: &buffer[slot.start as usize..slot.start as usize + slot.len as usize],
+        frames.extend(self.mux_frames.iter().map(|(key, slot)| {
+            (
+                DbcFrame {
+                    timestamp: self.last_ts,
+                    identity: slot.identity,
+                    payload: &buffer[slot.start as usize..slot.start as usize + slot.len as usize],
+                },
+                FrameSignals::Mux(key.mux_value),
+            )
         }));
 
-        let batch = match self.decoder.decode_dbc_frames(frames, projection) {
+        let batch = match self
+            .decoder
+            .decode_scoped_frames(frames.into_iter(), projection)
+        {
             Some(tuple) => Some(RecordBatch::new(vec![tuple])?),
             None => None,
         };
@@ -646,6 +672,9 @@ pub struct CanDecoder {
     source_name: Arc<str>,
     keys: Arc<[Arc<str>]>,
     messages: FrameIdentityMap<MessageSpec>,
+    /// Selector metadata from the complete DBC, including selectors omitted by
+    /// the output schema. Direct decoding uses it when no selector column exists.
+    mux_resolver: Option<CanMuxKeyResolver>,
     /// Number of distinct `msg_index` values; sizes per-decode scratch tables.
     message_count: usize,
     ts_index: Option<usize>,
@@ -837,8 +866,8 @@ impl CanDecoder {
                          to every bus/message pair."
                     );
                 }
-                // Pre-compute if this message has a multiplexer signal
-                let has_multiplexer = signals.iter().any(|s| s.is_multiplexer);
+                // Output pruning must not change the message's mux semantics.
+                let has_multiplexer = msg.signals.iter().any(|s| s.is_multiplexer);
                 let msg_index = next_msg_index;
                 next_msg_index += 1;
                 messages.insert(
@@ -852,10 +881,14 @@ impl CanDecoder {
             }
         }
 
+        let mux_resolver = CanMuxKeyResolver::from_dbc_with_identity(dbc, |bus_id, msg_id| {
+            identity_mapping.frame_identity(bus_id, msg_id)
+        });
         Ok(Self {
             source_name: Arc::<str>::from(source_name),
             keys: Arc::from(keys),
             messages,
+            mux_resolver,
             message_count: next_msg_index,
             ts_index,
             null_value: Arc::new(Value::Null),
@@ -971,10 +1004,19 @@ impl CanDecoder {
         frames: Vec<DbcFrame<'_>>,
         projection: Option<&DecodeProjection>,
     ) -> Option<Tuple> {
-        if frames.is_empty() {
-            return None;
-        }
+        self.decode_scoped_frames(
+            frames.into_iter().map(|frame| (frame, FrameSignals::All)),
+            projection,
+        )
+    }
 
+    fn decode_scoped_frames<'a>(
+        &self,
+        frames: impl DoubleEndedIterator<Item = (DbcFrame<'a>, FrameSignals)>,
+        projection: Option<&DecodeProjection>,
+    ) -> Option<Tuple> {
+        let mut frames = frames.peekable();
+        let timestamp = frames.peek()?.0.timestamp;
         let (required_columns, slot_layout) = self.projection_state(projection);
 
         // Output position for a full-schema column: its slot (VF-56 narrow row) or
@@ -995,7 +1037,7 @@ impl CanDecoder {
         if let Some(ts_idx) = self.ts_index
             && let Some(o) = out_idx(ts_idx)
         {
-            values[o] = Some(Value::Int64(frames[0].timestamp as i64));
+            values[o] = Some(Value::Int64(timestamp as i64));
         }
 
         // A packed window typically repeats the same message many times (a
@@ -1012,7 +1054,7 @@ impl CanDecoder {
         // scan beats a hash set here.
         let mut seen_mux: Vec<(usize, Option<i64>)> = Vec::new();
 
-        for frame in frames.iter().rev() {
+        for (frame, signals) in frames.rev() {
             let Some(spec) = self.messages.get(&frame.identity) else {
                 trace!(
                     frame_identity = frame.identity.value(),
@@ -1021,14 +1063,18 @@ impl CanDecoder {
                 continue;
             };
 
-            if !spec.has_multiplexer {
+            if matches!(signals, FrameSignals::Common)
+                || (!spec.has_multiplexer && matches!(signals, FrameSignals::All))
+            {
                 if seen_messages[spec.msg_index] {
                     continue;
                 }
                 seen_messages[spec.msg_index] = true;
 
                 for signal in &spec.signals {
-                    if !required_columns.includes(signal.col_index) {
+                    if (matches!(signals, FrameSignals::Common) && signal.is_multiplexed)
+                        || !required_columns.includes(signal.col_index)
+                    {
                         continue;
                     }
                     if let Some(o) = out_idx(signal.col_index) {
@@ -1038,13 +1084,17 @@ impl CanDecoder {
                 continue;
             }
 
-            // Multiplexed message: decode the multiplexer selector to get the
-            // current mux value, then decode this (message, mux value) pair at
-            // most once. Columns are written only when still empty so that the
-            // newest frame (visited first in reverse) wins.
-            let mut multiplexer_value: Option<i64> = None;
-            for signal in &spec.signals {
-                if signal.is_multiplexer {
+            // Direct decoding resolves the selector and keeps the newest value
+            // of each column. Window mux slots use the cached selector and write
+            // only group-specific columns; their order relative to common slots
+            // does not affect the result.
+            let mut multiplexer_value = match signals {
+                FrameSignals::Mux(value) => Some(value),
+                _ => None,
+            };
+            // Window mux slots reuse the validated selector cached in their key.
+            if matches!(signals, FrameSignals::All) {
+                if let Some(signal) = spec.signals.iter().find(|signal| signal.is_multiplexer) {
                     let val = decode_signal(frame.payload, signal);
                     multiplexer_value = match &val {
                         Value::Int64(v) => Some(*v),
@@ -1057,7 +1107,14 @@ impl CanDecoder {
                     {
                         values[o] = Some(val);
                     }
-                    break;
+                } else {
+                    // The selector is needed for matching even when the output
+                    // schema excludes it. Resolve it without emitting a column.
+                    multiplexer_value = self.mux_resolver.as_ref().and_then(|resolver| {
+                        resolver
+                            .resolve_identity_mux(frame.identity, frame.payload)
+                            .ok()
+                    });
                 }
             }
 
@@ -1068,8 +1125,10 @@ impl CanDecoder {
             seen_mux.push(mux_key);
 
             for signal in &spec.signals {
-                // Skip multiplexer signal (already decoded above)
-                if signal.is_multiplexer {
+                // Selectors belong to direct decoding or the common frame slot.
+                if signal.is_multiplexer
+                    || (matches!(signals, FrameSignals::Mux(_)) && !signal.is_multiplexed)
+                {
                     continue;
                 }
 
@@ -1937,6 +1996,304 @@ mod tests {
             .value_by_name("mul", "SENSOR_SONARS_mux1")
             .expect("mux1");
         assert_eq!(*mux1, Value::Int64(1));
+    }
+
+    #[test]
+    fn test_window_mux_latest_common_and_schema_pruning() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
+        let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
+        let full_schema = schema_from_dbc("mul", &dbc, None).expect("compile schema");
+        let selected = [
+            "SENSOR_SONARS_no_filt_left",
+            "SENSOR_SONARS_err_count",
+            "SENSOR_SONARS_left",
+        ];
+        let projections = [
+            None,
+            Some(DecodeProjection::from_top_level_columns_with_version(
+                &selected.map(str::to_string),
+                1,
+            )),
+            Some(
+                DecodeProjection::from_top_level_columns_with_version(
+                    &selected.map(str::to_string),
+                    2,
+                )
+                .with_output_slots(Arc::from(selected.map(Arc::<str>::from))),
+            ),
+            Some(
+                DecodeProjection::from_top_level_columns_with_version(
+                    &["SENSOR_SONARS_mux".into(), "SENSOR_SONARS_err_count".into()],
+                    3,
+                )
+                .with_output_slots(Arc::from([
+                    Arc::<str>::from("SENSOR_SONARS_mux"),
+                    Arc::<str>::from("SENSOR_SONARS_err_count"),
+                ])),
+            ),
+        ];
+        let payloads = [
+            [0x00u8, 0x24, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11],
+            [0x01u8, 0x54, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11],
+            [0x01u8, 0x99, 0x35, 0x73, 0x74, 0x00, 0x00, 0x11],
+        ];
+        let cases: &[(&[usize], i64, i64)] = &[
+            (&[1, 0], 0, 576),
+            (&[0, 1], 1, 1344),
+            (&[1, 0, 2], 1, 2448),
+            (&[0], 0, 576),
+        ];
+        let oracle = get_multiplex_decoder();
+        for pruned_schema in [false, true] {
+            let schema = if pruned_schema {
+                Schema::new(
+                    full_schema
+                        .column_schemas()
+                        .iter()
+                        .filter(|column| selected.contains(&column.name.as_str()))
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                full_schema.clone()
+            };
+            for projection in &projections {
+                let decoder = CanDecoder::new(
+                    "mul",
+                    Arc::new(schema.clone()),
+                    dbc.clone(),
+                    None,
+                    true,
+                    CanIdMapping::Raw,
+                )
+                .expect("build decoder");
+                let mut accumulator = DbcWindowAccumulator::new(
+                    decoder,
+                    CanMuxKeyResolver::from_dbc(&dbc, CanIdMapping::Raw),
+                );
+                // Reuse one accumulator across windows to detect stale group slots.
+                for &(order, mux, common) in cases {
+                    for (index, &payload_index) in order.iter().enumerate() {
+                        // Timestamps decrease: newest is defined by arrival order.
+                        accumulator.merge_frame(
+                            100 - index as u64,
+                            FrameIdentity::gbf(0x00C8),
+                            &payloads[payload_index],
+                        );
+                    }
+                    let expected = oracle
+                        .decode_frames(
+                            order
+                                .iter()
+                                .map(|&index| CanFrame {
+                                    timestamp: accumulator.last_ts,
+                                    can_id: 0x00C8,
+                                    payload: &payloads[index],
+                                })
+                                .collect(),
+                            projection.as_ref(),
+                        )
+                        .expect("direct decode");
+                    let batch = accumulator
+                        .decode_window(projection.as_ref())
+                        .expect("decode window")
+                        .expect("batch");
+                    assert_eq!(batch.rows().len(), 1);
+                    let row = &batch.rows()[0];
+                    let names: Vec<&str> = match projection.as_ref().and_then(|p| p.output_slots())
+                    {
+                        Some(slots) => slots.iter().map(|name| name.as_ref()).collect(),
+                        None => schema
+                            .column_schemas()
+                            .iter()
+                            .map(|c| c.name.as_str())
+                            .collect(),
+                    };
+                    for (index, name) in names.iter().enumerate() {
+                        let expected_value = if schema.contains_column(name) {
+                            expected.value_by_name("mul", name)
+                        } else {
+                            Some(&Value::Null)
+                        };
+                        assert_eq!(
+                            row.value_by_index("mul", index),
+                            expected_value,
+                            "order={order:?}, pruned_schema={pruned_schema}, column={name}"
+                        );
+                    }
+                    assert!(row.value_by_index("mul", names.len()).is_none());
+                    if projection.is_none() {
+                        assert_eq!(
+                            row.value_by_name("mul", "SENSOR_SONARS_err_count"),
+                            Some(&Value::Int64(common))
+                        );
+                        if !pruned_schema {
+                            assert_eq!(
+                                row.value_by_name("mul", "SENSOR_SONARS_mux"),
+                                Some(&Value::Int64(mux))
+                            );
+                        }
+                    }
+                    assert!(
+                        accumulator
+                            .decode_window(projection.as_ref())
+                            .expect("empty window")
+                            .is_none()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_direct_mux_decode_without_selector_in_schema() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests/mul.json");
+        let dbc = load_dbc_json(path.to_str().unwrap()).expect("load mul.json");
+        let full_schema = schema_from_dbc("mul", &dbc, None).expect("compile schema");
+        let selected = [
+            "SENSOR_SONARS_err_count",
+            "SENSOR_SONARS_left",
+            "SENSOR_SONARS_no_filt_left",
+        ];
+        let schema = Schema::new(
+            full_schema
+                .column_schemas()
+                .iter()
+                .filter(|column| selected.contains(&column.name.as_str()))
+                .cloned()
+                .collect(),
+        );
+        let decoder = CanDecoder::new("mul", Arc::new(schema), dbc, None, true, CanIdMapping::Raw)
+            .expect("build pruned decoder");
+        let slots: Arc<[Arc<str>]> = Arc::from(
+            selected
+                .into_iter()
+                .rev()
+                .map(Arc::<str>::from)
+                .collect::<Vec<_>>(),
+        );
+        let projection =
+            DecodeProjection::from_top_level_columns_with_version(&selected.map(str::to_string), 1)
+                .with_output_slots(Arc::clone(&slots));
+        let payloads = [
+            [0x00u8, 0x24, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11],
+            [0x01u8, 0x54, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11],
+            [0x01u8, 0x99, 0x35, 0x73, 0x74, 0x00, 0x00, 0x11],
+        ];
+        let cases: &[(&[usize], [Value; 3])] = &[
+            (
+                &[1],
+                [Value::Int64(1344), Value::Null, Value::Float64(86.9)],
+            ),
+            (&[0], [Value::Int64(576), Value::Float64(86.9), Value::Null]),
+            (
+                &[1, 0, 2],
+                [
+                    Value::Int64(2448),
+                    Value::Float64(86.9),
+                    Value::Float64(82.1),
+                ],
+            ),
+        ];
+        for projection in [None, Some(&projection)] {
+            for (order, expected) in cases {
+                let row = decoder
+                    .decode_frames(
+                        order
+                            .iter()
+                            .map(|&index| CanFrame {
+                                timestamp: 1,
+                                can_id: 0x00C8,
+                                payload: &payloads[index],
+                            })
+                            .collect(),
+                        projection,
+                    )
+                    .expect("direct decode");
+                for (name, expected_value) in selected.iter().zip(expected) {
+                    assert_eq!(
+                        row.value_by_name("mul", name),
+                        Some(expected_value),
+                        "order={order:?}, column={name}"
+                    );
+                }
+                assert!(row.value_by_name("mul", "SENSOR_SONARS_mux").is_none());
+                assert!(row.value_by_index("mul", selected.len()).is_none());
+                if projection.is_some() {
+                    for (index, expected_value) in expected.iter().rev().enumerate() {
+                        assert_eq!(row.value_by_index("mul", index), Some(expected_value));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_window_mux_signal_scopes_are_order_independent() {
+        let decoder = get_multiplex_decoder();
+        let g1 = [0x01u8, 0x54, 0x65, 0x73, 0x74, 0x00, 0x00, 0x11];
+        let g0 = [0x00u8, 0x24, 0x35, 0x73, 0x74, 0x00, 0x00, 0x11];
+        let slots = [
+            (
+                DbcFrame {
+                    timestamp: 1,
+                    identity: FrameIdentity::gbf(0x00C8),
+                    payload: &g0,
+                },
+                FrameSignals::Common,
+            ),
+            (
+                DbcFrame {
+                    timestamp: 1,
+                    identity: FrameIdentity::gbf(0x00C8),
+                    payload: &g1,
+                },
+                FrameSignals::Mux(1),
+            ),
+            (
+                DbcFrame {
+                    timestamp: 1,
+                    identity: FrameIdentity::gbf(0x00C8),
+                    payload: &g0,
+                },
+                FrameSignals::Mux(0),
+            ),
+        ];
+        let expected = decoder
+            .decode_dbc_frames(vec![slots[1].0.clone(), slots[0].0.clone()], None)
+            .expect("direct decode");
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let row = decoder
+                .decode_scoped_frames(order.into_iter().map(|i| slots[i].clone()), None)
+                .expect("scoped decode");
+            for name in decoder.keys.iter() {
+                assert_eq!(
+                    row.value_by_name("mul", name),
+                    expected.value_by_name("mul", name),
+                    "order={order:?}, column={name}"
+                );
+            }
+        }
+        let common = decoder
+            .decode_scoped_frames(std::iter::once(slots[0].clone()), None)
+            .expect("common decode");
+        assert_eq!(
+            common.value_by_name("mul", "SENSOR_SONARS_left"),
+            Some(&Value::Null)
+        );
+        let groups = decoder
+            .decode_scoped_frames(slots[1..].iter().cloned(), None)
+            .expect("group decode");
+        for name in ["SENSOR_SONARS_mux", "SENSOR_SONARS_err_count"] {
+            assert_eq!(groups.value_by_name("mul", name), Some(&Value::Null));
+        }
     }
 
     /// Frames with different mux values both contribute their groups; shared

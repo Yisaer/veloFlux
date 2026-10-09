@@ -1141,6 +1141,7 @@ mod tests {
             &none_request,
             instance.encoder_registry().as_ref(),
             &instance,
+            Default::default(),
         )
         .expect("nop sink with explicit none encoder builds");
         assert_eq!(
@@ -1153,6 +1154,7 @@ mod tests {
             &json_request,
             instance.encoder_registry().as_ref(),
             &instance,
+            Default::default(),
         )
         .expect("nop sink default json encoder builds");
         assert_eq!(

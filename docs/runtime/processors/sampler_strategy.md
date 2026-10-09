@@ -123,6 +123,12 @@ For a CAN-format GBF schema, the fused merger keeps newest-wins semantics within
   preserve the complete CAN ID.
 - Multiplexed frames additionally include `mux_value` in the key.
 - Repeated frames with the same key keep only the newest payload.
+- Each message identity also retains its newest full frame for common signals
+  and the multiplexer selector. Mux slots decode only their group-specific
+  signals, using the mux value already cached in the key. These slots write
+  disjoint columns, so hash-map traversal order cannot change the output.
+- Newest means arrival order, not the packet timestamp. Both signal paths honor
+  the decoder projection and output slot layout.
 
 The mux value is decoded from the payload using the DBC multiplexer signal definition. Future GBF inner formats must add explicit inner handlers with their own key semantics; they must not fall back to generic GBF byte merging.
 
