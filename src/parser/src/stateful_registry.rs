@@ -1,10 +1,35 @@
 use std::sync::Arc;
 
-pub trait StatefulRegistry: Send + Sync {
-    fn is_stateful_function(&self, name: &str) -> bool;
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StatefulOutputMode {
+    #[default]
+    Immediate,
+    Deferred,
 }
 
-pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 13] = [
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StatefulFunctionCapabilities {
+    pub output_mode: StatefulOutputMode,
+    pub supports_until: bool,
+}
+
+impl StatefulFunctionCapabilities {
+    pub const DEFERRED_WITH_UNTIL: Self = Self {
+        output_mode: StatefulOutputMode::Deferred,
+        supports_until: true,
+    };
+}
+
+pub trait StatefulRegistry: Send + Sync {
+    fn is_stateful_function(&self, name: &str) -> bool;
+
+    fn capabilities(&self, name: &str) -> Option<StatefulFunctionCapabilities> {
+        self.is_stateful_function(name)
+            .then(StatefulFunctionCapabilities::default)
+    }
+}
+
+pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 14] = [
     "acc_avg",
     "acc_count",
     "acc_max",
@@ -17,6 +42,7 @@ pub const BUILTIN_STATEFUL_FUNCTIONS: [&str; 13] = [
     "consecutive_start",
     "had_changed",
     "lag",
+    "lead",
     "latest",
 ];
 
@@ -26,20 +52,41 @@ pub fn builtin_stateful_function_names() -> &'static [&'static str] {
 
 #[derive(Default)]
 pub struct StaticStatefulRegistry {
-    names: std::collections::HashSet<String>,
+    functions: std::collections::HashMap<String, StatefulFunctionCapabilities>,
 }
 
 impl StaticStatefulRegistry {
     pub fn new(names: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        Self {
-            names: names.into_iter().map(|s| s.into().to_lowercase()).collect(),
+        let mut registry = Self::default();
+        for name in names {
+            let name = name.into().to_lowercase();
+            let capabilities = if name == "lead" {
+                StatefulFunctionCapabilities::DEFERRED_WITH_UNTIL
+            } else {
+                StatefulFunctionCapabilities::default()
+            };
+            registry.register(name, capabilities);
         }
+        registry
+    }
+
+    pub fn register(
+        &mut self,
+        name: impl Into<String>,
+        capabilities: StatefulFunctionCapabilities,
+    ) {
+        self.functions
+            .insert(name.into().to_lowercase(), capabilities);
     }
 }
 
 impl StatefulRegistry for StaticStatefulRegistry {
     fn is_stateful_function(&self, name: &str) -> bool {
-        self.names.contains(&name.to_lowercase())
+        self.functions.contains_key(&name.to_lowercase())
+    }
+
+    fn capabilities(&self, name: &str) -> Option<StatefulFunctionCapabilities> {
+        self.functions.get(&name.to_lowercase()).copied()
     }
 }
 

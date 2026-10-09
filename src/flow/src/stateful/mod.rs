@@ -7,6 +7,7 @@ pub mod consecutive_start;
 pub mod had_changed;
 pub mod lag;
 pub mod latest;
+pub mod lead;
 pub mod registry;
 pub(crate) mod util;
 
@@ -31,9 +32,12 @@ pub use lag::lag_function_def;
 pub use lag::LagFunction;
 pub use latest::latest_function_def;
 pub use latest::LatestFunction;
+pub use lead::lead_function_def;
+pub use lead::LeadFunction;
 pub use registry::{
-    PreparedStatefulEval, StatefulEvalInput, StatefulEvalUpdate, StatefulFunction,
-    StatefulFunctionInstance, StatefulFunctionRegistry, StatefulRegistryError,
+    DeferredEvalInput, DeferredProbe, PreparedStatefulEval, ResolvedStatefulRow, StatefulEvalInput,
+    StatefulEvalOutput, StatefulEvalUpdate, StatefulFunction, StatefulFunctionInstance,
+    StatefulFunctionRegistry, StatefulRegistryError,
 };
 
 use crate::catalog::FunctionDef;
@@ -53,5 +57,6 @@ pub fn builtin_stateful_function_defs() -> Vec<FunctionDef> {
         had_changed_function_def(),
         lag_function_def(),
         latest_function_def(),
+        lead_function_def(),
     ]
 }

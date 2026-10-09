@@ -9,7 +9,9 @@ veloFlux supports three different function categories in stream SQL:
 - Stateful functions evaluated per row, but with internal state carried across rows.
 
 A stateful function consumes the current row together with its own historical state and returns a
-scalar value for the current row.
+scalar value for the current row. Streaming `lead` is the deferred exception: it consumes the
+current row, but may release the result for an earlier origin row only after a future probe row
+arrives.
 
 Example:
 
@@ -23,6 +25,8 @@ Stateful functions are similar to aggregates in that they require a registry and
 execution stage, but they differ in two important ways:
 
 - They are evaluated for every input row.
+- Most functions produce an immediate value; deferred functions such as `lead` may retain the
+  current origin row until a later probe or normal stream end.
 - Their execution order must match expression dependency order.
 
 Stateful calls are supported in `SELECT` expressions, the query-level `WHERE` condition, and
@@ -56,6 +60,7 @@ SELECT lag(a) FILTER (WHERE flag = 1) OVER (PARTITION BY k1, k2) FROM stream
 Built-in stateful functions currently include:
 
 - `lag`
+- `lead`
 - `latest`
 - `change_to`
 - `change_capture`
@@ -155,6 +160,11 @@ Example:
 ```sql
 SELECT latest(status) AS latest_status FROM stream
 ```
+
+### `lead`
+
+The streaming `lead(expr [, offset [, ignore_null]])` syntax and deferred row lifecycle are specified separately in
+[`streaming_lead.md`](streaming_lead.md).
 
 ### `changed_col`
 
@@ -400,6 +410,10 @@ For stateful functions, the current implementation supports only:
 - Positional expression arguments.
 - `FILTER (WHERE <expr>)`.
 - `OVER (PARTITION BY <expr> [, <expr> ...])`.
+
+Streaming `lead` additionally supports `UNTIL` as specified in
+[`streaming_lead.md`](streaming_lead.md). `UNTIL` is valid only for `lead`; other stateful
+functions must reject it during parsing or planning.
 
 For acc functions, the current implementation supports only:
 

@@ -11,6 +11,11 @@ use std::sync::Arc;
 pub enum ScalarExpr {
     /// A column reference
     Column(ColumnRef),
+    /// A column reference evaluated against the pending origin row of a deferred call.
+    OriginRow {
+        column: ColumnRef,
+        datum: Option<Value>,
+    },
     /// Wildcard reference (`*` or `source.*`)
     Wildcard {
         /// Optional source/table qualifier
@@ -90,7 +95,7 @@ pub enum WindowMetadataField {
     End,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnRef {
     ByName {
         column_name: String,
@@ -107,7 +112,77 @@ pub struct EvalRowContext<'a> {
     pub collection_metadata: &'a CollectionMetadata,
 }
 
+fn value_for_column(tuple: &Tuple, column: &ColumnRef) -> Result<Value, EvalError> {
+    match column {
+        ColumnRef::ByIndex {
+            source_name,
+            column_index,
+        } => tuple
+            .value_by_index(source_name, *column_index)
+            .cloned()
+            .ok_or_else(|| EvalError::ColumnNotFound {
+                source: source_name.clone(),
+                column: format!("#{column_index}"),
+            }),
+        ColumnRef::ByName { column_name } => tuple
+            .value_by_name("", column_name)
+            .cloned()
+            .ok_or_else(|| EvalError::ColumnNotFound {
+                source: "".to_string(),
+                column: column_name.clone(),
+            }),
+    }
+}
+
 impl ScalarExpr {
+    /// Bind origin-row references to one pending tuple before evaluating a deferred predicate.
+    pub fn bind_origin_row(&mut self, tuple: &Tuple) -> Result<(), EvalError> {
+        match self {
+            ScalarExpr::OriginRow { column, datum } => {
+                *datum = Some(value_for_column(tuple, column)?);
+            }
+            ScalarExpr::CallUnary { expr, .. } | ScalarExpr::FieldAccess { expr, .. } => {
+                expr.bind_origin_row(tuple)?
+            }
+            ScalarExpr::CallBinary { expr1, expr2, .. } => {
+                expr1.bind_origin_row(tuple)?;
+                expr2.bind_origin_row(tuple)?;
+            }
+            ScalarExpr::ListIndex { expr, index_expr } => {
+                expr.bind_origin_row(tuple)?;
+                index_expr.bind_origin_row(tuple)?;
+            }
+            ScalarExpr::CallFunc { args, .. } => {
+                for arg in args {
+                    arg.bind_origin_row(tuple)?;
+                }
+            }
+            ScalarExpr::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                if let Some(operand) = operand {
+                    operand.bind_origin_row(tuple)?;
+                }
+                for (when_expr, then_expr) in when_then {
+                    when_expr.bind_origin_row(tuple)?;
+                    then_expr.bind_origin_row(tuple)?;
+                }
+                if let Some(else_expr) = else_expr {
+                    else_expr.bind_origin_row(tuple)?;
+                }
+            }
+            ScalarExpr::Column(_)
+            | ScalarExpr::Wildcard { .. }
+            | ScalarExpr::Literal(_, _)
+            | ScalarExpr::PipelineState { .. }
+            | ScalarExpr::ProcessorState { .. }
+            | ScalarExpr::WindowMetadata { .. } => {}
+        }
+        Ok(())
+    }
+
     /// Evaluate this expression against a collection row by row.
     pub fn eval_with_collection(
         &self,
@@ -138,6 +213,11 @@ impl ScalarExpr {
     pub fn eval_with_context(&self, context: &EvalRowContext<'_>) -> Result<Value, EvalError> {
         let tuple = context.tuple;
         match self {
+            ScalarExpr::OriginRow { datum, .. } => {
+                datum.clone().ok_or_else(|| EvalError::NotImplemented {
+                    feature: "unbound origin row".to_string(),
+                })
+            }
             ScalarExpr::Column(column_ref) => match column_ref {
                 ColumnRef::ByIndex {
                     source_name,
@@ -364,6 +444,7 @@ impl ScalarExpr {
                 }
             }
             ScalarExpr::Column(_)
+            | ScalarExpr::OriginRow { .. }
             | ScalarExpr::Wildcard { .. }
             | ScalarExpr::Literal(_, _)
             | ScalarExpr::PipelineState { .. }
@@ -485,6 +566,9 @@ impl ScalarExpr {
 impl std::fmt::Debug for ScalarExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ScalarExpr::OriginRow { column, datum } => {
+                write!(f, "OriginRow({column:?}, {datum:?})")
+            }
             ScalarExpr::Column(ColumnRef::ByName { column_name }) => {
                 write!(f, "Column({})", column_name)
             }
@@ -536,6 +620,16 @@ impl std::fmt::Debug for ScalarExpr {
 impl PartialEq for ScalarExpr {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
+            (
+                ScalarExpr::OriginRow {
+                    column: a_column,
+                    datum: a_datum,
+                },
+                ScalarExpr::OriginRow {
+                    column: b_column,
+                    datum: b_datum,
+                },
+            ) => a_column == b_column && a_datum == b_datum,
             (
                 ScalarExpr::Column(ColumnRef::ByName { column_name: ca }),
                 ScalarExpr::Column(ColumnRef::ByName { column_name: cb }),

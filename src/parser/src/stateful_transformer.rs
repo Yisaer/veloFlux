@@ -554,6 +554,10 @@ fn parse_stateful_call(
         ));
     }
 
+    if func_name == "lead" && func.null_treatment.is_some() {
+        return Err("lead() does not support IGNORE NULLS or RESPECT NULLS".to_string());
+    }
+
     let mut args = Vec::with_capacity(func.args.len());
     for arg in &func.args {
         match arg {
@@ -583,7 +587,51 @@ fn parse_stateful_call(
         None => None,
     };
 
-    let partition_by = parse_stateful_over_partition_by(func, &func_name)?;
+    let capabilities = stateful_registry
+        .capabilities(&func_name)
+        .unwrap_or_default();
+    let mut partition_by = parse_stateful_over_partition_by(func, &func_name)?;
+    let until = if let Some(Expr::Function(marker)) = partition_by.last() {
+        if !marker
+            .name
+            .to_string()
+            .eq_ignore_ascii_case("__vf_stateful_until__")
+        {
+            None
+        } else {
+            if !capabilities.supports_until {
+                return Err(format!(
+                    "stateful function '{}' does not support UNTIL",
+                    func_name
+                ));
+            }
+            if marker.args.len() != 1 {
+                return Err("stateful UNTIL requires one expression".to_string());
+            }
+            let expr = match &marker.args[0] {
+                FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => expr.clone(),
+                _ => return Err("stateful UNTIL requires a scalar expression".to_string()),
+            };
+            partition_by.pop();
+            Some(expr)
+        }
+    } else {
+        None
+    };
+    if func.over.is_some() && partition_by.is_empty() && until.is_none() {
+        let required = if capabilities.supports_until {
+            "PARTITION BY or UNTIL"
+        } else {
+            "PARTITION BY expressions"
+        };
+        return Err(format!(
+            "stateful function '{}' OVER requires {}",
+            func_name, required
+        ));
+    }
+    if let Some(expr) = &until {
+        validate_stateful_context_expr(expr, stateful_registry, aggregate_registry, "UNTIL")?;
+    }
     for expr in &partition_by {
         validate_stateful_context_expr(
             expr,
@@ -599,6 +647,7 @@ fn parse_stateful_call(
         func_name,
         args,
         when,
+        until,
         partition_by,
         original_expr: original_expr.clone(),
     })
@@ -632,13 +681,6 @@ fn parse_stateful_window_spec_partition_by(
     if spec.window_frame.is_some() {
         return Err(format!(
             "stateful function '{}' OVER does not support window frames",
-            func_name
-        ));
-    }
-
-    if spec.partition_by.is_empty() {
-        return Err(format!(
-            "stateful function '{}' OVER requires PARTITION BY expressions",
             func_name
         ));
     }
@@ -725,6 +767,20 @@ fn validate_stateful_builtin_args(func_name: &str, args: &[Expr]) -> Result<(), 
             }
             if let Some(ignore_null) = args.get(2) {
                 validate_bool_literal(ignore_null, "lag() third argument")?;
+            }
+        }
+        "lead" => {
+            if args.is_empty() || args.len() > 3 {
+                return Err(format!(
+                    "lead() expects 1 to 3 arguments, got {}",
+                    args.len()
+                ));
+            }
+            if let Some(offset) = args.get(1) {
+                validate_positive_integer_literal(offset, "lead() second argument")?;
+            }
+            if let Some(ignore_null) = args.get(2) {
+                validate_bool_literal(ignore_null, "lead() third argument")?;
             }
         }
         "acc_sum" | "acc_max" | "acc_min" | "acc_count" | "acc_avg"

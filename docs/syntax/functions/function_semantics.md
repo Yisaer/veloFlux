@@ -35,7 +35,8 @@ The canonical categories are represented by `FunctionKind`:
 
 - `Scalar`: stateless per-row computation such as `concat(a, b)` or `regexp_substring(...)`
 - `Aggregate`: grouped or windowed reduction such as `sum(x)` or `median(x)`
-- `Stateful`: per-row computation with evolving state such as `lag(x)` or `latest(x)`
+- `Stateful`: per-row computation with evolving state such as `lag(x)` or `latest(x)`; streaming
+  `lead(x)` is a deferred stateful function that may release an earlier row after a future probe.
 
 The category determines:
 

@@ -10,6 +10,7 @@ pub struct DeliveryResult {
 }
 
 /// Trait implemented by all sink connectors.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait SinkConnector: Send + Sync + 'static {
     /// Identifier for logging/metrics.

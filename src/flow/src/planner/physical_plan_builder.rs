@@ -1,7 +1,8 @@
 //! Physical plan builder - converts logical plans to physical plans using centralized index management
 use crate::expr::sql_conversion::{
-    convert_expr_to_scalar_with_bindings_and_custom_registry, SchemaBinding, SchemaBindingEntry,
-    SourceBindingKind,
+    convert_expr_to_scalar_with_bindings_and_custom_registry,
+    convert_until_expr_to_scalar_with_bindings_and_custom_registry, SchemaBinding,
+    SchemaBindingEntry, SourceBindingKind,
 };
 use crate::expr::ScalarExpr;
 use crate::planner::logical::{
@@ -756,6 +757,9 @@ fn create_physical_stateful_function_with_builder(
             if let Some(expr) = &mut spec.when {
                 lowerer.lower(expr)?;
             }
+            if let Some(expr) = &mut spec.until {
+                lowerer.lower(expr)?;
+            }
             for expr in &mut spec.partition_by {
                 lowerer.lower(expr)?;
             }
@@ -793,6 +797,18 @@ fn create_physical_stateful_function_with_builder(
             );
         }
 
+        let until_scalar = match spec.until.as_ref() {
+            Some(expr) => Some(
+                convert_until_expr_to_scalar_with_bindings_and_custom_registry(
+                    expr,
+                    bindings,
+                    registries.custom_func_registry().as_ref(),
+                )
+                .map_err(|err| err.to_string())?,
+            ),
+            None => None,
+        };
+
         let when_scalar = match spec.when.as_ref() {
             Some(expr) => Some(
                 convert_expr_to_scalar_with_bindings_and_custom_registry(
@@ -822,6 +838,7 @@ fn create_physical_stateful_function_with_builder(
             func_name,
             arg_scalars,
             when_scalar,
+            until_scalar,
             partition_group_key: PartitionGroupKey::from_partition_by(&spec.partition_by),
             partition_by_scalars,
             spec: spec.clone(),
@@ -1465,6 +1482,7 @@ fn inject_processor_state(expr: &mut ScalarExpr, state: &Arc<ProcessorState>) {
                 field: field.clone(),
             };
         }
+        ScalarExpr::OriginRow { .. } => {}
         ScalarExpr::CallUnary { expr: inner, .. } => inject_processor_state(inner, state),
         ScalarExpr::CallBinary { expr1, expr2, .. } => {
             inject_processor_state(expr1, state);

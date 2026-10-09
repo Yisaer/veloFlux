@@ -304,6 +304,54 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
         StreamDecoderConfig::new("file_line", JsonMap::new()),
     );
 
+    let telemetry_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "telemetry".to_string(),
+            "device_id".to_string(),
+            ConcreteDatatype::String(StringType),
+        ),
+        ColumnSchema::new(
+            "telemetry".to_string(),
+            "ts".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "telemetry".to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "telemetry".to_string(),
+            "b".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+    let telemetry_def = StreamDefinition::new(
+        "telemetry",
+        Arc::clone(&telemetry_schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    );
+
+    let origin_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new(
+            "origin".to_string(),
+            "ts".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+        ColumnSchema::new(
+            "origin".to_string(),
+            "a".to_string(),
+            ConcreteDatatype::Int64(Int64Type),
+        ),
+    ]));
+    let origin_def = StreamDefinition::new(
+        "origin",
+        Arc::clone(&origin_schema),
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    );
+
     let mut stream_defs = HashMap::new();
     stream_defs.insert("stream".to_string(), Arc::new(stream_def));
     stream_defs.insert("stream_sampler".to_string(), Arc::new(stream_sampler_def));
@@ -321,6 +369,8 @@ fn setup_streams() -> HashMap<String, Arc<StreamDefinition>> {
     stream_defs.insert("vehicle_stream".to_string(), Arc::new(vehicle_stream_def));
     stream_defs.insert("camera".to_string(), Arc::new(camera_def));
     stream_defs.insert("file_logs".to_string(), Arc::new(file_logs_def));
+    stream_defs.insert("telemetry".to_string(), Arc::new(telemetry_def));
+    stream_defs.insert("origin".to_string(), Arc::new(origin_def));
 
     stream_defs
 }
@@ -1636,6 +1686,73 @@ fn plan_explain_stateful_table_driven() {
             expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE col_1) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lag(a) -> col_1; lag(a) FILTER (WHERE col_1) -> col_2]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1 as lag(a); col_2 as lag(a) FILTER (WHERE lag(a))]"],"operator":"PhysicalProject"}}"##,
         },
 
+    ];
+
+    for case in cases {
+        let got = explain_json_string(case.sql);
+        assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+#[test]
+fn plan_explain_lead_until_table_driven() {
+    struct Case {
+        name: &'static str,
+        sql: &'static str,
+        expected: &'static str,
+    }
+
+    let cases = vec![
+        Case {
+            name: "lead_until_shorthand_origin",
+            sql: "SELECT lead(a) OVER (UNTIL ts - origin.ts > 5) FROM telemetry",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=telemetry","decoder=json","schema=[device_id, ts, a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lead(a) OVER (UNTIL ts - origin.ts > 5) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=telemetry","schema=[device_id, ts, a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[device_id, ts, a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lead(a) OVER (UNTIL ts - origin.ts > 5) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "lead_until_full_probe_origin_scope",
+            sql: "SELECT lead(a) OVER (UNTIL probe.telemetry.ts - origin.telemetry.ts > 5) FROM telemetry",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=telemetry","decoder=json","schema=[device_id, ts, a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lead(a) OVER (UNTIL probe.telemetry.ts - origin.telemetry.ts > 5) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=telemetry","schema=[device_id, ts, a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[device_id, ts, a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lead(a) OVER (UNTIL probe.telemetry.ts - origin.telemetry.ts > 5) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "lead_until_shorthand_and_full_scope_are_equivalent",
+            sql: "SELECT lead(a) OVER (UNTIL ts - origin.ts > 5), lead(a) OVER (UNTIL probe.telemetry.ts - origin.telemetry.ts > 5) FROM telemetry",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=telemetry","decoder=json","schema=[device_id, ts, a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lead(a) OVER (UNTIL ts - origin.ts > 5) -> col_1; lead(a) OVER (UNTIL probe.telemetry.ts - origin.telemetry.ts > 5) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1; col_2]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=telemetry","schema=[device_id, ts, a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[device_id, ts, a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lead(a) OVER (UNTIL ts - origin.ts > 5) -> col_1; lead(a) OVER (UNTIL probe.telemetry.ts - origin.telemetry.ts > 5) -> col_2]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1; col_2]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "lead_until_partition_binding",
+            sql: "SELECT lead(a) OVER (PARTITION BY device_id UNTIL ts - origin.ts > 5) FROM telemetry",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=telemetry","decoder=json","schema=[device_id, ts, a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lead(a) OVER (PARTITION BY device_id UNTIL ts - origin.ts > 5) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=telemetry","schema=[device_id, ts, a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[device_id, ts, a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lead(a) OVER (PARTITION BY device_id UNTIL ts - origin.ts > 5) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "lead_until_probe_columns_remain_regular_columns",
+            sql: "SELECT lead(a) OVER (UNTIL ts - origin.ts > 5 AND a > 0) FROM telemetry",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=telemetry","decoder=json","schema=[device_id, ts, a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lead(a) OVER (UNTIL ts - origin.ts > 5 AND a > 0) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=telemetry","schema=[device_id, ts, a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[device_id, ts, a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lead(a) OVER (UNTIL ts - origin.ts > 5 AND a > 0) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "lead_until_origin_in_nested_expression",
+            sql: "SELECT lead(a) OVER (UNTIL origin.ts + 100 < ts) FROM telemetry",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=telemetry","decoder=json","schema=[device_id, ts, a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lead(a) OVER (UNTIL origin.ts + 100 < ts) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=telemetry","schema=[device_id, ts, a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[device_id, ts, a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lead(a) OVER (UNTIL origin.ts + 100 < ts) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "lead_without_until",
+            sql: "SELECT lead(a) FROM telemetry",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=telemetry","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lead(a) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=telemetry","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lead(a) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "lead_with_full_arguments",
+            sql: "SELECT lead(a, 2, false) FROM telemetry",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=telemetry","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lead(a, 2, false) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=telemetry","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lead(a, 2, false) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "multiple_lead_until_calls",
+            sql: "SELECT lead(a) OVER (UNTIL ts - origin.ts > 5), lead(b) OVER (UNTIL ts - origin.ts > 10) FROM telemetry",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=telemetry","decoder=json","schema=[device_id, ts, a, b]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lead(a) OVER (UNTIL ts - origin.ts > 5) -> col_1; lead(b) OVER (UNTIL ts - origin.ts > 10) -> col_2]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1; col_2]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=telemetry","schema=[device_id, ts, a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[device_id, ts, a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lead(a) OVER (UNTIL ts - origin.ts > 5) -> col_1; lead(b) OVER (UNTIL ts - origin.ts > 10) -> col_2]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1; col_2]"],"operator":"PhysicalProject"}}"##,
+        },
+        Case {
+            name: "lead_until_source_named_origin",
+            sql: "SELECT lead(a) OVER (UNTIL probe.origin.ts - origin.origin.ts > 5) FROM origin",
+            expected: r##"{"logical":{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=origin","decoder=json","schema=[ts, a]"],"operator":"DataSource"}],"id":"StatefulFunction_1","info":["calls=[lead(a) OVER (UNTIL probe.origin.ts - origin.origin.ts > 5) -> col_1]"],"operator":"StatefulFunction"}],"id":"Project_2","info":["fields=[col_1]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=origin","schema=[ts, a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[ts, a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStatefulFunction_2","info":["calls=[lead(a) OVER (UNTIL probe.origin.ts - origin.origin.ts > 5) -> col_1]"],"operator":"PhysicalStatefulFunction"}],"id":"PhysicalProject_3","info":["fields=[col_1]"],"operator":"PhysicalProject"}}"##,
+        },
     ];
 
     for case in cases {

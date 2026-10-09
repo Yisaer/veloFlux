@@ -1,4 +1,5 @@
 use super::{logical::LogicalPlan, physical::PhysicalPlan};
+use crate::expr::internal_columns::is_internal_derived;
 use crate::planner::decode_projection::{DecodeProjection, ListIndexSelection, ProjectionNode};
 use crate::planner::logical::{DataSinkPlan, LogicalWindowSpec};
 use crate::planner::physical::WatermarkConfig;
@@ -851,6 +852,14 @@ fn format_project_field(expr: &Expr, field_name: &str) -> String {
         return field_name.to_string();
     }
 
+    if let Expr::Identifier(identifier) = expr {
+        if is_internal_derived(&identifier.value)
+            && field_name.to_ascii_lowercase().starts_with("lead(")
+        {
+            return identifier.value.clone();
+        }
+    }
+
     let expr_str = format_expr_for_explain(expr);
     if expr_str == field_name {
         expr_str
@@ -872,9 +881,19 @@ fn format_stateful_call_spec(spec: &StatefulCallSpec) -> String {
         ));
     }
 
-    if !spec.partition_by.is_empty() {
-        let partition_by = format_expr_list(&spec.partition_by, EXPLAIN_MAX_LIST_ITEMS);
-        rendered.push_str(&format!(" OVER (PARTITION BY {})", partition_by));
+    if !spec.partition_by.is_empty() || spec.until.is_some() {
+        rendered.push_str(" OVER (");
+        if !spec.partition_by.is_empty() {
+            let partition_by = format_expr_list(&spec.partition_by, EXPLAIN_MAX_LIST_ITEMS);
+            rendered.push_str(&format!("PARTITION BY {}", partition_by));
+            if spec.until.is_some() {
+                rendered.push(' ');
+            }
+        }
+        if let Some(until) = &spec.until {
+            rendered.push_str(&format!("UNTIL {}", format_expr_for_explain(until)));
+        }
+        rendered.push(')');
     }
 
     rendered

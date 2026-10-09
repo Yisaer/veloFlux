@@ -647,6 +647,7 @@ fn infer_scalar_type(expr: &ScalarExpr, input: &PlanLayout) -> Option<ConcreteDa
             | BinaryFunc::Mod => None,
         },
         ScalarExpr::Case { .. }
+        | ScalarExpr::OriginRow { .. }
         | ScalarExpr::Wildcard { .. }
         | ScalarExpr::FieldAccess { .. }
         | ScalarExpr::ListIndex { .. }

@@ -15,12 +15,12 @@ use crate::processor::{
 };
 use crate::runtime::TaskSpawner;
 use crate::stateful::{
-    StatefulEvalInput, StatefulEvalUpdate, StatefulFunction, StatefulFunctionInstance,
-    StatefulFunctionRegistry,
+    DeferredEvalInput, DeferredProbe, ResolvedStatefulRow, StatefulEvalInput, StatefulEvalOutput,
+    StatefulFunction, StatefulFunctionInstance, StatefulFunctionRegistry,
 };
 use datatypes::Value;
 use futures::stream::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
@@ -39,8 +39,38 @@ struct StatefulProcessorCall {
     function: Arc<dyn StatefulFunction>,
     arg_scalars: Vec<ScalarExpr>,
     when_scalar: Option<ScalarExpr>,
+    until_scalar: Option<ScalarExpr>,
     partition_group_id: usize,
     states: HashMap<PartitionKey, StatefulPartitionState>,
+    pending: HashMap<PartitionKey, VecDeque<PendingOrigin>>,
+}
+
+#[derive(Clone)]
+struct PendingOrigin {
+    origin_id: u64,
+}
+
+struct BufferedRow {
+    tuple: crate::model::Tuple,
+    unresolved: usize,
+}
+
+fn resolve_row(
+    pending_rows: &mut HashMap<u64, BufferedRow>,
+    _call_index: usize,
+    output_column: &Arc<String>,
+    resolution: ResolvedStatefulRow,
+) -> Result<(), ProcessorError> {
+    let row = pending_rows.get_mut(&resolution.origin_id).ok_or_else(|| {
+        ProcessorError::ProcessingError(format!(
+            "stateful function resolved unknown origin {}",
+            resolution.origin_id
+        ))
+    })?;
+    row.tuple
+        .add_affiliate_column(Arc::clone(output_column), resolution.value);
+    row.unresolved = row.unresolved.saturating_sub(1);
+    Ok(())
 }
 
 struct PartitionGroup {
@@ -97,6 +127,7 @@ impl StatefulFunctionProcessor {
             func_name,
             arg_scalars,
             when_scalar,
+            until_scalar,
             partition_group_key,
             partition_by_scalars,
             ..
@@ -125,8 +156,10 @@ impl StatefulFunctionProcessor {
                 function,
                 arg_scalars: arg_scalars.clone(),
                 when_scalar: when_scalar.clone(),
+                until_scalar: until_scalar.clone(),
                 partition_group_id,
                 states: HashMap::new(),
+                pending: HashMap::new(),
             });
         }
         Ok(Self {
@@ -162,6 +195,9 @@ impl StatefulFunctionProcessor {
         collection: Box<dyn Collection>,
         partition_groups: &[PartitionGroup],
         calls: &mut [StatefulProcessorCall],
+        pending_rows: &mut HashMap<u64, BufferedRow>,
+        pending_order: &mut VecDeque<u64>,
+        next_origin_id: &mut u64,
         stats: Option<&ProcessorStats>,
     ) -> Result<Box<dyn Collection>, ProcessorError> {
         let metadata = collection.metadata().clone();
@@ -171,6 +207,8 @@ impl StatefulFunctionProcessor {
         let mut out_rows = Vec::with_capacity(rows.len());
 
         'rows: for mut tuple in rows {
+            let origin_id = *next_origin_id;
+            *next_origin_id = next_origin_id.saturating_add(1);
             let mut partition_keys = Vec::with_capacity(partition_groups.len());
             for group in partition_groups {
                 let key = if group.scalars.is_empty() {
@@ -199,9 +237,9 @@ impl StatefulFunctionProcessor {
                 partition_keys.push(key);
             }
 
-            let mut prepared_updates: Vec<(usize, PartitionKey, Box<dyn StatefulEvalUpdate>)> =
-                Vec::with_capacity(calls.len());
-            for (idx, call) in calls.iter().enumerate() {
+            let mut prepared_updates = Vec::with_capacity(calls.len());
+            let mut deferred_origins = Vec::new();
+            for (idx, call) in calls.iter_mut().enumerate() {
                 let partition_key = &partition_keys[call.partition_group_id];
                 let should_apply = match call.when_scalar.as_ref() {
                     Some(scalar) => match scalar.eval_with_tuple(&tuple) {
@@ -246,14 +284,84 @@ impl StatefulFunctionProcessor {
                     args.push(value);
                 }
 
-                let prepared_result = if let Some(state) = call.states.get(partition_key) {
-                    state.instance.prepare_eval(StatefulEvalInput {
-                        args: &args,
-                        should_apply,
+                let state = call.states.entry(partition_key.clone()).or_insert_with(|| {
+                    StatefulPartitionState {
+                        instance: call.function.create_instance(),
+                    }
+                });
+                let prepared_result = if call.function.supports_deferred_eval() {
+                    let pending = call.pending.get(partition_key);
+                    let mut probes = Vec::with_capacity(pending.map_or(0, VecDeque::len));
+                    for origin in pending.into_iter().flatten() {
+                        let origin_tuple = match pending_rows.get(&origin.origin_id) {
+                            Some(row) => &row.tuple,
+                            None => {
+                                if let Some(stats) = stats {
+                                    stats.record_error_logged(
+                                        "stateful function processor error",
+                                        format!("missing pending origin row {}", origin.origin_id),
+                                    );
+                                }
+                                continue 'rows;
+                            }
+                        };
+                        let until = match call.until_scalar.as_mut() {
+                            Some(scalar) => {
+                                if let Err(error) = scalar.bind_origin_row(origin_tuple) {
+                                    if let Some(stats) = stats {
+                                        stats.record_error_logged(
+                                            "stateful function processor error",
+                                            format!(
+                                                "failed to bind stateful function UNTIL origin row: {error}"
+                                            ),
+                                        );
+                                    }
+                                    continue 'rows;
+                                }
+                                match scalar.eval_with_tuple(&tuple) {
+                                    Ok(Value::Bool(value)) => value,
+                                    Ok(Value::Null) => false,
+                                    Ok(other) => {
+                                        if let Some(stats) = stats {
+                                            stats.record_error_logged(
+                                                "stateful function processor error",
+                                                format!(
+                                                    "stateful function UNTIL must be bool, got {other:?}"
+                                                ),
+                                            );
+                                        }
+                                        continue 'rows;
+                                    }
+                                    Err(error) => {
+                                        if let Some(stats) = stats {
+                                            stats.record_error_logged(
+                                                "stateful function processor error",
+                                                format!(
+                                                    "failed to evaluate stateful function UNTIL: {error}"
+                                                ),
+                                            );
+                                        }
+                                        continue 'rows;
+                                    }
+                                }
+                            }
+                            None => false,
+                        };
+                        probes.push(DeferredProbe {
+                            origin_id: origin.origin_id,
+                            args: &args,
+                            until,
+                            should_apply,
+                        });
+                    }
+                    deferred_origins.push((idx, partition_key.clone(), origin_id));
+                    state.instance.prepare_deferred_eval(DeferredEvalInput {
+                        origin_id,
+                        origin_args: &args,
+                        probes: &probes,
                     })
                 } else {
-                    let instance = call.function.create_instance();
-                    instance.prepare_eval(StatefulEvalInput {
+                    state.instance.prepare_eval(StatefulEvalInput {
                         args: &args,
                         should_apply,
                     })
@@ -270,27 +378,111 @@ impl StatefulFunctionProcessor {
                         continue 'rows;
                     }
                 };
-                tuple.add_affiliate_column(Arc::clone(&call.output_column), prepared.output);
-                prepared_updates.push((idx, partition_key.clone(), prepared.update));
+                let output = match prepared.output {
+                    StatefulEvalOutput::Immediate(value) => {
+                        tuple.add_affiliate_column(Arc::clone(&call.output_column), value);
+                        (None, Vec::new())
+                    }
+                    StatefulEvalOutput::Deferred(resolved) => (None, resolved),
+                };
+                prepared_updates.push((
+                    idx,
+                    partition_key.clone(),
+                    output.0,
+                    output.1,
+                    prepared.update,
+                ));
             }
 
-            for (idx, partition_key, update) in prepared_updates {
+            for (idx, partition_key, output, resolved, update) in prepared_updates {
                 let call = &mut calls[idx];
-                let state =
-                    call.states
-                        .entry(partition_key)
-                        .or_insert_with(|| StatefulPartitionState {
-                            instance: call.function.create_instance(),
-                        });
+                let state = call.states.entry(partition_key.clone()).or_insert_with(|| {
+                    StatefulPartitionState {
+                        instance: call.function.create_instance(),
+                    }
+                });
                 state.instance.commit_eval(update);
+                if let Some(output) = output {
+                    tuple.add_affiliate_column(Arc::clone(&call.output_column), output);
+                }
+                let resolved_ids: HashSet<u64> = resolved.iter().map(|row| row.origin_id).collect();
+                for resolution in resolved {
+                    resolve_row(pending_rows, idx, &call.output_column, resolution)?;
+                }
+                if call.function.supports_deferred_eval() && !resolved_ids.is_empty() {
+                    call.pending
+                        .entry(partition_key.clone())
+                        .or_default()
+                        .retain(|origin| !resolved_ids.contains(&origin.origin_id));
+                }
+            }
+            for (idx, partition_key, id) in deferred_origins {
+                calls[idx]
+                    .pending
+                    .entry(partition_key)
+                    .or_default()
+                    .push_back(PendingOrigin { origin_id: id });
             }
 
-            out_rows.push(tuple);
+            let deferred_count = calls
+                .iter()
+                .filter(|call| call.function.supports_deferred_eval())
+                .count();
+            if deferred_count == 0 {
+                out_rows.push(tuple);
+            } else {
+                pending_order.push_back(origin_id);
+                pending_rows.insert(
+                    origin_id,
+                    BufferedRow {
+                        tuple,
+                        unresolved: deferred_count,
+                    },
+                );
+            }
+        }
+
+        while let Some(origin_id) = pending_order.front().copied() {
+            let Some(row) = pending_rows.get(&origin_id) else {
+                pending_order.pop_front();
+                continue;
+            };
+            if row.unresolved != 0 {
+                break;
+            }
+            let row = pending_rows
+                .remove(&origin_id)
+                .expect("buffered row disappeared");
+            pending_order.pop_front();
+            out_rows.push(row.tuple);
         }
 
         let batch = RecordBatch::new_with_metadata(out_rows, metadata)
             .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
         Ok(Box::new(batch))
+    }
+
+    fn finish_stateful(
+        calls: &mut [StatefulProcessorCall],
+        pending_rows: &mut HashMap<u64, BufferedRow>,
+        pending_order: &mut VecDeque<u64>,
+    ) -> Result<Vec<crate::model::Tuple>, ProcessorError> {
+        for (idx, call) in calls.iter_mut().enumerate() {
+            let output_column = Arc::clone(&call.output_column);
+            for state in call.states.values_mut() {
+                for resolution in state.instance.finish() {
+                    resolve_row(pending_rows, idx, &output_column, resolution)?;
+                }
+            }
+        }
+
+        let mut rows = Vec::with_capacity(pending_order.len());
+        while let Some(origin_id) = pending_order.pop_front() {
+            if let Some(row) = pending_rows.remove(&origin_id) {
+                rows.push(row.tuple);
+            }
+        }
+        Ok(rows)
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
@@ -315,6 +507,9 @@ impl Processor for StatefulFunctionProcessor {
         let channel_capacities = self.channel_capacities;
         let partition_groups = std::mem::take(&mut self.partition_groups);
         let mut calls = std::mem::take(&mut self.calls);
+        let mut pending_rows = HashMap::new();
+        let mut pending_order = VecDeque::new();
+        let mut next_origin_id = 0;
         let _physical_stateful = Arc::clone(&self.physical_stateful);
         let stats = Arc::clone(&self.stats);
 
@@ -353,17 +548,29 @@ impl Processor for StatefulFunctionProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let handle_start = std::time::Instant::now();
-                                        match Self::apply_stateful(collection, &partition_groups, &mut calls, Some(stats.as_ref())) {
+                                        match Self::apply_stateful(
+                                            collection,
+                                            &partition_groups,
+                                            &mut calls,
+                                            &mut pending_rows,
+                                            &mut pending_order,
+                                            &mut next_origin_id,
+                                            Some(stats.as_ref()),
+                                        ) {
                                             Ok(out_collection) => {
                                                 let out = StreamData::collection(out_collection);
                                                 let out_rows = out.row_count();
-                                                let send_res = send_with_backpressure(
-                                                    &output,
-                                                    channel_capacities.data,
-                                                    out,
-                                                    Some(stats.as_ref()),
-                                                )
-                                                .await;
+                                                let send_res = if out_rows != Some(0) {
+                                                    send_with_backpressure(
+                                                        &output,
+                                                        channel_capacities.data,
+                                                        out,
+                                                        Some(stats.as_ref()),
+                                                    )
+                                                    .await
+                                                } else {
+                                                    Ok(())
+                                                };
                                                 // For synchronous processors, handle duration includes downstream send/backpressure time.
                                                 stats.record_handle_duration(handle_start.elapsed());
                                                 send_res?;
@@ -379,6 +586,24 @@ impl Processor for StatefulFunctionProcessor {
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
+                                        if is_terminal {
+                                            let rows = Self::finish_stateful(
+                                                &mut calls,
+                                                &mut pending_rows,
+                                                &mut pending_order,
+                                            )?;
+                                            if !rows.is_empty() {
+                                                let batch = RecordBatch::new(rows)
+                                                    .map_err(|error| ProcessorError::ProcessingError(error.to_string()))?;
+                                                send_with_backpressure(
+                                                    &output,
+                                                    channel_capacities.data,
+                                                    StreamData::collection(Box::new(batch)),
+                                                    Some(stats.as_ref()),
+                                                )
+                                                .await?;
+                                            }
+                                        }
                                         send_with_backpressure(
                                             &output,
                                             channel_capacities.data,

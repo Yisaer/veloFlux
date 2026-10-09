@@ -28,6 +28,7 @@ pub struct StatefulCall {
     pub func_name: String,
     pub arg_scalars: Vec<ScalarExpr>,
     pub when_scalar: Option<ScalarExpr>,
+    pub until_scalar: Option<ScalarExpr>,
     pub partition_group_key: PartitionGroupKey,
     pub partition_by_scalars: Vec<ScalarExpr>,
     pub spec: StatefulCallSpec,

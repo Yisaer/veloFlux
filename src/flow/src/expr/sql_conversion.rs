@@ -7,9 +7,10 @@ use crate::expr::ProcStateField;
 use crate::processor::processor_state::is_pipeline_state_function;
 use datatypes::{BooleanType, ConcreteDatatype, Float64Type, Int64Type, Schema, StringType, Value};
 use sqlparser::ast::{
-    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, Ident, UnaryOperator,
-    Value as SqlValue,
+    BinaryOperator, Expr, Function, FunctionArg, FunctionArgExpr, Ident, ObjectName, UnaryOperator,
+    Value as SqlValue, VisitMut, VisitorMut,
 };
+use std::ops::ControlFlow;
 use std::sync::{Arc, OnceLock};
 
 /// Binding between SQL sources (table/alias) and schemas.
@@ -214,6 +215,72 @@ pub fn convert_expr_to_scalar_with_bindings_and_custom_registry(
     convert_expr_to_scalar_internal(expr, bindings, custom_func_registry)
 }
 
+/// Convert an UNTIL predicate after resolving its probe/origin row scopes.
+pub fn convert_until_expr_to_scalar_with_bindings_and_custom_registry(
+    expr: &Expr,
+    bindings: &SchemaBinding,
+    custom_func_registry: &CustomFuncRegistry,
+) -> Result<ScalarExpr, ConversionError> {
+    let mut scoped_expr = expr.clone();
+    let mut rewriter = UntilRowScopeRewriter {
+        skip_next_compound_identifier: false,
+    };
+    match VisitMut::visit(&mut scoped_expr, &mut rewriter) {
+        ControlFlow::Continue(()) => {
+            convert_expr_to_scalar_internal(&scoped_expr, bindings, custom_func_registry)
+        }
+        ControlFlow::Break(error) => Err(error),
+    }
+}
+
+struct UntilRowScopeRewriter {
+    skip_next_compound_identifier: bool,
+}
+
+impl VisitorMut for UntilRowScopeRewriter {
+    type Break = ConversionError;
+
+    fn pre_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
+        let Expr::CompoundIdentifier(idents) = expr else {
+            return ControlFlow::Continue(());
+        };
+        if self.skip_next_compound_identifier {
+            self.skip_next_compound_identifier = false;
+            return ControlFlow::Continue(());
+        }
+        let parts = idents
+            .iter()
+            .map(|ident| ident.value.as_str())
+            .collect::<Vec<_>>();
+
+        if parts.len() == 2 && parts[0].eq_ignore_ascii_case("origin") {
+            *expr = origin_row_marker(Expr::Identifier(Ident::new(parts[1])));
+        } else if parts.len() == 3 && parts[0].eq_ignore_ascii_case("origin") {
+            self.skip_next_compound_identifier = true;
+            *expr = origin_row_marker(Expr::CompoundIdentifier(vec![
+                Ident::new(parts[1]),
+                Ident::new(parts[2]),
+            ]));
+        } else if parts.len() == 3 && parts[0].eq_ignore_ascii_case("probe") {
+            *expr = Expr::CompoundIdentifier(vec![Ident::new(parts[1]), Ident::new(parts[2])]);
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+fn origin_row_marker(expr: Expr) -> Expr {
+    Expr::Function(Function {
+        name: ObjectName(vec![Ident::new("__vf_origin_row__")]),
+        args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(expr))],
+        over: None,
+        distinct: false,
+        special: false,
+        order_by: vec![],
+        filter: None,
+        null_treatment: None,
+    })
+}
+
 fn default_custom_func_registry() -> &'static Arc<CustomFuncRegistry> {
     static REGISTRY: OnceLock<Arc<CustomFuncRegistry>> = OnceLock::new();
     REGISTRY.get_or_init(CustomFuncRegistry::with_builtins)
@@ -299,6 +366,30 @@ fn convert_expr_to_scalar_internal(
                     }
                 };
                 return Ok(ScalarExpr::WindowMetadata { field });
+            }
+
+            if function_name == "__vf_origin_row__" {
+                if args.len() != 1 {
+                    return Err(ConversionError::InvalidColumnReference(
+                        "origin row reference must contain exactly one column".to_string(),
+                    ));
+                }
+                let FunctionArg::Unnamed(FunctionArgExpr::Expr(origin_expr)) = &args[0] else {
+                    return Err(ConversionError::InvalidColumnReference(
+                        "origin row reference must contain a column expression".to_string(),
+                    ));
+                };
+                let column =
+                    convert_expr_to_scalar_internal(origin_expr, bindings, custom_func_registry)?;
+                let ScalarExpr::Column(column) = column else {
+                    return Err(ConversionError::InvalidColumnReference(
+                        "origin row reference must contain a column".to_string(),
+                    ));
+                };
+                return Ok(ScalarExpr::OriginRow {
+                    column,
+                    datum: None,
+                });
             }
 
             convert_function_call(name, args, bindings, custom_func_registry)

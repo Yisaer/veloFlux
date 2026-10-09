@@ -126,6 +126,7 @@ pub enum TableProviderError {
 }
 
 /// Runtime contract for a table provider.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait TableProvider: Send + Sync {
     fn schema(&self) -> Arc<Schema>;

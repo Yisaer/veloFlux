@@ -62,8 +62,12 @@ impl StreamSqlParser {
     pub fn parse(&self, sql: &str) -> Result<SelectStmt, String> {
         let (sql_without_named_expressions, named_expressions) =
             self.extract_named_expressions(sql)?;
-        let sliding_over =
-            preprocess_sliding_window_over(&sql_without_named_expressions, &self.dialect)?;
+        let stateful_until_sql = preprocess_stateful_until(
+            &sql_without_named_expressions,
+            &self.dialect,
+            self.stateful_registry.as_ref(),
+        )?;
+        let sliding_over = preprocess_sliding_window_over(&stateful_until_sql, &self.dialect)?;
 
         // Create a parser with StreamDialect
         let parser = Parser::parse_sql(&self.dialect, &sliding_over.sql)
@@ -736,6 +740,115 @@ struct Replacement {
     start: usize,
     end: usize,
     text: String,
+}
+
+// sqlparser does not have a native UNTIL clause. Keep UNTIL as an expression inside a private
+// marker until the stateful transformer extracts it from the parsed window partition list.
+fn preprocess_stateful_until(
+    sql: &str,
+    dialect: &StreamDialect,
+    registry: &dyn StatefulRegistry,
+) -> Result<String, String> {
+    let mut tokenizer = Tokenizer::new(dialect, sql);
+    let tokens = tokenizer
+        .tokenize_with_location()
+        .map_err(|err| format!("Parse error: {err}"))?;
+    if tokens
+        .iter()
+        .any(|token| is_word(&token.token, "__vf_stateful_until__"))
+    {
+        return Err("__vf_stateful_until__ is reserved for parser internals".to_string());
+    }
+
+    let mut replacements = Vec::new();
+    for (idx, token) in tokens.iter().enumerate() {
+        let Token::Word(word) = &token.token else {
+            continue;
+        };
+        if word.quote_style.is_some() || !registry.is_stateful_function(&word.value) {
+            continue;
+        }
+        let Some(fn_lparen) = next_non_whitespace(&tokens, idx + 1) else {
+            continue;
+        };
+        if !matches!(tokens[fn_lparen].token, Token::LParen) {
+            continue;
+        }
+        let fn_rparen = matching_rparen(&tokens, fn_lparen)?;
+        let mut cursor = next_non_whitespace(&tokens, fn_rparen + 1);
+        if let Some(filter_idx) = cursor
+            && is_word(&tokens[filter_idx].token, "filter")
+        {
+            let filter_lparen = next_non_whitespace(&tokens, filter_idx + 1)
+                .ok_or("stateful FILTER requires parentheses")?;
+            if !matches!(tokens[filter_lparen].token, Token::LParen) {
+                return Err("stateful FILTER requires parentheses".to_string());
+            }
+            let filter_rparen = matching_rparen(&tokens, filter_lparen)?;
+            cursor = next_non_whitespace(&tokens, filter_rparen + 1);
+        }
+        let Some(over_idx) = cursor else { continue };
+        if !is_word(&tokens[over_idx].token, "over") {
+            continue;
+        }
+        let over_lparen = next_non_whitespace(&tokens, over_idx + 1)
+            .ok_or("stateful OVER requires parentheses")?;
+        if !matches!(tokens[over_lparen].token, Token::LParen) {
+            return Err("stateful OVER requires parentheses".to_string());
+        }
+        let over_rparen = matching_rparen(&tokens, over_lparen)?;
+        let mut depth = 0usize;
+        let mut until_idx = None;
+        for (token_idx, token) in tokens
+            .iter()
+            .enumerate()
+            .take(over_rparen)
+            .skip(over_lparen + 1)
+        {
+            match token.token {
+                Token::LParen | Token::LBracket | Token::LBrace => depth += 1,
+                Token::RParen | Token::RBracket | Token::RBrace => depth = depth.saturating_sub(1),
+                _ if depth == 0 && is_word(&token.token, "until") && until_idx.is_some() => {
+                    return Err("stateful OVER accepts one UNTIL clause".to_string());
+                }
+                _ if depth == 0 && is_word(&token.token, "until") => {
+                    until_idx = Some(token_idx);
+                }
+                _ => {}
+            }
+        }
+        let Some(until_idx) = until_idx else { continue };
+        let expr_idx = next_non_whitespace(&tokens, until_idx + 1)
+            .ok_or("stateful UNTIL requires an expression")?;
+        if expr_idx >= over_rparen {
+            return Err("stateful UNTIL requires an expression".to_string());
+        }
+        let first_idx = next_non_whitespace(&tokens, over_lparen + 1)
+            .ok_or("stateful OVER requires PARTITION BY or UNTIL")?;
+        let replacement = if first_idx == until_idx {
+            "PARTITION BY __vf_stateful_until__("
+        } else {
+            ", __vf_stateful_until__("
+        };
+        let until_start = token_start_offset(sql, &tokens[until_idx])?;
+        replacements.push(Replacement {
+            start: until_start,
+            end: until_start + "UNTIL".len(),
+            text: replacement.to_string(),
+        });
+        let close = token_start_offset(sql, &tokens[over_rparen])?;
+        replacements.push(Replacement {
+            start: close,
+            end: close,
+            text: ")".to_string(),
+        });
+    }
+
+    let mut rewritten = sql.to_string();
+    for replacement in replacements.iter().rev() {
+        rewritten.replace_range(replacement.start..replacement.end, &replacement.text);
+    }
+    Ok(rewritten)
 }
 
 /// Preprocess SQL to extract `OVER (WHEN <expr>)` from slidingwindow and remove it
@@ -2599,6 +2712,62 @@ mod source_info_tests {
                 assert!(trigger_condition.is_none());
             }
             other => panic!("expected sliding window with partition, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_lead_arguments_and_until_scopes() {
+        let parser = StreamSqlParser::new();
+        let statement = parser
+            .parse(
+                "SELECT lead(a, 2, false) FILTER (WHERE valid = true) OVER (UNTIL probe.telemetry.ts - origin.telemetry.ts > 5) FROM telemetry",
+            )
+            .expect("LEAD with UNTIL should parse");
+
+        let mapping = &statement.stateful_mappings[0];
+        assert_eq!(mapping.spec.func_name, "lead");
+        assert_eq!(mapping.spec.args.len(), 3);
+        assert!(mapping.spec.partition_by.is_empty());
+        assert_eq!(
+            mapping.spec.until.as_ref().map(ToString::to_string),
+            Some("probe.telemetry.ts - origin.telemetry.ts > 5".to_string())
+        );
+        assert_eq!(
+            mapping.spec.display_sql(),
+            "lead(a, 2, false) FILTER (WHERE valid = true) OVER (UNTIL probe.telemetry.ts - origin.telemetry.ts > 5)"
+        );
+    }
+
+    #[test]
+    fn parse_lead_until_without_partition_uses_global_partition() {
+        let parser = StreamSqlParser::new();
+        let statement = parser
+            .parse("SELECT lead(a) OVER (UNTIL ts - origin.ts > 5) FROM telemetry")
+            .expect("LEAD UNTIL without PARTITION BY should parse");
+
+        let mapping = &statement.stateful_mappings[0];
+        assert!(mapping.spec.partition_by.is_empty());
+        assert!(mapping.spec.until.is_some());
+    }
+
+    #[test]
+    fn reject_invalid_lead_arguments_and_empty_over() {
+        let parser = StreamSqlParser::new();
+        for sql in [
+            "SELECT lead() FROM stream",
+            "SELECT lead(a, 0) FROM stream",
+            "SELECT lead(a, -1) FROM stream",
+            "SELECT lead(a, 1.5) FROM stream",
+            "SELECT lead(a, true) FROM stream",
+            "SELECT lead(a, 1, 1) FROM stream",
+            "SELECT lead(a, 1, true, 0) FROM stream",
+            "SELECT lead(a) OVER () FROM stream",
+            "SELECT lag(a) OVER (UNTIL ts - origin.ts > 5) FROM stream",
+        ] {
+            assert!(
+                parser.parse(sql).is_err(),
+                "query should be rejected: {sql}"
+            );
         }
     }
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::{
     AccAvgFunction, AccCountFunction, AccMaxFunction, AccMinFunction, AccSumFunction,
     ChangeCaptureFunction, ChangeToFunction, ChangedColFunction, ConsecutiveCountFunction,
-    ConsecutiveStartFunction, HadChangedFunction, LagFunction, LatestFunction,
+    ConsecutiveStartFunction, HadChangedFunction, LagFunction, LatestFunction, LeadFunction,
 };
 
 pub struct StatefulEvalInput<'a> {
@@ -15,14 +15,47 @@ pub struct StatefulEvalInput<'a> {
     pub should_apply: bool,
 }
 
+pub struct DeferredProbe<'a> {
+    pub origin_id: u64,
+    pub args: &'a [Value],
+    pub until: bool,
+    pub should_apply: bool,
+}
+
+pub struct DeferredEvalInput<'a> {
+    pub origin_id: u64,
+    pub origin_args: &'a [Value],
+    pub probes: &'a [DeferredProbe<'a>],
+}
+
+pub struct ResolvedStatefulRow {
+    pub origin_id: u64,
+    pub value: Value,
+}
+
+pub enum StatefulEvalOutput {
+    Immediate(Value),
+    Deferred(Vec<ResolvedStatefulRow>),
+}
+
 pub struct PreparedStatefulEval {
-    pub output: Value,
+    pub output: StatefulEvalOutput,
     pub update: Box<dyn StatefulEvalUpdate>,
 }
 
 impl PreparedStatefulEval {
     pub fn new(output: Value, update: Box<dyn StatefulEvalUpdate>) -> Self {
-        Self { output, update }
+        Self {
+            output: StatefulEvalOutput::Immediate(output),
+            update,
+        }
+    }
+
+    pub fn deferred(output: Vec<ResolvedStatefulRow>, update: Box<dyn StatefulEvalUpdate>) -> Self {
+        Self {
+            output: StatefulEvalOutput::Deferred(output),
+            update,
+        }
     }
 }
 
@@ -32,11 +65,25 @@ pub trait StatefulEvalUpdate: Send + Sync {
 
 pub trait StatefulFunctionInstance: Send + Sync {
     fn prepare_eval(&self, input: StatefulEvalInput<'_>) -> Result<PreparedStatefulEval, String>;
+    fn prepare_deferred_eval(
+        &self,
+        _input: DeferredEvalInput<'_>,
+    ) -> Result<PreparedStatefulEval, String> {
+        Err("stateful function does not support deferred evaluation".to_string())
+    }
     fn commit_eval(&mut self, update: Box<dyn StatefulEvalUpdate>);
+    fn finish(&mut self) -> Vec<ResolvedStatefulRow> {
+        Vec::new()
+    }
 
     fn eval(&mut self, input: StatefulEvalInput<'_>) -> Result<Value, String> {
         let prepared = self.prepare_eval(input)?;
-        let output = prepared.output.clone();
+        let output = match prepared.output {
+            StatefulEvalOutput::Immediate(output) => output,
+            StatefulEvalOutput::Deferred(_) => {
+                return Err("deferred stateful evaluation has no immediate output".to_string())
+            }
+        };
         self.commit_eval(prepared.update);
         Ok(output)
     }
@@ -46,6 +93,9 @@ pub trait StatefulFunction: Send + Sync {
     fn name(&self) -> &str;
     fn return_type(&self, input_types: &[ConcreteDatatype]) -> Result<ConcreteDatatype, String>;
     fn create_instance(&self) -> Box<dyn StatefulFunctionInstance>;
+    fn supports_deferred_eval(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +155,7 @@ impl StatefulFunctionRegistry {
         let _ = self.register_function(Arc::new(HadChangedFunction::new()));
         let _ = self.register_function(Arc::new(LagFunction::new()));
         let _ = self.register_function(Arc::new(LatestFunction::new()));
+        let _ = self.register_function(Arc::new(LeadFunction::new()));
     }
 }
 
@@ -119,6 +170,15 @@ impl Default for StatefulFunctionRegistry {
 impl parser::StatefulRegistry for StatefulFunctionRegistry {
     fn is_stateful_function(&self, name: &str) -> bool {
         self.is_registered(name)
+    }
+
+    fn capabilities(&self, name: &str) -> Option<parser::StatefulFunctionCapabilities> {
+        let function = self.get(name)?;
+        if function.supports_deferred_eval() {
+            Some(parser::StatefulFunctionCapabilities::DEFERRED_WITH_UNTIL)
+        } else {
+            Some(parser::StatefulFunctionCapabilities::default())
+        }
     }
 }
 

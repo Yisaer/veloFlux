@@ -32,6 +32,23 @@ struct StatefulCase {
     close_before_read: bool,
 }
 
+async fn recv_json_rows(
+    output: &mut tokio::sync::broadcast::Receiver<flow::connector::MemoryData>,
+    expected_rows: usize,
+    timeout: Duration,
+) -> JsonValue {
+    let mut rows = Vec::with_capacity(expected_rows);
+    while rows.len() < expected_rows {
+        let batch = recv_next_json(output, timeout).await;
+        let JsonValue::Array(batch_rows) = batch else {
+            panic!("expected JSON array batch, got {batch:?}");
+        };
+        rows.extend(batch_rows);
+    }
+    assert_eq!(rows.len(), expected_rows);
+    JsonValue::Array(rows)
+}
+
 fn source_name_for_case(case: &StatefulCase) -> &'static str {
     if case.sql.contains("FROM stream_ab") {
         "stream_ab"
@@ -69,7 +86,7 @@ async fn run_stateful_case(case: StatefulCase) {
     );
     instance
         .create_pipeline(CreatePipelineRequest::new(pipeline))
-        .unwrap_or_else(|_| panic!("Failed to create pipeline for: {}", case.name));
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {}: {err}", case.name));
     instance
         .start_pipeline(&pipeline_id)
         .await
@@ -106,7 +123,11 @@ async fn run_stateful_case(case: StatefulCase) {
 
     let timeout_duration = Duration::from_secs(5);
     for expected in case.expected_outputs {
-        let actual: JsonValue = recv_next_json(&mut output, timeout_duration).await;
+        let actual: JsonValue = if case.name.starts_with("lead_") {
+            recv_json_rows(&mut output, expected.expected_rows, timeout_duration).await
+        } else {
+            recv_next_json(&mut output, timeout_duration).await
+        };
         assert_eq!(
             expected.expected_columns,
             expected.column_checks.len(),
@@ -2438,4 +2459,445 @@ async fn streaming_state_window_graceful_close_flushes_active_window() {
         .delete_pipeline(&pipeline_id)
         .await
         .unwrap_or_else(|err| panic!("Failed to delete pipeline for test {}: {err}", case_name));
+}
+
+async fn run_lead_graceful_case(
+    case_name: &str,
+    sql: &str,
+    input_data: Vec<(String, Vec<Value>)>,
+    expected_before_stop: Option<JsonValue>,
+    expected_after_stop: JsonValue,
+) {
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("lead_table_driven", case_name);
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    install_memory_stream_schema(&instance, &input_topic, &input_data).await;
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output");
+    let pipeline_id = format!("pipe_{output_topic}");
+    instance
+        .create_pipeline(CreatePipelineRequest::new(PipelineDefinition::new(
+            pipeline_id.clone(),
+            sql,
+            vec![SinkDefinition::new(
+                "mem_sink",
+                SinkType::Memory,
+                SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+            )],
+        )))
+        .unwrap_or_else(|err| panic!("Failed to create pipeline for {case_name}: {err}"));
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to start pipeline for {case_name}: {err}"));
+
+    let batch = batch_from_columns_simple(
+        input_data
+            .into_iter()
+            .map(|(name, values)| ("stream".to_string(), name, values))
+            .collect(),
+    )
+    .expect("input batch");
+    let timeout = Duration::from_secs(5);
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout).await;
+
+    match expected_before_stop {
+        Some(expected) => {
+            let expected_rows = expected.as_array().map_or(0, Vec::len);
+            let actual = recv_json_rows(&mut output, expected_rows, timeout).await;
+            assert_eq!(
+                normalize_json(actual),
+                normalize_json(expected),
+                "{case_name}"
+            );
+        }
+        None => assert_no_json_output(&mut output, Duration::from_millis(300)).await,
+    }
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Graceful, timeout)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to gracefully stop {case_name}: {err}"));
+    let expected_rows = expected_after_stop.as_array().map_or(0, Vec::len);
+    let actual = recv_json_rows(&mut output, expected_rows, timeout).await;
+    assert_eq!(
+        normalize_json(actual),
+        normalize_json(expected_after_stop),
+        "{case_name} graceful tail"
+    );
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .unwrap_or_else(|err| panic!("Failed to delete pipeline for {case_name}: {err}"));
+}
+
+async fn run_lead_partition_order_case() {
+    let case_name = "lead_blocks_completed_partitions_until_earlier_row_finishes";
+    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
+        "default", None,
+    ))
+    .expect("create flow instance");
+    let (input_topic, output_topic) = make_memory_topics("lead_table_driven", case_name);
+    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+    install_memory_stream_schema(
+        &instance,
+        &input_topic,
+        &[
+            ("k".to_string(), vec![Value::Int64(1)]),
+            ("a".to_string(), vec![Value::Int64(10)]),
+        ],
+    )
+    .await;
+    let mut output = instance
+        .open_memory_subscribe_bytes(&output_topic)
+        .expect("subscribe output");
+    let pipeline_id = format!("pipe_{output_topic}");
+    instance
+        .create_pipeline(CreatePipelineRequest::new(PipelineDefinition::new(
+            pipeline_id.clone(),
+            "SELECT k, a, lead(a, 2) OVER (PARTITION BY k) AS next_a FROM stream",
+            vec![SinkDefinition::new(
+                "mem_sink",
+                SinkType::Memory,
+                SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+            )],
+        )))
+        .expect("create pipeline");
+    instance
+        .start_pipeline(&pipeline_id)
+        .await
+        .expect("start pipeline");
+    let timeout = Duration::from_secs(5);
+
+    for rows in [vec![(1, 10), (2, 20), (2, 30)], vec![(2, 40), (3, 90)]] {
+        let batch = batch_from_columns_simple(vec![
+            (
+                "stream".to_string(),
+                "k".to_string(),
+                rows.iter().map(|(k, _)| Value::Int64(*k)).collect(),
+            ),
+            (
+                "stream".to_string(),
+                "a".to_string(),
+                rows.iter().map(|(_, a)| Value::Int64(*a)).collect(),
+            ),
+        ])
+        .expect("input batch");
+        publish_input_collection(&instance, &input_topic, Box::new(batch), timeout).await;
+    }
+    assert_no_json_output(&mut output, Duration::from_millis(300)).await;
+
+    let batch = batch_from_columns_simple(vec![
+        (
+            "stream".to_string(),
+            "k".to_string(),
+            vec![Value::Int64(1), Value::Int64(1)],
+        ),
+        (
+            "stream".to_string(),
+            "a".to_string(),
+            vec![Value::Int64(50), Value::Int64(60)],
+        ),
+    ])
+    .expect("input batch");
+    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout).await;
+    let completed = recv_next_json(&mut output, timeout).await;
+    assert_eq!(
+        normalize_json(completed),
+        serde_json::json!([
+            {"k": 1, "a": 10, "next_a": 60},
+            {"k": 2, "a": 20, "next_a": 40}
+        ])
+    );
+
+    instance
+        .stop_pipeline(&pipeline_id, PipelineStopMode::Graceful, timeout)
+        .await
+        .expect("graceful stop");
+    let tail = recv_next_json(&mut output, timeout).await;
+    assert_eq!(
+        normalize_json(tail),
+        serde_json::json!([
+            {"k": 2, "a": 30},
+            {"k": 2, "a": 40},
+            {"k": 3, "a": 90},
+            {"k": 1, "a": 50},
+            {"k": 1, "a": 60}
+        ])
+    );
+    instance
+        .delete_pipeline(&pipeline_id)
+        .await
+        .expect("delete pipeline");
+}
+
+// coverage-covers: parser.function.stateful_functions, processor.stateful.lead
+#[tokio::test]
+async fn lead_function_table_driven() {
+    let cases = vec![
+        StatefulCase {
+            name: "lead_next_value_before_end",
+            sql: "SELECT a, lead(a) AS next_a FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 2,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "a".to_string(),
+                        expected_values: vec![Value::Int64(10), Value::Int64(20)],
+                    },
+                    ColumnCheck {
+                        expected_name: "next_a".to_string(),
+                        expected_values: vec![Value::Int64(20), Value::Int64(30)],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "lead_until_error_preserves_prior_resolution",
+            sql: "SELECT a, lead(a) OVER (UNTIL 1 / (ts - origin.ts) < 0) AS next_a FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                ),
+                (
+                    "ts".to_string(),
+                    vec![Value::Int64(0), Value::Int64(1), Value::Int64(1)],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 1,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "a".to_string(),
+                        expected_values: vec![Value::Int64(10)],
+                    },
+                    ColumnCheck {
+                        expected_name: "next_a".to_string(),
+                        expected_values: vec![Value::Int64(20)],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "lead_error_rolls_back_eager_state",
+            sql: "SELECT lead(100 / b) AS next_a, acc_sum(a) AS total, a FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30), Value::Int64(40)],
+                ),
+                (
+                    "b".to_string(),
+                    vec![Value::Int64(10), Value::Int64(0), Value::Int64(5), Value::Int64(2)],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 2,
+                expected_columns: 3,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "a".to_string(),
+                        expected_values: vec![Value::Int64(10), Value::Int64(30)],
+                    },
+                    ColumnCheck {
+                        expected_name: "total".to_string(),
+                        expected_values: vec![Value::Float64(10.0), Value::Float64(40.0)],
+                    },
+                    ColumnCheck {
+                        expected_name: "next_a".to_string(),
+                        expected_values: vec![Value::Float64(20.0), Value::Float64(50.0)],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "lead_filter_until_origin_row",
+            sql: "SELECT a, lead(a) FILTER (WHERE flag = 1) OVER (UNTIL ts - origin.ts > 5) AS next_a FROM stream",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30), Value::Int64(40)],
+                ),
+                (
+                    "flag".to_string(),
+                    vec![Value::Int64(0), Value::Int64(1), Value::Int64(0), Value::Int64(1)],
+                ),
+                (
+                    "ts".to_string(),
+                    vec![Value::Int64(0), Value::Int64(2), Value::Int64(6), Value::Int64(10)],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 3,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "a".to_string(),
+                        expected_values: vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+                    },
+                    ColumnCheck {
+                        expected_name: "next_a".to_string(),
+                        expected_values: vec![Value::Int64(20), Value::Null, Value::Int64(40)],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "lead_partition_order_and_where",
+            sql: "SELECT k, a, lead(a) OVER (PARTITION BY k) AS next_a FROM stream WHERE a <> 20",
+            input_data: vec![
+                (
+                    "a".to_string(),
+                    vec![Value::Int64(10), Value::Int64(20), Value::Int64(30), Value::Int64(40)],
+                ),
+                (
+                    "k".to_string(),
+                    vec![Value::Int64(1), Value::Int64(2), Value::Int64(2), Value::Int64(1)],
+                ),
+            ],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 1,
+                expected_columns: 3,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "k".to_string(),
+                        expected_values: vec![Value::Int64(1)],
+                    },
+                    ColumnCheck {
+                        expected_name: "a".to_string(),
+                        expected_values: vec![Value::Int64(10)],
+                    },
+                    ColumnCheck {
+                        expected_name: "next_a".to_string(),
+                        expected_values: vec![Value::Int64(40)],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "lead_uses_eager_lag_result",
+            sql: "SELECT lead(lag(a)) AS next_previous FROM stream",
+            input_data: vec![(
+                "a".to_string(),
+                vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 2,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "next_previous".to_string(),
+                    expected_values: vec![Value::Int64(10), Value::Int64(20)],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "lead_multiple_offsets_and_null_policy",
+            sql: "SELECT lead(a, 2, true) AS skip_null, lead(a, 1, false) AS keep_null FROM stream",
+            input_data: vec![ (
+                "a".to_string(),
+                vec![Value::Int64(10), Value::Null, Value::Int64(20), Value::Int64(30), Value::Int64(40)],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 3,
+                expected_columns: 2,
+                column_checks: vec![
+                    ColumnCheck {
+                        expected_name: "skip_null".to_string(),
+                        expected_values: vec![Value::Int64(30), Value::Int64(30), Value::Int64(40)],
+                    },
+                    ColumnCheck {
+                        expected_name: "keep_null".to_string(),
+                        expected_values: vec![Value::Null, Value::Int64(20), Value::Int64(30)],
+                    },
+                ],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+        StatefulCase {
+            name: "lead_result_in_where",
+            sql: "SELECT a FROM stream WHERE lead(a) > 20",
+            input_data: vec![(
+                "a".to_string(),
+                vec![Value::Int64(10), Value::Int64(20), Value::Int64(30), Value::Int64(40)],
+            )],
+            expected_outputs: vec![ExpectedCollection {
+                expected_rows: 2,
+                expected_columns: 1,
+                column_checks: vec![ColumnCheck {
+                    expected_name: "a".to_string(),
+                    expected_values: vec![Value::Int64(20), Value::Int64(30)],
+                }],
+            }],
+            wait_after_send: Duration::from_millis(0),
+            close_before_read: false,
+        },
+    ];
+
+    for case in cases {
+        run_stateful_case(case).await;
+    }
+
+    run_lead_graceful_case(
+        "lead_normal_end_releases_unmatched_tail",
+        "SELECT a, lead(a) AS next_a FROM stream",
+        vec![(
+            "a".to_string(),
+            vec![Value::Int64(10), Value::Int64(20), Value::Int64(30)],
+        )],
+        Some(serde_json::json!([
+            {"a": 10, "next_a": 20},
+            {"a": 20, "next_a": 30}
+        ])),
+        serde_json::json!([{ "a": 30 }]),
+    )
+    .await;
+
+    run_lead_partition_order_case().await;
+
+    for (name, sql) in [
+        (
+            "lead_filter_tail",
+            "SELECT a, lead(a) FILTER (WHERE flag = 1) AS next_a FROM stream",
+        ),
+        (
+            "lead_large_offset_tail",
+            "SELECT a, lead(a, 9223372036854775807) AS next_a FROM stream",
+        ),
+    ] {
+        run_lead_graceful_case(
+            name,
+            sql,
+            vec![
+                ("a".to_string(), vec![Value::Int64(10), Value::Int64(20)]),
+                ("flag".to_string(), vec![Value::Int64(0), Value::Int64(0)]),
+            ],
+            None,
+            serde_json::json!([{ "a": 10 }, { "a": 20 }]),
+        )
+        .await;
+    }
 }
