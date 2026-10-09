@@ -278,13 +278,19 @@ installation; it reports current observable results, or `null` when application
 cannot be confirmed. Scheduled patrol retains its ordinary handling of current
 in-memory failed runtimes.
 
-Apply defaults to `restart_pipelines=false`: upstream configuration changes keep
-unsubmitted pipelines' processor graphs and runtime state. With
-`restart_pipelines=true`, affected existing pipelines stop before the dependency
+Apply defaults to `cascade=false`: upstream configuration changes keep
+unsubmitted stream/table definitions and pipelines' processor graphs and runtime
+state. With
+`cascade=true`, affected existing pipelines stop before the dependency
 batch is installed, then rebuild and restore their operational desired state.
 Submitted newer pipelines follow incoming `run_state` in either mode. Runtime
 MQTT bindings are retained in pipeline snapshots so client replacement and cascade
 selection remain safe when catalog definitions have changed without a restart.
+New or explicitly updated streams/tables resolve the current named schema, while
+new pipelines follow their bound streams, including the old schema of a retained
+shared runtime. Concurrent resolved schema versions are expected after a
+non-cascading update. A newer schema revision with `cascade=true`, or restart
+hydration, converges consumers; an equal-revision replay does not rebuild them.
 Shared clients and shared streams still used by unselected pipelines keep their
 old runtime and report that the new configuration has not applied.
 See [the API contract](../../api/storage_apply.md) for recovery and scheduling.

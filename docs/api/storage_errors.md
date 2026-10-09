@@ -53,13 +53,13 @@ A topic `frames` already runs with capacity 16. Apply accepts revision 2 with
 capacity 32. Metadata commits revision 2, but the runtime registry cannot change
 an existing topic's capacity in place. The response is `200`, with
 `metadata_committed: true` and `runtime_applied: false`. With
-`restart_pipelines=true`, pipelines selected for reconstruction also report
+`cascade=true`, pipelines selected for reconstruction also report
 unavailable dependencies; by default unsubmitted pipelines keep running. Replaying revision 2 observes the current topic
 configuration without restarting resources. Restart reconstructs global resources
 and retries desired-running pipelines from their committed definitions. Manual
 pipeline start can also retry a failed or absent runtime in the current process.
 
-With `restart_pipelines=true`, a retained pipeline can also fail after a valid
+With `cascade=true`, a retained pipeline can also fail after a valid
 schema update removes one of its
 columns. Its metadata and operational intent remain; the new schema is not
 rolled back. Correct the pipeline with a greater revision, or repair the cause

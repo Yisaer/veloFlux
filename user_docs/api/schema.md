@@ -77,6 +77,48 @@ curl -s -XPOST http://127.0.0.1:8080/schemas \
   }' | jq .
 ```
 
+### Update Schema
+
+`PUT /schemas/:name?cascade=false`
+
+Uses the same body as create; the body name must match the path. A newer revision
+updates the stored definition and named-schema cache. An older revision returns
+`409 Conflict`. An equal revision is idempotent only when the definition is
+unchanged, otherwise it returns `409 Conflict`.
+
+The optional `cascade` parameter defaults to `false`:
+
+- `false`: update only this schema. Existing stream/table definitions and pipeline
+  graphs keep their resolved schema versions. New or explicitly updated
+  streams/tables resolve the current version. New pipelines use their bound
+  streams' schemas, including the older version of a retained shared runtime.
+- `true`: refresh referencing streams/tables, rebuild affected stream pipelines,
+  and restore their operational Running/Stopped intent. Scheduled pipelines resume
+  under scheduler patrol. A concurrent stream operation establishing a reference
+  to this schema can return `409 Conflict`; retry after that operation completes.
+
+Multiple resolved schema versions may intentionally coexist. To converge existing
+consumers, submit a newer schema revision with `cascade=true`, or restart the
+manager to hydrate committed configuration. Replaying the accepted revision with
+`cascade=true` does not trigger convergence.
+
+A successful update returns `200 OK` with `name`, `revision`, `stream_refresh`,
+`table_refresh`, and `pipeline_restart: {requested, results}`. `requested` reflects
+`cascade`; with `false` the result arrays are empty. `dependent_refresh` makes
+that choice explicit: `{"status":"skipped","reason":"cascade_disabled"}`.
+A cascading update reports `{"status":"requested","reason":null}`; inspect
+individual results for success or failure. Equal-revision replay reports
+`{"status":"skipped","reason":"same_revision"}`. After metadata commits,
+refresh/rebuild failures are reported in those arrays and do not roll back the
+schema or change the response to an error status. An equal-revision replay makes
+no runtime changes, even with `cascade=true`.
+
+```bash
+curl -X PUT 'http://127.0.0.1:8080/schemas/sensor_schema?cascade=true' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"sensor_schema","revision":2,"type":"json","props":{"columns":[{"name":"value","data_type":"int64"}]}}'
+```
+
 ### Upload and Create Schema
 
 `POST /schemas/:type/:name/upload`

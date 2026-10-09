@@ -144,8 +144,8 @@ Format version 1 does not support deletions. A `deletions` field is rejected,
 even when empty. JSON Apply permits inline resources and already
 installed, validated managed attachments; new files require ZIP.
 
-Online Apply defaults to `restart_pipelines=false`, preserving unsubmitted
-pipeline graphs. `restart_pipelines=true` coordinates cascading reconstruction
+Online Apply defaults to `cascade=false`, preserving unsubmitted
+stream/table definitions and pipeline graphs. `cascade=true` coordinates cascading reconstruction
 around the complete dependency batch; submitted newer pipelines always use their
 incoming `run_state`. Replay remains idempotent with either query value.
 

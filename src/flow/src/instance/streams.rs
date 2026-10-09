@@ -266,6 +266,8 @@ impl FlowInstance {
         match definition.props() {
             StreamProps::Mqtt(props) => {
                 let mut config = SharedStreamConfig::new(definition.id(), definition.schema());
+                config.stream_revision = definition.revision();
+                config.schema_version = definition.schema_version();
                 config.flow_instance_id = Arc::<str>::from(self.id.as_str());
                 config.set_decoder(definition.decoder().clone());
                 struct MqttSharedStreamConnectorFactory {
@@ -354,6 +356,8 @@ impl FlowInstance {
             }
             StreamProps::Mock(_) => {
                 let mut config = SharedStreamConfig::new(definition.id(), definition.schema());
+                config.stream_revision = definition.revision();
+                config.schema_version = definition.schema_version();
                 config.set_decoder(definition.decoder().clone());
 
                 struct MockSharedStreamConnectorFactory {

@@ -10,9 +10,10 @@ Use `POST /storage/import` for full-snapshot replacement.
 Send either `application/json` with a manifest, or `multipart/form-data` with
 exactly one non-empty `file` field whose filename ends in `.zip`. ZIP contents
 are `manifest.json`, `schemas/<type>/<name>/`, and `wasm_files/<sha256>.wasm`.
-The optional query parameter `restart_pipelines` defaults to `false` for both
-JSON and ZIP. It controls only cascading reconstruction of existing pipelines;
-submitted newer pipeline definitions always use their incoming `run_state`.
+The optional query parameter `cascade` defaults to `false` for both
+JSON and ZIP. It controls cascading refresh of unsubmitted dependent resources
+and reconstruction of existing pipelines. Explicitly submitted newer resources
+are applied directly; submitted newer pipelines use their incoming `run_state`.
 
 The manifest limit is 8 MiB for both JSON and ZIP.
 The compressed file limit is 512 MiB; the multipart body limit is 513 MiB.
@@ -27,7 +28,7 @@ as uploaded attachments. ZIP and JSON use the same definitions and revision rule
 ```sh
 curl -H 'Content-Type: application/json' \
   --data-binary @manifest.json http://127.0.0.1:8080/storage/apply
-curl -F 'file=@deployment.zip' 'http://127.0.0.1:8080/storage/apply?restart_pipelines=true'
+curl -F 'file=@deployment.zip' 'http://127.0.0.1:8080/storage/apply?cascade=true'
 ```
 
 All required resource arrays in format version 1 must be present; `schemas` and
@@ -86,18 +87,26 @@ external code directly using the storage crate.
 
 ## Runtime Application And Recovery
 
-After commit the manager updates changed schemas and stream/table definitions,
-including retained sources that depend on changed schemas or connectors.
+After commit the manager updates explicitly submitted newer resources.
 
-- With `restart_pipelines=false` (the default), unsubmitted pipelines retain
-  their processor graphs and runtime state. Catalog updates do not rebuild those
-  graphs. A submitted identical pipeline also remains idempotent.
-- With `restart_pipelines=true`, the manager collects affected existing pipelines,
-  stops them once, applies the complete dependency batch, then rebuilds them and
+- With `cascade=false` (the default), unsubmitted stream/table definitions
+  and pipeline graphs retain their runtime state and resolved dependencies.
+  Updating a named schema does not refresh its existing consumers. New or
+  explicitly updated streams/tables resolve the accepted named schema. New
+  pipelines use their bound streams' schemas; a retained shared runtime supplies
+  its previously resolved version.
+  A submitted identical resource remains idempotent.
+- With `cascade=true`, the manager collects affected existing pipelines,
+  stops them once, applies the complete dependency batch including refresh of
+  retained dependent streams/tables, then rebuilds the pipelines and
   restores their persisted operational desired state. UDF changes participate in
   this cascading reconstruction.
 - Submitted newer pipelines are installed according to their incoming `run_state`
   in either mode. This direct replacement is independent of the cascade option.
+
+Multiple schema versions can intentionally coexist after a non-cascading update.
+Converge consumers by submitting a newer schema revision with `cascade=true`, or
+by restarting the manager. Same-revision replay remains observation-only.
 
 Runtime objects that cannot be safely replaced while retained pipelines use them
 are deferred. In particular, a shared MQTT client or shared stream used by a
@@ -118,7 +127,7 @@ Connector reconnection keeps its existing behavior. Scheduled Running intent is 
 by the schedule window and patrol; it does not force execution outside a window.
 
 A repeated same-revision Apply preserves manual start/stop and does not reinstall
-or restart resources, even when replay adds `restart_pipelines=true`. To execute
+or restart resources, even when replay adds `cascade=true`. To execute
 cascading reconstruction after a deferred update, submit a newer revision with
 that option or restart the manager. Its runtime results come from current observable state,
 not a persisted history of previous attempts. Schema versions, stream resource
@@ -162,7 +171,8 @@ A processed configuration commit returns `200`, including runtime failure:
 }
 ```
 
-`result` is `created`, `updated`, or `idempotent`. `affected_resources` reports
+`result` is `created`, `updated`, or `idempotent`. With `cascade=false`,
+`affected_resources` is empty. With `cascade=true`, it reports
 runtime rebinding of retained resources as `rebound`, or their observed state
 as `current` on replay; neither is another metadata update.
 `runtime_applied` is `true` for confirmed application, `false` for confirmed

@@ -494,6 +494,8 @@ pub enum SharedStreamConnectorSpec {
 
 /// Configuration used to create a shared stream instance.
 pub struct SharedStreamConfig {
+    pub stream_revision: Option<u64>,
+    pub schema_version: Option<u64>,
     pub stream_name: String,
     pub flow_instance_id: Arc<str>,
     pub schema: Arc<Schema>,
@@ -506,6 +508,8 @@ pub struct SharedStreamConfig {
 impl SharedStreamConfig {
     pub fn new(stream_name: impl Into<String>, schema: Arc<Schema>) -> Self {
         Self {
+            stream_revision: None,
+            schema_version: None,
             stream_name: stream_name.into(),
             flow_instance_id: Arc::<str>::from("default"),
             schema,
@@ -585,6 +589,8 @@ pub enum SharedStreamStatus {
 /// Public information returned to management APIs.
 #[derive(Clone, Debug)]
 pub struct SharedStreamInfo {
+    pub stream_revision: Option<u64>,
+    pub schema_version: Option<u64>,
     pub name: String,
     pub schema: Arc<Schema>,
     pub created_at: SystemTime,
@@ -675,6 +681,8 @@ impl Drop for SharedStreamSubscription {
 
 /// Internal structure that holds state for a single shared stream.
 struct SharedStreamInner {
+    stream_revision: Option<u64>,
+    schema_version: Option<u64>,
     name: String,
     flow_instance_id: Arc<str>,
     schema: Arc<Schema>,
@@ -762,6 +770,8 @@ impl SharedStreamInner {
         slice_registry: Arc<SyncRwLock<SliceRegistry>>,
     ) -> Result<Arc<Self>, SharedStreamError> {
         let SharedStreamConfig {
+            stream_revision,
+            schema_version,
             stream_name,
             flow_instance_id,
             schema,
@@ -806,6 +816,8 @@ impl SharedStreamInner {
         let control_hub = Arc::new(BackpressureHub::new(control_channel_capacity));
 
         let entry = Arc::new(Self {
+            stream_revision,
+            schema_version,
             name: stream_name,
             flow_instance_id,
             schema,
@@ -1026,6 +1038,8 @@ impl SharedStreamInner {
         let slot_version = applied.slot_version;
         drop(applied);
         SharedStreamInfo {
+            stream_revision: self.stream_revision,
+            schema_version: self.schema_version,
             name: self.name.clone(),
             schema: Arc::clone(&self.schema),
             created_at: self.created_at,

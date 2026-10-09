@@ -112,6 +112,36 @@ Example:
 curl -s http://127.0.0.1:8080/streams/describe/source_stream | jq .
 ```
 
+For a named schema reference, the response also includes `schema_status`:
+
+```json
+{
+  "reference": "sensor_schema",
+  "stored_schema_revision": 2,
+  "instances": [{
+    "flow_instance_id": "default",
+    "catalog_schema_revision": 1,
+    "runtime_stream_revision": 1,
+    "runtime_schema_revision": 1
+  }]
+}
+```
+
+`stored_schema_revision` comes from the named schema's persistent metadata.
+Instance versions are observed from the installed stream definition; for a shared
+stream, `runtime_schema_revision` and `runtime_stream_revision` come from the
+actual shared runtime, independently of its catalog definition. For a private
+stream, they describe the installed catalog definition, not schemas held by
+existing pipeline graphs. `spec` still describes the stored configuration
+resolved with the current named schema.
+
+Missing runtime versions are `null`. Schema versions also return `null` when
+an installed stream has a different resource revision: it might reference another
+schema, so the two schema revisions cannot safely be compared. Inline schemas
+omit `schema_status`. Observations are per instance and may show transitional
+states during an update. There is no separate `stale` flag: callers can compare
+known versions, and different versions are expected after a non-cascading update.
+
 ### Update Stream
 
 `PUT /streams/:name`
@@ -147,13 +177,19 @@ The request body contains the mutable fields from `CreateStreamRequest`:
 }
 ```
 
-The optional `restart_pipelines` query parameter controls whether pipelines that reference the
+A stream with a named schema reference holds that schema's reference guard from
+resolution through installation. Creating or updating such a stream returns
+`409 Conflict` while a cascade or deletion of that schema is active. A concurrent
+non-cascading schema update can leave the stream using its previously resolved
+schema version.
+
+The optional `cascade` query parameter controls whether pipelines that reference the
 stream are rebuilt:
 
-- `restart_pipelines=false` is the default and preserves the existing behavior. Updating a private
+- `cascade=false` is the default and preserves the existing behavior. Updating a private
   stream does not affect already running pipelines, which continue to use their existing runtime.
   Updating a shared stream returns `409 Conflict` while a referencing pipeline is running.
-- `restart_pipelines=true` applies the same lifecycle to private and shared streams. The manager
+- `cascade=true` applies the same lifecycle to private and shared streams. The manager
   stops referencing pipelines that are running, replaces the stream, rebuilds every referencing
   pipeline against the updated stream catalog, and restores each pipeline according to its stored
   desired state.
@@ -162,7 +198,7 @@ Example:
 
 ```bash
 curl -s -XPUT \
-  "http://127.0.0.1:8080/streams/source_stream?restart_pipelines=true" \
+  "http://127.0.0.1:8080/streams/source_stream?cascade=true" \
   -H "Content-Type: application/json" \
   -d @stream-update.json | jq .
 ```
@@ -222,9 +258,9 @@ pipeline results report failure. Validation, resource-lock, pipeline-stop, stora
 replacement failures that occur before the stream update completes return the corresponding error
 response instead.
 
-When `restart_pipelines` is omitted or `false`, the successful response contains only `name` and
+When `cascade` is omitted or `false`, the successful response contains only `name` and
 `revision`. If an equal revision contains the same normalized definition, the request is
-idempotent and does not restart pipelines even when `restart_pipelines=true`.
+idempotent and does not restart pipelines even when `cascade=true`.
 
 ### Delete Stream
 

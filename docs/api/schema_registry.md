@@ -11,13 +11,42 @@ startup init.
 
 `PUT /schemas/:name` updates an existing named schema. An older revision is
 rejected, an equal revision is idempotent only when the definition is unchanged,
-and a newer revision replaces the stored and in-memory schema. Streams referencing
-the schema are then refreshed. Pass `restart_pipelines=true` to cascade the
-existing stream pipeline rebuild and restore flow to pipelines that reference
-those streams. Once the schema update succeeds, refresh failures do not change
-the HTTP status: the response remains `200` and reports stream, table, and
-pipeline results in `stream_refresh`, `table_refresh`, and
-`pipeline_restart.results`.
+and a newer revision replaces the stored and in-memory schema. The optional
+`cascade` query parameter defaults to `false`: existing stream/table definitions
+and pipeline graphs keep their previously resolved schemas. New or explicitly
+updated streams/tables resolve the current named schema. New pipelines use the
+schema of their bound streams; subscribing to an existing shared runtime retains
+that runtime's schema version.
+
+Different resolved schema versions may intentionally coexist after a
+non-cascading update. They converge through a newer schema revision submitted
+with `cascade=true`, or manager restart hydration. Replaying the accepted revision
+with `cascade=true` remains idempotent and does not refresh dependants.
+
+With `cascade=true`, referencing streams and tables are refreshed and pipelines
+referencing those streams are rebuilt according to their operational desired
+state. Cascade holds an exclusive per-schema guard before discovering references;
+stream creation and update hold a shared guard from reference resolution through
+installation. Conflicting operations return `409` before schema commit, so a new
+reference cannot escape a concurrent cascade. Non-cascading schema updates do not
+acquire this guard and can overlap reference installation; retaining the already
+resolved schema in that case is intentional. Table mutations are already
+serialized with schema mutations by the storage-operation guard.
+
+Once the schema update commits, refresh failures do not change the HTTP status:
+the response remains `200` and reports stream, table, and pipeline results in
+`stream_refresh`, `table_refresh`, and `pipeline_restart.results`. With
+`cascade=false`, those result arrays are empty. An identical revision remains
+idempotent even when `cascade=true`; it does not retry a previous refresh.
+
+`dependent_refresh` reports `skipped` with `cascade_disabled` when dependency
+refresh was not requested, or `same_revision` for idempotent replay. `requested`
+means cascade was requested; per-resource results still identify refresh errors.
+
+Stream describe returns `schema_status` for named references, pairing the stored
+schema revision with each instance's observed schema revision. Different versions
+are expected in non-cascade mode and do not by themselves indicate failure. No
+persistent stale flag or runtime-result table is needed.
 
 For the REST API contract, see `user_docs/api/schema.md`.
 

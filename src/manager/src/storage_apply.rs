@@ -74,7 +74,7 @@ pub(crate) fn acquire_exclusive_metadata(
 #[derive(Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct ApplyQuery {
-    restart_pipelines: bool,
+    cascade: bool,
 }
 
 #[derive(Serialize)]
@@ -217,7 +217,7 @@ pub(crate) async fn apply_storage_handler(
             );
         }
     };
-    match apply_manifest(&state, manifest, work.path(), query.restart_pipelines).await {
+    match apply_manifest(&state, manifest, work.path(), query.cascade).await {
         Ok(result) => Json(result).into_response(),
         Err((status, code, message)) => failure(status, code, message),
     }
@@ -255,7 +255,7 @@ async fn apply_manifest(
     state: &AppState,
     mut manifest: ResourceManifestV1,
     source: &Path,
-    restart_pipelines: bool,
+    cascade: bool,
 ) -> Result<ApplyResponse, ApplyError> {
     crate::export::validate_resource_manifest(&manifest).map_err(invalid)?;
     normalize(&mut manifest.resources).map_err(invalid)?;
@@ -273,7 +273,7 @@ async fn apply_manifest(
     }
     normalize(&mut live).map_err(internal)?;
     let previous = live.clone();
-    let submitted_scope = runtime_scope(state, &previous, &manifest.resources);
+    let submitted_scope = runtime_scope(state, &previous, &manifest.resources, cascade);
     let (candidate, pending, mut results) = apply_core::build_apply_candidate(
         &manifest.bundle_version,
         live,
@@ -372,7 +372,7 @@ async fn apply_manifest(
                 .map_err(internal)?,
         )
     };
-    let execution_scope = runtime_scope(state, &previous, &pending);
+    let execution_scope = runtime_scope(state, &previous, &pending, cascade);
     crate::attachments::publish_and_commit(
         &state.storage,
         delta,
@@ -381,14 +381,7 @@ async fn apply_manifest(
         &prepared.wasm_staged,
     )
     .map_err(internal)?;
-    let mut affected = apply_runtime(
-        state,
-        execution_scope,
-        &pending,
-        &mut results,
-        restart_pipelines,
-    )
-    .await;
+    let mut affected = apply_runtime(state, execution_scope, &pending, &mut results).await;
     read_runtime_results(state, &mut results);
     match related_results(state, &submitted_scope, &results) {
         Ok(related) => {
@@ -1000,6 +993,7 @@ fn runtime_scope(
     state: &AppState,
     previous: &ExportResources,
     pending: &ExportResources,
+    cascade: bool,
 ) -> RuntimeScope {
     let mut sources = pending
         .streams
@@ -1012,6 +1006,17 @@ fn runtime_scope(
                 .map(|table| table.definition.name.clone()),
         )
         .collect::<BTreeSet<_>>();
+    let mut pipeline_ids = pending
+        .pipelines
+        .iter()
+        .map(|pipeline| pipeline.definition.id.clone())
+        .collect::<BTreeSet<_>>();
+    if !cascade {
+        return RuntimeScope {
+            sources,
+            pipelines: pipeline_ids,
+        };
+    }
     let schemas = pending
         .schemas
         .iter()
@@ -1057,11 +1062,6 @@ fn runtime_scope(
             sources.insert(table.definition.name.clone());
         }
     }
-    let mut pipeline_ids = pending
-        .pipelines
-        .iter()
-        .map(|pipeline| pipeline.definition.id.clone())
-        .collect::<BTreeSet<_>>();
     let runtime_pipelines = state
         .instances
         .instances_snapshot()
@@ -1206,21 +1206,11 @@ async fn apply_runtime(
     scope: RuntimeScope,
     pending: &ExportResources,
     results: &mut [ResourceApplyResult],
-    restart_pipelines: bool,
 ) -> Vec<ResourceApplyResult> {
     let RuntimeScope {
         sources,
         pipelines: pipeline_ids,
     } = scope;
-    let pipeline_ids = if restart_pipelines {
-        pipeline_ids
-    } else {
-        pending
-            .pipelines
-            .iter()
-            .map(|pipeline| pipeline.definition.id.clone())
-            .collect()
-    };
     let mut pipeline_results = BTreeMap::new();
     let mut affected_resources = Vec::new();
     let mut stop_error = None;
@@ -1731,6 +1721,377 @@ mod tests {
             .status()
     }
 
+    async fn put_schema(state: &AppState, schema: &Value, cascade: bool) -> (StatusCode, Value) {
+        let response = crate::build_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!(
+                        "/schemas/{}?cascade={cascade}",
+                        schema["name"].as_str().unwrap()
+                    ))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(schema).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|_| Value::String(String::from_utf8(bytes.to_vec()).unwrap()));
+        (status, body)
+    }
+
+    async fn stream_schema_status(state: &AppState, name: &str) -> Value {
+        let response = crate::build_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/streams/describe/{name}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        body["schema_status"].clone()
+    }
+
+    #[tokio::test]
+    async fn shared_schema_status_reports_bound_versions_and_missing_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path());
+        let mut initial = bundle();
+        initial["resources"]["memory_topics"] = json!([]);
+        initial["resources"]["schemas"] = json!([{"name":"shared_status_schema", "revision":1, "type":"json", "props":{"columns":[{"name":"value", "data_type":"int64"}]}}]);
+        initial["resources"]["streams"][0]["schema"] = json!({"ref":"shared_status_schema"});
+        initial["resources"]["streams"][0]["type"] = json!("mock");
+        initial["resources"]["streams"][0]["props"] = json!({});
+        initial["resources"]["streams"][0]["decoder"] = json!({"type":"json"});
+        initial["resources"]["streams"][0]["shared"] = json!(true);
+        assert_eq!(post(&state, &initial).await.0, StatusCode::OK);
+        let mut schema = initial["resources"]["schemas"][0].clone();
+        schema["revision"] = json!(2);
+        assert_eq!(put_schema(&state, &schema, false).await.0, StatusCode::OK);
+        let status = stream_schema_status(&state, "apply_stream").await;
+        assert_eq!(status["stored_schema_revision"], 2);
+        assert_eq!(status["instances"][0]["runtime_schema_revision"], 1);
+        let instance = state.instances.default_instance();
+        let old = instance.stream_definition("apply_stream").unwrap();
+        assert_eq!(
+            instance
+                .get_stream("apply_stream")
+                .await
+                .unwrap()
+                .shared_info
+                .unwrap()
+                .schema_version,
+            Some(1)
+        );
+        instance.delete_pipeline("apply_pipeline").await.unwrap();
+        instance.delete_stream("apply_stream").await.unwrap();
+        let status = stream_schema_status(&state, "apply_stream").await;
+        assert_eq!(
+            status["instances"][0]["catalog_schema_revision"],
+            Value::Null
+        );
+        assert_eq!(
+            status["instances"][0]["runtime_schema_revision"],
+            Value::Null
+        );
+        // A catalog definition alone is not evidence of a shared runtime binding.
+        instance
+            .create_stream(old.as_ref().clone(), false)
+            .await
+            .unwrap();
+        let status = stream_schema_status(&state, "apply_stream").await;
+        assert_eq!(status["instances"][0]["catalog_schema_revision"], 1);
+        assert_eq!(
+            status["instances"][0]["runtime_schema_revision"],
+            Value::Null
+        );
+        drop(instance);
+        drop(state);
+        let restarted = self::state(dir.path());
+        restarted.bootstrap_from_storage().await.unwrap();
+        let status = stream_schema_status(&restarted, "apply_stream").await;
+        assert_eq!(status["stored_schema_revision"], 2);
+        assert_eq!(status["instances"][0]["runtime_schema_revision"], 2);
+        schema["revision"] = json!(3);
+        assert_eq!(
+            put_schema(&restarted, &schema, true).await.0,
+            StatusCode::OK
+        );
+        let status = stream_schema_status(&restarted, "apply_stream").await;
+        assert_eq!(status["stored_schema_revision"], 3);
+        assert_eq!(status["instances"][0]["runtime_schema_revision"], 3);
+        crate::named_schema_store().remove("shared_status_schema");
+    }
+
+    #[tokio::test]
+    async fn schema_and_apply_preserve_dependants_until_cascade_is_requested() {
+        for api in ["schema", "apply"] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = state(dir.path());
+            let schema_name = format!("noncascade_{api}_schema");
+            let mut initial = bundle();
+            initial["resources"]["schemas"] = json!([{"name":schema_name, "revision":1, "type":"json", "props":{"columns":[{"name":"value", "data_type":"int64"}]}}]);
+            initial["resources"]["streams"][0]["schema"] = json!({"ref":schema_name});
+            initial["resources"]["tables"] = json!([{"name":"apply_table", "revision":1, "type":"memory_mock", "schema":{"ref":schema_name}, "props":{"rows":[{"value":1}]}}]);
+            initial["resources"]["pipelines"][0]["run_state"] = json!("Running");
+            assert_eq!(post(&state, &initial).await.0, StatusCode::OK);
+            let instance = state.instances.default_instance();
+            let old_stream = instance.stream_definition("apply_stream").unwrap();
+            let old_table = instance.get_table("apply_table").await.unwrap().unwrap();
+            let old_pipeline = instance.list_pipelines()[0].definition.clone();
+            let mut update = initial.clone();
+            for kind in ["memory_topics", "streams", "tables", "pipelines"] {
+                update["resources"][kind] = json!([]);
+            }
+            update["resources"]["schemas"][0]["revision"] = json!(2);
+            update["resources"]["schemas"][0]["props"]["columns"][0]["data_type"] =
+                json!("float64");
+            let stream_permit = state.try_acquire_stream_op("apply_stream").await.unwrap();
+            let pipeline_permit = state
+                .try_acquire_pipeline_op("apply_pipeline")
+                .await
+                .unwrap();
+            let (status, result) = if api == "schema" {
+                put_schema(&state, &update["resources"]["schemas"][0], false).await
+            } else {
+                post(&state, &update).await
+            };
+            assert_eq!(status, StatusCode::OK, "{result}");
+            if api == "apply" {
+                assert_eq!(result["applied_to_runtime"], true, "{result}");
+                assert_eq!(result["affected_resources"], json!([]));
+            } else {
+                assert_eq!(result["stream_refresh"], json!([]));
+                assert_eq!(result["table_refresh"], json!([]));
+                assert_eq!(
+                    result["dependent_refresh"],
+                    json!({"status":"skipped", "reason":"cascade_disabled"})
+                );
+            }
+            drop(stream_permit);
+            drop(pipeline_permit);
+            assert_eq!(
+                state
+                    .storage
+                    .get_schema(&schema_name)
+                    .unwrap()
+                    .unwrap()
+                    .revision,
+                2
+            );
+            assert!(Arc::ptr_eq(
+                &old_stream,
+                &instance.stream_definition("apply_stream").unwrap()
+            ));
+            assert!(Arc::ptr_eq(
+                &old_table,
+                &instance.get_table("apply_table").await.unwrap().unwrap()
+            ));
+            assert!(Arc::ptr_eq(
+                &old_pipeline,
+                &instance.list_pipelines()[0].definition
+            ));
+            assert_eq!(
+                instance.list_pipelines()[0].status,
+                flow::pipeline::PipelineStatus::Running
+            );
+
+            let mut fresh = initial["resources"]["streams"][0].clone();
+            fresh["name"] = json!("fresh_stream");
+            let response = crate::stream::create_stream_handler(
+                State(state.clone()),
+                Json(serde_json::from_value(fresh).unwrap()),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let fresh = instance.stream_definition("fresh_stream").unwrap();
+            assert_eq!(fresh.schema_version(), Some(2));
+            assert!(matches!(
+                fresh.schema().column_schemas()[0].data_type,
+                flow::ConcreteDatatype::Float64(_)
+            ));
+
+            let old_status = stream_schema_status(&state, "apply_stream").await;
+            assert_eq!(old_status["stored_schema_revision"], 2);
+            assert_eq!(old_status["instances"][0]["runtime_schema_revision"], 1);
+            let fresh_status = stream_schema_status(&state, "fresh_stream").await;
+            assert_eq!(fresh_status["stored_schema_revision"], 2);
+            assert_eq!(fresh_status["instances"][0]["runtime_schema_revision"], 2);
+
+            // A same-revision replay does not turn a non-cascading update into a cascade.
+            let (status, result) = if api == "schema" {
+                put_schema(&state, &update["resources"]["schemas"][0], true).await
+            } else {
+                post_with_query(&state, &update, "?cascade=true").await
+            };
+            assert_eq!(status, StatusCode::OK, "{result}");
+            assert!(Arc::ptr_eq(
+                &old_stream,
+                &instance.stream_definition("apply_stream").unwrap()
+            ));
+            assert!(Arc::ptr_eq(
+                &old_pipeline,
+                &instance.list_pipelines()[0].definition
+            ));
+
+            if api == "schema" {
+                assert_eq!(
+                    result["dependent_refresh"],
+                    json!({"status":"skipped", "reason":"same_revision"})
+                );
+            }
+            update["resources"]["schemas"][0]["revision"] = json!(3);
+            let (status, result) = if api == "schema" {
+                put_schema(&state, &update["resources"]["schemas"][0], true).await
+            } else {
+                post_with_query(&state, &update, "?cascade=true").await
+            };
+            assert_eq!(status, StatusCode::OK, "{result}");
+            assert_eq!(
+                instance
+                    .stream_definition("apply_stream")
+                    .unwrap()
+                    .schema_version(),
+                Some(3)
+            );
+            assert!(!Arc::ptr_eq(
+                &old_table,
+                &instance.get_table("apply_table").await.unwrap().unwrap()
+            ));
+            assert!(!Arc::ptr_eq(
+                &old_pipeline,
+                &instance.list_pipelines()[0].definition
+            ));
+            assert_eq!(
+                instance.list_pipelines()[0].status,
+                flow::pipeline::PipelineStatus::Running
+            );
+            let status = stream_schema_status(&state, "apply_stream").await;
+            assert_eq!(status["stored_schema_revision"], 3);
+            assert_eq!(status["instances"][0]["runtime_schema_revision"], 3);
+            if api == "schema" {
+                assert_eq!(
+                    result["dependent_refresh"],
+                    json!({"status":"requested", "reason":null})
+                );
+            }
+            assert_eq!(lifecycle(&state, "stop").await, StatusCode::OK);
+            crate::named_schema_store().remove(&schema_name);
+        }
+    }
+
+    #[tokio::test]
+    async fn schema_cascade_conflicts_with_stream_switching_to_its_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path());
+        let mut initial = bundle();
+        initial["resources"]["schemas"] = json!([{"name":"reference_race_schema", "revision":1, "type":"json", "props":{"columns":[{"name":"value", "data_type":"int64"}]}}]);
+        initial["resources"]["pipelines"][0]["run_state"] = json!("Running");
+        assert_eq!(post(&state, &initial).await.0, StatusCode::OK);
+        let mut stream = initial["resources"]["streams"][0].clone();
+        stream["revision"] = json!(2);
+        stream["schema"] = json!({"ref":"reference_race_schema"});
+        let mut switch = Box::pin(crate::stream::upsert_stream_handler(
+            State(state.clone()),
+            axum::extract::Path("apply_stream".into()),
+            Query(crate::stream::UpsertStreamQuery { cascade: true }),
+            Json(serde_json::from_value(stream.clone()).unwrap()),
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(switch.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        let mut schema = initial["resources"]["schemas"][0].clone();
+        schema["revision"] = json!(2);
+        schema["props"]["columns"][0]["data_type"] = json!("float64");
+        assert_eq!(
+            put_schema(&state, &schema, true).await.0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            state
+                .storage
+                .get_schema("reference_race_schema")
+                .unwrap()
+                .unwrap()
+                .revision,
+            1
+        );
+        assert_eq!(switch.await.into_response().status(), StatusCode::OK);
+        assert_eq!(put_schema(&state, &schema, true).await.0, StatusCode::OK);
+        let instance = state.instances.default_instance();
+        assert_eq!(
+            instance
+                .stream_definition("apply_stream")
+                .unwrap()
+                .schema_version(),
+            Some(2)
+        );
+        assert_eq!(
+            instance.list_pipelines()[0].status,
+            flow::pipeline::PipelineStatus::Running
+        );
+
+        // Exercise the opposite acquisition order: reference creation and update
+        // must not pass a cascading schema operation already holding its guard.
+        let guard = crate::schema::operation_guard(&state, "reference_race_schema", true)
+            .await
+            .unwrap();
+        let mut fresh = stream.clone();
+        fresh["name"] = json!("blocked_reference_stream");
+        assert_eq!(
+            crate::stream::create_stream_handler(
+                State(state.clone()),
+                Json(serde_json::from_value(fresh).unwrap())
+            )
+            .await
+            .into_response()
+            .status(),
+            StatusCode::CONFLICT
+        );
+        stream["revision"] = json!(3);
+        assert_eq!(
+            crate::stream::upsert_stream_handler(
+                State(state.clone()),
+                axum::extract::Path("apply_stream".into()),
+                Query(crate::stream::UpsertStreamQuery { cascade: false }),
+                Json(serde_json::from_value(stream).unwrap()),
+            )
+            .await
+            .into_response()
+            .status(),
+            StatusCode::CONFLICT
+        );
+        assert!(
+            state
+                .storage
+                .get_stream("blocked_reference_stream")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            state
+                .storage
+                .get_stream("apply_stream")
+                .unwrap()
+                .unwrap()
+                .revision,
+            2
+        );
+        drop(guard);
+        assert_eq!(lifecycle(&state, "stop").await, StatusCode::OK);
+        crate::named_schema_store().remove("reference_race_schema");
+    }
+
     #[tokio::test]
     async fn dependency_parse_failure_preserves_bindings_and_conservatively_selects_absent_graphs()
     {
@@ -1757,10 +2118,10 @@ mod tests {
         let mut pending = previous.clone();
         pending.pipelines.clear();
         pending.memory_topics.clear();
-        let scope = runtime_scope(&state, &previous, &pending);
+        let scope = runtime_scope(&state, &previous, &pending, true);
         assert!(scope.pipelines.contains("apply_pipeline"));
         pending.streams[0].name = "unrelated_stream".to_string();
-        let scope = runtime_scope(&state, &previous, &pending);
+        let scope = runtime_scope(&state, &previous, &pending, true);
         assert!(
             !scope.pipelines.contains("apply_pipeline"),
             "known bindings must not restart unrelated pipelines"
@@ -1819,7 +2180,7 @@ mod tests {
             .delete_pipeline("apply_pipeline")
             .await
             .unwrap();
-        let scope = runtime_scope(&state, &previous, &pending);
+        let scope = runtime_scope(&state, &previous, &pending, true);
         assert!(
             scope.pipelines.contains("apply_pipeline"),
             "absent bindings must not silently discard unknown dependencies"
@@ -1841,7 +2202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn restart_query_controls_retained_pipeline_rebuilding_without_reapplying_replay() {
+    async fn cascade_query_controls_retained_pipeline_rebuilding_without_reapplying_replay() {
         for (query, restart, run_state, expected_status) in [
             (
                 "",
@@ -1850,19 +2211,19 @@ mod tests {
                 flow::pipeline::PipelineStatus::Running,
             ),
             (
-                "?restart_pipelines=false",
+                "?cascade=false",
                 false,
                 "Running",
                 flow::pipeline::PipelineStatus::Running,
             ),
             (
-                "?restart_pipelines=true",
+                "?cascade=true",
                 true,
                 "Running",
                 flow::pipeline::PipelineStatus::Running,
             ),
             (
-                "?restart_pipelines=true",
+                "?cascade=true",
                 true,
                 "Stopped",
                 flow::pipeline::PipelineStatus::Stopped,
@@ -1906,8 +2267,7 @@ mod tests {
                 &old_table,
                 &instance.get_table("apply_table").await.unwrap().unwrap()
             ));
-            let (status, replay) =
-                post_with_query(&state, &update, "?restart_pipelines=true").await;
+            let (status, replay) = post_with_query(&state, &update, "?cascade=true").await;
             assert_eq!(status, StatusCode::OK, "{replay}");
             assert!(Arc::ptr_eq(
                 &after.definition,
@@ -1950,8 +2310,7 @@ mod tests {
         ] {
             update["resources"]["pipelines"][0]["revision"] = json!(revision);
             update["resources"]["pipelines"][0]["run_state"] = json!(run_state);
-            let (status, result) =
-                post_with_query(&state, &update, "?restart_pipelines=false").await;
+            let (status, result) = post_with_query(&state, &update, "?cascade=false").await;
             assert_eq!(status, StatusCode::OK, "{result}");
             let snapshots = instance.list_pipelines();
             let direct = snapshots
@@ -2093,8 +2452,7 @@ mod tests {
                 .unwrap();
             assert!(Arc::ptr_eq(&before.definition, &retained.definition));
             assert_eq!(retained.status, flow::pipeline::PipelineStatus::Running);
-            let (status, replay) =
-                post_with_query(&state, &update, "?restart_pipelines=true").await;
+            let (status, replay) = post_with_query(&state, &update, "?cascade=true").await;
             assert_eq!(status, StatusCode::OK, "{replay}");
             assert_eq!(replay["applied_to_runtime"], false);
             assert_eq!(
@@ -2113,8 +2471,7 @@ mod tests {
             update["resources"]["shared_mqtt_clients"][0]["revision"] = json!(3);
             update["resources"]["streams"][0]["revision"] = json!(3);
             update["resources"]["pipelines"][0]["revision"] = json!(3);
-            let (status, result) =
-                post_with_query(&state, &update, "?restart_pipelines=true").await;
+            let (status, result) = post_with_query(&state, &update, "?cascade=true").await;
             assert_eq!(status, StatusCode::OK, "{result}");
             assert_eq!(result["applied_to_runtime"], true, "{result}");
             assert_eq!(
@@ -2207,8 +2564,7 @@ mod tests {
             &instance.list_pipelines()[0].definition
         ));
         client_update["resources"]["shared_mqtt_clients"][0]["revision"] = json!(3);
-        let (status, result) =
-            post_with_query(&state, &client_update, "?restart_pipelines=true").await;
+        let (status, result) = post_with_query(&state, &client_update, "?cascade=true").await;
         assert_eq!(status, StatusCode::OK, "{result}");
         assert_eq!(result["applied_to_runtime"], true, "{result}");
         let rebuilt = instance.list_pipelines()[0].clone();
@@ -2459,7 +2815,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/storage/apply?restart_pipelines=true")
+                    .uri("/storage/apply?cascade=true")
                     .header(CONTENT_TYPE, "multipart/form-data; boundary=apply_boundary")
                     .body(Body::from(multipart))
                     .unwrap(),
@@ -2511,7 +2867,7 @@ mod tests {
         let before = state.instances.default_instance().list_pipelines()[0]
             .definition
             .clone();
-        let (status, result) = post(&state, &update).await;
+        let (status, result) = post_with_query(&state, &update, "?cascade=true").await;
         assert_eq!(status, StatusCode::OK, "{result}");
         assert_eq!(result["metadata_committed"], true);
         assert_eq!(result["applied_to_runtime"], false);
@@ -2541,7 +2897,7 @@ mod tests {
             restarted.instances.default_instance().list_pipelines()[0].status,
             flow::pipeline::PipelineStatus::Running
         );
-        let (status, result) = post(&restarted, &update).await;
+        let (status, result) = post_with_query(&restarted, &update, "?cascade=true").await;
         assert_eq!(status, StatusCode::OK, "{result}");
         assert!(result["applied_to_runtime"].is_null());
         assert_eq!(lifecycle(&restarted, "start").await, StatusCode::OK);
@@ -2645,8 +3001,7 @@ mod tests {
         update["resources"]["schemas"][0]["revision"] = json!(2);
         update["resources"]["schemas"][0]["props"]["columns"][0]["name"] = json!("other_column");
         for _ in 0..2 {
-            let (status, result) =
-                post_with_query(&state, &update, "?restart_pipelines=true").await;
+            let (status, result) = post_with_query(&state, &update, "?cascade=true").await;
             assert_eq!(status, StatusCode::OK, "{result}");
             assert_eq!(result["metadata_committed"], true);
             assert_eq!(result["applied_to_runtime"], false);

@@ -11,8 +11,7 @@ use crate::audit::ResourceMutationLog;
 use crate::pipeline::AppState;
 use crate::resource_id::{ResourceIdKind, validate_resource_id};
 use crate::stream::{
-    PipelineRestartResult, named_schema_store, refresh_stream_and_restart_pipelines,
-    schema_registry,
+    PipelineRestartResult, named_schema_store, refresh_stream_and_cascade, schema_registry,
 };
 use crate::streaming_upload::{
     TemporaryUpload, is_zip_filename, read_text_field, required_multipart,
@@ -36,7 +35,7 @@ pub struct CreateSchemaRequest {
 #[derive(Deserialize)]
 pub struct UpdateSchemaQuery {
     #[serde(default)]
-    pub restart_pipelines: bool,
+    pub cascade: bool,
 }
 
 #[derive(Serialize)]
@@ -148,7 +147,8 @@ pub async fn update_schema_handler(
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "name": name,
-                    "revision": current.revision
+                    "revision": current.revision,
+                    "dependent_refresh": {"status": "skipped", "reason": "same_revision"}
                 })),
             )
                 .into_response();
@@ -159,9 +159,21 @@ pub async fn update_schema_handler(
         )).into_response();
     }
 
-    let (streams, tables) = match find_resources_referencing_schema(&state, &name) {
-        Ok(references) => references,
-        Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+    let _schema_permit = if query.cascade {
+        match super::operation_guard(&state, &name, true).await {
+            Ok(permit) => Some(permit),
+            Err(response) => return *response,
+        }
+    } else {
+        None
+    };
+    let (streams, tables) = if query.cascade {
+        match find_resources_referencing_schema(&state, &name) {
+            Ok(references) => references,
+            Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+        }
+    } else {
+        (Vec::new(), Vec::new())
     };
     let mut resource_permits = Vec::with_capacity(streams.len() + tables.len());
     for resource in streams.iter().chain(tables.iter()) {
@@ -236,7 +248,7 @@ pub async fn update_schema_handler(
     let mut pipeline_results = Vec::<PipelineRestartResult>::new();
     let mut stream_results = Vec::<ResourceRefreshResult>::new();
     for stream in &streams {
-        match refresh_stream_and_restart_pipelines(&state, stream, query.restart_pipelines).await {
+        match refresh_stream_and_cascade(&state, stream).await {
             Ok(results) => {
                 pipeline_results.extend(results);
                 stream_results.push(ResourceRefreshResult {
@@ -273,8 +285,12 @@ pub async fn update_schema_handler(
         Json(serde_json::json!({
             "name": name,
             "revision": req.revision,
+            "dependent_refresh": {
+                "status": if query.cascade { "requested" } else { "skipped" },
+                "reason": if query.cascade { None } else { Some("cascade_disabled") }
+            },
             "pipeline_restart": {
-                "requested": query.restart_pipelines,
+                "requested": query.cascade,
                 "results": pipeline_results
             },
             "stream_refresh": stream_results,
@@ -646,6 +662,10 @@ pub async fn delete_schema_handler(
         Err(tokio::sync::TryAcquireError::Closed) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, "operation guard closed").into_response();
         }
+    };
+    let _schema_permit = match super::operation_guard(&state, &name, true).await {
+        Ok(permit) => permit,
+        Err(response) => return *response,
     };
     let mut audit = ResourceMutationLog::new("schema", "delete", &name, None);
     let stored_schema = match state.storage.get_schema(&name) {
@@ -1082,9 +1102,7 @@ mod tests {
         let response = update_schema_handler(
             State(state.clone()),
             Path(schema_name.to_string()),
-            Query(UpdateSchemaQuery {
-                restart_pipelines: true,
-            }),
+            Query(UpdateSchemaQuery { cascade: true }),
             Json(CreateSchemaRequest {
                 name: schema_name.to_string(),
                 revision: 2,
@@ -1230,9 +1248,7 @@ mod tests {
         let response = update_schema_handler(
             State(state.clone()),
             Path(schema_name.to_string()),
-            Query(UpdateSchemaQuery {
-                restart_pipelines: true,
-            }),
+            Query(UpdateSchemaQuery { cascade: true }),
             Json(CreateSchemaRequest {
                 name: schema_name.to_string(),
                 revision: 2,

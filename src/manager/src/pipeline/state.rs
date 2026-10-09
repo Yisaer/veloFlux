@@ -12,7 +12,7 @@ use std::time::Duration;
 use storage::StorageManager;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, TryAcquireError};
 
-const STREAM_SHARED_REF_PERMITS: u32 = 1024;
+const RESOURCE_SHARED_REF_PERMITS: u32 = 1024;
 
 /// Default patrol interval for the pipeline scheduler, in seconds.
 pub const DEFAULT_PATROL_INTERVAL_SECS: u64 = 15;
@@ -27,6 +27,7 @@ pub struct AppState {
     metadata_operation_lock: Arc<Semaphore>,
     pipeline_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     stream_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    schema_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     shared_mqtt_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
@@ -66,6 +67,7 @@ impl AppState {
             metadata_operation_lock: Arc::new(Semaphore::new(1024)),
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
             stream_op_locks: Arc::new(Mutex::new(HashMap::new())),
+            schema_op_locks: Arc::new(Mutex::new(HashMap::new())),
             shared_mqtt_op_locks: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -183,10 +185,10 @@ impl AppState {
             let mut guard = self.stream_op_locks.lock().await;
             guard
                 .entry(stream_name.to_string())
-                .or_insert_with(|| Arc::new(Semaphore::new(STREAM_SHARED_REF_PERMITS as usize)))
+                .or_insert_with(|| Arc::new(Semaphore::new(RESOURCE_SHARED_REF_PERMITS as usize)))
                 .clone()
         };
-        semaphore.try_acquire_many_owned(STREAM_SHARED_REF_PERMITS)
+        semaphore.try_acquire_many_owned(RESOURCE_SHARED_REF_PERMITS)
     }
 
     pub async fn try_acquire_stream_ref_ops<I, S>(
@@ -214,7 +216,7 @@ impl AppState {
                     guard
                         .entry(name)
                         .or_insert_with(|| {
-                            Arc::new(Semaphore::new(STREAM_SHARED_REF_PERMITS as usize))
+                            Arc::new(Semaphore::new(RESOURCE_SHARED_REF_PERMITS as usize))
                         })
                         .clone()
                 })
@@ -226,6 +228,25 @@ impl AppState {
             permits.push(semaphore.try_acquire_owned()?);
         }
         Ok(permits)
+    }
+
+    pub(crate) async fn try_acquire_schema_operation(
+        &self,
+        name: &str,
+        exclusive: bool,
+    ) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        let semaphore = {
+            let mut guard = self.schema_op_locks.lock().await;
+            guard
+                .entry(name.to_string())
+                .or_insert_with(|| Arc::new(Semaphore::new(RESOURCE_SHARED_REF_PERMITS as usize)))
+                .clone()
+        };
+        semaphore.try_acquire_many_owned(if exclusive {
+            RESOURCE_SHARED_REF_PERMITS
+        } else {
+            1
+        })
     }
 
     pub(crate) fn try_acquire_metadata_operation(

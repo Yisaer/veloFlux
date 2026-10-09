@@ -70,6 +70,17 @@ Note: current implementation does not populate `shared_stream` in this endpoint.
 - `revision: number` (persisted resource revision)
 - `spec: StreamDefinitionSpec`
 
+## Named Schema Version Observations
+
+`GET /streams/describe/:name` adds `schema_status` for a named reference. It
+returns the stored named-schema revision and per-instance catalog/runtime schema
+revisions. Shared runtime versions are captured from the definition at runtime
+creation and remain independent of subsequent catalog or metadata changes.
+Private runtime versions describe the installed stream catalog, not retained
+pipeline processor graphs. Missing or incomparable bindings return `null`, rather
+than assuming the stored version has applied. Inline schemas omit this object.
+See `user_docs/api/stream.md` for fields and examples.
+
 ## Revision-Based Update
 
 `revision` is required when creating a stream and in
@@ -88,13 +99,18 @@ For an existing stream:
 
 JSON formatting and object field order do not affect equality.
 
-`PUT /streams/:name` also accepts the optional `restart_pipelines` query parameter. It defaults to
+`PUT /streams/:name` also accepts the optional `cascade` query parameter. It defaults to
 `false`. When set to `true`, the manager stops running pipelines that reference the stream,
 replaces the stream, rebuilds all affected pipeline runtimes against the updated catalog, and
 restores non-scheduled pipelines according to their stored desired state. Scheduled pipelines with
 desired state `running` are left with runtime status `scheduled_stopped` for patrol reconciliation;
 manually stopped scheduled pipelines remain `stopped`. This runtime rebuild does not change pipeline specifications
 or revisions.
+
+Named-schema reference resolution and stream installation hold a shared
+per-schema guard. A concurrent schema cascade or deletion returns `409` on a
+conflicting operation. Non-cascading schema updates may overlap installation;
+the stream retains the schema version it resolved for this update.
 
 Pipeline recovery after a successful stream replacement is non-transactional. Rebuild and start
 failures are recorded and returned as per-pipeline results without rolling back the stream. See

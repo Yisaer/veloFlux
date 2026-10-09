@@ -123,7 +123,7 @@ pub struct UpsertStreamRequest {
 pub struct UpsertStreamQuery {
     /// Rebuild pipelines that reference the updated stream.
     #[serde(default)]
-    pub restart_pipelines: bool,
+    pub cascade: bool,
 }
 
 #[derive(Serialize)]
@@ -391,17 +391,12 @@ impl PreparedStreamRuntimeRefresh {
     }
 }
 
-pub(crate) async fn refresh_stream_and_restart_pipelines(
+pub(crate) async fn refresh_stream_and_cascade(
     state: &AppState,
     stream_name: &str,
-    restart_pipelines: bool,
 ) -> Result<Vec<PipelineRestartResult>, String> {
     let refresh = PreparedStreamRuntimeRefresh::from_storage(state, stream_name)?;
-    let affected = if restart_pipelines {
-        collect_pipelines_referencing_stream(state, stream_name)?
-    } else {
-        Vec::new()
-    };
+    let affected = collect_pipelines_referencing_stream(state, stream_name)?;
     let mut permits = Vec::with_capacity(affected.len());
     for pipeline in &affected {
         permits.push(state.try_acquire_pipeline_op(&pipeline.id).await.map_err(
@@ -820,6 +815,23 @@ pub struct DescribeStreamResponse {
     pub stream: String,
     pub revision: u64,
     pub spec: StreamDefinitionSpec,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_status: Option<StreamSchemaStatus>,
+}
+
+#[derive(Serialize)]
+pub struct StreamSchemaStatus {
+    pub reference: String,
+    pub stored_schema_revision: Option<u64>,
+    pub instances: Vec<StreamSchemaInstanceStatus>,
+}
+
+#[derive(Serialize)]
+pub struct StreamSchemaInstanceStatus {
+    pub flow_instance_id: String,
+    pub catalog_schema_revision: Option<u64>,
+    pub runtime_stream_revision: Option<u64>,
+    pub runtime_schema_revision: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -877,6 +889,14 @@ pub async fn create_stream_handler(
             )
                 .into_response();
         }
+    };
+    let _schema_permit = if let Some(reference) = req.schema.r#ref.as_deref() {
+        match crate::schema::operation_guard(&state, reference, false).await {
+            Ok(permit) => Some(permit),
+            Err(response) => return *response,
+        }
+    } else {
+        None
     };
     let resolved_schema = match resolve_schema_from_request(&req) {
         Ok(schema) => schema,
@@ -1076,8 +1096,8 @@ pub async fn describe_stream_handler(
         }
     };
 
-    let shared = match storage_bridge::stream_request_from_stored(&stored) {
-        Ok(req) => req.shared,
+    let request = match storage_bridge::stream_request_from_stored(&stored) {
+        Ok(req) => req,
         Err(err) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1100,6 +1120,61 @@ pub async fn describe_stream_handler(
             }
         };
 
+    let schema_status = if let Some(reference) = request.schema.r#ref.as_deref() {
+        let stored_schema_revision = match state.storage.get_schema(reference) {
+            Ok(schema) => schema.map(|schema| schema.revision),
+            Err(error) => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+            }
+        };
+        let mut instances = Vec::new();
+        for (id, instance) in state.instances.instances_snapshot() {
+            let catalog = instance.stream_definition(&name);
+            let catalog_schema_revision = catalog
+                .as_ref()
+                .filter(|definition| definition.revision() == Some(stored.revision))
+                .and_then(|definition| definition.schema_version());
+            let (runtime_stream_revision, runtime_schema_revision) = if request.shared {
+                let shared = instance
+                    .get_stream(&name)
+                    .await
+                    .ok()
+                    .and_then(|stream| stream.shared_info);
+                match shared {
+                    Some(shared) => (shared.stream_revision, shared.schema_version),
+                    None => (None, None),
+                }
+            } else {
+                (
+                    catalog
+                        .as_ref()
+                        .and_then(|definition| definition.revision()),
+                    catalog
+                        .as_ref()
+                        .and_then(|definition| definition.schema_version()),
+                )
+            };
+            // A different stream revision can reference a different schema with
+            // the same number. Do not claim those schema revisions are comparable.
+            let runtime_schema_revision = (runtime_stream_revision == Some(stored.revision))
+                .then_some(runtime_schema_revision)
+                .flatten();
+            instances.push(StreamSchemaInstanceStatus {
+                flow_instance_id: id,
+                catalog_schema_revision,
+                runtime_stream_revision,
+                runtime_schema_revision,
+            });
+        }
+        instances.sort_by(|left, right| left.flow_instance_id.cmp(&right.flow_instance_id));
+        Some(StreamSchemaStatus {
+            reference: reference.to_string(),
+            stored_schema_revision,
+            instances,
+        })
+    } else {
+        None
+    };
     let schema = definition.schema();
     let columns = schema
         .column_schemas()
@@ -1110,7 +1185,7 @@ pub async fn describe_stream_handler(
         stream_type: stream_type_label(definition.stream_type()).to_string(),
         schema: StreamSchemaInfo { columns },
         props: stream_props_value(definition.props()),
-        shared,
+        shared: request.shared,
         decoder: DecoderConfigRequest {
             decode_type: definition.decoder().kind().to_string(),
             props: definition.decoder().props().clone(),
@@ -1130,6 +1205,7 @@ pub async fn describe_stream_handler(
             stream: name,
             revision: stored.revision,
             spec,
+            schema_status,
         }),
     )
         .into_response()
@@ -1259,7 +1335,7 @@ pub async fn upsert_stream_handler(
 
     // For shared streams (existing or newly converted): reject if any running
     // pipeline references this stream.
-    if new_shared && !query.restart_pipelines {
+    if new_shared && !query.cascade {
         let mut running_pipelines = Vec::new();
         for (_, instance) in state.instances.instances_snapshot() {
             for snapshot in instance.list_pipelines() {
@@ -1340,6 +1416,14 @@ pub async fn upsert_stream_handler(
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
+    let _schema_permit = if let Some(reference) = new_req.schema.r#ref.as_deref() {
+        match crate::schema::operation_guard(&state, reference, false).await {
+            Ok(permit) => Some(permit),
+            Err(response) => return *response,
+        }
+    } else {
+        None
+    };
     let resolved_schema = match resolve_schema_from_request(&new_req) {
         Ok(s) => s,
         Err(err) => {
@@ -1403,7 +1487,7 @@ pub async fn upsert_stream_handler(
         definition = definition.with_sampler(sampler);
     }
 
-    let affected_pipelines = if query.restart_pipelines {
+    let affected_pipelines = if query.cascade {
         match collect_pipelines_referencing_stream(&state, &name) {
             Ok(pipelines) => pipelines,
             Err(err) => {
@@ -1499,7 +1583,7 @@ pub async fn upsert_stream_handler(
         }
     }
 
-    let pipeline_restart = if query.restart_pipelines {
+    let pipeline_restart = if query.cascade {
         Some(PipelineRestartResponse {
             requested: true,
             results: rebuild_and_restore_affected_pipelines(&state, &affected_pipelines).await,
