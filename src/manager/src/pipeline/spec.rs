@@ -683,6 +683,9 @@ pub(crate) fn build_pipeline_definition(
             SinkType::Memory if sink_req.encoder.encode_type.eq_ignore_ascii_case("none") => {
                 SinkEncoderConfig::new("none", sink_req.encoder.props.clone())
             }
+            SinkType::Nop if sink_req.encoder.encode_type.eq_ignore_ascii_case("none") => {
+                SinkEncoderConfig::new("none", sink_req.encoder.props.clone())
+            }
             SinkType::File if sink_req.encoder.encode_type.eq_ignore_ascii_case("none") => {
                 return Err(
                     "file sink requires an encoder; encoder.type=none is not supported".to_string(),
@@ -1126,6 +1129,35 @@ mod tests {
         assert!(
             result.is_err(),
             "missing output.mode should fail deserialization"
+        );
+    }
+
+    // coverage-covers: sink.connector.nop_collection
+    #[tokio::test]
+    async fn nop_sink_accepts_explicit_none_encoder_without_changing_default() {
+        let instance = test_instance();
+        let none_request = sample_request_with_encoder(json!({ "type": "none" }));
+        let none_definition = build_pipeline_definition(
+            &none_request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+        )
+        .expect("nop sink with explicit none encoder builds");
+        assert_eq!(
+            none_definition.sinks()[0].encoder.kind(),
+            &SinkEncoderKind::None
+        );
+
+        let json_request = sample_request_with_encoder(json!({ "type": "json" }));
+        let json_definition = build_pipeline_definition(
+            &json_request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+        )
+        .expect("nop sink default json encoder builds");
+        assert_eq!(
+            json_definition.sinks()[0].encoder.kind(),
+            &SinkEncoderKind::Json
         );
     }
 

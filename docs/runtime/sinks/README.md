@@ -58,7 +58,7 @@ The runtime currently registers these built-in sink connector kinds:
 | Connector | Runtime built-in | Accepts bytes | Accepts collection | Notes |
 |----------|-------------------|---------------|--------------------|-------|
 | `mqtt` | yes | yes | no | Intended for encoded payloads such as JSON bytes. |
-| `nop` | yes | yes | no | Useful for tests, benchmarks, and plan validation. |
+| `nop` | yes | yes | yes (explicit `encoder.type=none` only) | Useful for tests, benchmarks, and plan validation; the default `json` encoder still serializes output before discarding it. |
 | `kuksa` | yes | no | yes | Consumes decoded rows directly; pipeline API forces `encoder=none`. |
 | `memory` | yes | yes | yes | Topic kind depends on whether an encoder is present. |
 

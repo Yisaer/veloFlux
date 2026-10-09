@@ -91,6 +91,13 @@ features:
       - docs/runtime/sinks/connectors/video.md
     status: active
 
+  - id: sink.connector.nop_collection
+    title: Nop collection discard
+    summary: Discard decoded collections through the nop sink connector without serialization when encoder.type=none is explicitly configured.
+    doc_refs:
+      - docs/runtime/sinks/README.md
+    status: active
+
   - id: sink.compress.gzip_delivery
     title: Gzip compression delivery transform
     summary: Apply gzip compression to sink delivery output via PhysicalSinkCompress.

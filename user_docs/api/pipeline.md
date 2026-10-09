@@ -285,6 +285,7 @@ included and the end timestamp is excluded. Multiple ranges are combined with OR
   - CSV accepts `props.delimiter` (one ASCII byte, default `,`) and `props.header` (boolean,
     default `true`), and does not support `output.mode=delta` or encoder transforms.
   - For `type == "kuksa"` or `type == "kura"`, encoder is ignored and forced to `none`.
+  - For `type == "nop"`, `encoder: {"type": "none"}` is accepted to skip serialization and discard decoded collections directly (default remains `json`).
   - For `type == "http"`, encoder is required (e.g. `json`, `csv`, `protobuf`).
 
 ### Sink `props` by `type`
