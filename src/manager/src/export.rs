@@ -23,7 +23,10 @@ pub(crate) const RESOURCE_DIRECTORY_FORMAT_VERSION: u32 = 1;
 pub struct ResourceManifestV1 {
     pub format_version: u32,
     pub bundle_version: String,
+    #[serde(default)]
     pub resources: ExportResources,
+    #[serde(default)]
+    pub deletions: ExportDeletions,
 }
 
 #[derive(Deserialize)]
@@ -31,18 +34,185 @@ pub struct ExportStorageQuery {
     bundle_version: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Default, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ExportResources {
+    #[serde(default)]
     pub memory_topics: Vec<ExportMemoryTopic>,
+    #[serde(default)]
     pub shared_mqtt_clients: Vec<ExportSharedMqttClient>,
     #[serde(default)]
     pub schemas: Vec<ExportSchema>,
+    #[serde(default)]
     pub streams: Vec<CreateStreamRequest>,
+    #[serde(default)]
     pub pipelines: Vec<ExportPipeline>,
+    #[serde(default)]
     pub udfs: Vec<ExportUdf>,
     #[serde(default)]
     pub tables: Vec<ExportTable>,
+}
+
+impl ExportResources {
+    pub(crate) fn identities(&self) -> std::collections::BTreeSet<(storage::ResourceKind, String)> {
+        use storage::ResourceKind;
+        let mut identities = std::collections::BTreeSet::new();
+        macro_rules! live {
+            ($field:ident, $kind:ident, $id:expr) => {
+                for item in &self.$field {
+                    identities.insert((ResourceKind::$kind, $id(item)));
+                }
+            };
+        }
+        live!(memory_topics, MemoryTopics, |v: &ExportMemoryTopic| v
+            .topic
+            .clone());
+        live!(
+            shared_mqtt_clients,
+            SharedMqttClients,
+            |v: &ExportSharedMqttClient| v.definition.key.clone()
+        );
+        live!(schemas, Schemas, |v: &ExportSchema| v.name.clone());
+        live!(streams, Streams, |v: &CreateStreamRequest| v.name.clone());
+        live!(pipelines, Pipelines, |v: &ExportPipeline| v
+            .definition
+            .id
+            .clone());
+        live!(udfs, Udfs, |v: &ExportUdf| v.name.to_ascii_lowercase());
+        live!(tables, Tables, |v: &ExportTable| v.definition.name.clone());
+        identities
+    }
+}
+
+macro_rules! deletion_entry {
+    ($type:ident, $identity:ident) => {
+        #[derive(Clone, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        pub struct $type {
+            pub $identity: String,
+            #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+            pub revision: u64,
+        }
+    };
+}
+deletion_entry!(TopicDeletion, topic);
+deletion_entry!(KeyDeletion, key);
+deletion_entry!(NameDeletion, name);
+deletion_entry!(PipelineDeletion, id);
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportDeletions {
+    #[serde(default)]
+    pub memory_topics: Vec<TopicDeletion>,
+    #[serde(default)]
+    pub shared_mqtt_clients: Vec<KeyDeletion>,
+    #[serde(default)]
+    pub schemas: Vec<NameDeletion>,
+    #[serde(default)]
+    pub streams: Vec<NameDeletion>,
+    #[serde(default)]
+    pub pipelines: Vec<PipelineDeletion>,
+    #[serde(default)]
+    pub udfs: Vec<NameDeletion>,
+    #[serde(default)]
+    pub tables: Vec<NameDeletion>,
+}
+
+impl ExportDeletions {
+    pub(crate) fn tombstones(&self) -> Vec<storage::StoredTombstone> {
+        let mut markers = Vec::new();
+        macro_rules! collect {
+            ($field:ident, $kind:ident, $id:ident) => {
+                for item in &self.$field {
+                    markers.push(storage::StoredTombstone {
+                        kind: storage::ResourceKind::$kind,
+                        identity: if stringify!($field) == "udfs" {
+                            item.$id.to_ascii_lowercase()
+                        } else {
+                            item.$id.clone()
+                        },
+                        revision: item.revision,
+                    });
+                }
+            };
+        }
+        collect!(memory_topics, MemoryTopics, topic);
+        collect!(shared_mqtt_clients, SharedMqttClients, key);
+        collect!(schemas, Schemas, name);
+        collect!(streams, Streams, name);
+        collect!(pipelines, Pipelines, id);
+        collect!(udfs, Udfs, name);
+        collect!(tables, Tables, name);
+        markers
+    }
+
+    pub(crate) fn validate(&self, resources: &ExportResources) -> Result<(), String> {
+        use crate::resource_id::{ResourceIdKind, validate_resource_id};
+        use storage::ResourceKind;
+        let mut seen = resources.identities();
+        for marker in self.tombstones() {
+            let id_kind = match marker.kind {
+                ResourceKind::MemoryTopics => ResourceIdKind::MemoryTopic,
+                ResourceKind::SharedMqttClients => ResourceIdKind::SharedMqttClientKey,
+                ResourceKind::Schemas => ResourceIdKind::SchemaName,
+                ResourceKind::Streams | ResourceKind::Tables => ResourceIdKind::StreamName,
+                ResourceKind::Pipelines => ResourceIdKind::PipelineId,
+                ResourceKind::Udfs => ResourceIdKind::UdfName,
+            };
+            validate_resource_id(id_kind, &marker.identity)?;
+            if !seen.insert((marker.kind, marker.identity.clone())) {
+                return Err(format!(
+                    "duplicate resource/deletion identity: {:?} {}",
+                    marker.kind, marker.identity
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn from_tombstones(markers: Vec<storage::StoredTombstone>) -> Self {
+        let mut deletions = Self::default();
+        for marker in markers {
+            let identity = marker.identity;
+            let revision = marker.revision;
+            match marker.kind {
+                storage::ResourceKind::MemoryTopics => {
+                    deletions.memory_topics.push(TopicDeletion {
+                        topic: identity,
+                        revision,
+                    })
+                }
+                storage::ResourceKind::SharedMqttClients => {
+                    deletions.shared_mqtt_clients.push(KeyDeletion {
+                        key: identity,
+                        revision,
+                    })
+                }
+                storage::ResourceKind::Schemas => deletions.schemas.push(NameDeletion {
+                    name: identity,
+                    revision,
+                }),
+                storage::ResourceKind::Streams => deletions.streams.push(NameDeletion {
+                    name: identity,
+                    revision,
+                }),
+                storage::ResourceKind::Pipelines => deletions.pipelines.push(PipelineDeletion {
+                    id: identity,
+                    revision,
+                }),
+                storage::ResourceKind::Udfs => deletions.udfs.push(NameDeletion {
+                    name: identity,
+                    revision,
+                }),
+                storage::ResourceKind::Tables => deletions.tables.push(NameDeletion {
+                    name: identity,
+                    revision,
+                }),
+            }
+        }
+        deletions
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -414,6 +584,9 @@ pub(crate) fn build_resource_manifest(
         format_version: RESOURCE_DIRECTORY_FORMAT_VERSION,
         bundle_version,
         resources: build_export_resources(storage)?,
+        deletions: ExportDeletions::from_tombstones(
+            storage.list_tombstones().map_err(|err| err.to_string())?,
+        ),
     })
 }
 

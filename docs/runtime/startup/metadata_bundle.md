@@ -11,7 +11,9 @@ wasm_files/<sha256>.wasm
 `manifest.json` uses `format_version: 1` and contains seven resource collections:
 memory topics, shared MQTT clients, schemas, streams, tables, pipelines, and
 UDFs.
-Every entry requires a `revision` in `1..=9007199254740991`.
+Every resource or deletion requires a `revision` in `1..=9007199254740991`.
+`resources`, optional `deletions`, and each collection may be omitted; omitted
+collections are empty, while `null` and non-array collections are invalid.
 
 ```json
 {
@@ -140,14 +142,13 @@ the artifact must replace the complete persisted resource set.
 
 ## Entry Contracts
 
-Format version 1 does not support deletions. A `deletions` field is rejected,
-even when empty. JSON Apply permits inline resources and already
+Format version 1 supports optional revisioned `deletions`. JSON Apply permits inline resources and already
 installed, validated managed attachments; new files require ZIP.
 
 Online Apply defaults to `cascade=false`, preserving unsubmitted
 stream/table definitions and pipeline graphs. `cascade=true` coordinates cascading reconstruction
 around the complete dependency batch; submitted newer pipelines always use their
-incoming `run_state`. Replay remains idempotent with either query value.
+incoming `run_state`. Upsert replay remains idempotent with either query value; deletion replay retries cleanup.
 
 Pipeline deployment declarations are stored independently of operational
 Running/Stopped intent. Export preserves its existing snapshot behavior: inline
@@ -158,3 +159,29 @@ the last accepted deployment declaration. Start/stop does not change revisions.
 Read the [Apply API](../../api/storage_apply.md),
 [Import API](../../api/storage_import.md), and
 [error comparison](../../api/storage_errors.md) before choosing an entrance.
+
+## Deletion Records
+
+`deletions` contains any of the same seven collection names. Each record has
+only its identity and revision:
+
+| Collection | Identity | Example |
+| --- | --- | --- |
+| `memory_topics` | `topic` | `{"topic":"frames","revision":12}` |
+| `shared_mqtt_clients` | `key` | `{"key":"broker","revision":12}` |
+| `schemas` | `name` | `{"name":"payload","revision":12}` |
+| `streams` | `name` | `{"name":"telemetry","revision":12}` |
+| `tables` | `name` | `{"name":"history","revision":12}` |
+| `pipelines` | `id` | `{"id":"processor","revision":12}` |
+| `udfs` | `name` | `{"name":"transform","revision":12}` |
+
+Within one kind, an identity must be unique across both resources and deletions.
+UDF names are case-insensitive. Array order does not decide which operation wins.
+
+Export includes tombstones using this object. Import restores the complete
+resource and tombstone snapshot without comparing existing revisions. An old
+snapshot lacking a tombstone removes that protection; subsequent old upserts
+can recreate the identity. Import rejects live/deleted duplicate identities.
+Init skips entries whose revision does not exceed the live record or tombstone;
+its successful subset must preserve retained owners' dependencies. Online
+Apply uses the [revision and dependency rules](../../api/storage_apply.md).

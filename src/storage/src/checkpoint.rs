@@ -120,6 +120,21 @@ impl CheckpointStorage {
         pipeline_id: &str,
     ) -> Result<(), crate::StorageError> {
         validate_checkpoint_identity(flow_instance_id, pipeline_id)?;
+        self.clear_selected_records(Some(flow_instance_id), pipeline_id)
+    }
+
+    /// Clear a globally identified pipeline's records across all flow instances.
+    /// This also works after its metadata definition has already been deleted.
+    pub fn clear_pipeline_records(&self, pipeline_id: &str) -> Result<(), crate::StorageError> {
+        validate_checkpoint_identity("default", pipeline_id)?;
+        self.clear_selected_records(None, pipeline_id)
+    }
+
+    fn clear_selected_records(
+        &self,
+        flow_instance_id: Option<&str>,
+        pipeline_id: &str,
+    ) -> Result<(), crate::StorageError> {
         let _guard = self.lock_db()?;
         let txn = self
             .backend
@@ -138,7 +153,8 @@ impl CheckpointStorage {
                 let (key, _) = entry.map_err(crate::StorageError::backend)?;
                 let (record_flow_instance_id, record_pipeline_id, _) =
                     parse_checkpoint_key(key.value())?;
-                if record_flow_instance_id == flow_instance_id && record_pipeline_id == pipeline_id
+                if flow_instance_id.is_none_or(|id| record_flow_instance_id == id)
+                    && record_pipeline_id == pipeline_id
                 {
                     keys.push(key.value().to_string());
                 }

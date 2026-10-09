@@ -146,3 +146,10 @@ resource set, send the ZIP to the import API instead.
   `run_state` records the desired run state, not whether a live runtime is currently failed.
 - The exported arrays are sorted by stable identifiers to make the output easier to diff.
 - The bundle is intended for future import / migration workflows, not for runtime checkpoint recovery.
+
+## Deletion Watermarks
+
+Format version 1 carries tombstones in optional `deletions`. Export includes all
+stored markers. Full import replaces both resources and markers; restoring an
+older snapshot that omits a marker removes its protection against old upserts.
+Live and deleted records cannot share an identity in the same snapshot.

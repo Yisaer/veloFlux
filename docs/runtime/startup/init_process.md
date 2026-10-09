@@ -22,8 +22,9 @@ and import use the same directory inside a ZIP envelope.
 - A resource from init replaces the stored resource only when its revision is
   strictly greater. Equal and lower revisions are `ignored_not_newer` without
   comparing content.
-- A stored resource absent from init remains stored. Init does not delete
-  resources.
+- A stored resource absent from init remains stored. Explicit `deletions` can
+  remove it and record a persistent revision watermark, including for absent
+  resources. Equal/lower changes cannot resurrect a deleted identity.
 
 The supported range is `1..=9007199254740991`. Timestamp revisions in seconds,
 milliseconds, or microseconds fit this range. Producers are responsible for
@@ -180,3 +181,19 @@ Online Apply rejects a batch if any submitted static configuration is invalid.
 Neither entrance replans retained pipelines as a precondition for an upstream
 update. No Apply background retry loop is introduced. See the
 [three-entrance error examples](../../api/storage_errors.md).
+
+## Revisioned Deletions
+
+Init accepts the optional [manifest deletions](metadata_bundle.md#deletion-records).
+It skips equal/lower revisions against either a live record or a tombstone.
+Higher upserts recreate deleted identities. Duplicate upsert/delete identities
+fail every entry of that identity; independent entries can still commit.
+
+Deletion selection uses the actually accepted upserts and deletions. If deleting
+or updating an owner fails, its retained definition protects its dependencies.
+Rejected dependency deletion leaves both its live record and attachments intact.
+The selected live-record changes and tombstones commit together before hydration.
+Pipeline checkpoints, schema attachments, and unreferenced managed WASM files
+are cleaned as with ordinary DELETE. Cleanup failure leaves the package
+incomplete; the next startup retries cleanup only for the matching tombstone,
+never for a newer recreated resource.

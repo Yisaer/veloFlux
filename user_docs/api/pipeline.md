@@ -464,3 +464,12 @@ userinfo, or `Authorization`/`Cookie` in plain `headers`) are always rejected re
 - `stats: object`
   - Common fields: `records_in`, `records_out`, `error_count`, `last_error`
   - Custom processor metrics are flattened into this object as additional numeric fields (e.g. `rows_buffered`)
+
+## Revisioned Deletion
+
+DELETE also accepts optional `?revision=N`. It uses the shared revision timeline,
+records a tombstone even for an absent resource, and returns the
+[Apply response](../../docs/api/storage_apply.md). A greater revision is required
+for recreation; equal deletion replay retries cleanup. Omitting the parameter
+keeps ordinary DELETE behavior and does not create or clear a tombstone.
+See [resource deletion](../../docs/api/storage_delete.md) for conflicts and cleanup.

@@ -120,6 +120,9 @@ pub async fn create_shared_mqtt_client_handler(
             .create_mqtt_config(stored_mqtt_from_config(&req, revision))
         {
             Ok(()) => {}
+            Err(storage::StorageError::RevisionConflict(error)) => {
+                return (StatusCode::CONFLICT, error).into_response();
+            }
             Err(StorageError::AlreadyExists(_)) => {
                 let err = format!("shared mqtt client {key} already exists");
                 audit.log_failure(&err);

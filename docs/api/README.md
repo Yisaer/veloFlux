@@ -11,3 +11,5 @@ This section contains runtime-facing HTTP and introspection contracts.
 - [Incremental Apply](storage_apply.md): `POST /storage/apply`, revisions and runtime results.
 - [Full Import](storage_import.md): `POST /storage/import`, replacement and publication rollback.
 - [Storage error comparison](storage_errors.md): init/Apply/import examples and retry contracts.
+
+- [Resource deletion and tombstones](storage_delete.md)

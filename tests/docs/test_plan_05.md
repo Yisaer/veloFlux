@@ -94,7 +94,7 @@
 ### Import / export contract
 
 - Import validation:
-  - `import_rejects_missing_resources`
+  - `import_accepts_omitted_resources_as_empty_snapshot`
   - `import_rejects_invalid_json_shape`
   - `import_rejects_duplicate_identifiers`
   - `import_rejects_invalid_resources`

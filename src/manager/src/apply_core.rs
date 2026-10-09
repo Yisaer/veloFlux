@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -28,18 +28,26 @@ const MAX_SOURCE_TOTAL_SIZE: u64 = 512 * 1024 * 1024;
 struct RawInitManifest {
     format_version: u32,
     bundle_version: String,
+    #[serde(default)]
     resources: RawInitResources,
+    #[serde(default)]
+    deletions: RawInitResources,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawInitResources {
+    #[serde(default)]
     memory_topics: Vec<serde_json::Value>,
+    #[serde(default)]
     shared_mqtt_clients: Vec<serde_json::Value>,
     #[serde(default)]
     schemas: Vec<serde_json::Value>,
+    #[serde(default)]
     streams: Vec<serde_json::Value>,
+    #[serde(default)]
     pipelines: Vec<serde_json::Value>,
+    #[serde(default)]
     udfs: Vec<serde_json::Value>,
     #[serde(default)]
     tables: Vec<serde_json::Value>,
@@ -213,7 +221,29 @@ where
     Ok(())
 }
 
-fn parse_init_entries(raw: RawInitManifest) -> ParsedInitManifest {
+fn parse_init_entries(mut raw: RawInitManifest) -> ParsedInitManifest {
+    let mut cross_errors = false;
+    macro_rules! reject_cross_duplicates {
+        ($field:ident, $id:literal, $canonical:expr) => {
+            let identity = |item: &serde_json::Value| item.get($id).and_then(serde_json::Value::as_str).map(|id| if $canonical { id.to_ascii_lowercase() } else { id.to_string() });
+            let upserts = raw.resources.$field.iter().filter_map(identity).collect::<BTreeSet<_>>();
+            let deletions = raw.deletions.$field.iter().filter_map(identity).collect::<BTreeSet<_>>();
+            let duplicated = upserts.intersection(&deletions).cloned().collect::<BTreeSet<_>>();
+            if !duplicated.is_empty() {
+                cross_errors = true;
+                tracing::warn!(kind = stringify!($field), identities = ?duplicated, "init resource/deletion duplicates rejected");
+                raw.resources.$field.retain(|item| identity(item).is_none_or(|id| !duplicated.contains(&id)));
+                raw.deletions.$field.retain(|item| identity(item).is_none_or(|id| !duplicated.contains(&id)));
+            }
+        };
+    }
+    reject_cross_duplicates!(memory_topics, "topic", false);
+    reject_cross_duplicates!(shared_mqtt_clients, "key", false);
+    reject_cross_duplicates!(schemas, "name", false);
+    reject_cross_duplicates!(streams, "name", false);
+    reject_cross_duplicates!(pipelines, "id", false);
+    reject_cross_duplicates!(udfs, "name", true);
+    reject_cross_duplicates!(tables, "name", false);
     let bundle_version = raw.bundle_version;
     let (memory_topics, memory_errors) = decode_resource_entries(
         &bundle_version,
@@ -250,8 +280,11 @@ fn parse_init_entries(raw: RawInitManifest) -> ParsedInitManifest {
         raw.resources.pipelines,
         false,
     );
-    let (udfs, udf_errors) =
+    let (mut udfs, udf_errors): (Vec<crate::export::ExportUdf>, bool) =
         decode_resource_entries(&bundle_version, "udfs", "name", raw.resources.udfs, true);
+    for udf in &mut udfs {
+        udf.name = udf.name.to_ascii_lowercase();
+    }
     let (tables, table_errors) = decode_resource_entries(
         &bundle_version,
         "tables",
@@ -259,8 +292,43 @@ fn parse_init_entries(raw: RawInitManifest) -> ParsedInitManifest {
         raw.resources.tables,
         false,
     );
+    let mut deletions = crate::export::ExportDeletions::default();
+    let mut deletion_errors = cross_errors;
+    macro_rules! decode_deletions {
+        ($field:ident, $identity:literal, $canonical:expr) => {
+            let (items, errors) = decode_resource_entries(
+                &bundle_version,
+                stringify!($field),
+                $identity,
+                raw.deletions.$field,
+                $canonical,
+            );
+            deletions.$field = items;
+            deletion_errors |= errors;
+        };
+    }
+    decode_deletions!(memory_topics, "topic", false);
+    decode_deletions!(shared_mqtt_clients, "key", false);
+    decode_deletions!(schemas, "name", false);
+    decode_deletions!(streams, "name", false);
+    decode_deletions!(pipelines, "id", false);
+    decode_deletions!(udfs, "name", true);
+    decode_deletions!(tables, "name", false);
+    let valid_markers = deletions.tombstones().into_iter().filter(|marker| {
+        let single = crate::export::ExportDeletions::from_tombstones(vec![marker.clone()]);
+        match single.validate(&ExportResources::default()) {
+            Ok(()) => true,
+            Err(error) => {
+                deletion_errors = true;
+                tracing::warn!(kind = crate::resource_delete::kind_name(marker.kind), identity = %marker.identity, error = %error, "invalid init deletion");
+                false
+            }
+        }
+    }).collect();
+    deletions = crate::export::ExportDeletions::from_tombstones(valid_markers);
     ParsedInitManifest {
         manifest: ResourceManifestV1 {
+            deletions,
             format_version: raw.format_version,
             bundle_version,
             resources: ExportResources {
@@ -273,7 +341,8 @@ fn parse_init_entries(raw: RawInitManifest) -> ParsedInitManifest {
                 tables,
             },
         },
-        had_entry_errors: memory_errors
+        had_entry_errors: deletion_errors
+            || memory_errors
             || mqtt_errors
             || schema_errors
             || stream_errors
@@ -412,12 +481,41 @@ where
     validate_incoming_identities(&manifest.resources)?;
     let live = build_export_resources(storage)?;
     let initial_live = live.clone();
-    let (_candidate_resources, mut pending_resources, results) = build_apply_candidate(
+    let current_tombstones =
+        relevant_tombstones(storage, &manifest.resources, &manifest.deletions)?;
+    let candidate = build_apply_candidate(
         &manifest.bundle_version,
         live,
         manifest.resources,
-        ApplyPolicy::BestEffort,
+        CandidateOptions {
+            policy: ApplyPolicy::BestEffort,
+            tombstones: current_tombstones.clone(),
+            deletions: manifest.deletions,
+        },
     )?;
+    let mut pending_resources = candidate.pending;
+    let results = candidate.results;
+    let pending_deletions = candidate.deletions;
+    let cleanup_deletions = results
+        .iter()
+        .filter(|result| {
+            result.operation == "delete"
+                && (result.result == "deleted"
+                    || (result.result == "ignored_not_newer"
+                        && result.current_revision == Some(result.incoming_revision)))
+        })
+        .filter_map(|result| {
+            current_tombstones
+                .iter()
+                .chain(&pending_deletions)
+                .find(|marker| {
+                    crate::resource_delete::kind_name(marker.kind) == result.kind
+                        && marker.identity == result.identity
+                        && marker.revision == result.incoming_revision
+                })
+                .cloned()
+        })
+        .collect::<Vec<_>>();
     let kept_existing = results
         .iter()
         .filter(|result| result.result == "ignored_not_newer")
@@ -479,7 +577,7 @@ where
     let (mut pending_resources, mut pending_snapshot, validation_errors) =
         validate_pending_resources_best_effort(
             &manifest.bundle_version,
-            initial_live,
+            initial_live.clone(),
             pending_resources,
             Some(&combined_schemas),
             is_declared_instance,
@@ -587,7 +685,21 @@ where
     } else {
         Some(PreparedSchemaTree::prepare(storage, &final_schemas)?)
     };
-    let meta = if had_entry_errors || validation_errors || preparation_errors {
+    let accepted = build_apply_candidate(
+        &manifest.bundle_version,
+        initial_live,
+        pending_resources.clone(),
+        CandidateOptions {
+            policy: ApplyPolicy::BestEffort,
+            tombstones: Vec::new(),
+            deletions: Default::default(),
+        },
+    )?;
+    let (deletions, deletion_errors) =
+        crate::resource_delete::select_init_deletions(accepted.resources, pending_deletions)?;
+    let deletion_count = deletions.len();
+    pending_snapshot.tombstones = deletions;
+    let meta = if had_entry_errors || validation_errors || preparation_errors || deletion_errors {
         None
     } else {
         Some(StoredInitApplyMeta {
@@ -595,19 +707,59 @@ where
             applied_at_ms: unix_time_ms(SystemTime::now())?,
         })
     };
+    let completion_meta = if cleanup_deletions.is_empty() {
+        None
+    } else {
+        meta.clone()
+    };
+    let commit_meta = if cleanup_deletions.is_empty() {
+        meta
+    } else {
+        None
+    };
     let installed_wasm = crate::attachments::publish_and_commit(
         storage,
         pending_snapshot,
         storage::MetadataCommitOptions {
-            init_meta: meta,
+            init_meta: commit_meta,
             ..Default::default()
         },
         schema_tree.take(),
         &staged_wasm,
     )?;
 
+    let mut cleanup_failed = false;
+    let mut wasm_reclaimed = false;
+    for marker in cleanup_deletions {
+        // A rejected init deletion has no committed marker and must not clean
+        // up the dependency that its retained owner still uses.
+        if storage
+            .get_tombstone(marker.kind, &marker.identity)
+            .map_err(|error| error.to_string())?
+            .is_none_or(|current| current.revision != marker.revision)
+        {
+            continue;
+        }
+        if marker.kind == storage::ResourceKind::Udfs {
+            if wasm_reclaimed {
+                continue;
+            }
+            wasm_reclaimed = true;
+        }
+        if let Err(error) =
+            crate::resource_delete::cleanup_persisted(storage, marker.kind, &marker.identity)
+        {
+            cleanup_failed = true;
+            tracing::warn!(identity = %marker.identity, error = %error, "init deletion cleanup failed");
+        }
+    }
+    if !cleanup_failed && let Some(meta) = completion_meta {
+        storage
+            .put_init_apply_meta(meta)
+            .map_err(|error| error.to_string())?;
+    }
     Ok(ApplySummary {
-        resources_applied: count_resources(&pending_resources),
+        resources_applied: count_resources(&pending_resources) + deletion_count,
         kept_existing,
         schema_files: limits.entries,
         wasm_files: installed_wasm.len(),
@@ -641,6 +793,7 @@ fn append_snapshot(target: &mut MetadataExportSnapshot, mut source: MetadataExpo
 
 pub(crate) fn empty_snapshot() -> MetadataExportSnapshot {
     MetadataExportSnapshot {
+        tombstones: Vec::new(),
         streams: Vec::new(),
         schemas: Vec::new(),
         pipelines: Vec::new(),
@@ -954,6 +1107,7 @@ where
 {
     validate_and_build_snapshot(
         &ResourceManifestV1 {
+            deletions: Default::default(),
             format_version: RESOURCE_DIRECTORY_FORMAT_VERSION,
             bundle_version: bundle_version.to_string(),
             resources,
@@ -996,12 +1150,49 @@ pub(crate) struct ResourceApplyResult {
     pub error: Option<String>,
 }
 
+pub(crate) fn relevant_tombstones(
+    storage: &StorageManager,
+    resources: &ExportResources,
+    deletions: &crate::export::ExportDeletions,
+) -> Result<Vec<storage::StoredTombstone>, String> {
+    let mut identities = resources.identities();
+    identities.extend(
+        deletions
+            .tombstones()
+            .into_iter()
+            .map(|marker| (marker.kind, marker.identity)),
+    );
+    storage
+        .get_tombstones(&identities)
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) struct CandidateOptions {
+    pub policy: ApplyPolicy,
+    pub tombstones: Vec<storage::StoredTombstone>,
+    pub deletions: crate::export::ExportDeletions,
+}
+
+pub(crate) struct ApplyCandidate {
+    pub resources: ExportResources,
+    pub pending: ExportResources,
+    pub deletions: Vec<storage::StoredTombstone>,
+    pub results: Vec<ResourceApplyResult>,
+}
+
 pub(crate) fn build_apply_candidate(
     bundle_version: &str,
     mut live: ExportResources,
     incoming: ExportResources,
-    policy: ApplyPolicy,
-) -> Result<(ExportResources, ExportResources, Vec<ResourceApplyResult>), String> {
+    options: CandidateOptions,
+) -> Result<ApplyCandidate, String> {
+    let policy = options.policy;
+    let tombstones = options
+        .tombstones
+        .into_iter()
+        .map(|marker| ((marker.kind, marker.identity.clone()), marker))
+        .collect::<BTreeMap<_, _>>();
+    let incoming_deletions = options.deletions.tombstones();
     let mut pending = ExportResources {
         memory_topics: Vec::new(),
         shared_mqtt_clients: Vec::new(),
@@ -1013,12 +1204,20 @@ pub(crate) fn build_apply_candidate(
     };
     let mut results = Vec::new();
     macro_rules! merge {
-        ($field:ident, $id:expr, $revision:expr) => {{
+        ($field:ident, $kind:ident, $id:expr, $revision:expr) => {{
             for item in incoming.$field {
                 let id = $id(&item);
                 let incoming_revision = $revision(&item);
                 let position = live.$field.iter().position(|live| $id(live) == id);
-                let current_revision = position.map(|position| $revision(&live.$field[position]));
+                let marker = tombstones.get(&(storage::ResourceKind::$kind, id.clone()));
+                let current_revision = position.map(|position| $revision(&live.$field[position])).or_else(|| marker.map(|marker| marker.revision));
+                if let Some(marker) = marker && incoming_revision <= marker.revision {
+                    if matches!(policy, ApplyPolicy::Atomic) {
+                        return Err(format!("{}: {} {id}: incoming {incoming_revision}, deleted {}", if incoming_revision == marker.revision { "same_revision_different_operation" } else { "older_revision" }, stringify!($field), marker.revision));
+                    }
+                    results.push(ResourceApplyResult { kind: stringify!($field).to_string(), identity: id, incoming_revision, current_revision, operation: "upsert", result: "ignored_not_newer", runtime_applied: None, error: None });
+                    continue;
+                }
                 let mut outcome = "created";
                 if let Some(position) = position {
                     let current_revision = $revision(&live.$field[position]);
@@ -1055,40 +1254,151 @@ pub(crate) fn build_apply_candidate(
     }
     merge!(
         memory_topics,
+        MemoryTopics,
         |item: &crate::export::ExportMemoryTopic| { item.topic.clone() },
         |item: &crate::export::ExportMemoryTopic| item.revision
     );
     merge!(
         shared_mqtt_clients,
+        SharedMqttClients,
         |item: &crate::export::ExportSharedMqttClient| item.definition.key.clone(),
         |item: &crate::export::ExportSharedMqttClient| item.revision
     );
     merge!(
         schemas,
+        Schemas,
         |item: &crate::export::ExportSchema| item.name.clone(),
         |item: &crate::export::ExportSchema| item.revision
     );
     merge!(
         streams,
+        Streams,
         |item: &crate::stream::CreateStreamRequest| item.name.clone(),
         |item: &crate::stream::CreateStreamRequest| item.revision
     );
     merge!(
         pipelines,
+        Pipelines,
         |item: &crate::export::ExportPipeline| item.definition.id.clone(),
         |item: &crate::export::ExportPipeline| item.definition.revision
     );
     merge!(
         udfs,
+        Udfs,
         |item: &crate::export::ExportUdf| item.name.to_ascii_lowercase(),
         |item: &crate::export::ExportUdf| item.revision
     );
     merge!(
         tables,
+        Tables,
         |item: &crate::export::ExportTable| item.definition.name.clone(),
         |item: &crate::export::ExportTable| item.definition.revision
     );
-    Ok((live, pending, results))
+    let mut deletions = Vec::new();
+    macro_rules! delete {
+        ($field:ident, $kind:ident, $id:expr, $revision:expr) => {
+            for marker in incoming_deletions
+                .iter()
+                .filter(|marker| marker.kind == storage::ResourceKind::$kind)
+                .cloned()
+            {
+                let position = live
+                    .$field
+                    .iter()
+                    .position(|item| $id(item) == marker.identity);
+                let live_revision = position.map(|position| $revision(&live.$field[position]));
+                let deleted_revision = tombstones
+                    .get(&(marker.kind, marker.identity.clone()))
+                    .map(|current| current.revision);
+                let current_revision = live_revision.or(deleted_revision);
+                let outcome =
+                    if current_revision.is_some_and(|revision| marker.revision <= revision) {
+                        if matches!(policy, ApplyPolicy::BestEffort) {
+                            "ignored_not_newer"
+                        } else if deleted_revision == Some(marker.revision) {
+                            "idempotent"
+                        } else {
+                            return Err(format!(
+                                "{}: {} {}: incoming {}, current {}",
+                                if current_revision == Some(marker.revision) {
+                                    "same_revision_different_operation"
+                                } else {
+                                    "older_revision"
+                                },
+                                stringify!($field),
+                                marker.identity,
+                                marker.revision,
+                                current_revision.unwrap_or(0)
+                            ));
+                        }
+                    } else {
+                        if let Some(position) = position {
+                            live.$field.remove(position);
+                        }
+                        deletions.push(marker.clone());
+                        "deleted"
+                    };
+                results.push(ResourceApplyResult {
+                    kind: stringify!($field).to_string(),
+                    identity: marker.identity.clone(),
+                    incoming_revision: marker.revision,
+                    current_revision,
+                    operation: "delete",
+                    result: outcome,
+                    runtime_applied: None,
+                    error: None,
+                });
+            }
+        };
+    }
+    delete!(
+        memory_topics,
+        MemoryTopics,
+        |item: &crate::export::ExportMemoryTopic| item.topic.clone(),
+        |item: &crate::export::ExportMemoryTopic| item.revision
+    );
+    delete!(
+        shared_mqtt_clients,
+        SharedMqttClients,
+        |item: &crate::export::ExportSharedMqttClient| item.definition.key.clone(),
+        |item: &crate::export::ExportSharedMqttClient| item.revision
+    );
+    delete!(
+        schemas,
+        Schemas,
+        |item: &crate::export::ExportSchema| item.name.clone(),
+        |item: &crate::export::ExportSchema| item.revision
+    );
+    delete!(
+        streams,
+        Streams,
+        |item: &crate::stream::CreateStreamRequest| item.name.clone(),
+        |item: &crate::stream::CreateStreamRequest| item.revision
+    );
+    delete!(
+        pipelines,
+        Pipelines,
+        |item: &crate::export::ExportPipeline| item.definition.id.clone(),
+        |item: &crate::export::ExportPipeline| item.definition.revision
+    );
+    delete!(
+        udfs,
+        Udfs,
+        |item: &crate::export::ExportUdf| item.name.to_ascii_lowercase(),
+        |item: &crate::export::ExportUdf| item.revision
+    );
+    delete!(
+        tables,
+        Tables,
+        |item: &crate::export::ExportTable| item.definition.name.clone(),
+        |item: &crate::export::ExportTable| item.definition.revision
+    );
+    Ok(ApplyCandidate {
+        resources: live,
+        pending,
+        deletions,
+        results,
+    })
 }
 
 pub(crate) fn validate_incoming_identities(resources: &ExportResources) -> Result<(), String> {
@@ -1174,7 +1484,7 @@ pub(crate) fn filter_pending_snapshot(
     let udf_ids = pending
         .udfs
         .iter()
-        .map(|v| v.name.as_str())
+        .map(|v| v.name.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
     let table_ids = pending
         .tables
@@ -1182,6 +1492,7 @@ pub(crate) fn filter_pending_snapshot(
         .map(|v| v.definition.name.as_str())
         .collect::<BTreeSet<_>>();
     MetadataExportSnapshot {
+        tombstones: Vec::new(),
         streams: candidate
             .streams
             .into_iter()
@@ -1457,6 +1768,7 @@ mod tests {
 
     fn manifest(version: &str, topics: &[(&str, usize, u64)]) -> ResourceManifestV1 {
         ResourceManifestV1 {
+            deletions: Default::default(),
             format_version: RESOURCE_DIRECTORY_FORMAT_VERSION,
             bundle_version: version.to_string(),
             resources: ExportResources {
@@ -1479,6 +1791,185 @@ mod tests {
                 tables: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn init_delete_preserves_dependencies_when_dependent_deletion_is_invalid() {
+        let root = tempdir().unwrap();
+        let storage = StorageManager::new(root.path().join("data")).unwrap();
+        let init = root.path().join("init");
+        fs::create_dir_all(&init).unwrap();
+        storage
+            .create_memory_topic(storage::StoredMemoryTopic {
+                topic: "retained_topic".into(),
+                revision: 1,
+                kind: storage::StoredMemoryTopicKind::Bytes,
+                capacity: 8,
+            })
+            .unwrap();
+        storage
+            .create_memory_topic(storage::StoredMemoryTopic {
+                topic: "independent_topic".into(),
+                revision: 1,
+                kind: storage::StoredMemoryTopicKind::Bytes,
+                capacity: 8,
+            })
+            .unwrap();
+        let stream: crate::stream::CreateStreamRequest = serde_json::from_value(serde_json::json!({"name":"retained_stream","revision":1,"type":"memory","props":{"topic":"retained_topic"}})).unwrap();
+        storage
+            .create_stream(crate::storage_bridge::stored_stream_from_request(&stream).unwrap())
+            .unwrap();
+        let raw = serde_json::json!({"format_version":1,"bundle_version":"failed_dependent_delete","deletions":{
+            "streams":[{"name":"retained_stream","revision":0}],
+            "memory_topics":[{"topic":"retained_topic","revision":2},{"topic":"independent_topic","revision":2}]
+        }});
+        fs::write(init.join(MANIFEST_FILE), serde_json::to_vec(&raw).unwrap()).unwrap();
+        apply_init_directory_if_needed(&storage, Some(&init), &|_| true).unwrap();
+        assert!(storage.get_stream("retained_stream").unwrap().is_some());
+        assert!(
+            storage
+                .get_memory_topic("retained_topic")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            storage
+                .get_tombstone(storage::ResourceKind::MemoryTopics, "retained_topic")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .get_memory_topic("independent_topic")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .get_tombstone(storage::ResourceKind::MemoryTopics, "independent_topic")
+                .unwrap()
+                .is_some()
+        );
+        assert!(storage.get_init_apply_meta().unwrap().is_none());
+    }
+
+    #[test]
+    fn init_delete_replay_ignores_old_revisions_and_recreates_only_newer_resources() {
+        let root = tempdir().unwrap();
+        let storage = StorageManager::new(root.path().join("data")).unwrap();
+        let init = root.path().join("init");
+        fs::create_dir_all(&init).unwrap();
+        let deletion = serde_json::json!({"format_version":1,"bundle_version":"delete_missing","deletions":{"memory_topics":[{"topic":"topic_a","revision":5}]}});
+        fs::write(
+            init.join(MANIFEST_FILE),
+            serde_json::to_vec(&deletion).unwrap(),
+        )
+        .unwrap();
+        apply_init_directory_if_needed(&storage, Some(&init), &|_| true).unwrap();
+        assert_eq!(
+            storage
+                .get_tombstone(storage::ResourceKind::MemoryTopics, "topic_a")
+                .unwrap()
+                .unwrap()
+                .revision,
+            5
+        );
+        for revision in [4, 5, 6] {
+            write_manifest(
+                &init,
+                &manifest(&format!("upsert_{revision}"), &[("topic_a", 8, revision)]),
+            );
+            apply_init_directory_if_needed(&storage, Some(&init), &|_| true).unwrap();
+            assert_eq!(
+                storage.get_memory_topic("topic_a").unwrap().is_some(),
+                revision == 6
+            );
+        }
+        let mut delayed = deletion;
+        delayed["bundle_version"] = serde_json::json!("delayed_delete");
+        fs::write(
+            init.join(MANIFEST_FILE),
+            serde_json::to_vec(&delayed).unwrap(),
+        )
+        .unwrap();
+        apply_init_directory_if_needed(&storage, Some(&init), &|_| true).unwrap();
+        assert_eq!(
+            storage
+                .get_memory_topic("topic_a")
+                .unwrap()
+                .unwrap()
+                .revision,
+            6
+        );
+    }
+
+    #[test]
+    fn init_udf_recreation_uses_canonical_identity_through_snapshot_selection() {
+        let raw: RawInitManifest = serde_json::from_value(serde_json::json!({
+            "format_version":1,"bundle_version":"recreate_udf","resources":{"udfs":[{"name":"TRANSFORM","revision":10,"wasm_sha256":"a".repeat(64)}]}
+        })).unwrap();
+        let parsed = parse_init_entries(raw);
+        let selected = build_apply_candidate(
+            "recreate_udf",
+            ExportResources::default(),
+            parsed.manifest.resources,
+            CandidateOptions {
+                policy: ApplyPolicy::BestEffort,
+                tombstones: vec![storage::StoredTombstone {
+                    kind: storage::ResourceKind::Udfs,
+                    identity: "transform".into(),
+                    revision: 9,
+                }],
+                deletions: Default::default(),
+            },
+        )
+        .unwrap();
+        assert_eq!(selected.pending.udfs[0].name, "transform");
+        let mut snapshot = empty_snapshot();
+        snapshot.udfs.push(storage::StoredUdf {
+            name: "transform".into(),
+            revision: 10,
+            wasm_sha256: "a".repeat(64),
+            raw_json: "{}".into(),
+        });
+        assert_eq!(
+            filter_pending_snapshot(snapshot, &selected.pending)
+                .udfs
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn init_resource_delete_duplicates_reject_both_and_keep_independent_operations() {
+        let root = tempdir().unwrap();
+        let storage = StorageManager::new(root.path().join("data")).unwrap();
+        let init = root.path().join("init");
+        fs::create_dir_all(&init).unwrap();
+        let raw = serde_json::json!({"format_version":1,"bundle_version":"cross_duplicates",
+            "resources":{"memory_topics":[{"topic":"duplicate_topic","revision":1,"kind":"bytes","capacity":8}]},
+            "deletions":{"memory_topics":[{"topic":"duplicate_topic","revision":2},{"topic":"independent_topic","revision":3}]}});
+        fs::write(init.join(MANIFEST_FILE), serde_json::to_vec(&raw).unwrap()).unwrap();
+        apply_init_directory_if_needed(&storage, Some(&init), &|_| true).unwrap();
+        assert!(
+            storage
+                .get_memory_topic("duplicate_topic")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .get_tombstone(storage::ResourceKind::MemoryTopics, "duplicate_topic")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            storage
+                .get_tombstone(storage::ResourceKind::MemoryTopics, "independent_topic")
+                .unwrap()
+                .is_some()
+        );
+        assert!(storage.get_init_apply_meta().unwrap().is_none());
     }
 
     fn write_manifest(init_dir: &Path, manifest: &ResourceManifestV1) {

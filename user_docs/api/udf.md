@@ -110,3 +110,12 @@ type errors return an error envelope instead of a default value:
 
 The SDK can generate the required exports and batch wrapper. See the
 `veloflux-udf-sdk` crate for the `define_udf!` macro and WASM build command.
+
+## Revisioned Deletion
+
+DELETE also accepts optional `?revision=N`. It uses the shared revision timeline,
+records a tombstone even for an absent resource, and returns the
+[Apply response](../../docs/api/storage_apply.md). A greater revision is required
+for recreation; equal deletion replay retries cleanup. Omitting the parameter
+keeps ordinary DELETE behavior and does not create or clear a tombstone.
+See [resource deletion](../../docs/api/storage_delete.md) for conflicts and cleanup.

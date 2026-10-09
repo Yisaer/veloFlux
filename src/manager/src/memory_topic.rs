@@ -99,6 +99,9 @@ pub async fn create_memory_topic_handler(
 
     match state.storage.create_memory_topic(stored.clone()) {
         Ok(()) => {}
+        Err(storage::StorageError::RevisionConflict(error)) => {
+            return (StatusCode::CONFLICT, error).into_response();
+        }
         Err(StorageError::AlreadyExists(_)) => {
             let err = format!("memory topic {topic} already exists");
             audit.log_failure(&err);
@@ -115,6 +118,7 @@ pub async fn create_memory_topic_handler(
         if let Err(err) = instance.declare_memory_topic(&topic, req.kind.as_flow_kind(), capacity) {
             let _ = state.storage.delete_memory_topic(&topic);
             let (status, message) = match err {
+                MemoryPubSubError::TopicInUse { .. } => (StatusCode::CONFLICT, err.to_string()),
                 MemoryPubSubError::InvalidTopic => {
                     (StatusCode::BAD_REQUEST, format!("invalid topic {topic}"))
                 }

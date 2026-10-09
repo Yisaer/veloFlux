@@ -383,3 +383,12 @@ During import, schemas are validated for:
 - Non-empty name (duplicates are rejected).
 - Well-formed props (valid JSON).
 - Names must be unique within the bundle.
+
+## Revisioned Deletion
+
+DELETE also accepts optional `?revision=N`. It uses the shared revision timeline,
+records a tombstone even for an absent resource, and returns the
+[Apply response](../../docs/api/storage_apply.md). A greater revision is required
+for recreation; equal deletion replay retries cleanup. Omitting the parameter
+keeps ordinary DELETE behavior and does not create or clear a tombstone.
+See [resource deletion](../../docs/api/storage_delete.md) for conflicts and cleanup.

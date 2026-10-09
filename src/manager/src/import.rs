@@ -509,6 +509,7 @@ fn validate_and_build_snapshot_inner<F>(
 where
     F: Fn(&str) -> bool,
 {
+    bundle.deletions.validate(&bundle.resources)?;
     let mut memory_topics = Vec::with_capacity(bundle.resources.memory_topics.len());
     let mut memory_topic_names = BTreeSet::new();
     for topic in &bundle.resources.memory_topics {
@@ -648,6 +649,7 @@ where
     }
 
     Ok(MetadataExportSnapshot {
+        tombstones: bundle.deletions.tombstones(),
         streams,
         schemas,
         pipelines,
@@ -987,6 +989,7 @@ mod tests {
         topic_name: &str,
     ) -> ResourceManifestV1 {
         ResourceManifestV1 {
+            deletions: Default::default(),
             format_version: RESOURCE_DIRECTORY_FORMAT_VERSION,
             bundle_version: "test-bundle-1".to_string(),
             resources: crate::export::ExportResources {
@@ -1244,6 +1247,51 @@ mod tests {
             err.contains("uncompressed size exceeds 7 bytes"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn tombstones_export_and_restore_with_full_snapshot_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let source = StorageManager::new(root.path().join("source")).unwrap();
+        let target = StorageManager::new(root.path().join("target")).unwrap();
+        let mut delta = crate::apply_core::empty_snapshot();
+        delta.tombstones.push(storage::StoredTombstone {
+            kind: storage::ResourceKind::Streams,
+            identity: "deleted_stream".into(),
+            revision: 9,
+        });
+        source
+            .commit_metadata_snapshot(delta, Default::default())
+            .unwrap();
+        let manifest = build_resource_manifest(&source, "deleted_snapshot".to_string()).unwrap();
+        let zip = crate::export::build_zip(
+            &manifest,
+            &[],
+            &source.wasm_files_dir(),
+            &source.schemas_dir(),
+        )
+        .unwrap();
+        let extract = root.path().join("extract");
+        std::fs::create_dir_all(&extract).unwrap();
+        extract_zip(&zip, &extract).unwrap();
+        let restored: ResourceManifestV1 =
+            serde_json::from_slice(&std::fs::read(extract.join("manifest.json")).unwrap()).unwrap();
+        let snapshot = validate_and_build_snapshot(&restored, None, &is_default_instance).unwrap();
+        target.replace_metadata_snapshot(snapshot).unwrap();
+        assert_eq!(
+            source.list_tombstones().unwrap(),
+            target.list_tombstones().unwrap()
+        );
+        let old: ResourceManifestV1 = serde_json::from_value(
+            serde_json::json!({"format_version":1,"bundle_version":"old_snapshot","resources":{}}),
+        )
+        .unwrap();
+        target
+            .replace_metadata_snapshot(
+                validate_and_build_snapshot(&old, None, &is_default_instance).unwrap(),
+            )
+            .unwrap();
+        assert!(target.list_tombstones().unwrap().is_empty());
     }
 
     #[test]

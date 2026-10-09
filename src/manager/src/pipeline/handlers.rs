@@ -375,6 +375,9 @@ pub async fn create_pipeline_handler(
     };
     match state.storage.create_pipeline(stored.clone()) {
         Ok(()) => {}
+        Err(storage::StorageError::RevisionConflict(error)) => {
+            return (StatusCode::CONFLICT, error).into_response();
+        }
         Err(StorageError::AlreadyExists(_)) => {
             return (
                 StatusCode::CONFLICT,
@@ -712,6 +715,9 @@ pub async fn upsert_pipeline_handler(
     };
     match state.storage.create_pipeline(stored.clone()) {
         Ok(()) => {}
+        Err(storage::StorageError::RevisionConflict(error)) => {
+            return (StatusCode::CONFLICT, error).into_response();
+        }
         Err(StorageError::AlreadyExists(_)) => {
             return (
                 StatusCode::CONFLICT,

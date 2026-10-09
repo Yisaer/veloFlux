@@ -10,7 +10,9 @@ Their acceptance policies remain different.
 | Bad resource/revision | Fail entry; independent valid entries continue | Reject whole batch | Reject whole snapshot |
 | Duplicate identity | Fail all entries of that identity | Reject whole batch | Reject whole snapshot |
 | Lower revision | Ignore, retain current record | 409; nothing commits | Replace without comparing old revisions |
-| Equal revision | Ignore without comparing content | Equal normalized declaration is idempotent; changed declaration/hash is 409; attachment bytes inconsistent with the declared hash are 400 | Full replacement |
+| Equal revision | Ignore without comparing content | Delete of a tombstone is idempotent; switching live/deleted operation is 409; equal normalized declaration is idempotent; changed declaration/hash is 409; attachment bytes inconsistent with the declared hash are 400 | Full replacement |
+| Retained reference to deletion | Reject that deletion and preserve dependency | 409; reject whole batch | Reject inconsistent snapshot |
+| Deletion cleanup fails after commit | Keep tombstone, leave package incomplete | 200 with failed cleanup result; same delete can retry | Storage-only |
 | Dependency fails | Use retained valid dependency where available; fail unsatisfied dependants | Reject batch before commit | Validate only snapshot dependencies |
 | Invalid submitted SQL/schema/WASM | Fail entry and unsatisfied dependants | Reject whole batch | Reject snapshot for static import validation |
 | Upstream update breaks retained pipeline | No additional retained-pipeline planning before commit | Commit; report failed runtime rebind | Old absent pipelines are removed from metadata |
@@ -18,7 +20,7 @@ Their acceptance policies remain different.
 | Runtime build/start fails after commit | Hydration logs errors; committed configuration stays | 200 with false runtime result; configuration stays | No online runtime reconciliation |
 | Committed attachment cleanup fails | Keep commit, warning | Keep commit, warning | Keep commit, warning |
 | Partial processing | Do not record bundle completion | No static partial commit | No partial snapshot commit |
-| Retry | Next startup skips successful equal revisions and retries unresolved entries | Same declaration acknowledges committed revision without runtime retry | Replaces full snapshot again |
+| Retry | Next startup skips accepted revisions and retries unresolved entries and matching deletion cleanup | Same upsert observes without runtime retry; same delete retries cleanup | Replaces full snapshot again |
 
 Apply reports a failed attachment recovery as `500 attachment_recovery_failed`.
 An unresolved journal blocks ordinary manager mutations with

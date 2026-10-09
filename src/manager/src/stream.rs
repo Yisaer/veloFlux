@@ -949,6 +949,9 @@ pub async fn create_stream_handler(
     };
     match state.storage.create_stream(stored.clone()) {
         Ok(()) => {}
+        Err(storage::StorageError::RevisionConflict(error)) => {
+            return (StatusCode::CONFLICT, error).into_response();
+        }
         Err(StorageError::AlreadyExists(_)) => {
             return (
                 StatusCode::CONFLICT,
@@ -1545,6 +1548,9 @@ pub async fn upsert_stream_handler(
     if let Err(err) = state.storage.create_stream(new_stored) {
         // Best-effort restore the old entry.
         let _ = state.storage.create_stream(old_stored.clone());
+        if let storage::StorageError::RevisionConflict(error) = err {
+            return (StatusCode::CONFLICT, error).into_response();
+        }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to persist updated stream {name}: {err}"),

@@ -148,3 +148,10 @@ Named schemas are refreshed in memory after import, but pipeline/global runtime
 reconciliation is not performed. A lost response does not prove the replacement
 failed; repeating import replaces the complete snapshot again. See the
 [detailed error contract](../../docs/api/storage_import.md).
+
+## Deletion Watermarks
+
+Format version 1 carries tombstones in optional `deletions`. Export includes all
+stored markers. Full import replaces both resources and markers; restoring an
+older snapshot that omits a marker removes its protection against old upserts.
+Live and deleted records cannot share an identity in the same snapshot.

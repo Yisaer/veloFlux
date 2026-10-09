@@ -317,3 +317,6 @@ Important failure behaviors:
 
 - If shared-client updates are introduced later, they should reuse the same per-key mutation lock
   model instead of bypassing it with in-place runtime mutation.
+
+Revisioned DELETE accepts `?revision=N`; see [resource deletion](../../api/storage_delete.md)
+for the shared version timeline, cleanup, and tombstone behavior.

@@ -403,6 +403,14 @@ impl FlowInstance {
         self.memory_pubsub_registry.open_publisher_collection(topic)
     }
 
+    pub fn ensure_memory_topic_unused(&self, topic: &str) -> Result<(), MemoryPubSubError> {
+        self.memory_pubsub_registry.ensure_topic_unused(topic)
+    }
+
+    pub fn drop_memory_topic(&self, topic: &str) -> Result<(), MemoryPubSubError> {
+        self.memory_pubsub_registry.drop_topic(topic)
+    }
+
     pub fn memory_topic_kind(&self, topic: &str) -> Option<MemoryTopicKind> {
         self.memory_pubsub_registry.topic_kind(topic)
     }

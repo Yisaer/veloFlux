@@ -6,6 +6,51 @@ use sqlparser::parser::Parser;
 
 use crate::dialect::StreamDialect;
 
+/// Collect functions from the resolved SELECT AST, including expressions that
+/// were lifted into aggregate, stateful, or accumulate mappings.
+pub fn referenced_functions(statement: &crate::SelectStmt) -> Vec<String> {
+    struct Functions(Vec<String>);
+    impl Visitor for Functions {
+        type Break = ();
+        fn pre_visit_expr(&mut self, expr: &Expr) -> std::ops::ControlFlow<()> {
+            if let Expr::Function(function) = expr {
+                self.0.push(function.name.to_string().to_ascii_lowercase());
+            }
+            std::ops::ControlFlow::Continue(())
+        }
+    }
+    let mut visitor = Functions(Vec::new());
+    for field in &statement.select_fields {
+        let _ = field.expr.visit(&mut visitor);
+    }
+    for expr in statement
+        .where_condition
+        .iter()
+        .chain(statement.having.iter())
+        .chain(statement.group_by_exprs.iter())
+        .chain(statement.aggregate_mappings.values())
+    {
+        let _ = expr.visit(&mut visitor);
+    }
+    for item in &statement.order_by {
+        let _ = item.expr.visit(&mut visitor);
+    }
+    for item in &statement.stateful_mappings {
+        let _ = item.spec.original_expr.visit(&mut visitor);
+    }
+    for item in &statement.acc_mappings {
+        let _ = item.spec.original_expr.visit(&mut visitor);
+    }
+    for join in &statement.joins {
+        if let crate::select_stmt::JoinConstraint::On(expr) = &join.constraint {
+            let _ = expr.visit(&mut visitor);
+        }
+    }
+    visitor.0.sort();
+    visitor.0.dedup();
+    visitor.0
+}
+
 /// Extract all expressions from SQL statements
 pub fn extract_expressions_from_sql(sql: &str) -> Result<Vec<String>, String> {
     let dialect = StreamDialect::new();

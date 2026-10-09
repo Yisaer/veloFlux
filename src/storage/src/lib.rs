@@ -29,6 +29,7 @@ const INIT_APPLY_META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new
 const INIT_APPLY_META_KEY: &str = "resource_directory";
 const ATTACHMENT_COMMIT_KEY: &str = "attachment_transaction";
 const UDFS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("udfs");
+const TOMBSTONES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("resource_tombstones");
 const TABLES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("tables");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +51,8 @@ pub enum StorageError {
     NotFound(String),
     #[error("already exists: {0}")]
     AlreadyExists(String),
+    #[error("revision conflict: {0}")]
+    RevisionConflict(String),
     #[error("invalid input: {0}")]
     InvalidInput(String),
 }
@@ -177,8 +180,81 @@ pub struct StoredUdf {
     pub raw_json: String,
 }
 
+/// Resource identity namespace shared by live records and deletion watermarks.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceKind {
+    MemoryTopics,
+    SharedMqttClients,
+    Schemas,
+    Streams,
+    Pipelines,
+    Udfs,
+    Tables,
+}
+
+impl ResourceKind {
+    fn table(self) -> TableDefinition<'static, &'static str, &'static [u8]> {
+        match self {
+            Self::MemoryTopics => MEMORY_TOPICS_TABLE,
+            Self::SharedMqttClients => SHARED_MQTT_CONFIGS_TABLE,
+            Self::Schemas => SCHEMAS_TABLE,
+            Self::Streams => STREAMS_TABLE,
+            Self::Pipelines => PIPELINES_TABLE,
+            Self::Udfs => UDFS_TABLE,
+            Self::Tables => TABLES_TABLE,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredTombstone {
+    pub kind: ResourceKind,
+    pub identity: String,
+    pub revision: u64,
+}
+
+impl StoredTombstone {
+    fn key(&self) -> Result<String, StorageError> {
+        tombstone_key(self.kind, &self.identity)
+    }
+}
+
+fn tombstone_key(kind: ResourceKind, identity: &str) -> Result<String, StorageError> {
+    let identity = if kind == ResourceKind::Udfs {
+        identity.to_ascii_lowercase()
+    } else {
+        identity.to_string()
+    };
+    serde_json::to_string(&(kind, identity)).map_err(StorageError::serialization)
+}
+
+trait ResourceRecord: Serialize {
+    const KIND: ResourceKind;
+    fn revision(&self) -> u64;
+}
+
+macro_rules! resource_record {
+    ($record:ty, $kind:ident) => {
+        impl ResourceRecord for $record {
+            const KIND: ResourceKind = ResourceKind::$kind;
+            fn revision(&self) -> u64 {
+                self.revision
+            }
+        }
+    };
+}
+resource_record!(StoredStream, Streams);
+resource_record!(StoredSchema, Schemas);
+resource_record!(StoredPipeline, Pipelines);
+resource_record!(StoredMqttClientConfig, SharedMqttClients);
+resource_record!(StoredMemoryTopic, MemoryTopics);
+resource_record!(StoredUdf, Udfs);
+resource_record!(StoredTable, Tables);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataExportSnapshot {
+    pub tombstones: Vec<StoredTombstone>,
     pub streams: Vec<StoredStream>,
     pub schemas: Vec<StoredSchema>,
     pub pipelines: Vec<StoredPipeline>,
@@ -270,7 +346,7 @@ impl MetadataStorage {
     }
 
     pub fn replace_schema(&self, schema: StoredSchema) -> Result<(), StorageError> {
-        self.put_entry(SCHEMAS_TABLE, &schema.name, &schema)
+        self.put_resource(SCHEMAS_TABLE, &schema.name, &schema)
     }
 
     pub fn get_schema(&self, name: &str) -> Result<Option<StoredSchema>, StorageError> {
@@ -391,12 +467,13 @@ impl MetadataStorage {
         self.delete_entry(MEMORY_TOPICS_TABLE, topic)
     }
 
-    pub fn create_udf(&self, udf: StoredUdf) -> Result<(), StorageError> {
+    pub fn create_udf(&self, mut udf: StoredUdf) -> Result<(), StorageError> {
+        udf.name = udf.name.to_ascii_lowercase();
         self.insert_if_absent(UDFS_TABLE, &udf.name, &udf)
     }
 
     pub fn get_udf(&self, name: &str) -> Result<Option<StoredUdf>, StorageError> {
-        self.get_entry(UDFS_TABLE, name)
+        self.get_entry(UDFS_TABLE, &name.to_ascii_lowercase())
     }
 
     pub fn list_udfs(&self) -> Result<Vec<StoredUdf>, StorageError> {
@@ -404,7 +481,7 @@ impl MetadataStorage {
     }
 
     pub fn delete_udf(&self, name: &str) -> Result<(), StorageError> {
-        self.delete_entry(UDFS_TABLE, name)
+        self.delete_entry(UDFS_TABLE, &name.to_ascii_lowercase())
     }
 
     pub fn create_table(&self, table: StoredTable) -> Result<(), StorageError> {
@@ -431,6 +508,7 @@ impl MetadataStorage {
             .begin_read()
             .map_err(StorageError::backend)?;
         Ok(MetadataExportSnapshot {
+            tombstones: Self::list_entries_in_read_txn(&txn, TOMBSTONES_TABLE)?,
             streams: Self::list_entries_in_read_txn(&txn, STREAMS_TABLE)?,
             schemas: Self::list_entries_in_read_txn(&txn, SCHEMAS_TABLE)?,
             pipelines: Self::list_entries_in_read_txn(&txn, PIPELINES_TABLE)?,
@@ -440,6 +518,44 @@ impl MetadataStorage {
             udfs: Self::list_entries_in_read_txn(&txn, UDFS_TABLE)?,
             tables: Self::list_entries_in_read_txn(&txn, TABLES_TABLE)?,
         })
+    }
+
+    pub fn get_tombstone(
+        &self,
+        kind: ResourceKind,
+        identity: &str,
+    ) -> Result<Option<StoredTombstone>, StorageError> {
+        self.get_entry(TOMBSTONES_TABLE, &tombstone_key(kind, identity)?)
+    }
+
+    /// Observe only the requested deletion identities in one read transaction.
+    pub fn get_tombstones(
+        &self,
+        identities: &std::collections::BTreeSet<(ResourceKind, String)>,
+    ) -> Result<Vec<StoredTombstone>, StorageError> {
+        let _guard = self.lock_db()?;
+        let txn = self
+            .backend
+            .db
+            .begin_read()
+            .map_err(StorageError::backend)?;
+        let table = txn
+            .open_table(TOMBSTONES_TABLE)
+            .map_err(StorageError::backend)?;
+        let mut markers = Vec::new();
+        for (kind, identity) in identities {
+            if let Some(raw) = table
+                .get(tombstone_key(*kind, identity)?.as_str())
+                .map_err(StorageError::backend)?
+            {
+                markers.push(decode_record(raw.value())?);
+            }
+        }
+        Ok(markers)
+    }
+
+    pub fn list_tombstones(&self) -> Result<Vec<StoredTombstone>, StorageError> {
+        self.list_entries(TOMBSTONES_TABLE)
     }
 
     pub fn replace_snapshot(&self, snapshot: MetadataExportSnapshot) -> Result<(), StorageError> {
@@ -469,12 +585,72 @@ impl MetadataStorage {
         mut snapshot: MetadataExportSnapshot,
         options: MetadataCommitOptions,
     ) -> Result<(), StorageError> {
+        for udf in &mut snapshot.udfs {
+            udf.name = udf.name.to_ascii_lowercase();
+        }
+        for marker in &mut snapshot.tombstones {
+            if marker.kind == ResourceKind::Udfs {
+                marker.identity = marker.identity.to_ascii_lowercase();
+            }
+        }
         let _guard = self.lock_db()?;
         let txn = self
             .backend
             .db
             .begin_write()
             .map_err(StorageError::backend)?;
+        let mut identities = std::collections::BTreeSet::new();
+        macro_rules! check_resources {
+            ($values:expr, $kind:ident, $key:ident) => {
+                for resource in $values {
+                    let identity = resource.$key.as_str();
+                    if !identities.insert((ResourceKind::$kind, identity.to_string())) {
+                        return Err(StorageError::InvalidInput(format!(
+                            "duplicate resource identity: {identity}"
+                        )));
+                    }
+                    if !options.replace {
+                        Self::check_recreation(
+                            &txn,
+                            ResourceKind::$kind,
+                            identity,
+                            resource.revision,
+                        )?;
+                    }
+                }
+            };
+        }
+        check_resources!(&snapshot.streams, Streams, id);
+        check_resources!(&snapshot.schemas, Schemas, name);
+        check_resources!(&snapshot.pipelines, Pipelines, id);
+        check_resources!(&snapshot.mqtt_configs, SharedMqttClients, key);
+        check_resources!(&snapshot.memory_topics, MemoryTopics, topic);
+        check_resources!(&snapshot.udfs, Udfs, name);
+        check_resources!(&snapshot.tables, Tables, id);
+        for marker in &snapshot.tombstones {
+            if marker.identity.is_empty()
+                || marker.revision == 0
+                || marker.revision > (1_u64 << 53) - 1
+            {
+                return Err(StorageError::InvalidInput(
+                    "invalid tombstone identity or revision".to_string(),
+                ));
+            }
+            if !identities.insert((marker.kind, marker.identity.clone())) {
+                return Err(StorageError::InvalidInput(format!(
+                    "duplicate resource/deletion identity: {}",
+                    marker.identity
+                )));
+            }
+            if !options.replace {
+                Self::check_deletion(&txn, marker)?;
+            }
+        }
+        if options.replace {
+            Self::replace_table_entries(&txn, TOMBSTONES_TABLE, &[] as &[StoredTombstone], |v| {
+                v.identity.as_str()
+            })?;
+        }
         macro_rules! write_entries {
             ($txn:expr, $table:expr, $values:expr, $key:expr $(,)?) => {
                 if options.replace {
@@ -543,6 +719,24 @@ impl MetadataStorage {
         write_entries!(&txn, TABLES_TABLE, &snapshot.tables, |table| {
             table.id.as_str()
         })?;
+        for marker in &snapshot.tombstones {
+            {
+                let mut live = txn
+                    .open_table(marker.kind.table())
+                    .map_err(StorageError::backend)?;
+                live.remove(marker.identity.as_str())
+                    .map_err(StorageError::backend)?;
+            }
+            if marker.kind == ResourceKind::Pipelines {
+                let mut states = txn
+                    .open_table(PIPELINE_RUN_STATES_TABLE)
+                    .map_err(StorageError::backend)?;
+                states
+                    .remove(marker.identity.as_str())
+                    .map_err(StorageError::backend)?;
+            }
+            Self::put_entry_in_txn(&txn, TOMBSTONES_TABLE, &marker.key()?, marker)?;
+        }
         if let Some(meta) = options.init_meta {
             Self::put_entry_in_txn(&txn, INIT_APPLY_META_TABLE, INIT_APPLY_META_KEY, &meta)?;
         }
@@ -591,13 +785,15 @@ impl MetadataStorage {
         txn.open_table(UDFS_TABLE).map_err(StorageError::backend)?;
         txn.open_table(TABLES_TABLE)
             .map_err(StorageError::backend)?;
+        txn.open_table(TOMBSTONES_TABLE)
+            .map_err(StorageError::backend)?;
         txn.open_table(SCHEMAS_TABLE)
             .map_err(StorageError::backend)?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
     }
 
-    fn insert_if_absent<T: Serialize>(
+    fn insert_if_absent<T: ResourceRecord>(
         &self,
         table: TableDefinition<&str, &[u8]>,
         key: &str,
@@ -609,6 +805,7 @@ impl MetadataStorage {
             .db
             .begin_write()
             .map_err(StorageError::backend)?;
+        Self::check_recreation(&txn, T::KIND, key, value.revision())?;
         {
             let mut table = txn.open_table(table).map_err(StorageError::backend)?;
             if table.get(key).map_err(StorageError::backend)?.is_some() {
@@ -620,6 +817,105 @@ impl MetadataStorage {
                 .map_err(StorageError::backend)?;
         }
         txn.commit().map_err(StorageError::backend)?;
+        Ok(())
+    }
+
+    fn put_resource<T: ResourceRecord>(
+        &self,
+        table: TableDefinition<&str, &[u8]>,
+        key: &str,
+        value: &T,
+    ) -> Result<(), StorageError> {
+        let _guard = self.lock_db()?;
+        let txn = self
+            .backend
+            .db
+            .begin_write()
+            .map_err(StorageError::backend)?;
+        Self::check_recreation(&txn, T::KIND, key, value.revision())?;
+        Self::put_entry_in_txn(&txn, table, key, value)?;
+        txn.commit().map_err(StorageError::backend)
+    }
+
+    fn check_recreation(
+        txn: &WriteTransaction,
+        kind: ResourceKind,
+        identity: &str,
+        revision: u64,
+    ) -> Result<(), StorageError> {
+        let key = tombstone_key(kind, identity)?;
+        let mut markers = txn
+            .open_table(TOMBSTONES_TABLE)
+            .map_err(StorageError::backend)?;
+        let marker: Option<StoredTombstone> = markers
+            .get(key.as_str())
+            .map_err(StorageError::backend)?
+            .map(|raw| decode_record(raw.value()))
+            .transpose()?;
+        if let Some(marker) = marker {
+            if revision <= marker.revision {
+                return Err(StorageError::RevisionConflict(format!(
+                    "{:?} {identity}: incoming {revision}, deleted {}",
+                    kind, marker.revision
+                )));
+            }
+            markers
+                .remove(key.as_str())
+                .map_err(StorageError::backend)?;
+        }
+        Ok(())
+    }
+
+    fn check_deletion(
+        txn: &WriteTransaction,
+        marker: &StoredTombstone,
+    ) -> Result<(), StorageError> {
+        let live = txn
+            .open_table(marker.kind.table())
+            .map_err(StorageError::backend)?;
+        let revision = match live
+            .get(marker.identity.as_str())
+            .map_err(StorageError::backend)?
+        {
+            Some(raw) => {
+                macro_rules! revision {
+                    ($ty:ty) => {
+                        decode_record::<$ty>(raw.value())?.revision
+                    };
+                }
+                Some(match marker.kind {
+                    ResourceKind::Streams => revision!(StoredStream),
+                    ResourceKind::Schemas => revision!(StoredSchema),
+                    ResourceKind::Pipelines => revision!(StoredPipeline),
+                    ResourceKind::SharedMqttClients => revision!(StoredMqttClientConfig),
+                    ResourceKind::MemoryTopics => revision!(StoredMemoryTopic),
+                    ResourceKind::Udfs => revision!(StoredUdf),
+                    ResourceKind::Tables => revision!(StoredTable),
+                })
+            }
+            None => None,
+        };
+        if revision.is_some_and(|revision| marker.revision <= revision) {
+            return Err(StorageError::RevisionConflict(format!(
+                "{:?} {}: deletion revision {} does not exceed live revision",
+                marker.kind, marker.identity, marker.revision
+            )));
+        }
+        let markers = txn
+            .open_table(TOMBSTONES_TABLE)
+            .map_err(StorageError::backend)?;
+        if let Some(raw) = markers
+            .get(marker.key()?.as_str())
+            .map_err(StorageError::backend)?
+        {
+            let current: StoredTombstone = decode_record(raw.value())?;
+            if marker.revision < current.revision {
+                return Err(StorageError::RevisionConflict(format!(
+                    "older deletion revision for {}",
+                    marker.identity
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1122,6 +1418,25 @@ impl StorageManager {
         self.metadata.delete_table(id)
     }
 
+    pub fn get_tombstone(
+        &self,
+        kind: ResourceKind,
+        identity: &str,
+    ) -> Result<Option<StoredTombstone>, StorageError> {
+        self.metadata.get_tombstone(kind, identity)
+    }
+
+    pub fn get_tombstones(
+        &self,
+        identities: &std::collections::BTreeSet<(ResourceKind, String)>,
+    ) -> Result<Vec<StoredTombstone>, StorageError> {
+        self.metadata.get_tombstones(identities)
+    }
+
+    pub fn list_tombstones(&self) -> Result<Vec<StoredTombstone>, StorageError> {
+        self.metadata.list_tombstones()
+    }
+
     pub fn export_metadata_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
         self.metadata.export_snapshot()
     }
@@ -1166,6 +1481,265 @@ fn decode_record<T: DeserializeOwned>(raw: &[u8]) -> Result<T, StorageError> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn empty_snapshot() -> MetadataExportSnapshot {
+        MetadataExportSnapshot {
+            tombstones: vec![],
+            streams: vec![],
+            schemas: vec![],
+            pipelines: vec![],
+            pipeline_run_states: vec![],
+            mqtt_configs: vec![],
+            memory_topics: vec![],
+            udfs: vec![],
+            tables: vec![],
+        }
+    }
+
+    #[test]
+    fn revisioned_delete_survives_restart_and_requires_newer_recreation() {
+        let dir = tempdir().expect("directory");
+        let marker = StoredTombstone {
+            kind: ResourceKind::Streams,
+            identity: "sensor".into(),
+            revision: 11,
+        };
+        {
+            let store = MetadataStorage::open(dir.path()).expect("storage");
+            let mut snapshot = empty_snapshot();
+            snapshot.tombstones.push(marker.clone());
+            store
+                .commit_snapshot(snapshot.clone(), Default::default())
+                .expect("delete missing resource");
+            store
+                .commit_snapshot(snapshot, Default::default())
+                .expect("replay deletion");
+        }
+        let store = MetadataStorage::open(dir.path()).expect("reopen");
+        assert_eq!(
+            store
+                .get_tombstone(ResourceKind::Streams, "sensor")
+                .expect("read"),
+            Some(marker)
+        );
+        assert!(matches!(
+            store.delete_stream("sensor"),
+            Err(StorageError::NotFound(_))
+        ));
+        for revision in [10, 11] {
+            let record = StoredStream {
+                id: "sensor".into(),
+                revision,
+                raw_json: "{}".into(),
+            };
+            assert!(matches!(
+                store.create_stream(record),
+                Err(StorageError::RevisionConflict(_))
+            ));
+        }
+        store
+            .create_stream(StoredStream {
+                id: "sensor".into(),
+                revision: 12,
+                raw_json: "{}".into(),
+            })
+            .expect("recreate");
+        assert_eq!(
+            store
+                .get_tombstone(ResourceKind::Streams, "sensor")
+                .expect("read"),
+            None
+        );
+        let mut delayed = empty_snapshot();
+        delayed.tombstones.push(StoredTombstone {
+            kind: ResourceKind::Streams,
+            identity: "sensor".into(),
+            revision: 11,
+        });
+        assert!(matches!(
+            store.commit_snapshot(delayed, Default::default()),
+            Err(StorageError::RevisionConflict(_))
+        ));
+        assert_eq!(
+            store
+                .get_stream("sensor")
+                .expect("read")
+                .expect("record")
+                .revision,
+            12
+        );
+    }
+
+    #[test]
+    fn snapshot_deletions_are_atomic_and_full_restore_replaces_watermarks() {
+        let dir = tempdir().expect("directory");
+        let store = MetadataStorage::open(dir.path()).expect("storage");
+        let mut snapshot = empty_snapshot();
+        snapshot.tombstones.push(StoredTombstone {
+            kind: ResourceKind::Streams,
+            identity: "sensor".into(),
+            revision: 11,
+        });
+        store
+            .commit_snapshot(snapshot.clone(), Default::default())
+            .expect("delete");
+        snapshot.streams.push(StoredStream {
+            id: "sensor".into(),
+            revision: 12,
+            raw_json: "{}".into(),
+        });
+        assert!(matches!(
+            store.commit_snapshot(snapshot, Default::default()),
+            Err(StorageError::InvalidInput(_))
+        ));
+        assert!(store.get_stream("sensor").expect("read").is_none());
+        assert_eq!(
+            store
+                .get_tombstone(ResourceKind::Streams, "sensor")
+                .expect("read")
+                .expect("marker")
+                .revision,
+            11
+        );
+        store
+            .replace_snapshot(empty_snapshot())
+            .expect("restore old snapshot");
+        assert!(store
+            .get_tombstone(ResourceKind::Streams, "sensor")
+            .expect("read")
+            .is_none());
+        store
+            .create_stream(StoredStream {
+                id: "sensor".into(),
+                revision: 1,
+                raw_json: "{}".into(),
+            })
+            .expect("watermark replaced");
+    }
+
+    #[test]
+    fn deletion_watermarks_cover_every_resource_storage_write() {
+        let root = tempdir().unwrap();
+        let store = MetadataStorage::open(root.path()).unwrap();
+        let mut delta = empty_snapshot();
+        for kind in [
+            ResourceKind::MemoryTopics,
+            ResourceKind::SharedMqttClients,
+            ResourceKind::Schemas,
+            ResourceKind::Streams,
+            ResourceKind::Pipelines,
+            ResourceKind::Udfs,
+            ResourceKind::Tables,
+        ] {
+            delta.tombstones.push(StoredTombstone {
+                kind,
+                identity: "removed".into(),
+                revision: 2,
+            });
+        }
+        store.commit_snapshot(delta, Default::default()).unwrap();
+        let mut restore = empty_snapshot();
+        restore.memory_topics.push(StoredMemoryTopic {
+            topic: "removed".into(),
+            revision: 1,
+            kind: StoredMemoryTopicKind::Bytes,
+            capacity: 8,
+        });
+        restore.mqtt_configs.push(StoredMqttClientConfig {
+            key: "removed".into(),
+            revision: 1,
+            raw_json: "{}".into(),
+        });
+        restore.schemas.push(StoredSchema {
+            name: "removed".into(),
+            revision: 1,
+            schema_type: "json".into(),
+            props_json: "{}".into(),
+        });
+        restore.streams.push(StoredStream {
+            id: "removed".into(),
+            revision: 1,
+            raw_json: "{}".into(),
+        });
+        restore.pipelines.push(StoredPipeline {
+            id: "removed".into(),
+            revision: 1,
+            raw_json: "{}".into(),
+        });
+        restore.udfs.push(StoredUdf {
+            name: "removed".into(),
+            revision: 1,
+            wasm_sha256: "a".repeat(64),
+            raw_json: "{}".into(),
+        });
+        restore.tables.push(StoredTable {
+            id: "removed".into(),
+            revision: 1,
+            raw_json: "{}".into(),
+        });
+        assert!(matches!(
+            store.create_memory_topic(restore.memory_topics[0].clone()),
+            Err(StorageError::RevisionConflict(_))
+        ));
+        assert!(matches!(
+            store.create_mqtt_config(restore.mqtt_configs[0].clone()),
+            Err(StorageError::RevisionConflict(_))
+        ));
+        assert!(matches!(
+            store.replace_schema(restore.schemas[0].clone()),
+            Err(StorageError::RevisionConflict(_))
+        ));
+        assert!(matches!(
+            store.create_stream(restore.streams[0].clone()),
+            Err(StorageError::RevisionConflict(_))
+        ));
+        assert!(matches!(
+            store.create_pipeline(restore.pipelines[0].clone()),
+            Err(StorageError::RevisionConflict(_))
+        ));
+        assert!(matches!(
+            store.create_udf(restore.udfs[0].clone()),
+            Err(StorageError::RevisionConflict(_))
+        ));
+        assert!(matches!(
+            store.create_table(restore.tables[0].clone()),
+            Err(StorageError::RevisionConflict(_))
+        ));
+        assert!(matches!(
+            store.commit_snapshot(restore.clone(), Default::default()),
+            Err(StorageError::RevisionConflict(_))
+        ));
+        for v in &mut restore.memory_topics {
+            v.revision = 3;
+        }
+        for v in &mut restore.mqtt_configs {
+            v.revision = 3;
+        }
+        for v in &mut restore.schemas {
+            v.revision = 3;
+        }
+        for v in &mut restore.streams {
+            v.revision = 3;
+        }
+        for v in &mut restore.pipelines {
+            v.revision = 3;
+        }
+        for v in &mut restore.udfs {
+            v.revision = 3;
+        }
+        for v in &mut restore.tables {
+            v.revision = 3;
+        }
+        let mut uppercase = restore.udfs[0].clone();
+        uppercase.name = "REMOVED".into();
+        uppercase.revision = 2;
+        assert!(matches!(
+            store.create_udf(uppercase),
+            Err(StorageError::RevisionConflict(_))
+        ));
+        store.commit_snapshot(restore, Default::default()).unwrap();
+        assert!(store.list_tombstones().unwrap().is_empty());
+    }
 
     fn sample_stream() -> StoredStream {
         StoredStream {
@@ -1416,6 +1990,7 @@ mod tests {
         storage.create_stream(existing_stream).unwrap();
 
         let snapshot = MetadataExportSnapshot {
+            tombstones: Vec::new(),
             streams: vec![sample_stream()],
             schemas: vec![],
             pipelines: vec![sample_pipeline()],
@@ -1464,6 +2039,7 @@ mod tests {
         let meta = sample_init_apply_meta();
 
         let snapshot = MetadataExportSnapshot {
+            tombstones: Vec::new(),
             streams: vec![stream.clone()],
             schemas: vec![],
             pipelines: vec![pipeline.clone()],

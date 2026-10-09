@@ -219,6 +219,7 @@ mod tests {
 
     fn snapshot() -> MetadataExportSnapshot {
         MetadataExportSnapshot {
+            tombstones: Vec::new(),
             streams: vec![],
             schemas: vec![],
             pipelines: vec![],

@@ -153,6 +153,9 @@ pub async fn upload_udf_handler(
 
     match state.storage.create_udf(stored) {
         Ok(()) => {}
+        Err(storage::StorageError::RevisionConflict(error)) => {
+            return (StatusCode::CONFLICT, error).into_response();
+        }
         Err(storage::StorageError::AlreadyExists(_)) => {
             let err = format!("UDF '{name}' already exists");
             audit.log_failure(&err);

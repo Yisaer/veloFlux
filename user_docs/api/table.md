@@ -237,3 +237,12 @@ persistent storage on restart.
 Import performs full-snapshot replacement and does not compare revisions.
 Startup init applies a table only when its revision is greater than the stored
 table revision; equal and lower revisions are ignored.
+
+## Revisioned Deletion
+
+DELETE also accepts optional `?revision=N`. It uses the shared revision timeline,
+records a tombstone even for an absent resource, and returns the
+[Apply response](../../docs/api/storage_apply.md). A greater revision is required
+for recreation; equal deletion replay retries cleanup. Omitting the parameter
+keeps ordinary DELETE behavior and does not create or clear a tombstone.
+See [resource deletion](../../docs/api/storage_delete.md) for conflicts and cleanup.

@@ -25,6 +25,21 @@ pub(crate) async fn coordinate_metadata(
     request: Request,
     next: Next,
 ) -> Response {
+    if request.method() == axum::http::Method::DELETE
+        && crate::resource_delete::route_kind(request.uri().path()).is_some()
+    {
+        match Query::<crate::resource_delete::DeleteQuery>::try_from_uri(request.uri()) {
+            Ok(Query(query))
+                if query.revision.is_some()
+                    || crate::resource_delete::route_kind(request.uri().path())
+                        == Some(storage::ResourceKind::MemoryTopics) =>
+            {
+                return next.run(request).await;
+            }
+            Err(error) => return error.into_response(),
+            _ => {}
+        }
+    }
     if request.method() == axum::http::Method::GET
         || matches!(request.uri().path(), "/storage/apply" | "/storage/import")
     {
@@ -78,7 +93,7 @@ pub(crate) struct ApplyQuery {
 }
 
 #[derive(Serialize)]
-struct ApplyResponse {
+pub(crate) struct ApplyResponse {
     bundle_version: String,
     metadata_committed: bool,
     applied_to_runtime: Option<bool>,
@@ -86,7 +101,7 @@ struct ApplyResponse {
     affected_resources: Vec<ResourceApplyResult>,
 }
 
-fn failure(status: StatusCode, code: &str, message: String) -> Response {
+pub(crate) fn failure(status: StatusCode, code: &str, message: String) -> Response {
     (
         status,
         Json(serde_json::json!({
@@ -251,7 +266,7 @@ fn normalize(resources: &mut ExportResources) -> Result<(), String> {
     Ok(())
 }
 
-async fn apply_manifest(
+pub(crate) async fn apply_manifest(
     state: &AppState,
     mut manifest: ResourceManifestV1,
     source: &Path,
@@ -260,6 +275,10 @@ async fn apply_manifest(
     crate::export::validate_resource_manifest(&manifest).map_err(invalid)?;
     normalize(&mut manifest.resources).map_err(invalid)?;
     apply_core::validate_incoming_identities(&manifest.resources).map_err(invalid)?;
+    manifest
+        .deletions
+        .validate(&manifest.resources)
+        .map_err(invalid)?;
     let mut live = crate::export::build_export_resources(&state.storage).map_err(internal)?;
     // Compare against the accepted declaration, never the operational desired state.
     for pipeline in &mut live.pipelines {
@@ -274,17 +293,34 @@ async fn apply_manifest(
     normalize(&mut live).map_err(internal)?;
     let previous = live.clone();
     let submitted_scope = runtime_scope(state, &previous, &manifest.resources, cascade);
-    let (candidate, pending, mut results) = apply_core::build_apply_candidate(
+    let tombstones =
+        apply_core::relevant_tombstones(&state.storage, &manifest.resources, &manifest.deletions)
+            .map_err(internal)?;
+    let candidate = apply_core::build_apply_candidate(
         &manifest.bundle_version,
         live,
         manifest.resources,
-        ApplyPolicy::Atomic,
+        apply_core::CandidateOptions {
+            policy: ApplyPolicy::Atomic,
+            tombstones,
+            deletions: manifest.deletions,
+        },
     )
     .map_err(|err| (StatusCode::CONFLICT, "revision_conflict", err))?;
-    for result in results
-        .iter()
-        .filter(|result| result.kind == "schemas" && result.result == "idempotent")
+    let pending_deletions = candidate.deletions;
+    let pending = candidate.pending;
+    let mut results = candidate.results;
+    let candidate = candidate.resources;
+    if let Some(error) = crate::resource_delete::blockers(&candidate, &pending_deletions)
+        .map_err(invalid)?
+        .into_values()
+        .next()
     {
+        return Err((StatusCode::CONFLICT, "resource_referenced", error));
+    }
+    for result in results.iter().filter(|result| {
+        result.operation == "upsert" && result.kind == "schemas" && result.result == "idempotent"
+    }) {
         let schema = candidate
             .schemas
             .iter()
@@ -306,10 +342,9 @@ async fn apply_manifest(
             ));
         }
     }
-    for result in results
-        .iter()
-        .filter(|result| result.kind == "udfs" && result.result == "idempotent")
-    {
+    for result in results.iter().filter(|result| {
+        result.operation == "upsert" && result.kind == "udfs" && result.result == "idempotent"
+    }) {
         let udf = candidate
             .udfs
             .iter()
@@ -328,6 +363,7 @@ async fn apply_manifest(
         }
     }
     if results.iter().all(|result| result.result == "idempotent") {
+        cleanup_deletions(state, &mut results).await;
         read_runtime_results(state, &mut results);
         let affected = related_results(state, &submitted_scope, &results).map_err(internal)?;
         return Ok(ApplyResponse {
@@ -345,6 +381,7 @@ async fn apply_manifest(
     validation_view.pipelines = pending.pipelines.clone();
     let snapshot = crate::import::validate_and_build_snapshot(
         &ResourceManifestV1 {
+            deletions: Default::default(),
             format_version: manifest.format_version,
             bundle_version: manifest.bundle_version.clone(),
             resources: validation_view,
@@ -353,7 +390,8 @@ async fn apply_manifest(
         &|id| state.is_declared_instance(id),
     )
     .map_err(invalid)?;
-    let delta = apply_core::filter_pending_snapshot(snapshot, &pending);
+    let mut delta = apply_core::filter_pending_snapshot(snapshot, &pending);
+    delta.tombstones = pending_deletions;
     crate::import::validate_and_copy_udfs_for_import(
         &delta.udfs,
         &prepared.wasm_source,
@@ -775,6 +813,53 @@ fn combined_runtime_result(
         }
     }
     known.then_some(true)
+}
+
+async fn cleanup_deletions(state: &AppState, results: &mut [ResourceApplyResult]) {
+    let mut owner_failure = None;
+    for kind in [
+        storage::ResourceKind::Pipelines,
+        storage::ResourceKind::Streams,
+        storage::ResourceKind::Tables,
+        storage::ResourceKind::SharedMqttClients,
+        storage::ResourceKind::MemoryTopics,
+        storage::ResourceKind::Udfs,
+        storage::ResourceKind::Schemas,
+    ] {
+        let inherited_failure = owner_failure.clone();
+        let wasm_cleanup = if kind == storage::ResourceKind::Udfs
+            && inherited_failure.is_none()
+            && results
+                .iter()
+                .any(|result| result.operation == "delete" && result.kind == "udfs")
+        {
+            crate::resource_delete::cleanup_persisted(&state.storage, kind, "")
+        } else {
+            Ok(())
+        };
+        for result in results.iter_mut().filter(|result| {
+            result.operation == "delete" && result.kind == crate::resource_delete::kind_name(kind)
+        }) {
+            let outcome = if let Some(error) = &inherited_failure {
+                Err(format!("dependent deletion failed: {error}"))
+            } else if let Err(error) = &wasm_cleanup {
+                Err(error.clone())
+            } else {
+                crate::resource_delete::cleanup(state, kind, &result.identity).await
+            };
+            if let Err(error) = &outcome
+                && matches!(
+                    kind,
+                    storage::ResourceKind::Pipelines
+                        | storage::ResourceKind::Streams
+                        | storage::ResourceKind::Tables
+                )
+            {
+                owner_failure = Some(error.clone());
+            }
+            record_runtime(result, outcome);
+        }
+    }
 }
 
 fn read_runtime_results(state: &AppState, results: &mut [ResourceApplyResult]) {
@@ -1224,6 +1309,7 @@ async fn apply_runtime(
             }
         }
     }
+    cleanup_deletions(state, results).await;
     let protected = match protected_runtime_resources(state, pending).await {
         Ok(protected) => protected,
         Err(error) => {
@@ -1236,25 +1322,25 @@ async fn apply_runtime(
     if let Some(err) = &stop_error {
         for result in results
             .iter_mut()
-            .filter(|result| result.result != "idempotent")
+            .filter(|result| result.operation == "upsert" && result.result != "idempotent")
         {
             record_runtime(result, Err(err.clone()));
         }
     } else {
         let schema_result =
             storage_bridge::hydrate_schemas_from_storage(&state.storage).map(|_| ());
-        let udf_result = if let Some(result) = results
-            .iter()
-            .find(|result| result.kind == "udfs" && result.result != "idempotent")
-        {
+        let udf_result = if let Some(result) = results.iter().find(|result| {
+            result.operation == "upsert" && result.kind == "udfs" && result.result != "idempotent"
+        }) {
             Some(apply_runtime_resource(state, result, &schema_result).await)
         } else {
             None
         };
-        for result in results
-            .iter_mut()
-            .filter(|result| result.result != "idempotent" && result.kind != "pipelines")
-        {
+        for result in results.iter_mut().filter(|result| {
+            result.operation == "upsert"
+                && result.result != "idempotent"
+                && result.kind != "pipelines"
+        }) {
             let outcome = if let Some(error) =
                 protected.get(&format!("{}/{}", result.kind, result.identity))
             {
@@ -1672,6 +1758,223 @@ mod tests {
             0,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn revisioned_delete_is_atomic_replayable_and_blocks_old_recreation() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        assert_eq!(post(&state, &bundle()).await.0, StatusCode::OK);
+        state
+            .storage
+            .checkpoint_storage()
+            .unwrap()
+            .commit_record("default", "apply_pipeline", 1, &[1])
+            .unwrap();
+        let deletion = json!({"format_version":1,"bundle_version":"delete_batch","deletions":{
+            "memory_topics":[{"topic":"apply_feed","revision":2}],
+            "streams":[{"name":"apply_stream","revision":2}],
+            "pipelines":[{"id":"apply_pipeline","revision":2}]
+        }});
+        let (status, response) = post(&state, &deletion).await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["applied_to_runtime"], true);
+        assert_eq!(state.storage.list_tombstones().unwrap().len(), 3);
+        assert!(
+            state
+                .instances
+                .default_instance()
+                .list_pipelines()
+                .is_empty()
+        );
+        assert!(
+            state
+                .instances
+                .default_instance()
+                .list_streams()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            state
+                .instances
+                .default_instance()
+                .memory_topic_kind("apply_feed")
+                .is_none()
+        );
+        assert!(
+            state
+                .storage
+                .checkpoint_storage()
+                .unwrap()
+                .load_latest_record("default", "apply_pipeline")
+                .unwrap()
+                .is_none()
+        );
+        let (status, replay) = post_with_query(&state, &deletion, "?cascade=true").await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["applied_to_runtime"], true);
+        assert_eq!(post(&state, &bundle()).await.0, StatusCode::CONFLICT);
+        let mut recreate = bundle();
+        for kind in ["memory_topics", "streams", "pipelines"] {
+            recreate["resources"][kind][0]["revision"] = json!(3);
+        }
+        assert_eq!(post(&state, &recreate).await.0, StatusCode::OK);
+        assert!(state.storage.list_tombstones().unwrap().is_empty());
+        assert_eq!(post(&state, &deletion).await.0, StatusCode::CONFLICT);
+        assert_eq!(state.instances.default_instance().list_pipelines().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn revisioned_delete_checks_final_references_and_stops_direct_updates_first() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        assert_eq!(post(&state, &bundle()).await.0, StatusCode::OK);
+        let mut deletion = json!({"format_version":1,"bundle_version":"delete_referenced","deletions":{"streams":[{"name":"apply_stream","revision":2}]}});
+        let (status, rejected) = post(&state, &deletion).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{rejected}");
+        assert_eq!(rejected["error"]["code"], "resource_referenced");
+        assert!(state.storage.list_tombstones().unwrap().is_empty());
+        let mut resources = bundle()["resources"].clone();
+        resources["memory_topics"] = json!([]);
+        resources["streams"][0]["name"] = json!("replacement_stream");
+        resources["pipelines"][0]["revision"] = json!(2);
+        resources["pipelines"][0]["sql"] = json!("SELECT value FROM replacement_stream");
+        deletion["resources"] = resources;
+        let (status, applied) = post(&state, &deletion).await;
+        assert_eq!(status, StatusCode::OK, "{applied}");
+        assert_eq!(applied["applied_to_runtime"], true);
+        assert!(state.storage.get_stream("apply_stream").unwrap().is_none());
+        assert_eq!(
+            state.instances.default_instance().list_pipelines()[0].streams,
+            vec!["replacement_stream"]
+        );
+    }
+
+    #[tokio::test]
+    async fn revisioned_single_delete_and_unversioned_delete_have_explicit_watermarks() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        for uri in ["/streams/missing?revision=2", "/streams/missing?revision=2"] {
+            let response = crate::build_app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let mut stream = bundle()["resources"]["streams"][0].clone();
+        stream["name"] = json!("missing");
+        stream["type"] = json!("mock");
+        stream["props"] = json!({});
+        stream["decoder"] = json!({"type":"json","props":{}});
+        let response = crate::build_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/streams")
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&stream).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let response = crate::build_app(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/streams/missing")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            state
+                .storage
+                .get_tombstone(storage::ResourceKind::Streams, "missing")
+                .unwrap()
+                .unwrap()
+                .revision,
+            2
+        );
+        for revision in [0, crate::revision::MAX_RESOURCE_REVISION + 1] {
+            let response = crate::build_app(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/streams/missing?revision={revision}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn revisioned_delete_reports_runtime_failure_and_replay_retries_cleanup() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        assert_eq!(post(&state, &bundle()).await.0, StatusCode::OK);
+        // Model a retained runtime consumer after its metadata was removed.
+        state.storage.delete_pipeline("apply_pipeline").unwrap();
+        let deletion = json!({"format_version":1,"bundle_version":"runtime_cleanup","deletions":{"streams":[{"name":"apply_stream","revision":2}]}});
+        let (status, result) = post(&state, &deletion).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["metadata_committed"], true);
+        assert_eq!(result["applied_to_runtime"], false);
+        assert!(
+            state
+                .storage
+                .get_tombstone(storage::ResourceKind::Streams, "apply_stream")
+                .unwrap()
+                .is_some()
+        );
+        state
+            .instances
+            .default_instance()
+            .delete_pipeline("apply_pipeline")
+            .await
+            .unwrap();
+        let (status, replay) = post(&state, &deletion).await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(replay["applied_to_runtime"], true);
+    }
+
+    #[test]
+    fn revisioned_manifest_rejects_null_and_duplicate_operation_identities() {
+        for value in [
+            json!({"format_version":1,"bundle_version":"empty","deletions":null}),
+            json!({"format_version":1,"bundle_version":"empty","deletions":{"streams":null}}),
+            json!({"format_version":1,"bundle_version":"empty","resources":null}),
+        ] {
+            assert!(serde_json::from_value::<ResourceManifestV1>(value).is_err());
+        }
+        let mut manifest: ResourceManifestV1 = serde_json::from_value(bundle()).unwrap();
+        manifest
+            .deletions
+            .streams
+            .push(crate::export::NameDeletion {
+                name: "apply_stream".into(),
+                revision: 2,
+            });
+        assert!(
+            manifest
+                .deletions
+                .validate(&manifest.resources)
+                .unwrap_err()
+                .contains("duplicate")
+        );
     }
 
     fn bundle() -> Value {
@@ -2797,7 +3100,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zip_and_json_share_manifest_and_reject_deletions() {
+    async fn zip_and_json_share_manifest_and_accept_empty_deletions() {
         let dir = tempfile::tempdir().unwrap();
         let state = state(dir.path());
         let manifest: ResourceManifestV1 = serde_json::from_value(bundle()).unwrap();
@@ -2828,7 +3131,7 @@ mod tests {
         assert_eq!(post(&state, &bundle()).await.0, StatusCode::OK);
         let mut deletion = bundle();
         deletion["deletions"] = json!({});
-        assert_eq!(post(&state, &deletion).await.0, StatusCode::BAD_REQUEST);
+        assert_eq!(post(&state, &deletion).await.0, StatusCode::OK);
         let response = crate::build_app(state)
             .oneshot(
                 Request::builder()
@@ -2910,6 +3213,7 @@ mod tests {
         let request =
             serde_json::from_value(stream_update["resources"]["streams"][0].clone()).unwrap();
         let delta = storage::MetadataExportSnapshot {
+            tombstones: Vec::new(),
             streams: vec![storage_bridge::stored_stream_from_request(&request).unwrap()],
             schemas: vec![],
             pipelines: vec![],

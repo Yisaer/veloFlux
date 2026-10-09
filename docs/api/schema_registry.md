@@ -336,3 +336,6 @@ register_schema("my_type", Arc::new(parse_my_schema));
 
 Registration must happen before any schema of that type is created
 (typically during distribution-specific initialization).
+
+Revisioned DELETE accepts `?revision=N`; see [resource deletion](storage_delete.md)
+for the shared version timeline, cleanup, and tombstone behavior.

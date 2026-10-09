@@ -1,8 +1,8 @@
 # Incremental Storage Apply
 
 `POST /storage/apply` accepts the [public resource manifest](../runtime/startup/metadata_bundle.md).
-It creates or updates declared resources and retains absent resources. Format
-version 1 supports upserts only: `deletions`, even `{}`, is rejected.
+It creates, updates, or explicitly deletes declared resources and retains absent
+resources. Format version 1 accepts an optional `deletions` object.
 Use `POST /storage/import` for full-snapshot replacement.
 
 ## Requests
@@ -31,8 +31,9 @@ curl -H 'Content-Type: application/json' \
 curl -F 'file=@deployment.zip' 'http://127.0.0.1:8080/storage/apply?cascade=true'
 ```
 
-All required resource arrays in format version 1 must be present; `schemas` and
-`tables` can be omitted. Each resource has revision `1..=9007199254740991`.
+`resources`, `deletions`, and each of their seven arrays can be omitted; omitted
+collections are empty. `null` is invalid. Each resource or deletion requires a
+revision in `1..=9007199254740991`.
 `bundle_version` identifies the producer artifact and is echoed in the result;
 it does not order changes or provide a separate online deduplication key.
 The producer must not assign different contents to the same bundle identity.
@@ -40,10 +41,18 @@ The producer must not assign different contents to the same bundle identity.
 ## Configuration Commit
 
 The manager normalizes definitions, rejects duplicate identities, and builds
-an effective view from persisted resources plus this batch. Resource ordering
+an effective view from persisted resources plus accepted upserts minus accepted
+deletions. An identity cannot appear in both operations or more than once. Resource ordering
 in the arrays does not determine dependency ordering.
 
-- A greater revision creates or replaces the resource.
+- A greater revision creates, replaces, or deletes the resource. Deletion records
+  a persistent tombstone even when the resource does not exist. A newer upsert
+  recreates the resource and removes its tombstone.
+- An equal-revision delete of a tombstone is idempotent. An equal-revision upsert
+  of a tombstone, or delete of a live resource, is `409 revision_conflict`.
+- Retained references to a deleted identity reject the batch with
+  `409 resource_referenced`. Delete the owners in the same batch or submit newer
+  owner definitions that remove those references.
 - A lower revision rejects the entire batch with `409 revision_conflict`.
 - Equal revision and equal normalized deployment content is idempotent.
 - Equal revision with different content rejects the entire batch with `409`.
@@ -66,7 +75,8 @@ deployment `run_state` use `Stopped` for this comparison.
 
 A metadata transaction commits the complete selected delta, pipeline deployment
 and operational states, and the attachment commit marker together. Ordinary HTTP
-mutations and scheduler patrol coordinate with Apply/import/export. A busy HTTP mutation
+mutations and scheduler patrol coordinate with Apply/import/export and revisioned
+DELETE. A busy HTTP mutation
 returns `409`; ordinary mutations otherwise retain their per-resource locks
 and concurrency. Scheduler patrol evaluates pipelines without this boundary when
 no lifecycle operation is needed. Before a scheduled start/stop it waits for a
@@ -106,7 +116,7 @@ After commit the manager updates explicitly submitted newer resources.
 
 Multiple schema versions can intentionally coexist after a non-cascading update.
 Converge consumers by submitting a newer schema revision with `cascade=true`, or
-by restarting the manager. Same-revision replay remains observation-only.
+by restarting the manager. Same-revision upsert replay remains observation-only.
 
 Runtime objects that cannot be safely replaced while retained pipelines use them
 are deferred. In particular, a shared MQTT client or shared stream used by a
@@ -126,8 +136,9 @@ cause and use the recovery actions below to converge runtime to that metadata.
 Connector reconnection keeps its existing behavior. Scheduled Running intent is governed
 by the schedule window and patrol; it does not force execution outside a window.
 
-A repeated same-revision Apply preserves manual start/stop and does not reinstall
-or restart resources, even when replay adds `cascade=true`. To execute
+A repeated same-revision upsert preserves manual start/stop and does not reinstall
+or restart resources, even when replay adds `cascade=true`. Same-revision deletions
+retry cleanup of the deleted resources; this does not restart idempotent upserts. To execute
 cascading reconstruction after a deferred update, submit a newer revision with
 that option or restart the manager. Its runtime results come from current observable state,
 not a persisted history of previous attempts. Schema versions, stream resource
@@ -171,7 +182,8 @@ A processed configuration commit returns `200`, including runtime failure:
 }
 ```
 
-`result` is `created`, `updated`, or `idempotent`. With `cascade=false`,
+`result` is `created`, `updated`, `deleted`, or `idempotent`. `operation` is
+`upsert` or `delete`. With `cascade=false`,
 `affected_resources` is empty. With `cascade=true`, it reports
 runtime rebinding of retained resources as `rebound`, or their observed state
 as `current` on replay; neither is another metadata update.
@@ -197,7 +209,7 @@ Precommit failures return JSON such as:
 | Status | Codes/meaning | Committed configuration |
 | --- | --- | --- |
 | 400 | `invalid_manifest`, `invalid_upload`, `invalid_archive`, `invalid_resources` | None of this batch |
-| 409 | `revision_conflict`, `metadata_busy` | None of this batch |
+| 409 | `revision_conflict`, `resource_referenced`, `metadata_busy` | None of this batch |
 | 413 | Body/upload size exceeded | None of this batch |
 | 415 | `unsupported_media_type` | None of this batch |
 | 500 | `preparation_failed`, `commit_failed`, `attachment_recovery_failed` | None of this batch; recovery errors can concern an earlier committed publication |
@@ -216,11 +228,40 @@ a storage request or startup recovers it. Apply performs recovery itself; its
 recovery failure returns `500 attachment_recovery_failed`, not that ordinary
 mutation error.
 Cleanup after a committed publication logs a warning and does not turn it into
-an uncommitted response. Apply retains unreferenced WASM files; import retains
-its existing unreferenced-WASM cleanup. Schema hydration reconciles source trees
+an uncommitted response. Upsert-only Apply retains unreferenced WASM files.
+Explicit UDF deletion and import reclaim unreferenced managed WASM files. Schema hydration reconciles source trees
 with the committed schema identities.
 
 A timeout, disconnect, or lost response does not establish whether metadata
 committed. Replay the same declaration to re-observe current runtime application;
-runtime recovery still requires an explicit action. There is no exactly-once guarantee
+upsert runtime recovery still requires an explicit action; deletion replay retries cleanup. There is no exactly-once guarantee
 or Apply background retry loop. See the [three-entry error comparison](storage_errors.md).
+
+## Revisioned Deletion
+
+```json
+{
+  "format_version": 1,
+  "bundle_version": "remove-telemetry",
+  "deletions": {
+    "pipelines": [{"id": "telemetry_pipeline", "revision": 12}],
+    "streams": [{"name": "telemetry", "revision": 8}]
+  }
+}
+```
+
+The manager validates the final dependency graph before committing live-record
+removal, pipeline operational intent removal, and tombstones in one transaction.
+After stopping selected pipeline replacements, cleanup runs in reverse dependency
+order: pipelines, streams/tables, connectors/topics/UDFs, then schemas. Metadata
+is not rolled back if runtime or file cleanup fails; inspect `runtime_applied`
+and `error`, then replay the same deletion to retry. A late older deletion cannot
+remove a resource recreated at a newer revision.
+
+Cleanup uses the ordinary DELETE behavior: pipeline checkpoints and managed
+schema attachments are removed; unreferenced managed WASM files are reclaimed.
+Business data and user uploads are retained. UDF DELETE retains the registered
+runtime function until restart; Apply reports this as `runtime_applied: false`.
+Tombstones survive restart and are not automatically garbage-collected.
+The `cascade` option controls updates; deletion never implicitly deletes retained
+owners. See [single-resource deletion](storage_delete.md).

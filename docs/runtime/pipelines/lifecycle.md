@@ -294,3 +294,6 @@ hydration, converges consumers; an equal-revision replay does not rebuild them.
 Shared clients and shared streams still used by unselected pipelines keep their
 old runtime and report that the new configuration has not applied.
 See [the API contract](../../api/storage_apply.md) for recovery and scheduling.
+
+Revisioned DELETE accepts `?revision=N`; see [resource deletion](../../api/storage_delete.md)
+for the shared version timeline, cleanup, and tombstone behavior.

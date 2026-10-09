@@ -207,7 +207,7 @@ fn sorted_ids(values: &[JsonValue], key: &str) -> Vec<String> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn import_rejects_missing_resources() {
+async fn import_accepts_omitted_resources_as_empty_snapshot() {
     let Some(h) = ImportExportHarness::new().await else {
         return;
     };
@@ -222,8 +222,21 @@ async fn import_rejects_missing_resources() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
-    assert!(body.contains("missing field `resources`"), "body: {body}");
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    let response: JsonValue = serde_json::from_str(&body).expect("decode import response");
+    assert_eq!(response["applied_to_runtime"], false);
+    assert_eq!(
+        response["imported_resource_counts"],
+        json!({
+            "memory_topics": 0,
+            "shared_mqtt_clients": 0,
+            "schemas": 0,
+            "streams": 0,
+            "pipelines": 0,
+            "udfs": 0,
+            "tables": 0,
+        }),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

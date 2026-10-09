@@ -123,3 +123,6 @@ Table-scan planner and pipeline coverage lives in:
 
 Provider binding coverage is in `src/flow/src/catalog/mod.rs`, and MemoryMock provider behavior is
 covered in `src/flow/src/table/memory.rs`.
+
+Revisioned DELETE accepts `?revision=N`; see [resource deletion](../../api/storage_delete.md)
+for the shared version timeline, cleanup, and tombstone behavior.

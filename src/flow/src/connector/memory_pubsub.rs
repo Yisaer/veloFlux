@@ -111,6 +111,8 @@ pub enum MemoryData {
 
 #[derive(thiserror::Error, Debug)]
 pub enum MemoryPubSubError {
+    #[error("topic `{topic}` still has publishers or subscribers")]
+    TopicInUse { topic: String },
     #[error("topic must not be empty")]
     InvalidTopic,
     #[error("topic `{topic}` not found")]
@@ -316,6 +318,31 @@ impl MemoryPubSubRegistry {
     pub fn topic_capacity(&self, topic: &str) -> Option<usize> {
         let guard = self.topics.read();
         guard.get(topic).map(|entry| entry.capacity)
+    }
+
+    pub fn ensure_topic_unused(&self, topic: &str) -> Result<(), MemoryPubSubError> {
+        Self::check_topic_unused(self.topics.read().get(topic), topic)
+    }
+
+    fn check_topic_unused(
+        entry: Option<&TopicEntry>,
+        topic: &str,
+    ) -> Result<(), MemoryPubSubError> {
+        if entry.is_some_and(|entry| {
+            entry.sender.receiver_count() != 0 || entry.sender.strong_count() > 1
+        }) {
+            return Err(MemoryPubSubError::TopicInUse {
+                topic: topic.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn drop_topic(&self, topic: &str) -> Result<(), MemoryPubSubError> {
+        let mut topics = self.topics.write();
+        Self::check_topic_unused(topics.get(topic), topic)?;
+        topics.remove(topic);
+        Ok(())
     }
 
     pub fn topic_kind(&self, topic: &str) -> Option<MemoryTopicKind> {

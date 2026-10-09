@@ -16,6 +16,7 @@ mod instances;
 mod memory_topic;
 mod mqtt_client;
 mod pipeline;
+mod resource_delete;
 mod resource_id;
 mod revision;
 mod schema;
@@ -78,7 +79,7 @@ fn build_app(state: AppState) -> Router {
             "/pipelines/:id",
             get(pipeline::get_pipeline_handler)
                 .put(pipeline::upsert_pipeline_handler)
-                .delete(pipeline::delete_pipeline_handler),
+                .delete(resource_delete::handler),
         )
         .route(
             "/pipelines/:id/explain",
@@ -127,7 +128,7 @@ fn build_app(state: AppState) -> Router {
         )
         .route(
             "/streams/:name",
-            delete(stream::delete_stream_handler).put(stream::upsert_stream_handler),
+            delete(resource_delete::handler).put(stream::upsert_stream_handler),
         )
         .route(
             "/schemas",
@@ -137,7 +138,7 @@ fn build_app(state: AppState) -> Router {
             "/schemas/:name",
             get(schema::handler::get_schema_handler)
                 .put(schema::handler::update_schema_handler)
-                .delete(schema::handler::delete_schema_handler),
+                .delete(resource_delete::handler),
         )
         .route(
             "/schemas/:type/:name/upload",
@@ -150,6 +151,7 @@ fn build_app(state: AppState) -> Router {
             post(memory_topic::create_memory_topic_handler)
                 .get(memory_topic::list_memory_topics_handler),
         )
+        .route("/memory/topics/:topic", delete(resource_delete::handler))
         .route(
             "/mqtt/clients",
             post(mqtt_client::create_shared_mqtt_client_handler)
@@ -157,8 +159,7 @@ fn build_app(state: AppState) -> Router {
         )
         .route(
             "/mqtt/clients/:key",
-            get(mqtt_client::get_shared_mqtt_client_handler)
-                .delete(mqtt_client::delete_shared_mqtt_client_handler),
+            get(mqtt_client::get_shared_mqtt_client_handler).delete(resource_delete::handler),
         )
         .route(
             "/files/upload",
@@ -175,7 +176,7 @@ fn build_app(state: AppState) -> Router {
             "/tables",
             post(table::create_table_handler).get(table::list_tables),
         )
-        .route("/tables/:name", delete(table::delete_table_handler))
+        .route("/tables/:name", delete(resource_delete::handler))
         .route("/metrics", get(metrics_handler))
         .route("/status", get(status::status_handler))
         .layer(CorsLayer::permissive());
@@ -215,7 +216,7 @@ fn add_udf_routes(app: Router<AppState>) -> Router<AppState> {
         .route("/udfs", get(udf_handler::list_udfs_handler))
         .route(
             "/udfs/:name",
-            get(udf_handler::get_udf_handler).delete(udf_handler::delete_udf_handler),
+            get(udf_handler::get_udf_handler).delete(resource_delete::handler),
         )
 }
 

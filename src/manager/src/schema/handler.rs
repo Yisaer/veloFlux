@@ -230,6 +230,9 @@ pub async fn update_schema_handler(
         props_json,
     }) {
         let _ = source.rollback();
+        if let storage::StorageError::RevisionConflict(error) = err {
+            return (StatusCode::CONFLICT, error).into_response();
+        }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("failed to persist schema {name}: {err}"),
@@ -370,6 +373,9 @@ async fn create_schema_locked(
 
     match state.storage.create_schema(stored) {
         Ok(()) => {}
+        Err(storage::StorageError::RevisionConflict(error)) => {
+            return (StatusCode::CONFLICT, error).into_response();
+        }
         Err(StorageError::AlreadyExists(_)) => {
             let mut err = format!("schema {name} already exists");
             if let Err(cleanup_err) = source.rollback() {

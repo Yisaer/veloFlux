@@ -4,11 +4,18 @@
 See the
 [request and response reference](../../user_docs/api/import.md).
 
+The manifest keeps `format_version=1`. `resources`, `deletions`, and each resource
+array are optional and default to empty; `null` is invalid. Omitting both objects
+imports an empty snapshot, removing all persisted resources and tombstones.
+
 Import accepts exactly one multipart ZIP `file`; JSON and raw `application/zip`
 requests are unsupported. It validates the manifest, duplicate identities,
 revisions, dependency presence, schemas and WASM before publishing attachments.
 It does not compare revisions with storage: an old snapshot can replace newer
-configuration, and absent resources are removed. Repeating an import performs
+configuration, and absent resources and tombstones are removed. Tombstones
+are restored from `deletions`; a live/deleted duplicate identity is invalid.
+Importing an older snapshot without a deletion marker removes that identity's
+protection against stale upserts. Repeating an import performs
 another replacement, rather than the idempotent Apply protocol.
 
 Success is `200` with `applied_to_runtime: false`, `imported_resource_counts`,
