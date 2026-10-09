@@ -622,7 +622,7 @@ pub struct SinkPropsRequest {
 }
 
 impl SinkPropsRequest {
-    pub(super) fn to_value(&self) -> JsonValue {
+    pub(crate) fn to_value(&self) -> JsonValue {
         JsonValue::Object(self.fields.clone())
     }
 }

@@ -112,6 +112,10 @@ pub async fn import_storage_handler(
         }
     };
 
+    let _metadata_permit = match crate::storage_apply::acquire_exclusive_metadata(&state) {
+        Ok(permit) => permit,
+        Err(response) => return *response,
+    };
     let _import_export_permit = match state.try_acquire_storage_operation() {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return import_export_busy_response(),
@@ -122,7 +126,10 @@ pub async fn import_storage_handler(
         }
     };
 
-    let tmp = match tempfile::tempdir() {
+    let tmp = match tempfile::Builder::new()
+        .prefix(".import.")
+        .tempdir_in(state.storage.base_dir())
+    {
         Ok(d) => d,
         Err(e) => {
             let err = format!("create temp dir: {e}");
@@ -160,7 +167,7 @@ pub async fn import_storage_handler(
     }
 
     let schemas_src = tmp.path().join("schemas");
-    let mut schema_tree = match PreparedSchemaTree::prepare(&state.storage, &schemas_src) {
+    let schema_tree = match PreparedSchemaTree::prepare(&state.storage, &schemas_src) {
         Ok(tree) => tree,
         Err(err) => {
             audit.log_failure(&err);
@@ -197,23 +204,6 @@ pub async fn import_storage_handler(
         }
     }
 
-    if let Err(err) = schema_tree.activate() {
-        audit.log_failure(&err);
-        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
-    }
-    let installed_wasm =
-        match install_validated_wasm(&validated_wasm_dir, &state.storage.wasm_files_dir()) {
-            Ok(paths) => paths,
-            Err(err) => {
-                let mut err = err;
-                if let Err(rollback_err) = schema_tree.rollback() {
-                    err = format!("{err}; rollback schema sources: {rollback_err}");
-                }
-                audit.log_failure(&err);
-                return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
-            }
-        };
-
     let previous_resources = match build_export_resources(state.storage.as_ref()) {
         Ok(resources) => resources,
         Err(err) => {
@@ -237,18 +227,19 @@ pub async fn import_storage_handler(
         .map(|udf| format!("{}.wasm", udf.wasm_sha256))
         .collect::<BTreeSet<_>>();
 
-    if let Err(err) = state.storage.replace_metadata_snapshot(snapshot) {
-        let mut err = format!("replace metadata snapshot in storage: {err}");
-        for path in &installed_wasm {
-            let _ = std::fs::remove_file(path);
-        }
-        if let Err(rollback_err) = schema_tree.rollback() {
-            err = format!("{err}; rollback schema sources: {rollback_err}");
-        }
+    if let Err(err) = crate::attachments::publish_and_commit(
+        &state.storage,
+        snapshot,
+        storage::MetadataCommitOptions {
+            replace: true,
+            ..Default::default()
+        },
+        Some(schema_tree),
+        &validated_wasm_dir,
+    ) {
         audit.log_failure(&err);
         return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
-    schema_tree.finish();
     if let Err(err) = cleanup_unreferenced_wasm(&state.storage.wasm_files_dir(), &referenced_wasm) {
         tracing::warn!(error = %err, "failed to clean unreferenced imported WASM files");
     }
@@ -268,32 +259,6 @@ pub async fn import_storage_handler(
         .into_response()
 }
 
-fn install_validated_wasm(
-    source: &Path,
-    destination: &Path,
-) -> Result<Vec<std::path::PathBuf>, String> {
-    let mut installed = Vec::new();
-    for entry in std::fs::read_dir(source)
-        .map_err(|err| format!("read validated WASM staging directory: {err}"))?
-    {
-        let entry = entry.map_err(|err| format!("read validated WASM entry: {err}"))?;
-        let target = destination.join(entry.file_name());
-        if !target.exists() {
-            if let Err(err) = std::fs::rename(entry.path(), &target) {
-                for installed_path in &installed {
-                    let _ = std::fs::remove_file(installed_path);
-                }
-                return Err(format!(
-                    "install validated WASM `{}`: {err}",
-                    target.display()
-                ));
-            }
-            installed.push(target);
-        }
-    }
-    Ok(installed)
-}
-
 fn cleanup_unreferenced_wasm(wasm_dir: &Path, referenced: &BTreeSet<String>) -> Result<(), String> {
     for entry in
         std::fs::read_dir(wasm_dir).map_err(|err| format!("read managed WASM directory: {err}"))?
@@ -311,7 +276,7 @@ fn cleanup_unreferenced_wasm(wasm_dir: &Path, referenced: &BTreeSet<String>) -> 
     Ok(())
 }
 
-fn extract_zip_file(source: &Path, dest: &Path) -> Result<(), String> {
+pub(crate) fn extract_zip_file(source: &Path, dest: &Path) -> Result<(), String> {
     extract_zip_file_with_limits(
         source,
         dest,
@@ -559,6 +524,7 @@ where
     let mut mqtt_configs = Vec::with_capacity(bundle.resources.shared_mqtt_clients.len());
     let mut mqtt_keys = BTreeSet::new();
     for cfg in &bundle.resources.shared_mqtt_clients {
+        crate::mqtt_client::validate_shared_mqtt_config(&cfg.definition)?;
         validate_resource_id(ResourceIdKind::SharedMqttClientKey, &cfg.definition.key)?;
         let key = cfg.definition.key.as_str();
         if !mqtt_keys.insert(key.to_string()) {
@@ -949,7 +915,7 @@ mod tests {
         .expect("create app state");
         let request = axum::http::Request::builder()
             .method(axum::http::Method::POST)
-            .uri("/import")
+            .uri("/storage/import")
             .header(axum::http::header::CONTENT_TYPE, "application/zip")
             .body(axum::body::Body::from(b"not-used".to_vec()))
             .expect("build raw import request");

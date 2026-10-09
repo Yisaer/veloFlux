@@ -227,7 +227,7 @@ Provider note:
 ## Export / Import
 
 Table definitions are included in manager storage export (`GET /storage/export`) and import
-(`POST /import`). The export manifest contains a `tables` array in its `resources` block, and
+(`POST /storage/import`). The export manifest contains a `tables` array in its `resources` block, and
 the import handler validates table name uniqueness, schema references, and provider-specific
 props before committing the snapshot.
 

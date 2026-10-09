@@ -16,7 +16,7 @@ Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).
 
 ### Import Metadata Bundle
 
-`POST /import`
+`POST /storage/import`
 
 Imports a full metadata bundle and atomically replaces the current persisted metadata snapshot in
 storage.
@@ -34,8 +34,7 @@ file: required ZIP file, exactly once
 ```
 
 The file must be non-empty, its filename must end in `.zip`, and its compressed
-size must not exceed 512 MiB. The former raw `application/zip` request body is
-not supported.
+size must not exceed 512 MiB. Raw `application/zip` request bodies are not supported.
 
 Important behavior:
 
@@ -120,7 +119,7 @@ The import request is rejected with `400 Bad Request` if:
 ```bash
 curl -X POST \
   -F 'file=@veloflux-export.zip' \
-  http://127.0.0.1:8080/import
+  http://127.0.0.1:8080/storage/import
 ```
 
 ## Notes
@@ -128,7 +127,24 @@ curl -X POST \
 - The import API is defined as **full replace**, not partial upsert.
 - Use `GET /storage/export?bundle_version=<version>` before import when a complete
   restorable backup is required.
-- Pipeline runtime status and errors are not persisted or included in the import/export artifact. Imported pipeline
+- Runtime errors are process-local and are not included in the import/export artifact. Imported pipeline
   `run_state` is desired state only; runtime failed state is managed by the running manager.
 - Because runtime reconciliation is out of scope for this endpoint, a restart or a separate runtime
   apply workflow may still be required after import.
+
+## Publication Failures
+
+Use `POST /storage/apply` for incremental live deployment, or
+`POST /storage/import` for full storage replacement.
+
+Import reads previous resources before publishing any managed files. Metadata
+transaction failure triggers journal recovery of schema backups and new WASM
+files. Rollback failures are included in the error text; metadata not committed
+does not guarantee every filesystem change was undone. Recovery runs again at
+startup or the next storage operation. Committed attachment cleanup or subsequent
+unreferenced-WASM cleanup failure logs a warning and still returns success.
+
+Named schemas are refreshed in memory after import, but pipeline/global runtime
+reconciliation is not performed. A lost response does not prove the replacement
+failed; repeating import replaces the complete snapshot again. See the
+[detailed error contract](../../docs/api/storage_import.md).

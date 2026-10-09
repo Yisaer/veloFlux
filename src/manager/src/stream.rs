@@ -247,6 +247,7 @@ async fn rebuild_affected_pipeline(
         &pipeline.request,
         instance.encoder_registry().as_ref(),
         instance.as_ref(),
+        Default::default(),
     )?;
     instance
         .explain_pipeline(flow::ExplainPipelineTarget::Definition(&definition))
@@ -343,25 +344,59 @@ async fn rebuild_and_restore_affected_pipelines(
     results
 }
 
+pub(crate) struct PreparedStreamRuntimeRefresh {
+    pub(crate) schema_reference: Option<String>,
+    pub(crate) mqtt_reference: Option<String>,
+    name: String,
+    shared: bool,
+    definitions: Vec<(Arc<flow::FlowInstance>, StreamDefinition)>,
+}
+
+impl PreparedStreamRuntimeRefresh {
+    pub(crate) fn from_storage(state: &AppState, stream_name: &str) -> Result<Self, String> {
+        let stored = state
+            .storage
+            .get_stream(stream_name)
+            .map_err(|err| format!("failed to read stream {stream_name}: {err}"))?
+            .ok_or_else(|| format!("stream {stream_name} not found"))?;
+        let request = storage_bridge::stream_request_from_stored(&stored)?;
+        let mut definitions = Vec::new();
+        for (_, instance) in state.instances.instances_snapshot() {
+            let definition =
+                stream_definition_from_stored(&stored, instance.decoder_registry().as_ref())?;
+            definitions.push((instance, definition));
+        }
+        Ok(Self {
+            schema_reference: request.schema.r#ref,
+            mqtt_reference: request
+                .props
+                .fields
+                .get("connector_key")
+                .and_then(JsonValue::as_str)
+                .map(str::to_string),
+            name: stream_name.to_string(),
+            shared: request.shared,
+            definitions,
+        })
+    }
+
+    pub(crate) async fn apply(self) -> Result<(), String> {
+        for (instance, definition) in self.definitions {
+            instance
+                .replace_stream(definition, self.shared)
+                .await
+                .map_err(|err| format!("failed to refresh stream {}: {err}", self.name))?;
+        }
+        Ok(())
+    }
+}
+
 pub(crate) async fn refresh_stream_and_restart_pipelines(
     state: &AppState,
     stream_name: &str,
     restart_pipelines: bool,
 ) -> Result<Vec<PipelineRestartResult>, String> {
-    let stored = state
-        .storage
-        .get_stream(stream_name)
-        .map_err(|err| format!("failed to read stream {stream_name}: {err}"))?
-        .ok_or_else(|| format!("stream {stream_name} not found"))?;
-    let definition = stream_definition_from_stored(
-        &stored,
-        state
-            .instances
-            .default_instance()
-            .decoder_registry()
-            .as_ref(),
-    )?;
-    let stream_request = storage_bridge::stream_request_from_stored(&stored)?;
+    let refresh = PreparedStreamRuntimeRefresh::from_storage(state, stream_name)?;
     let affected = if restart_pipelines {
         collect_pipelines_referencing_stream(state, stream_name)?
     } else {
@@ -383,12 +418,7 @@ pub(crate) async fn refresh_stream_and_restart_pipelines(
     }
     stop_affected_pipelines(state, &affected).await?;
 
-    for (_, instance) in state.instances.instances_snapshot() {
-        instance
-            .replace_stream(definition.clone(), stream_request.shared)
-            .await
-            .map_err(|err| format!("failed to refresh stream {stream_name}: {err}"))?;
-    }
+    refresh.apply().await?;
     Ok(rebuild_and_restore_affected_pipelines(state, &affected).await)
 }
 
@@ -660,7 +690,7 @@ pub struct StreamPropsRequest {
 }
 
 impl StreamPropsRequest {
-    fn to_value(&self) -> JsonValue {
+    pub(crate) fn to_value(&self) -> JsonValue {
         JsonValue::Object(self.fields.clone())
     }
 }
@@ -920,7 +950,8 @@ pub async fn create_stream_handler(
         Arc::clone(&resolved_schema.logical_schema),
         stream_props,
         decoder,
-    );
+    )
+    .with_revision(req.revision);
     if let Some(schema_version) = resolved_schema.schema_version {
         definition = definition.with_schema_version(schema_version);
     }
@@ -1357,7 +1388,8 @@ pub async fn upsert_stream_handler(
         Arc::clone(&resolved_schema.logical_schema),
         stream_props,
         decoder,
-    );
+    )
+    .with_revision(new_req.revision);
     if let Some(schema_version) = resolved_schema.schema_version {
         definition = definition.with_schema_version(schema_version);
     }
@@ -3236,6 +3268,7 @@ mod tests {
             &pipeline_req,
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
+            Default::default(),
         )
         .expect("build pipeline definition");
         instance
@@ -3347,6 +3380,7 @@ mod tests {
             &request,
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
+            Default::default(),
         )
         .expect("definition");
         instance

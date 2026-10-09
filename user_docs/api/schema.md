@@ -309,7 +309,7 @@ installed with `POST /schemas` and referenced by ID.
 
 Schemas are included in the export bundle produced by
 `/storage/export?bundle_version=<version>`
-and validated during `/import`. For details, see `user_docs/api/export.md`
+and validated during `/storage/import`. For details, see `user_docs/api/export.md`
 and `user_docs/api/import.md`.
 
 ### Export Resource Shape

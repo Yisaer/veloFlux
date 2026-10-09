@@ -24,6 +24,7 @@ pub struct AppState {
     pub declared_instances: Arc<HashMap<String, ()>>,
     init_dir: Option<Arc<PathBuf>>,
     storage_operation_lock: Arc<Semaphore>,
+    metadata_operation_lock: Arc<Semaphore>,
     pipeline_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     stream_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     shared_mqtt_op_locks: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
@@ -62,6 +63,7 @@ impl AppState {
             declared_instances: Arc::new(HashMap::new()),
             init_dir: init_dir.map(Arc::new),
             storage_operation_lock: Arc::new(Semaphore::new(1)),
+            metadata_operation_lock: Arc::new(Semaphore::new(1024)),
             pipeline_op_locks: Arc::new(Mutex::new(HashMap::new())),
             stream_op_locks: Arc::new(Mutex::new(HashMap::new())),
             shared_mqtt_op_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -140,7 +142,7 @@ impl AppState {
     }
 
     pub async fn bootstrap_from_storage(&self) -> Result<(), String> {
-        crate::init_process::apply_init_directory_if_needed(
+        crate::apply_core::apply_init_directory_if_needed(
             self.storage.as_ref(),
             self.init_dir.as_deref().map(AsRef::as_ref),
             &|id| self.is_declared_instance(id),
@@ -224,6 +226,21 @@ impl AppState {
             permits.push(semaphore.try_acquire_owned()?);
         }
         Ok(permits)
+    }
+
+    pub(crate) fn try_acquire_metadata_operation(
+        &self,
+        exclusive: bool,
+    ) -> Result<OwnedSemaphorePermit, TryAcquireError> {
+        self.metadata_operation_lock
+            .clone()
+            .try_acquire_many_owned(if exclusive { 1024 } else { 1 })
+    }
+
+    pub(crate) async fn acquire_metadata_operation(
+        &self,
+    ) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        self.metadata_operation_lock.clone().acquire_owned().await
     }
 
     pub fn try_acquire_storage_operation(&self) -> Result<OwnedSemaphorePermit, TryAcquireError> {

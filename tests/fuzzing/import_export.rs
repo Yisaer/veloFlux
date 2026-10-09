@@ -175,7 +175,7 @@ async fn import_bundle(
 ) -> (StatusCode, String) {
     let zip_bytes = build_zip_from_metadata(bundle).expect("build ZIP");
     let resp = http
-        .post(format!("{base}/import"))
+        .post(format!("{base}/storage/import"))
         .multipart(
             reqwest::multipart::Form::new().part(
                 "file",
@@ -234,7 +234,7 @@ async fn import_rejects_invalid_json_shape() {
 
     let resp = h
         .http
-        .post(format!("{}/import", h.base()))
+        .post(format!("{}/storage/import", h.base()))
         .multipart(
             reqwest::multipart::Form::new().part(
                 "file",

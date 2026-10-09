@@ -27,6 +27,7 @@ const SHARED_MQTT_CONFIGS_TABLE: TableDefinition<&str, &[u8]> =
 const MEMORY_TOPICS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("memory_topics");
 const INIT_APPLY_META_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("init_apply_meta");
 const INIT_APPLY_META_KEY: &str = "resource_directory";
+const ATTACHMENT_COMMIT_KEY: &str = "attachment_transaction";
 const UDFS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("udfs");
 const TABLES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("tables");
 
@@ -89,8 +90,22 @@ pub struct StoredSchema {
 pub struct StoredPipeline {
     pub id: String,
     pub revision: u64,
-    /// Normalized pipeline definition serialized without identity revision.
+    /// Pipeline definition without identity revision, including its accepted deployment run_state.
     pub raw_json: String,
+}
+
+impl StoredPipeline {
+    /// Last accepted deployment declaration; operational start/stop does not change it.
+    pub fn deployment_run_state(&self) -> Result<StoredPipelineDesiredState, StorageError> {
+        let definition: serde_json::Value =
+            serde_json::from_str(&self.raw_json).map_err(StorageError::serialization)?;
+        match definition.get("run_state") {
+            Some(value) => {
+                serde_json::from_value(value.clone()).map_err(StorageError::serialization)
+            }
+            None => Ok(StoredPipelineDesiredState::Stopped),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,6 +118,13 @@ pub enum StoredPipelineDesiredState {
 pub struct StoredPipelineRunState {
     pub pipeline_id: String,
     pub desired_state: StoredPipelineDesiredState,
+}
+
+#[derive(Default)]
+pub struct MetadataCommitOptions {
+    pub replace: bool,
+    pub init_meta: Option<StoredInitApplyMeta>,
+    pub attachment_transaction: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -421,45 +443,17 @@ impl MetadataStorage {
     }
 
     pub fn replace_snapshot(&self, snapshot: MetadataExportSnapshot) -> Result<(), StorageError> {
-        let _guard = self.lock_db()?;
-        let txn = self
-            .backend
-            .db
-            .begin_write()
-            .map_err(StorageError::backend)?;
-        Self::replace_table_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
-            stream.id.as_str()
-        })?;
-        Self::replace_table_entries(&txn, SCHEMAS_TABLE, &snapshot.schemas, |schema| {
-            schema.name.as_str()
-        })?;
-        Self::replace_table_entries(&txn, PIPELINES_TABLE, &snapshot.pipelines, |pipeline| {
-            pipeline.id.as_str()
-        })?;
-        Self::replace_table_entries(
-            &txn,
-            PIPELINE_RUN_STATES_TABLE,
-            &snapshot.pipeline_run_states,
-            |state| state.pipeline_id.as_str(),
-        )?;
-        Self::replace_table_entries(
-            &txn,
-            SHARED_MQTT_CONFIGS_TABLE,
-            &snapshot.mqtt_configs,
-            |cfg| cfg.key.as_str(),
-        )?;
-        Self::replace_table_entries(
-            &txn,
-            MEMORY_TOPICS_TABLE,
-            &snapshot.memory_topics,
-            |topic| topic.topic.as_str(),
-        )?;
-        Self::replace_table_entries(&txn, UDFS_TABLE, &snapshot.udfs, |udf| udf.name.as_str())?;
-        Self::replace_table_entries(&txn, TABLES_TABLE, &snapshot.tables, |table| {
-            table.id.as_str()
-        })?;
-        txn.commit().map_err(StorageError::backend)?;
-        Ok(())
+        self.commit_snapshot(
+            snapshot,
+            MetadataCommitOptions {
+                replace: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn attachment_transaction(&self) -> Result<Option<String>, StorageError> {
+        self.get_entry(INIT_APPLY_META_TABLE, ATTACHMENT_COMMIT_KEY)
     }
 
     pub fn get_init_apply_meta(&self) -> Result<Option<StoredInitApplyMeta>, StorageError> {
@@ -470,10 +464,10 @@ impl MetadataStorage {
         self.put_entry(INIT_APPLY_META_TABLE, INIT_APPLY_META_KEY, &meta)
     }
 
-    pub fn apply_init_snapshot(
+    pub fn commit_snapshot(
         &self,
-        snapshot: MetadataExportSnapshot,
-        meta: Option<StoredInitApplyMeta>,
+        mut snapshot: MetadataExportSnapshot,
+        options: MetadataCommitOptions,
     ) -> Result<(), StorageError> {
         let _guard = self.lock_db()?;
         let txn = self
@@ -481,39 +475,84 @@ impl MetadataStorage {
             .db
             .begin_write()
             .map_err(StorageError::backend)?;
-        Self::insert_entries(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
+        macro_rules! write_entries {
+            ($txn:expr, $table:expr, $values:expr, $key:expr $(,)?) => {
+                if options.replace {
+                    Self::replace_table_entries($txn, $table, $values, $key)
+                } else {
+                    Self::insert_entries($txn, $table, $values, $key)
+                }
+            };
+        }
+        let mut declarations = snapshot
+            .pipeline_run_states
+            .iter()
+            .map(|state| (state.pipeline_id.as_str(), &state.desired_state))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for pipeline in &mut snapshot.pipelines {
+            let Some(desired_state) = declarations.remove(pipeline.id.as_str()) else {
+                continue;
+            };
+            let mut definition: serde_json::Value =
+                serde_json::from_str(&pipeline.raw_json).map_err(StorageError::serialization)?;
+            definition
+                .as_object_mut()
+                .ok_or_else(|| {
+                    StorageError::InvalidInput("pipeline definition must be an object".to_string())
+                })?
+                .insert(
+                    "run_state".to_string(),
+                    serde_json::to_value(desired_state).map_err(StorageError::serialization)?,
+                );
+            pipeline.raw_json =
+                serde_json::to_string(&definition).map_err(StorageError::serialization)?;
+        }
+        if let Some((id, _)) = declarations.first_key_value() {
+            return Err(StorageError::InvalidInput(format!(
+                "deployment state has no pipeline in snapshot: {id}"
+            )));
+        }
+        write_entries!(&txn, STREAMS_TABLE, &snapshot.streams, |stream| {
             stream.id.as_str()
         })?;
-        Self::insert_entries(&txn, SCHEMAS_TABLE, &snapshot.schemas, |schema| {
+        write_entries!(&txn, SCHEMAS_TABLE, &snapshot.schemas, |schema| {
             schema.name.as_str()
         })?;
-        Self::insert_entries(&txn, PIPELINES_TABLE, &snapshot.pipelines, |pipeline| {
+        write_entries!(&txn, PIPELINES_TABLE, &snapshot.pipelines, |pipeline| {
             pipeline.id.as_str()
         })?;
-        Self::insert_entries(
+        write_entries!(
             &txn,
             PIPELINE_RUN_STATES_TABLE,
             &snapshot.pipeline_run_states,
             |state| state.pipeline_id.as_str(),
         )?;
-        Self::insert_entries(
+        write_entries!(
             &txn,
             SHARED_MQTT_CONFIGS_TABLE,
             &snapshot.mqtt_configs,
             |cfg| cfg.key.as_str(),
         )?;
-        Self::insert_entries(
+        write_entries!(
             &txn,
             MEMORY_TOPICS_TABLE,
             &snapshot.memory_topics,
             |topic| topic.topic.as_str(),
         )?;
-        Self::insert_entries(&txn, UDFS_TABLE, &snapshot.udfs, |udf| udf.name.as_str())?;
-        Self::insert_entries(&txn, TABLES_TABLE, &snapshot.tables, |table| {
+        write_entries!(&txn, UDFS_TABLE, &snapshot.udfs, |udf| udf.name.as_str())?;
+        write_entries!(&txn, TABLES_TABLE, &snapshot.tables, |table| {
             table.id.as_str()
         })?;
-        if let Some(meta) = meta {
+        if let Some(meta) = options.init_meta {
             Self::put_entry_in_txn(&txn, INIT_APPLY_META_TABLE, INIT_APPLY_META_KEY, &meta)?;
+        }
+        if let Some(transaction) = options.attachment_transaction {
+            Self::put_entry_in_txn(
+                &txn,
+                INIT_APPLY_META_TABLE,
+                ATTACHMENT_COMMIT_KEY,
+                &transaction,
+            )?;
         }
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
@@ -1094,6 +1133,10 @@ impl StorageManager {
         self.metadata.replace_snapshot(snapshot)
     }
 
+    pub fn attachment_transaction(&self) -> Result<Option<String>, StorageError> {
+        self.metadata.attachment_transaction()
+    }
+
     pub fn get_init_apply_meta(&self) -> Result<Option<StoredInitApplyMeta>, StorageError> {
         self.metadata.get_init_apply_meta()
     }
@@ -1102,12 +1145,12 @@ impl StorageManager {
         self.metadata.put_init_apply_meta(meta)
     }
 
-    pub fn apply_init_snapshot(
+    pub fn commit_metadata_snapshot(
         &self,
         snapshot: MetadataExportSnapshot,
-        meta: Option<StoredInitApplyMeta>,
+        options: MetadataCommitOptions,
     ) -> Result<(), StorageError> {
-        self.metadata.apply_init_snapshot(snapshot, meta)
+        self.metadata.commit_snapshot(snapshot, options)
     }
 }
 
@@ -1136,7 +1179,7 @@ mod tests {
         StoredPipeline {
             id: "pipe_1".to_string(),
             revision: 1,
-            raw_json: r#"{"id":"pipe_1","sql":"SELECT * FROM stream_1","sinks":[]}"#.to_string(),
+            raw_json: serde_json::json!({"id":"pipe_1", "sql":"SELECT * FROM stream_1", "sinks":[], "run_state":"Running"}).to_string(),
         }
     }
 
@@ -1384,7 +1427,13 @@ mod tests {
         };
 
         storage
-            .apply_init_snapshot(snapshot, Some(sample_init_apply_meta()))
+            .commit_metadata_snapshot(
+                snapshot,
+                MetadataCommitOptions {
+                    init_meta: Some(sample_init_apply_meta()),
+                    ..Default::default()
+                },
+            )
             .expect("upsert init snapshot");
 
         assert_eq!(storage.list_streams().unwrap(), vec![sample_stream()]);
@@ -1426,7 +1475,13 @@ mod tests {
         };
 
         storage
-            .apply_init_snapshot(snapshot, Some(meta.clone()))
+            .commit_metadata_snapshot(
+                snapshot,
+                MetadataCommitOptions {
+                    init_meta: Some(meta.clone()),
+                    ..Default::default()
+                },
+            )
             .unwrap();
 
         assert_eq!(storage.list_streams().unwrap(), vec![stream]);

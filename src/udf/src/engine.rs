@@ -3,10 +3,29 @@ use crate::metadata::{UdfExecutionMode, UdfMetadata};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use thiserror::Error;
-use wasmtime::{Config, Engine, Linker, Module, Store};
+use wasmtime::{Config, Engine, Linker, Module, Store, StoreLimits, StoreLimitsBuilder};
 
 static GLOBAL_ENGINE: OnceLock<Engine> = OnceLock::new();
 static EPOCH_TICKER: OnceLock<Result<(), String>> = OnceLock::new();
+
+const MAX_MEMORY_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const PAGE_SIZE: u64 = 64 * 1024;
+pub(crate) const MAX_PAGES: u64 = MAX_MEMORY_BYTES as u64 / PAGE_SIZE;
+const MAX_METADATA_BYTES: usize = 64 * 1024;
+
+/// Apply the same limits to validation and processor-owned execution stores.
+pub(crate) fn new_store(engine: &Engine) -> Store<StoreLimits> {
+    let limits = StoreLimitsBuilder::new()
+        .memory_size(MAX_MEMORY_BYTES)
+        .memories(1)
+        .table_elements(65_536)
+        .tables(1)
+        .instances(1)
+        .build();
+    let mut store = Store::new(engine, limits);
+    store.limiter(|limits| limits);
+    store
+}
 
 /// Global WASM execution engine shared across all UDF instances.
 ///
@@ -15,7 +34,7 @@ static EPOCH_TICKER: OnceLock<Result<(), String>> = OnceLock::new();
 #[derive(Clone)]
 pub struct WasmEngine {
     engine: Engine,
-    linker: Arc<Linker<()>>,
+    linker: Arc<Linker<StoreLimits>>,
 }
 
 /// Errors that can occur during WASM compilation or instantiation.
@@ -86,7 +105,7 @@ impl WasmEngine {
         // instantiation, so we never commit large initial memory.
         enforce_memory_cap(&module)?;
 
-        let mut store = Store::new(&self.engine, ());
+        let mut store = new_store(&self.engine);
         store.set_epoch_deadline(100);
         let instance = self.linker.instantiate(&mut store, &module)?;
 
@@ -120,7 +139,7 @@ impl WasmEngine {
         // instantiation, so we never commit large initial memory.
         enforce_memory_cap(&module)?;
 
-        let mut store = Store::new(&self.engine, ());
+        let mut store = new_store(&self.engine);
 
         store.set_epoch_deadline(100);
 
@@ -157,7 +176,10 @@ impl Default for WasmEngine {
 ///
 /// Simple bump-allocator using memory.grow when the current block is exhausted.
 /// We reserve one i32 at offset 0 in memory to track the current offset.
-fn host_alloc(mut caller: wasmtime::Caller<'_, ()>, size: i32) -> Result<i32, wasmtime::Error> {
+fn host_alloc(
+    mut caller: wasmtime::Caller<'_, StoreLimits>,
+    size: i32,
+) -> Result<i32, wasmtime::Error> {
     if size <= 0 {
         return Ok(0);
     }
@@ -189,8 +211,6 @@ fn host_alloc(mut caller: wasmtime::Caller<'_, ()>, size: i32) -> Result<i32, wa
     let current_pages = memory.size(&caller);
 
     // Check if we need to grow
-    const PAGE_SIZE: u64 = 65536;
-    const MAX_PAGES: u64 = 256; // 16 MiB hard limit
     let needed_bytes = new_bump as u64;
     let current_bytes = current_pages * PAGE_SIZE;
     if needed_bytes > current_bytes {
@@ -219,7 +239,7 @@ fn host_alloc(mut caller: wasmtime::Caller<'_, ()>, size: i32) -> Result<i32, wa
 
 fn read_metadata(
     instance: &wasmtime::Instance,
-    store: &mut Store<()>,
+    store: &mut Store<StoreLimits>,
 ) -> Result<UdfMetadata, WasmError> {
     let memory = instance
         .get_memory(&mut *store, "memory")
@@ -235,18 +255,27 @@ fn read_metadata(
     let ptr = ptr_fn.call(&mut *store, ())?;
     let len = len_fn.call(&mut *store, ())?;
 
-    if ptr == 0 || len <= 0 {
+    if ptr <= 0 || len <= 0 {
         return Err(WasmError::InvalidMetadata(
             "metadata pointer is null or length is zero".to_string(),
         ));
     }
 
-    let mut buf = vec![0u8; len as usize];
-    memory.read(&*store, ptr as usize, &mut buf).map_err(|e| {
-        WasmError::InvalidMetadata(format!("failed to read metadata from WASM memory: {e}"))
-    })?;
+    let len = len as usize;
+    if len > MAX_METADATA_BYTES {
+        return Err(WasmError::InvalidMetadata(format!(
+            "metadata length {len} exceeds {MAX_METADATA_BYTES} bytes"
+        )));
+    }
+    let ptr = ptr as usize;
+    let bytes = memory
+        .data(&*store)
+        .get(ptr..ptr.saturating_add(len))
+        .ok_or_else(|| {
+            WasmError::InvalidMetadata("metadata range is outside WASM memory".to_string())
+        })?;
 
-    serde_json::from_slice(&buf)
+    serde_json::from_slice(bytes)
         .map_err(|e| WasmError::InvalidMetadata(format!("invalid metadata JSON: {e}")))
 }
 
@@ -274,7 +303,6 @@ fn validate_metadata(metadata: &UdfMetadata) -> Result<(), WasmError> {
 /// Both the minimum (initial size) and maximum (growth limit) are checked
 /// before instantiation. A missing maximum is treated as unbounded.
 fn enforce_memory_cap(module: &Module) -> Result<(), WasmError> {
-    const MAX_PAGES: u64 = 256;
     for export in module.exports() {
         if export.name() == "memory" {
             if let wasmtime::ExternType::Memory(mem) = export.ty() {
@@ -333,7 +361,6 @@ mod tests {
             "#,
         )
         .expect("wat parse")
-        .into()
     }
 
     #[test]
@@ -361,6 +388,79 @@ mod tests {
             .instantiate("wrong_name", &wasm)
             .expect_err("should reject name mismatch");
         assert!(err.to_string().contains("wrong_name"));
+    }
+
+    fn metadata_module(ptr: i32, len: i32, extra: &str) -> Vec<u8> {
+        let metadata = r#"{"abi_version":1,"name":"test_udf","description":"limits","args":[],"return_type":"any","execution_mode":"batch"}"#;
+        let data = metadata
+            .bytes()
+            .map(|byte| format!("\\{byte:02x}"))
+            .collect::<String>();
+        wat::parse_str(format!(
+            r#"
+            (module
+                (memory (export "memory") 1 256)
+                (data (i32.const 128) "{data}")
+                (func (export "udf_metadata_ptr") (result i32) i32.const {ptr})
+                (func (export "udf_metadata_len") (result i32) i32.const {len})
+                (func (export "udf_batch") (param i32 i32) (result i32) i32.const 0)
+                {extra}
+            )"#
+        ))
+        .expect("test module")
+    }
+
+    #[test]
+    fn metadata_limits_reject_invalid_lengths_and_ranges_before_parsing() {
+        let engine = WasmEngine::new().expect("engine");
+        for (ptr, len, reason) in [
+            (128, i32::MAX, "exceeds"),
+            (128, 65_537, "exceeds"),
+            (-1, 8, "pointer"),
+            (65_532, 8, "outside"),
+            (i32::MAX, 8, "outside"),
+        ] {
+            let wasm = metadata_module(ptr, len, "");
+            for result in [
+                engine.validate(&wasm).map(|_| ()),
+                engine.instantiate("test_udf", &wasm).map(|_| ()),
+            ] {
+                assert!(
+                    result
+                        .expect_err("reject metadata")
+                        .to_string()
+                        .contains(reason),
+                    "{ptr}/{len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validation_enforces_initial_memory_and_table_limits() {
+        let engine = WasmEngine::new().expect("engine");
+        let metadata_len = r#"{"abi_version":1,"name":"test_udf","description":"limits","args":[],"return_type":"any","execution_mode":"batch"}"#.len() as i32;
+        for extra in [
+            "(memory 1)",
+            "(table 65537 funcref)",
+            "(table 1 funcref) (table 1 funcref)",
+        ] {
+            let wasm = metadata_module(128, metadata_len, extra);
+            assert!(engine.validate(&wasm).is_err(), "{extra}");
+            assert!(engine.instantiate("test_udf", &wasm).is_err(), "{extra}");
+        }
+        let wasm = metadata_module(
+            128,
+            metadata_len,
+            r#"
+            (table (export "scratch") 1 funcref)
+            (func (export "grow_scratch") (result i32)
+                ref.null func i32.const 65536 table.grow)
+        "#,
+        );
+        engine.validate(&wasm).expect("valid initial resources");
+        let udf = engine.instantiate("test_udf", &wasm).expect("UDF");
+        udf.create_runtime().expect("worker runtime");
     }
 
     #[test]

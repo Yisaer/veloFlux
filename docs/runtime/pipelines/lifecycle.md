@@ -257,3 +257,34 @@ Scheduled pipelines expose only `scheduled_running`, `scheduled_stopped`,
   restart fails.
 - Verify stop persists desired state before runtime stop.
 - Verify delete removes storage even when runtime cleanup reports an error.
+
+## Incremental Apply
+
+`POST /storage/apply` stores the pipeline deployment declaration in its definition,
+separately from operational desired state. Higher revision applies inline `run_state` (default
+`Stopped`); same-revision identical declaration replay preserves manual start/stop.
+Both records survive restart. Ordinary pipeline upsert keeps its existing
+preserve-operational-intent behavior.
+
+Apply validates submitted pipelines before committing the complete delta. Runtime
+replacement happens after that commit; a build/start/rebind failure does not
+roll back the revision. The manager reports the failure in
+the batch result without persisting a runtime acknowledgment. Restart hydration
+retries committed configuration according to operational desired state. Explicit
+start rebuilds an absent or outdated runtime from stored metadata; an existing
+failed runtime uses the ordinary lifecycle retry against the current catalog.
+Same-revision Apply preserves manual lifecycle changes and does not retry runtime
+installation; it reports current observable results, or `null` when application
+cannot be confirmed. Scheduled patrol retains its ordinary handling of current
+in-memory failed runtimes.
+
+Apply defaults to `restart_pipelines=false`: upstream configuration changes keep
+unsubmitted pipelines' processor graphs and runtime state. With
+`restart_pipelines=true`, affected existing pipelines stop before the dependency
+batch is installed, then rebuild and restore their operational desired state.
+Submitted newer pipelines follow incoming `run_state` in either mode. Runtime
+MQTT bindings are retained in pipeline snapshots so client replacement and cascade
+selection remain safe when catalog definitions have changed without a restart.
+Shared clients and shared streams still used by unselected pipelines keep their
+old runtime and report that the new configuration has not applied.
+See [the API contract](../../api/storage_apply.md) for recovery and scheduling.

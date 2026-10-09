@@ -178,8 +178,14 @@ Examples:
 - Files remain on disk after deletion of the pipelines that reference them.
   Delete unused files manually via `DELETE /files/:name`.
 - The upload endpoint is serialized with import/export operations.
-  Concurrent `POST /files/upload` and `POST /import` requests will receive
+  Concurrent `POST /files/upload` and `POST /storage/import` requests will receive
   `409 Conflict`.
 - Request data is streamed through the reserved `<data_dir>/uploads/tmp/`
   directory and atomically moved to its final name. Startup clears temporary
   files left by an unclean process exit.
+
+Incremental Apply accepts new managed schema/WASM attachments through multipart
+ZIP on `POST /storage/apply`. JSON Apply can reuse already installed managed
+files. The shared publication journal coordinates file backup/installation with
+metadata commit and is recovered at startup; see
+[Apply attachment recovery](../../docs/api/storage_apply.md).

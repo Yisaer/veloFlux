@@ -296,7 +296,7 @@ async fn import_bundle(
     let body = build_import_zip(&bundle);
     let resp = h
         .http
-        .post(format!("{}/import", h.base()))
+        .post(format!("{}/storage/import", h.base()))
         .multipart(
             reqwest::multipart::Form::new().part(
                 "file",

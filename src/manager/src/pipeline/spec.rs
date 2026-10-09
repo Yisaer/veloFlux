@@ -11,7 +11,7 @@ use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
 use parser::SelectStmt;
 use serde::Deserialize;
 use serde_json::Map as JsonMap;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use super::types::{
@@ -367,10 +367,16 @@ fn validate_source_request(
     Ok(())
 }
 
+#[derive(Default)]
+pub(crate) struct PipelineBuildOptions<'a> {
+    pub shared_mqtt_clients: Option<&'a BTreeMap<String, flow::connector::SharedMqttClientConfig>>,
+}
+
 pub(crate) fn build_pipeline_definition(
     req: &CreatePipelineRequest,
     encoder_registry: &EncoderRegistry,
     instance: &flow::FlowInstance,
+    options: PipelineBuildOptions<'_>,
 ) -> Result<PipelineDefinition, String> {
     let select_stmt = parse_pipeline_select_stmt(req, instance)?;
     let sources = build_source_definitions(req, instance, &select_stmt)?;
@@ -433,12 +439,16 @@ pub(crate) fn build_pipeline_definition(
                     .map_err(|err| format!("invalid mqtt sink user_properties: {err}"))?;
                 if !user_properties.is_empty() {
                     let effective_protocol = if let Some(key) = &connector_key {
-                        instance
-                            .get_shared_mqtt_client(key)
-                            .ok_or_else(|| {
-                                format!("mqtt sink references unknown connector_key `{key}`")
-                            })?
-                            .protocol_version
+                        let protocol = if let Some(clients) = options.shared_mqtt_clients {
+                            clients.get(key).map(|client| client.protocol_version)
+                        } else {
+                            instance
+                                .get_shared_mqtt_client(key)
+                                .map(|client| client.protocol_version)
+                        };
+                        protocol.ok_or_else(|| {
+                            format!("mqtt sink references unknown connector_key `{key}`")
+                        })?
                     } else {
                         mqtt_props.protocol_version.unwrap_or_default()
                     };
@@ -888,9 +898,13 @@ mod tests {
         }))
         .expect("deserialize HTTP retry request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build pipeline definition");
         let retry = &definition.sinks()[0].retry;
         assert_eq!(retry.max_attempts, Some(5));
         assert_eq!(retry.retry_up_to, flow::pipeline::SinkRetryUpTo::Transient);
@@ -1005,9 +1019,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build pipeline definition");
 
         let SinkProps::Mqtt(mqtt) = &definition.sinks()[0].props else {
             panic!("expected MQTT sink");
@@ -1062,9 +1080,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build pipeline definition");
         let sink = &definition.sinks()[0];
 
         assert_eq!(sink.output.mode.as_str(), "delta");
@@ -1137,9 +1159,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let err =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect_err("invalid output mode should fail");
+        let err = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect_err("invalid output mode should fail");
         assert!(
             err.contains("invalid sink output.mode"),
             "unexpected error: {err}"
@@ -1186,9 +1212,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build pipeline definition");
 
         assert_eq!(definition.sources()[0].stream, "vehicle_stream");
         assert!(definition.sources()[0].input.is_on_change());
@@ -1231,9 +1261,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let err =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect_err("duplicate source stream should fail");
+        let err = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect_err("duplicate source stream should fail");
         assert!(
             err.contains("pipeline source `vehicle_stream` is configured more than once"),
             "unexpected error: {err}"
@@ -1268,9 +1302,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build pipeline definition");
         let sink = &definition.sinks()[0];
         let flow::pipeline::SinkProps::Mqtt(mqtt) = &sink.props else {
             panic!("expected mqtt sink props");
@@ -1312,9 +1350,13 @@ mod tests {
         }))
         .expect("deserialize MQTT 5 pipeline request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build MQTT 5 pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build MQTT 5 pipeline definition");
         let flow::pipeline::SinkProps::Mqtt(mqtt) = &definition.sinks()[0].props else {
             panic!("expected MQTT sink props");
         };
@@ -1356,9 +1398,13 @@ mod tests {
         }))
         .expect("deserialize MQTT 5 pipeline request");
 
-        let error =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect_err("missing static property must be rejected");
+        let error = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect_err("missing static property must be rejected");
 
         assert!(error.contains("props.user_properties[1].value"));
         assert!(error.contains("property `missing` is not defined"));
@@ -1394,9 +1440,13 @@ mod tests {
         }))
         .expect("deserialize MQTT 5 pipeline request");
 
-        let error =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect_err("invalid rendered MQTT string must be rejected");
+        let error = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect_err("invalid rendered MQTT string must be rejected");
 
         assert!(error.contains("user_properties[0].value"));
         assert!(!error.contains("private"));
@@ -1425,9 +1475,13 @@ mod tests {
         }))
         .expect("deserialize MQTT v3 pipeline request");
 
-        let error =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect_err("MQTT v3 User Properties must be rejected");
+        let error = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect_err("MQTT v3 User Properties must be rejected");
         assert!(error.contains("require effective protocol_version `v5`"));
     }
 
@@ -1454,9 +1508,13 @@ mod tests {
         }))
         .expect("deserialize shared MQTT pipeline request");
 
-        let error =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect_err("connector-local protocol version must be rejected");
+        let error = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect_err("connector-local protocol version must be rejected");
         assert!(error.contains("protocol_version is owned by connector_key"));
     }
 
@@ -1487,9 +1545,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build pipeline definition");
         let sink = &definition.sinks()[0];
         let flow::pipeline::SinkProps::NngPubSub(nng) = &sink.props else {
             panic!("expected nng_pubsub sink props");
@@ -1536,9 +1598,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build pipeline definition");
         let sink = &definition.sinks()[0];
         let flow::pipeline::SinkProps::File(file) = &sink.props else {
             panic!("expected file sink props");
@@ -1582,9 +1648,13 @@ mod tests {
             "vin".to_string(),
             SecretString::new("VIN-123".to_string()),
         )])));
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build pipeline definition");
         let SinkProps::File(file) = &definition.sinks()[0].props else {
             panic!("expected file sink props");
         };
@@ -1620,9 +1690,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("static name is valid");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("static name is valid");
         let SinkProps::File(file) = &definition.sinks()[0].props else {
             panic!("expected file sink props");
         };
@@ -1689,9 +1763,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build pipeline definition");
         let SinkProps::File(file) = &definition.sinks()[0].props else {
             panic!("expected file sink");
         };
@@ -1733,9 +1811,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let err =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect_err("rendered path separator should fail");
+        let err = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect_err("rendered path separator should fail");
 
         assert!(err.contains("filename_pattern must not contain path separators"));
         assert!(!err.contains("bad/name"));
@@ -1781,9 +1863,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let definition =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect("build pipeline definition");
+        let definition = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect("build pipeline definition");
         let sink = &definition.sinks()[0];
         assert!(matches!(
             sink.compression,
@@ -1832,9 +1918,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let err =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect_err("invalid key should fail");
+        let err = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect_err("invalid key should fail");
         assert!(!err.contains(raw_key), "error leaked raw key: {err}");
         assert!(err.contains("invalid base64 inline encryption key"));
     }
@@ -1868,9 +1958,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let err =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect_err("file sink should reject encoder none");
+        let err = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect_err("file sink should reject encoder none");
         assert!(
             err.contains("encoder.type=none is not supported"),
             "unexpected error: {err}"
@@ -1904,9 +1998,13 @@ mod tests {
         }))
         .expect("deserialize pipeline request");
 
-        let err =
-            build_pipeline_definition(&request, instance.encoder_registry().as_ref(), &instance)
-                .expect_err("standalone mqtt sink should require broker_url");
+        let err = build_pipeline_definition(
+            &request,
+            instance.encoder_registry().as_ref(),
+            &instance,
+            Default::default(),
+        )
+        .expect_err("standalone mqtt sink should require broker_url");
         assert_eq!(err, "mqtt sink requires broker_url");
     }
 }

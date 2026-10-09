@@ -22,7 +22,7 @@ pub struct SharedMqttClientResource {
     pub definition: SharedMqttClientConfig,
 }
 
-fn validate_shared_mqtt_config(cfg: &SharedMqttClientConfig) -> Result<(), String> {
+pub(crate) fn validate_shared_mqtt_config(cfg: &SharedMqttClientConfig) -> Result<(), String> {
     validate_resource_id(ResourceIdKind::SharedMqttClientKey, &cfg.key)?;
     if cfg.broker_url.trim().is_empty() {
         return Err(format!(

@@ -88,6 +88,21 @@ impl PreparedSchemaTree {
         self.staging_dir.as_deref()
     }
 
+    pub(crate) fn recovery_paths(&self) -> Option<(&Path, &Path, &Path)> {
+        Some((
+            &self.target_dir,
+            self.staging_dir.as_deref()?,
+            self.backup_dir.as_deref()?,
+        ))
+    }
+
+    pub(crate) fn preserve_for_recovery(&mut self) {
+        self.finished = true;
+        if let Some(work) = self.work_dir.take() {
+            let _ = work.keep();
+        }
+    }
+
     pub fn activate(&mut self) -> Result<(), String> {
         let Some(staging_dir) = &self.staging_dir else {
             return Ok(());
@@ -867,7 +882,8 @@ mod tests {
 
     #[test]
     fn extract_rejects_unsafe_or_invalid_layouts() {
-        let cases: &[(&str, &[(&str, Option<&[u8]>)], &str)] = &[
+        type ArchiveLayoutCase<'a> = (&'a str, &'a [(&'a str, Option<&'a [u8]>)], &'a str);
+        let cases: &[ArchiveLayoutCase<'_>] = &[
             ("empty", &[], "must not be empty"),
             (
                 "multiple_roots",

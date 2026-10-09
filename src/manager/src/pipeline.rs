@@ -15,6 +15,6 @@ pub use state::AppState;
 pub use types::CreatePipelineRequest;
 
 pub(crate) use spec::{
-    build_pipeline_definition, referenced_streams_from_pipeline_sql, status_label,
-    validate_create_request,
+    PipelineBuildOptions, build_pipeline_definition, referenced_streams_from_pipeline_sql,
+    status_label, validate_create_request,
 };

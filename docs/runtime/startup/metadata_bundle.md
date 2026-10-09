@@ -1,6 +1,6 @@
 # Resource Directory Format
 
-Export, import, and startup initialization share one canonical directory:
+Export, import, incremental Apply, and startup initialization share one canonical directory:
 
 ```text
 manifest.json
@@ -104,7 +104,12 @@ The physical format does not select write semantics:
   comparing them.
 - Startup `--init-dir` reads an extracted directory and performs revision-based,
   best-effort Apply. It retains resources absent from the directory.
-- HTTP import validates the complete ZIP and performs full-snapshot Sync in one
+- Online `POST /storage/apply` accepts manifest JSON or a ZIP and applies a
+  complete validated delta atomically, then reports runtime application separately.
+  It retains absent resources, rejects lower revisions and equal-revision content
+  conflicts, and acknowledges equal normalized deployment declarations without
+  undoing operational start/stop. Omitted pipeline `run_state` is `Stopped`.
+- HTTP `POST /storage/import` validates the complete ZIP and performs full-snapshot Sync in one
   metadata transaction. It does not compare revisions, so an imported lower
   revision replaces a stored higher revision and absent resources are deleted.
   Import remains storage-only and reports `applied_to_runtime: false`.
@@ -132,3 +137,24 @@ WASM module, recompute its SHA-256, rename it to
 
 Use startup Apply for selective revision-based deployment. Use HTTP import when
 the artifact must replace the complete persisted resource set.
+
+## Entry Contracts
+
+Format version 1 does not support deletions. A `deletions` field is rejected,
+even when empty. JSON Apply permits inline resources and already
+installed, validated managed attachments; new files require ZIP.
+
+Online Apply defaults to `restart_pipelines=false`, preserving unsubmitted
+pipeline graphs. `restart_pipelines=true` coordinates cascading reconstruction
+around the complete dependency batch; submitted newer pipelines always use their
+incoming `run_state`. Replay remains idempotent with either query value.
+
+Pipeline deployment declarations are stored independently of operational
+Running/Stopped intent. Export preserves its existing snapshot behavior: inline
+`run_state` reflects current persisted operational desired state. Import treats
+that snapshot value as the restored declaration; online replay compares against
+the last accepted deployment declaration. Start/stop does not change revisions.
+
+Read the [Apply API](../../api/storage_apply.md),
+[Import API](../../api/storage_import.md), and
+[error comparison](../../api/storage_errors.md) before choosing an entrance.

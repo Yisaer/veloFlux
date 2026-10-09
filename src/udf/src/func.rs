@@ -1,10 +1,11 @@
 use crate::abi::{deserialize_batch_result, serialize_batch_args};
+use crate::engine::{MAX_PAGES, PAGE_SIZE};
 use crate::metadata::UdfMetadata;
 use datatypes::Value;
 use flow::expr::custom_func::{BatchFunc, CustomFunc};
 use flow::expr::func::EvalError;
 use std::sync::{Arc, Mutex};
-use wasmtime::{Engine, InstancePre, Memory, Store, TypedFunc};
+use wasmtime::{Engine, InstancePre, Memory, Store, StoreLimits, TypedFunc};
 
 const HEAP_START: u32 = 4;
 
@@ -18,7 +19,7 @@ pub struct WasmUdf {
     /// Wasmtime engine (shared across all UDFs).
     engine: Engine,
     /// Pre-linked instantiation plan reused by processor-owned runtimes.
-    instance_pre: InstancePre<()>,
+    instance_pre: InstancePre<StoreLimits>,
     /// Epoch ticks allowed for one batch call.
     epoch_ticks_per_call: u64,
 }
@@ -42,7 +43,7 @@ impl WasmUdf {
         name: String,
         metadata: UdfMetadata,
         engine: Engine,
-        instance_pre: InstancePre<()>,
+        instance_pre: InstancePre<StoreLimits>,
     ) -> Result<Self, super::engine::WasmError> {
         Ok(Self {
             name,
@@ -60,13 +61,15 @@ impl WasmUdf {
     /// Bump-allocate `size` bytes in WASM linear memory.
     /// Returns the offset (pointer) to the allocated block.
     /// Mirrors the `host::alloc` function registered in the linker.
-    fn wasm_alloc(memory: &Memory, store: &mut Store<()>, size: i32) -> Result<i32, EvalError> {
+    fn wasm_alloc(
+        memory: &Memory,
+        store: &mut Store<StoreLimits>,
+        size: i32,
+    ) -> Result<i32, EvalError> {
         if size <= 0 {
             return Ok(0);
         }
         let size = size as u32;
-        const PAGE_SIZE: u64 = 65536;
-        const MAX_PAGES: u64 = 256;
 
         // Read current bump pointer
         let mut bump_bytes = [0u8; 4];
@@ -140,14 +143,14 @@ impl CustomFunc for WasmUdf {
 }
 
 impl WasmUdf {
-    fn instance_pre(&self) -> &InstancePre<()> {
+    fn instance_pre(&self) -> &InstancePre<StoreLimits> {
         &self.instance_pre
     }
 }
 
 /// A worker-owned WASM execution state for one UDF definition.
 pub struct WasmUdfRuntime {
-    store: Store<()>,
+    store: Store<StoreLimits>,
     memory: Memory,
     udf_batch: TypedFunc<(i32, i32), i32>,
     epoch_ticks_per_call: u64,
@@ -198,7 +201,7 @@ impl BatchFunc for BoundWasmUdf {
 
 impl WasmUdfRuntime {
     fn new(udf: &WasmUdf) -> Result<Self, EvalError> {
-        let mut store = Store::new(&udf.engine, ());
+        let mut store = crate::engine::new_store(&udf.engine);
         store.set_epoch_deadline(udf.epoch_ticks_per_call);
         let instance =
             udf.instance_pre()
@@ -342,6 +345,40 @@ mod tests {
     use crate::engine::WasmEngine;
     use datatypes::Value;
 
+    #[test]
+    fn worker_store_limits_guest_table_growth() {
+        let metadata = r#"{"abi_version":1,"name":"test_udf","description":"limits","args":[],"return_type":"any","execution_mode":"batch"}"#;
+        let data = metadata
+            .bytes()
+            .map(|byte| format!("\\{byte:02x}"))
+            .collect::<String>();
+        let wasm = wat::parse_str(format!(
+            r#"
+            (module
+                (memory (export "memory") 1 256)
+                (table 1 funcref)
+                (data (i32.const 128) "{data}")
+                (func (export "udf_metadata_ptr") (result i32) i32.const 128)
+                (func (export "udf_metadata_len") (result i32) i32.const {})
+                (func (export "udf_batch") (param i32 i32) (result i32)
+                    ref.null func i32.const 65536 table.grow)
+            )"#,
+            metadata.len()
+        ))
+        .expect("module");
+        let engine = WasmEngine::new().expect("engine");
+        let udf = engine.instantiate("test_udf", &wasm).expect("UDF");
+        let mut runtime = udf.create_runtime().expect("worker runtime");
+        let allocation = runtime
+            .udf_batch
+            .call(&mut runtime.store, (0, 0))
+            .expect("guest call");
+        assert_eq!(
+            allocation, -1,
+            "guest table.grow must fail at the store limit"
+        );
+    }
+
     /// A minimal WASM module that returns two batch values.
     fn batch_wasm_module() -> Vec<u8> {
         wat::parse_str(
@@ -386,7 +423,6 @@ mod tests {
             "#,
         )
         .expect("wat parse")
-        .into()
     }
 
     fn looping_wasm_module() -> Vec<u8> {
@@ -411,7 +447,6 @@ mod tests {
             "#,
         )
         .expect("wat parse")
-        .into()
     }
 
     #[test]
@@ -454,7 +489,7 @@ mod tests {
             .expect("bind runtime")
             .expect("WASM runtime");
 
-        let input = vec![Value::Float64(3.14)];
+        let input = vec![Value::Float64(2.5)];
         let result = udf.eval_batch(&[input], 1).expect("eval_batch");
         assert_eq!(result, vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))]);
     }

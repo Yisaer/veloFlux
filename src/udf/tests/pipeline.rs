@@ -61,7 +61,6 @@ fn batch_wasm_module() -> Vec<u8> {
         "#,
     )
     .expect("parse identity WASM module")
-    .into()
 }
 
 fn make_topics() -> (String, String) {
@@ -92,11 +91,9 @@ async fn install_stream_schema(instance: &FlowInstance, input_topic: &str) {
 
 async fn receive_json(output: &mut tokio::sync::broadcast::Receiver<MemoryData>) -> JsonValue {
     let payload = timeout(Duration::from_secs(10), async {
-        loop {
-            match output.recv().await.expect("receive output") {
-                MemoryData::Bytes(bytes) => break bytes,
-                MemoryData::Collection(_) => panic!("expected JSON bytes output"),
-            }
+        match output.recv().await.expect("receive output") {
+            MemoryData::Bytes(bytes) => bytes,
+            MemoryData::Collection(_) => panic!("expected JSON bytes output"),
         }
     })
     .await

@@ -58,6 +58,7 @@ pub(crate) fn apply_init_directory_if_needed<F>(
 where
     F: Fn(&str) -> bool,
 {
+    crate::attachments::recover(storage)?;
     let staging_root = storage.base_dir().join(".init-staging");
     if let Err(err) =
         fs::create_dir_all(&staging_root).map_err(|err| format!("create init staging root: {err}"))
@@ -411,8 +412,16 @@ where
     validate_incoming_identities(&manifest.resources)?;
     let live = build_export_resources(storage)?;
     let initial_live = live.clone();
-    let (_candidate_resources, mut pending_resources, kept_existing) =
-        build_apply_candidate(&manifest.bundle_version, live, manifest.resources);
+    let (_candidate_resources, mut pending_resources, results) = build_apply_candidate(
+        &manifest.bundle_version,
+        live,
+        manifest.resources,
+        ApplyPolicy::BestEffort,
+    )?;
+    let kept_existing = results
+        .iter()
+        .filter(|result| result.result == "ignored_not_newer")
+        .count();
     let staging_root = storage.base_dir().join(".init-staging");
     let work = tempfile::Builder::new()
         .prefix("apply.")
@@ -578,10 +587,6 @@ where
     } else {
         Some(PreparedSchemaTree::prepare(storage, &final_schemas)?)
     };
-    if let Some(tree) = &mut schema_tree {
-        tree.activate()?;
-    }
-    let installed_wasm = install_staged_wasm(&staged_wasm, &storage.wasm_files_dir())?;
     let meta = if had_entry_errors || validation_errors || preparation_errors {
         None
     } else {
@@ -590,21 +595,16 @@ where
             applied_at_ms: unix_time_ms(SystemTime::now())?,
         })
     };
-    if let Err(err) = storage.apply_init_snapshot(pending_snapshot, meta) {
-        for path in &installed_wasm {
-            let _ = fs::remove_file(path);
-        }
-        let mut message = format!("commit init metadata: {err}");
-        if let Some(tree) = &mut schema_tree
-            && let Err(rollback_err) = tree.rollback()
-        {
-            message = format!("{message}; rollback schemas: {rollback_err}");
-        }
-        return Err(message);
-    }
-    if let Some(tree) = &mut schema_tree {
-        tree.finish();
-    }
+    let installed_wasm = crate::attachments::publish_and_commit(
+        storage,
+        pending_snapshot,
+        storage::MetadataCommitOptions {
+            init_meta: meta,
+            ..Default::default()
+        },
+        schema_tree.take(),
+        &staged_wasm,
+    )?;
 
     Ok(ApplySummary {
         resources_applied: count_resources(&pending_resources),
@@ -614,7 +614,7 @@ where
     })
 }
 
-fn empty_resources() -> ExportResources {
+pub(crate) fn empty_resources() -> ExportResources {
     ExportResources {
         memory_topics: Vec::new(),
         shared_mqtt_clients: Vec::new(),
@@ -639,7 +639,7 @@ fn append_snapshot(target: &mut MetadataExportSnapshot, mut source: MetadataExpo
     target.tables.append(&mut source.tables);
 }
 
-fn empty_snapshot() -> MetadataExportSnapshot {
+pub(crate) fn empty_snapshot() -> MetadataExportSnapshot {
     MetadataExportSnapshot {
         streams: Vec::new(),
         schemas: Vec::new(),
@@ -978,11 +978,30 @@ where
     }
 }
 
-fn build_apply_candidate(
+#[derive(Clone, Copy)]
+pub(crate) enum ApplyPolicy {
+    BestEffort,
+    Atomic,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct ResourceApplyResult {
+    pub kind: String,
+    pub identity: String,
+    pub incoming_revision: u64,
+    pub current_revision: Option<u64>,
+    pub operation: &'static str,
+    pub result: &'static str,
+    pub runtime_applied: Option<bool>,
+    pub error: Option<String>,
+}
+
+pub(crate) fn build_apply_candidate(
     bundle_version: &str,
     mut live: ExportResources,
     incoming: ExportResources,
-) -> (ExportResources, ExportResources, usize) {
+    policy: ApplyPolicy,
+) -> Result<(ExportResources, ExportResources, Vec<ResourceApplyResult>), String> {
     let mut pending = ExportResources {
         memory_topics: Vec::new(),
         shared_mqtt_clients: Vec::new(),
@@ -992,34 +1011,45 @@ fn build_apply_candidate(
         udfs: Vec::new(),
         tables: Vec::new(),
     };
-    let mut kept = 0;
+    let mut results = Vec::new();
     macro_rules! merge {
         ($field:ident, $id:expr, $revision:expr) => {{
             for item in incoming.$field {
                 let id = $id(&item);
                 let incoming_revision = $revision(&item);
-                if let Some(position) = live.$field.iter().position(|live| $id(live) == id) {
+                let position = live.$field.iter().position(|live| $id(live) == id);
+                let current_revision = position.map(|position| $revision(&live.$field[position]));
+                let mut outcome = "created";
+                if let Some(position) = position {
                     let current_revision = $revision(&live.$field[position]);
                     if incoming_revision <= current_revision {
-                        kept += 1;
-                        log_init_resource_result(
-                            bundle_version,
-                            stringify!($field),
-                            Some(&id),
-                            Some(incoming_revision),
-                            Some(current_revision),
-                            "ignored_not_newer",
-                            "incoming_revision_not_greater",
-                            None,
-                        );
-                        continue;
+                        if matches!(policy, ApplyPolicy::Atomic) {
+                            if incoming_revision < current_revision {
+                                return Err(format!("older_revision: {} {id}: incoming {incoming_revision}, current {current_revision}", stringify!($field)));
+                            }
+                            if crate::revision::normalized_spec_without_revision(&item)?
+                                != crate::revision::normalized_spec_without_revision(&live.$field[position])? {
+                                return Err(format!("same_revision_different_spec: {} {id}: revision {incoming_revision}", stringify!($field)));
+                            }
+                            outcome = "idempotent";
+                        } else {
+                            outcome = "ignored_not_newer";
+                            log_init_resource_result(bundle_version, stringify!($field), Some(&id), Some(incoming_revision), Some(current_revision), outcome, "incoming_revision_not_greater", None);
+                        }
+                    } else {
+                        outcome = "updated";
+                        pending.$field.push(item.clone());
+                        live.$field[position] = item;
                     }
-                    pending.$field.push(item.clone());
-                    live.$field[position] = item;
                 } else {
                     pending.$field.push(item.clone());
                     live.$field.push(item);
                 }
+                results.push(ResourceApplyResult {
+                    kind: stringify!($field).to_string(), identity: id,
+                    incoming_revision, current_revision, operation: "upsert", result: outcome,
+                    runtime_applied: None, error: None,
+                });
             }
         }};
     }
@@ -1058,10 +1088,10 @@ fn build_apply_candidate(
         |item: &crate::export::ExportTable| item.definition.name.clone(),
         |item: &crate::export::ExportTable| item.definition.revision
     );
-    (live, pending, kept)
+    Ok((live, pending, results))
 }
 
-fn validate_incoming_identities(resources: &ExportResources) -> Result<(), String> {
+pub(crate) fn validate_incoming_identities(resources: &ExportResources) -> Result<(), String> {
     fn unique<'a>(kind: &str, identities: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
         let mut seen = BTreeSet::new();
         for identity in identities {
@@ -1112,7 +1142,7 @@ fn validate_incoming_identities(resources: &ExportResources) -> Result<(), Strin
     )
 }
 
-fn filter_pending_snapshot(
+pub(crate) fn filter_pending_snapshot(
     candidate: MetadataExportSnapshot,
     pending: &ExportResources,
 ) -> MetadataExportSnapshot {
@@ -1196,12 +1226,12 @@ fn filter_pending_snapshot(
 }
 
 #[derive(Default)]
-struct SourceLimits {
+pub(crate) struct SourceLimits {
     entries: usize,
     bytes: u64,
 }
 
-fn copy_tree_limited(
+pub(crate) fn copy_tree_limited(
     source: &Path,
     destination: &Path,
     limits: &mut SourceLimits,
@@ -1263,7 +1293,7 @@ fn copy_tree_limited(
     Ok(())
 }
 
-fn copy_regular_file_limited(
+pub(crate) fn copy_regular_file_limited(
     source: &Path,
     destination: &Path,
     limits: &mut SourceLimits,
@@ -1296,7 +1326,10 @@ fn copy_regular_file_limited(
     Ok(())
 }
 
-fn install_staged_wasm(source: &Path, destination: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn install_staged_wasm(
+    source: &Path,
+    destination: &Path,
+) -> Result<Vec<PathBuf>, String> {
     fs::create_dir_all(destination).map_err(|err| format!("create WASM directory: {err}"))?;
     let mut entries = fs::read_dir(source)
         .map_err(|err| format!("read staged WASM directory: {err}"))?
@@ -1326,16 +1359,22 @@ fn install_staged_wasm(source: &Path, destination: &Path) -> Result<Vec<PathBuf>
     })();
 
     if let Err(err) = install_result {
-        for path in &installed {
-            let _ = fs::remove_file(path);
-        }
-        return Err(err);
+        return Err(rollback_wasm(&installed, err));
     }
 
     Ok(installed)
 }
 
-fn files_equal(left: &Path, right: &Path) -> Result<bool, String> {
+pub(crate) fn rollback_wasm(paths: &[PathBuf], mut error: String) -> String {
+    for path in paths {
+        if let Err(err) = fs::remove_file(path) {
+            error.push_str(&format!("; rollback WASM `{}`: {err}", path.display()));
+        }
+    }
+    error
+}
+
+pub(crate) fn files_equal(left: &Path, right: &Path) -> Result<bool, String> {
     let left_len = fs::metadata(left)
         .map_err(|err| format!("inspect staged WASM `{}`: {err}", left.display()))?
         .len();

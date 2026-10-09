@@ -194,6 +194,7 @@ fn compute_schedule_status_at(
 /// and reconciles their actual state with the expected schedule windows.
 pub(crate) async fn run_patrol(state: super::state::AppState, interval: Duration) {
     let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tick.tick().await;
 
     loop {
@@ -207,8 +208,176 @@ pub(crate) async fn run_patrol(state: super::state::AppState, interval: Duration
         };
 
         for stored in &pipelines {
-            patrol_pipeline(stored, &state).await;
+            patrol_pipeline(&stored.id, &state).await;
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PatrolAction {
+    Start,
+    Stop,
+}
+
+async fn patrol_pipeline(pipeline_id: &str, state: &super::state::AppState) {
+    if patrol_action(pipeline_id, state).is_none() {
+        return;
+    }
+    let _metadata_permit = match state.acquire_metadata_operation().await {
+        Ok(permit) => permit,
+        Err(err) => {
+            tracing::error!(%err, "patrol: metadata operation guard closed");
+            return;
+        }
+    };
+    if crate::attachments::needs_recovery(&state.storage) {
+        return;
+    }
+    let _permit = match state.try_acquire_pipeline_op(pipeline_id).await {
+        Ok(permit) => permit,
+        Err(tokio::sync::TryAcquireError::NoPermits) => {
+            tracing::debug!(pipeline_id, "patrol: pipeline operation is busy");
+            return;
+        }
+        Err(tokio::sync::TryAcquireError::Closed) => {
+            tracing::error!(pipeline_id, "patrol: pipeline operation guard closed");
+            return;
+        }
+    };
+    // Configuration and runtime may have changed while waiting for the boundary.
+    let Some((instance, action)) = patrol_action(pipeline_id, state) else {
+        return;
+    };
+    match action {
+        PatrolAction::Start => {
+            tracing::info!(pipeline_id, "patrol: auto-starting pipeline");
+            if let Err(err) = instance.start_pipeline(pipeline_id).await {
+                tracing::error!(pipeline_id, %err, "patrol: failed to auto-start pipeline");
+            }
+        }
+        PatrolAction::Stop => {
+            tracing::info!(
+                pipeline_id,
+                "patrol: auto-stopping pipeline (scheduled window ended)"
+            );
+            if let Err(err) = instance
+                .stop_pipeline(
+                    pipeline_id,
+                    flow::pipeline::PipelineStopMode::Graceful,
+                    Duration::from_secs(30),
+                )
+                .await
+            {
+                tracing::error!(pipeline_id, %err, "patrol: failed to auto-stop pipeline");
+            }
+        }
+    }
+}
+
+fn patrol_action(
+    pipeline_id: &str,
+    state: &super::state::AppState,
+) -> Option<(std::sync::Arc<flow::FlowInstance>, PatrolAction)> {
+    let storage = state.storage.as_ref();
+    let instances = &state.instances;
+    let stored = match storage.get_pipeline(pipeline_id) {
+        Ok(Some(stored)) => stored,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::warn!(pipeline_id, %err, "patrol: failed to read pipeline");
+            return None;
+        }
+    };
+    let req = match storage_bridge::pipeline_request_from_stored(&stored) {
+        Ok(r) => r,
+        Err(err) => {
+            tracing::warn!(pipeline_id, %err, "patrol: failed to decode stored pipeline");
+            return None;
+        }
+    };
+
+    let Some(schedule_config) = &req.options.schedule else {
+        return None;
+    };
+
+    let now = Utc::now();
+    let evaluation = match evaluate_schedule_at(schedule_config, now) {
+        Ok(evaluation) => evaluation,
+        Err(err) => {
+            tracing::warn!(
+                pipeline_id,
+                cron = ?schedule_config.cron,
+                %err,
+                "patrol: invalid schedule configuration"
+            );
+            return None;
+        }
+    };
+    let in_window = evaluation.active_window_end_ms.is_some();
+    let current_desired_state = match storage.get_pipeline_run_state(pipeline_id) {
+        Ok(Some(state)) => state.desired_state,
+        Ok(None) => StoredPipelineDesiredState::Stopped,
+        Err(err) => {
+            tracing::warn!(pipeline_id, %err, "patrol: failed to read run state");
+            return None;
+        }
+    };
+
+    if matches!(current_desired_state, StoredPipelineDesiredState::Stopped) {
+        tracing::debug!(
+            pipeline_id,
+            "patrol: scheduled pipeline is manually stopped"
+        );
+        return None;
+    }
+
+    let flow_instance_id = req
+        .flow_instance_id
+        .as_deref()
+        .unwrap_or(crate::instances::DEFAULT_FLOW_INSTANCE_ID);
+
+    let Some(instance) = instances.get(flow_instance_id) else {
+        tracing::debug!(
+            pipeline_id,
+            flow_instance_id,
+            "patrol: flow instance not available"
+        );
+        return None;
+    };
+
+    let runtime_status = instance
+        .list_pipelines()
+        .into_iter()
+        .find(|snapshot| snapshot.definition.id() == pipeline_id)
+        .map(|snapshot| snapshot.status);
+
+    if matches!(
+        runtime_status,
+        Some(flow::pipeline::PipelineStatus::Stopping)
+    ) {
+        tracing::debug!(pipeline_id, "patrol: pipeline stop is still in progress");
+        return None;
+    }
+
+    if matches!(runtime_status, Some(flow::pipeline::PipelineStatus::Failed)) {
+        tracing::debug!(
+            pipeline_id,
+            "patrol: skipping pipeline with a runtime failure until explicit recovery"
+        );
+        return None;
+    }
+
+    let is_running = matches!(
+        runtime_status,
+        Some(flow::pipeline::PipelineStatus::Running)
+    );
+
+    if in_window && !is_running {
+        Some((instance, PatrolAction::Start))
+    } else if !in_window && is_running {
+        Some((instance, PatrolAction::Stop))
+    } else {
+        None
     }
 }
 
@@ -475,6 +644,414 @@ mod tests {
         }
     }
 
+    async fn scheduled_patrol_state() -> (
+        tempfile::TempDir,
+        super::super::state::AppState,
+        super::super::types::CreatePipelineRequest,
+    ) {
+        use flow::catalog::{
+            MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
+        };
+        let temp = tempfile::tempdir().expect("temp directory");
+        let state = super::super::state::AppState::new(
+            crate::new_default_flow_instance(),
+            storage::StorageManager::new(temp.path()).expect("storage"),
+            vec![crate::FlowInstanceSpec {
+                id: "default".to_string(),
+                ..Default::default()
+            }],
+            0,
+        )
+        .expect("state");
+        let instance = state.instances.default_instance();
+        instance
+            .declare_memory_topic("patrol_input", flow::connector::MemoryTopicKind::Bytes, 16)
+            .expect("topic");
+        instance
+            .create_stream(
+                StreamDefinition::new(
+                    "src",
+                    std::sync::Arc::new(flow::Schema::new(Vec::new())),
+                    StreamProps::Memory(MemoryStreamProps::new("patrol_input")),
+                    StreamDecoderConfig::json(),
+                ),
+                false,
+            )
+            .await
+            .expect("stream");
+        let now = Utc::now();
+        let request: super::super::types::CreatePipelineRequest =
+            serde_json::from_value(serde_json::json!({
+                "id":"scheduled", "revision":1, "sql":"SELECT * FROM src",
+                "sinks":[{"type":"nop", "props":{}, "encoder":{"type":"json","props":{}}}],
+                "options":{"schedule":{"datetime_ranges":[{
+                    "begin_timestamp_ms":(now - chrono::Duration::hours(1)).timestamp_millis(),
+                    "end_timestamp_ms":(now + chrono::Duration::hours(1)).timestamp_millis()
+                }]}}
+            }))
+            .expect("request");
+        let stored = storage_bridge::stored_pipeline_from_request(&request).expect("stored");
+        state
+            .storage
+            .create_pipeline(stored.clone())
+            .expect("persist");
+        state
+            .storage
+            .put_pipeline_run_state(storage::StoredPipelineRunState {
+                pipeline_id: request.id.clone(),
+                desired_state: StoredPipelineDesiredState::Running,
+            })
+            .expect("intent");
+        crate::storage_apply::install_pipeline(&state, &stored)
+            .await
+            .expect("stopped scheduled runtime");
+        (temp, state, request)
+    }
+
+    #[tokio::test]
+    async fn patrol_does_not_lock_idle_pipelines_and_rechecks_waiting_operations() {
+        for change in ["manual_stop", "schedule", "delete"] {
+            let (_temp, state, mut request) = scheduled_patrol_state().await;
+            let instance = state.instances.default_instance();
+            let stored = state.storage.get_pipeline(&request.id).unwrap().unwrap();
+            let exclusive = state
+                .try_acquire_metadata_operation(true)
+                .expect("exclusive");
+            state
+                .storage
+                .put_pipeline_run_state(storage::StoredPipelineRunState {
+                    pipeline_id: request.id.clone(),
+                    desired_state: StoredPipelineDesiredState::Stopped,
+                })
+                .unwrap();
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                patrol_pipeline(&stored.id, &state),
+            )
+            .await
+            .expect("idle patrol must not wait for metadata");
+            state
+                .storage
+                .put_pipeline_run_state(storage::StoredPipelineRunState {
+                    pipeline_id: request.id.clone(),
+                    desired_state: StoredPipelineDesiredState::Running,
+                })
+                .unwrap();
+            let waiting_state = state.clone();
+            let waiting =
+                tokio::spawn(async move { patrol_pipeline(&stored.id, &waiting_state).await });
+            tokio::task::yield_now().await;
+            assert!(
+                !waiting.is_finished(),
+                "active patrol must wait for metadata"
+            );
+            assert_eq!(
+                instance.list_pipelines()[0].status,
+                flow::pipeline::PipelineStatus::Stopped
+            );
+            match change {
+                "manual_stop" => state
+                    .storage
+                    .put_pipeline_run_state(storage::StoredPipelineRunState {
+                        pipeline_id: request.id.clone(),
+                        desired_state: StoredPipelineDesiredState::Stopped,
+                    })
+                    .unwrap(),
+                "schedule" => {
+                    request.revision = 2;
+                    let now = Utc::now();
+                    request.options.schedule = Some(datetime_range_schedule(vec![
+                        PipelineDatetimeRangeRequest {
+                            begin_timestamp_ms: (now + chrono::Duration::hours(1))
+                                .timestamp_millis(),
+                            end_timestamp_ms: (now + chrono::Duration::hours(2)).timestamp_millis(),
+                        },
+                    ]));
+                    let mut snapshot = state.storage.export_metadata_snapshot().unwrap();
+                    snapshot.pipelines[0] =
+                        storage_bridge::stored_pipeline_from_request(&request).unwrap();
+                    state
+                        .storage
+                        .commit_metadata_snapshot(snapshot, Default::default())
+                        .unwrap();
+                }
+                "delete" => {
+                    state.storage.delete_pipeline(&request.id).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            drop(exclusive);
+            tokio::time::timeout(Duration::from_secs(5), waiting)
+                .await
+                .expect("patrol resumes")
+                .unwrap();
+            assert_eq!(
+                instance.list_pipelines()[0].status,
+                flow::pipeline::PipelineStatus::Stopped,
+                "{change}"
+            );
+            let _exclusive = state
+                .try_acquire_metadata_operation(true)
+                .expect("permit released after cancellation");
+        }
+    }
+
+    #[tokio::test]
+    async fn patrol_releases_metadata_after_each_start_and_stop() {
+        let (_temp, state, mut request) = scheduled_patrol_state().await;
+        let instance = state.instances.default_instance();
+        let stored = state.storage.get_pipeline(&request.id).unwrap().unwrap();
+        patrol_pipeline(&stored.id, &state).await;
+        assert_eq!(
+            instance.list_pipelines()[0].status,
+            flow::pipeline::PipelineStatus::Running
+        );
+        let exclusive = state
+            .try_acquire_metadata_operation(true)
+            .expect("start released metadata");
+        // A running pipeline inside its window requires no operation or metadata permit.
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            patrol_pipeline(&stored.id, &state),
+        )
+        .await
+        .expect("running patrol remains idle");
+        let now = Utc::now();
+        request.revision = 2;
+        request.options.schedule = Some(datetime_range_schedule(vec![
+            PipelineDatetimeRangeRequest {
+                begin_timestamp_ms: (now - chrono::Duration::hours(2)).timestamp_millis(),
+                end_timestamp_ms: (now - chrono::Duration::hours(1)).timestamp_millis(),
+            },
+        ]));
+        let stored = storage_bridge::stored_pipeline_from_request(&request).unwrap();
+        let mut snapshot = state.storage.export_metadata_snapshot().unwrap();
+        snapshot.pipelines[0] = stored.clone();
+        state
+            .storage
+            .commit_metadata_snapshot(snapshot, Default::default())
+            .unwrap();
+        let waiting_state = state.clone();
+        let waiting =
+            tokio::spawn(async move { patrol_pipeline(&stored.id, &waiting_state).await });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        assert_eq!(
+            instance.list_pipelines()[0].status,
+            flow::pipeline::PipelineStatus::Running
+        );
+        drop(exclusive);
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("stop resumes")
+            .unwrap();
+        assert_eq!(
+            instance.list_pipelines()[0].status,
+            flow::pipeline::PipelineStatus::Stopped
+        );
+        let _exclusive = state
+            .try_acquire_metadata_operation(true)
+            .expect("stop released metadata");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn patrol_skips_missed_ticks_without_repeating_complete_scans() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tracing::instrument::WithSubscriber;
+
+        struct ScanWarnings(Arc<AtomicUsize>);
+        impl tracing::Subscriber for ScanWarnings {
+            fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+                metadata.level() == &tracing::Level::WARN
+                    && metadata.target().ends_with("pipeline::scheduler")
+            }
+            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+                tracing::span::Id::from_u64(1)
+            }
+            fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+            fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+            fn event(&self, event: &tracing::Event<'_>) {
+                if self.enabled(event.metadata()) {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            fn enter(&self, _: &tracing::span::Id) {}
+            fn exit(&self, _: &tracing::span::Id) {}
+        }
+
+        let (_temp, state, _) = scheduled_patrol_state().await;
+        let mut snapshot = state.storage.export_metadata_snapshot().unwrap();
+        snapshot.pipeline_run_states.clear();
+        snapshot.pipelines[0].raw_json = "invalid JSON".to_string();
+        state
+            .storage
+            .commit_metadata_snapshot(snapshot, Default::default())
+            .unwrap();
+        // This invalid stored definition emits one existing warning per real scan.
+        // Observe the task's warnings without adding production hooks or global subscribers.
+        let scans = Arc::new(AtomicUsize::new(0));
+        let interval = Duration::from_secs(10);
+        let patrol = tokio::spawn(
+            run_patrol(state, interval).with_subscriber(ScanWarnings(Arc::clone(&scans))),
+        );
+        tokio::task::yield_now().await;
+        tokio::time::advance(interval * 3 + Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            scans.load(Ordering::SeqCst),
+            1,
+            "missed ticks must produce one scan, not a burst"
+        );
+        tokio::time::advance(Duration::from_secs(5)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            scans.load(Ordering::SeqCst),
+            2,
+            "next scan must follow the next regular tick"
+        );
+        patrol.abort();
+        let _ = patrol.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn patrol_waits_for_metadata_and_uses_latest_schedule_before_next_tick() {
+        use flow::catalog::{
+            MemoryStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps,
+        };
+        use flow::pipeline::{PipelineStatus, PipelineStopMode};
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let state = super::super::state::AppState::new(
+            crate::new_default_flow_instance(),
+            storage::StorageManager::new(temp.path()).expect("storage"),
+            vec![crate::FlowInstanceSpec {
+                id: "default".to_string(),
+                ..Default::default()
+            }],
+            0,
+        )
+        .expect("state");
+        let instance = state.instances.default_instance();
+        instance
+            .declare_memory_topic("patrol_input", flow::connector::MemoryTopicKind::Bytes, 16)
+            .expect("topic");
+        instance
+            .create_stream(
+                StreamDefinition::new(
+                    "src",
+                    std::sync::Arc::new(flow::Schema::new(Vec::new())),
+                    StreamProps::Memory(MemoryStreamProps::new("patrol_input")),
+                    StreamDecoderConfig::json(),
+                ),
+                false,
+            )
+            .await
+            .expect("stream");
+        let now = Utc::now();
+        let mut request: super::super::types::CreatePipelineRequest =
+            serde_json::from_value(serde_json::json!({
+                "id": "waiting", "revision": 1, "sql": "SELECT * FROM src",
+                "sinks": [{"type":"nop", "props":{}, "encoder":{"type":"json","props":{}}}],
+                "options":{"schedule":{"datetime_ranges":[{
+                    "begin_timestamp_ms":(now + chrono::Duration::hours(1)).timestamp_millis(),
+                    "end_timestamp_ms":(now + chrono::Duration::hours(2)).timestamp_millis()
+                }]}}
+            }))
+            .expect("request");
+        let mut guarded = request.clone();
+        guarded.id = "guarded".to_string();
+        guarded.options.schedule = Some(datetime_range_schedule(vec![
+            PipelineDatetimeRangeRequest {
+                begin_timestamp_ms: (now - chrono::Duration::hours(1)).timestamp_millis(),
+                end_timestamp_ms: (now + chrono::Duration::hours(1)).timestamp_millis(),
+            },
+        ]));
+        for request in [&request, &guarded] {
+            let stored =
+                storage_bridge::stored_pipeline_from_request(request).expect("stored request");
+            state
+                .storage
+                .create_pipeline(stored.clone())
+                .expect("persist pipeline");
+            state
+                .storage
+                .put_pipeline_run_state(storage::StoredPipelineRunState {
+                    pipeline_id: request.id.clone(),
+                    desired_state: StoredPipelineDesiredState::Running,
+                })
+                .expect("running intent");
+            crate::storage_apply::install_pipeline(&state, &stored)
+                .await
+                .expect("stopped scheduled runtime");
+        }
+
+        let exclusive = state
+            .try_acquire_metadata_operation(true)
+            .expect("exclusive boundary");
+        let interval = Duration::from_secs(3600);
+        let patrol = tokio::spawn(run_patrol(state.clone(), interval));
+        tokio::task::yield_now().await;
+        tokio::time::advance(interval * 3 + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            instance
+                .list_pipelines()
+                .iter()
+                .all(|pipeline| pipeline.status == PipelineStatus::Stopped)
+        );
+
+        request.revision = 2;
+        request.options.schedule = Some(datetime_range_schedule(vec![
+            PipelineDatetimeRangeRequest {
+                begin_timestamp_ms: (now - chrono::Duration::hours(1)).timestamp_millis(),
+                end_timestamp_ms: (now + chrono::Duration::hours(1)).timestamp_millis(),
+            },
+        ]));
+        let mut snapshot = state.storage.export_metadata_snapshot().expect("snapshot");
+        *snapshot
+            .pipelines
+            .iter_mut()
+            .find(|pipeline| pipeline.id == request.id)
+            .expect("waiting pipeline") =
+            storage_bridge::stored_pipeline_from_request(&request).expect("updated pipeline");
+        state
+            .storage
+            .commit_metadata_snapshot(snapshot, Default::default())
+            .expect("commit active schedule while patrol waits");
+        assert!(
+            instance
+                .list_pipelines()
+                .iter()
+                .all(|pipeline| pipeline.status == PipelineStatus::Stopped)
+        );
+
+        drop(exclusive);
+        // Resume time for the failure timeout; the next patrol tick is still almost an hour away.
+        tokio::time::resume();
+        let started = tokio::time::timeout(Duration::from_secs(5), async {
+            while !instance
+                .list_pipelines()
+                .iter()
+                .all(|pipeline| pipeline.status == PipelineStatus::Running)
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        patrol.abort();
+        let _ = patrol.await;
+        for id in [&request.id, &guarded.id] {
+            instance
+                .stop_pipeline(id, PipelineStopMode::Quick, Duration::from_secs(5))
+                .await
+                .expect("cleanup");
+        }
+        started.expect("patrol must start with the latest schedule before the next tick");
+    }
+
     #[tokio::test]
     async fn scheduled_recovery_resets_current_failure_and_respects_windows() {
         use axum::{
@@ -547,6 +1124,7 @@ mod tests {
                 &request,
                 instance.encoder_registry().as_ref(),
                 instance.as_ref(),
+                Default::default(),
             )
             .expect("definition");
             instance
@@ -555,7 +1133,7 @@ mod tests {
             instance
                 .mark_pipeline_failed(label, "processor", "current failure".to_string())
                 .expect("fail runtime");
-            patrol_pipeline(&stored, &state).await;
+            patrol_pipeline(&stored.id, &state).await;
             let snapshot = instance.list_pipelines().pop().expect("snapshot");
             assert_eq!(
                 snapshot.status,
@@ -588,7 +1166,7 @@ mod tests {
                 }
             );
             assert!(body[0].get("last_runtime_error").is_none());
-            patrol_pipeline(&stored, &state).await;
+            patrol_pipeline(&stored.id, &state).await;
             assert_eq!(
                 instance
                     .list_pipelines()
@@ -605,137 +1183,6 @@ mod tests {
                 )
                 .await
                 .expect("cleanup");
-        }
-    }
-}
-
-async fn patrol_pipeline(stored: &storage::StoredPipeline, state: &super::state::AppState) {
-    let pipeline_id = &stored.id;
-    let _permit = match state.try_acquire_pipeline_op(pipeline_id).await {
-        Ok(permit) => permit,
-        Err(tokio::sync::TryAcquireError::NoPermits) => {
-            tracing::debug!(pipeline_id, "patrol: pipeline operation is busy");
-            return;
-        }
-        Err(tokio::sync::TryAcquireError::Closed) => {
-            tracing::error!(pipeline_id, "patrol: pipeline operation guard closed");
-            return;
-        }
-    };
-    let storage = state.storage.as_ref();
-    let instances = &state.instances;
-
-    let req = match storage_bridge::pipeline_request_from_stored(stored) {
-        Ok(r) => r,
-        Err(err) => {
-            tracing::warn!(pipeline_id, %err, "patrol: failed to decode stored pipeline");
-            return;
-        }
-    };
-
-    let Some(schedule_config) = &req.options.schedule else {
-        return;
-    };
-
-    let now = Utc::now();
-    let evaluation = match evaluate_schedule_at(schedule_config, now) {
-        Ok(evaluation) => evaluation,
-        Err(err) => {
-            tracing::warn!(
-                pipeline_id,
-                cron = ?schedule_config.cron,
-                %err,
-                "patrol: invalid schedule configuration"
-            );
-            return;
-        }
-    };
-    let in_window = evaluation.active_window_end_ms.is_some();
-    let current_desired_state = match storage.get_pipeline_run_state(pipeline_id) {
-        Ok(Some(state)) => state.desired_state,
-        Ok(None) => StoredPipelineDesiredState::Stopped,
-        Err(err) => {
-            tracing::warn!(pipeline_id, %err, "patrol: failed to read run state");
-            return;
-        }
-    };
-
-    if matches!(current_desired_state, StoredPipelineDesiredState::Stopped) {
-        tracing::debug!(
-            pipeline_id,
-            "patrol: scheduled pipeline is manually stopped"
-        );
-        return;
-    }
-
-    let flow_instance_id = req
-        .flow_instance_id
-        .as_deref()
-        .unwrap_or(crate::instances::DEFAULT_FLOW_INSTANCE_ID);
-
-    let Some(instance) = instances.get(flow_instance_id) else {
-        tracing::debug!(
-            pipeline_id,
-            flow_instance_id,
-            "patrol: flow instance not available"
-        );
-        return;
-    };
-
-    let runtime_status = instance
-        .list_pipelines()
-        .into_iter()
-        .find(|snapshot| snapshot.definition.id() == pipeline_id)
-        .map(|snapshot| snapshot.status);
-
-    if matches!(
-        runtime_status,
-        Some(flow::pipeline::PipelineStatus::Stopping)
-    ) {
-        tracing::debug!(pipeline_id, "patrol: pipeline stop is still in progress");
-        return;
-    }
-
-    if matches!(runtime_status, Some(flow::pipeline::PipelineStatus::Failed)) {
-        tracing::debug!(
-            pipeline_id,
-            "patrol: skipping pipeline with a runtime failure until explicit recovery"
-        );
-        return;
-    }
-
-    let is_running = matches!(
-        runtime_status,
-        Some(flow::pipeline::PipelineStatus::Running)
-    );
-
-    if in_window && !is_running {
-        tracing::info!(
-            pipeline_id,
-            cron = ?schedule_config.cron,
-            "patrol: auto-starting pipeline"
-        );
-
-        if let Err(err) = instance.start_pipeline(pipeline_id).await {
-            tracing::error!(pipeline_id, %err, "patrol: failed to auto-start pipeline");
-        }
-    } else if !in_window && is_running {
-        tracing::info!(
-            pipeline_id,
-            cron = ?schedule_config.cron,
-            "patrol: auto-stopping pipeline (scheduled window ended)"
-        );
-
-        let timeout = Duration::from_secs(30);
-        if let Err(err) = instance
-            .stop_pipeline(
-                pipeline_id,
-                flow::pipeline::PipelineStopMode::Graceful,
-                timeout,
-            )
-            .await
-        {
-            tracing::error!(pipeline_id, %err, "patrol: failed to auto-stop pipeline");
         }
     }
 }

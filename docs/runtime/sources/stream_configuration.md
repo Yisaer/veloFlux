@@ -44,6 +44,16 @@ instance. If any instance rejects the stream during create, manager rolls back b
 created runtime copies and the stored record. This keeps stream metadata and runtime installation
 aligned at creation time.
 
+The runtime catalog retains the manager-supplied stream resource revision, separately
+from the revision of its referenced named schema. Create, restore, and replacement
+carry both versions with the installed definition. Apply replay compares them against
+committed metadata without reinstalling the stream. Streams constructed directly by
+flow callers may omit the resource revision; their application cannot be confirmed
+by revision comparison. Apply defaults to preserving existing pipeline graphs;
+installing a new catalog definition does not update a graph already built from the
+previous definition. Shared streams used by retained pipelines defer replacement
+unless those consumers are selected for reconstruction.
+
 ## Stream Type Matrix
 
 Current built-in stream types are:

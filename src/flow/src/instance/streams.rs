@@ -171,15 +171,15 @@ impl FlowInstance {
             .lock()
             .remove(definition.id());
 
-        // Swap the catalog entry (upsert overwrites regardless of prior existence).
-        let stored = self.catalog.upsert(definition);
-
+        let prepared = Arc::new(definition);
         let shared_info = if shared {
-            Some(self.ensure_shared_stream(stored.clone()).await?)
+            Some(self.ensure_shared_stream(Arc::clone(&prepared)).await?)
         } else {
             None
         };
 
+        // Publish the definition and its revision only after replacement succeeds.
+        let stored = self.catalog.upsert(Arc::unwrap_or_clone(prepared));
         Ok(StreamRuntimeInfo {
             definition: stored,
             shared_info,

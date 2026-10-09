@@ -166,7 +166,7 @@ async fn export_import_restores_file_backed_gbf_schema_artifact() {
         storage::StorageManager::new(target_dir.path()).expect("target storage manager");
     let (target_base, target_server) = start_manager(target_storage).await;
     let response = http
-        .post(format!("{target_base}/import"))
+        .post(format!("{target_base}/storage/import"))
         .multipart(
             reqwest::multipart::Form::new().part(
                 "file",

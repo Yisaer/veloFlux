@@ -355,6 +355,8 @@ impl NngPubSubStreamProps {
 #[derive(Debug, Clone)]
 pub struct StreamDefinition {
     id: String,
+    /// Revision of the stream resource installed in this catalog.
+    revision: Option<u64>,
     stream_type: StreamType,
     schema: Arc<Schema>,
     /// Revision of the referenced named schema.
@@ -423,6 +425,7 @@ impl StreamDefinition {
             id: id.into(),
             stream_type,
             schema,
+            revision: None,
             schema_version: None,
             props,
             decoder,
@@ -439,6 +442,15 @@ impl StreamDefinition {
     pub fn with_sampler(mut self, sampler: SamplerConfig) -> Self {
         self.sampler = Some(sampler);
         self
+    }
+
+    pub fn with_revision(mut self, revision: u64) -> Self {
+        self.revision = Some(revision);
+        self
+    }
+
+    pub fn revision(&self) -> Option<u64> {
+        self.revision
     }
 
     pub fn with_schema_version(mut self, schema_version: u64) -> Self {

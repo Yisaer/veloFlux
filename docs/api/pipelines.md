@@ -192,8 +192,9 @@ startup attempt replaces the previous context, and a successful recovery clears 
 ```
 
 Startup hydration creates fresh runtime state from the pipeline definition and desired state.
-Runtime errors are not persisted and do not survive restart. A new startup failure records
-its reason and timestamp in the current runtime snapshot. Within the same process, the current runtime `failed` status prevents
+Runtime errors, including failures during `/storage/apply`, are not persisted.
+Restart retries the committed configuration according to desired state. A new startup
+failure records its reason and timestamp in the current runtime snapshot. Within the same process, the current runtime `failed` status prevents
 scheduled patrol from retrying repeatedly. A manual start is an explicit retry and clears the
 current failure context before runtime convergence; for scheduled pipelines, patrol performs the
 later runtime start. Manual stop clears the failure context, writes desired state `stopped`, and

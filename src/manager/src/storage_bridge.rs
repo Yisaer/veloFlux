@@ -76,7 +76,8 @@ pub fn stream_definition_from_stored(
         Arc::clone(&resolved_schema.logical_schema),
         props,
         decoder,
-    );
+    )
+    .with_revision(req.revision);
     if let Some(schema_version) = resolved_schema.schema_version {
         definition = definition.with_schema_version(schema_version);
     }
@@ -169,7 +170,7 @@ pub fn pipeline_definition_from_stored(
     instance: &flow::FlowInstance,
 ) -> Result<PipelineDefinition, String> {
     let req = pipeline_request_from_stored(stored)?;
-    build_pipeline_definition(&req, encoder_registry, instance)
+    build_pipeline_definition(&req, encoder_registry, instance, Default::default())
 }
 
 pub fn pipeline_request_from_stored(
@@ -288,7 +289,6 @@ struct InstanceGlobalsHydrationSummary {
     table_failures: usize,
 }
 
-/// Load persisted resources into the running FlowInstance.
 async fn hydrate_instance_globals_from_storage(
     storage: &StorageManager,
     instance: &flow::FlowInstance,
@@ -310,7 +310,8 @@ async fn hydrate_instance_globals_from_storage(
             StoredMemoryTopicKind::Bytes => flow::connector::MemoryTopicKind::Bytes,
             StoredMemoryTopicKind::Collection => flow::connector::MemoryTopicKind::Collection,
         };
-        if let Err(err) = instance.declare_memory_topic(&topic.topic, kind, topic.capacity) {
+        let outcome = instance.declare_memory_topic(&topic.topic, kind, topic.capacity);
+        if let Err(err) = outcome {
             summary.memory_topic_failures += 1;
             tracing::error!(topic = %topic.topic, error = %err, "failed to restore memory topic");
         }
@@ -323,24 +324,26 @@ async fn hydrate_instance_globals_from_storage(
             tracing::error!(key = %cfg.key.escape_debug(), error = %err, "skipping shared mqtt client with invalid key");
             continue;
         }
-        if let Err(err) = instance
+        let outcome = instance
             .create_shared_mqtt_client(mqtt_config_from_stored(&cfg))
-            .await
-        {
+            .await;
+        if let Err(err) = outcome {
             summary.shared_mqtt_failures += 1;
             tracing::error!(key = %cfg.key, error = %err, "failed to restore shared mqtt client");
         }
     }
 
     for stream in storage.list_streams().map_err(|e| e.to_string())? {
-        if let Err(err) = restore_stream(stream.clone(), storage, instance).await {
+        let outcome = restore_stream(stream.clone(), storage, instance).await;
+        if let Err(err) = outcome {
             summary.stream_failures += 1;
             tracing::error!(stream_id = %stream.id, error = %err, "failed to restore stream");
         }
     }
 
     for table in storage.list_tables().map_err(|e| e.to_string())? {
-        if let Err(err) = restore_table(table.clone(), instance).await {
+        let outcome = restore_table(table.clone(), instance).await;
+        if let Err(err) = outcome {
             summary.table_failures += 1;
             tracing::error!(table_id = %table.id, error = %err, "failed to restore table");
         }
@@ -366,7 +369,8 @@ async fn hydrate_pipelines_into_instances_from_storage(
 ) -> Result<usize, String> {
     let mut failures = 0usize;
     for pipeline in storage.list_pipelines().map_err(|e| e.to_string())? {
-        if let Err(err) = restore_pipeline(pipeline.clone(), storage, instances).await {
+        let outcome = restore_pipeline(pipeline.clone(), storage, instances).await;
+        if let Err(err) = outcome {
             failures += 1;
             tracing::error!(pipeline_id = %pipeline.id, error = %err, "failed to restore pipeline");
         }
@@ -451,6 +455,7 @@ async fn restore_pipeline(
                     error = %err,
                     "failed to auto-start pipeline"
                 );
+                return Err(err.to_string());
             }
         }
         _ => {}
@@ -521,7 +526,6 @@ pub(crate) async fn hydrate_runtime_from_storage(
 
     // Hydrate named schemas first — streams may reference them.
     let schema_count = hydrate_schemas_from_storage(storage)?;
-
     let instances_snapshot = instances.instances_snapshot();
 
     tracing::info!(
@@ -562,7 +566,8 @@ pub(crate) async fn hydrate_runtime_from_storage(
     {
         // Load WASM UDFs before restoring pipelines (pipelines may reference UDFs in SQL).
         for (_, instance) in instances.instances_snapshot() {
-            match load_wasm_udfs(storage, instance.as_ref()) {
+            let outcome = load_wasm_udfs(storage, instance.as_ref());
+            match outcome {
                 Ok(loaded) => {
                     if loaded > 0 {
                         tracing::info!(

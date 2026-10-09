@@ -4,13 +4,14 @@
 )]
 #![forbid(unsafe_code)]
 
+mod apply_core;
+mod attachments;
 mod audit;
 mod capabilities;
 mod checkpoint_storage;
 mod export;
 mod function;
 mod import;
-mod init_process;
 mod instances;
 mod memory_topic;
 mod mqtt_client;
@@ -20,6 +21,7 @@ mod revision;
 mod schema;
 mod startup;
 mod status;
+mod storage_apply;
 pub mod storage_bridge;
 mod stream;
 mod streaming_upload;
@@ -111,12 +113,18 @@ fn build_app(state: AppState) -> Router {
             axum::routing::get(capabilities::get_syntax_capabilities_handler),
         )
         .route(
-            "/import",
+            "/storage/import",
             post(import::import_storage_handler).layer(axum::extract::DefaultBodyLimit::max(
                 streaming_upload::MAX_MULTIPART_BODY_SIZE,
             )),
         )
         .route("/storage/export", get(export::export_storage_handler))
+        .route(
+            "/storage/apply",
+            post(storage_apply::apply_storage_handler).layer(axum::extract::DefaultBodyLimit::max(
+                streaming_upload::MAX_MULTIPART_BODY_SIZE,
+            )),
+        )
         .route(
             "/streams/:name",
             delete(stream::delete_stream_handler).put(stream::upsert_stream_handler),
@@ -171,7 +179,12 @@ fn build_app(state: AppState) -> Router {
         .route("/metrics", get(metrics_handler))
         .route("/status", get(status::status_handler))
         .layer(CorsLayer::permissive());
-    add_udf_routes(app).with_state(state)
+    add_udf_routes(app)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            storage_apply::coordinate_metadata,
+        ))
+        .with_state(state)
 }
 
 async fn metrics_handler() -> impl IntoResponse {

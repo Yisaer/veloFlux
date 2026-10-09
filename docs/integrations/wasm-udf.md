@@ -254,7 +254,7 @@ veloflux-export-<timestamp>.zip
 | Method | Path              | Content-Type       |
 |--------|-------------------|--------------------|
 | `GET`  | `/storage/export?bundle_version=<version>` | `application/zip` |
-| `POST` | `/import`         | `multipart/form-data` with a ZIP `file` field |
+| `POST` | `/storage/import`         | `multipart/form-data` with a ZIP `file` field |
 
 The previous JSON-only format is no longer supported.
 
@@ -445,9 +445,18 @@ Periodic reclamation by replacing an evaluator is optional deferred work.
   deadline. Epoch-based interruption terminates a call that exceeds its deadline and
   returns a timeout error. The timeout is a best-effort execution deadline rather than
   an exact wall-clock guarantee.
-- **Memory limit**: module-declared memory maximums and host allocator checks provide
-  the initial memory boundary. A separate store-level resource limiter is not required
-  for trusted UDFs.
+- **Store resources**: validation, instantiation, and processor-owned execution use
+  the same Wasmtime resource limiter: one instance, one linear memory of at most
+  16 MiB, and at most one table with 65,536 elements. Initial allocation and guest
+  growth are both checked. Module-declared memory maximums and host allocator
+  checks remain additional guards.
+- **Metadata**: metadata JSON is limited to 64 KiB. The host checks its pointer,
+  length, and linear-memory range before parsing a borrowed memory slice, without
+  allocating a buffer from an unchecked guest length.
+- **Compilation**: epoch interruption limits executed WASM code, including module
+  initialization and metadata functions; it does not bound JIT compilation time
+  or compiler memory. Store limits are per UDF evaluator, not a process-wide
+  budget for concurrent requests or all pipeline workers.
 - **No `unsafe`** in the call site. wasmtime's safe API handles all FFI.
 
 ## Flow Module Integration
@@ -739,7 +748,9 @@ otherwise independent pipelines and allow execution state to leak across them.
 
 2. **Execution safeguards**: A periodic engine epoch ticker and per-call epoch deadline
    provide a bounded execution timeout for running UDF code. Module-declared memory
-   maximums and host allocator checks bound the initial linear-memory model. This design
+   maximums, host allocator checks, and store-level resource limits bound linear
+   memory and table allocation during validation and execution. Epoch interruption
+   does not limit compilation cost. This design
    assumes trusted UDF artifacts and does not claim complete recovery from arbitrary
    hostile module state.
 
@@ -747,7 +758,8 @@ otherwise independent pipelines and allow execution state to leak across them.
    before calling into WASM.
 
 4. **No `unsafe`**: The wasmtime safe API is used throughout. All pointer reads/writes
-   go through wasmtime's checked `Memory::read`/`Memory::write` methods.
+   use bounds-checked memory slices or wasmtime's checked
+   `Memory::read`/`Memory::write` methods.
 
 ## Future Extensions
 

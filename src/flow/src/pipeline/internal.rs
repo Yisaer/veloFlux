@@ -178,6 +178,7 @@ pub(super) struct ManagedPipeline {
     definition: Arc<PipelineDefinition>,
     pipeline: Option<ProcessorPipeline>,
     streams: Vec<String>,
+    shared_mqtt_client_keys: Vec<String>,
     status: PipelineStatus,
     last_runtime_error: Option<PipelineRuntimeFailure>,
 }
@@ -187,6 +188,7 @@ impl ManagedPipeline {
         PipelineSnapshot {
             definition: Arc::clone(&self.definition),
             streams: self.streams.clone(),
+            shared_mqtt_client_keys: self.shared_mqtt_client_keys.clone(),
             status: self.status,
             last_runtime_error: self.last_runtime_error.clone(),
         }
@@ -256,7 +258,7 @@ impl PipelineManager {
     ) -> Result<PipelineSnapshot, PipelineError> {
         let pipeline_id = definition.id().to_string();
         let registries = self.registries.read();
-        let (pipeline, streams) = build_pipeline_runtime(
+        let (pipeline, streams, shared_mqtt_client_keys) = build_pipeline_runtime(
             &definition,
             Arc::clone(&self.catalog),
             &self.context,
@@ -271,6 +273,7 @@ impl PipelineManager {
             definition: Arc::new(definition),
             pipeline: Some(pipeline),
             streams,
+            shared_mqtt_client_keys,
             status: PipelineStatus::Stopped,
             last_runtime_error: None,
         };
@@ -361,7 +364,7 @@ impl PipelineManager {
             if entry.pipeline.is_none() {
                 let definition = Arc::clone(&entry.definition);
                 let registries = self.registries.read().clone();
-                let (pipeline, streams) = build_pipeline_runtime(
+                let (pipeline, streams, shared_mqtt_client_keys) = build_pipeline_runtime(
                     &definition,
                     Arc::clone(&self.catalog),
                     &self.context,
@@ -370,6 +373,7 @@ impl PipelineManager {
                 .map_err(PipelineError::BuildFailure)?;
                 entry.pipeline = Some(pipeline);
                 entry.streams = streams;
+                entry.shared_mqtt_client_keys = shared_mqtt_client_keys;
             }
 
             if entry.definition.options().checkpoint_enabled {
@@ -567,7 +571,7 @@ fn build_pipeline_runtime(
     catalog: Arc<Catalog>,
     context: &PipelineContext,
     registries: &PipelineRegistries,
-) -> Result<(ProcessorPipeline, Vec<String>), String> {
+) -> Result<(ProcessorPipeline, Vec<String>, Vec<String>), String> {
     let build_log = PipelineBuildLog::new(definition, context);
     let result = (|| {
         let select_stmt = build_log.run_phase("parse_sql", || {
@@ -810,14 +814,32 @@ fn build_pipeline_runtime(
         build_log.run_phase("attach_sources", || {
             attach_sources_from_catalog(&mut pipeline, &stream_definitions, context)
         })?;
+        let shared_mqtt_client_keys = stream_definitions
+            .values()
+            .filter_map(|stream| match stream.props() {
+                StreamProps::Mqtt(props) => props.connector_key.clone(),
+                _ => None,
+            })
+            .chain(
+                definition
+                    .sinks()
+                    .iter()
+                    .filter_map(|sink| match &sink.props {
+                        SinkProps::Mqtt(props) => props.connector_key.clone(),
+                        _ => None,
+                    }),
+            )
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
         let processor_count = pipeline.processor_stats().len();
-        Ok((pipeline, streams, processor_count))
+        Ok((pipeline, streams, shared_mqtt_client_keys, processor_count))
     })();
 
     match result {
-        Ok((pipeline, streams, processor_count)) => {
+        Ok((pipeline, streams, shared_mqtt_client_keys, processor_count)) => {
             build_log.log_success(streams.len(), processor_count);
-            Ok((pipeline, streams))
+            Ok((pipeline, streams, shared_mqtt_client_keys))
         }
         Err(err) => {
             build_log.log_failure(&err);
@@ -1473,6 +1495,7 @@ mod failure_tests {
             )),
             pipeline: None,
             streams: vec!["src".to_string()],
+            shared_mqtt_client_keys: Vec::new(),
             status: PipelineStatus::Failed,
             last_runtime_error: Some(failure.clone()),
         };

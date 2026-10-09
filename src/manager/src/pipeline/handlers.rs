@@ -359,11 +359,15 @@ pub async fn create_pipeline_handler(
         };
 
     let encoder_registry = instance.encoder_registry();
-    let definition =
-        match build_pipeline_definition(&req, encoder_registry.as_ref(), instance.as_ref()) {
-            Ok(def) => def,
-            Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
-        };
+    let definition = match build_pipeline_definition(
+        &req,
+        encoder_registry.as_ref(),
+        instance.as_ref(),
+        Default::default(),
+    ) {
+        Ok(def) => def,
+        Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+    };
 
     let stored = match storage_bridge::stored_pipeline_from_request(&req) {
         Ok(stored) => stored,
@@ -663,6 +667,7 @@ pub async fn upsert_pipeline_handler(
         &create_req,
         encoder_registry.as_ref(),
         instance.as_ref(),
+        Default::default(),
     ) {
         Ok(definition) => definition,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -1082,6 +1087,37 @@ pub async fn start_pipeline_handler(
             .into_response();
     }
 
+    let needs_recovery = runtime_snapshot(&state, &flow_instance_id, &id)
+        .is_none_or(|snapshot| snapshot.definition.revision() != pipeline_req.revision);
+    let _shared_mqtt_permits = if pipeline_req.options.schedule.is_none() || needs_recovery {
+        match try_acquire_shared_mqtt_pipeline_ops(&state, &id, &pipeline_req).await {
+            Ok(permits) => Some(permits),
+            Err(resp) => return *resp,
+        }
+    } else {
+        None
+    };
+    let instance = match local_instance_response(&state, &flow_instance_id) {
+        Ok(instance) => instance,
+        Err(resp) => return *resp,
+    };
+    let _stream_permits = if needs_recovery {
+        match try_acquire_referenced_stream_ops(&state, &pipeline_req, instance.as_ref()).await {
+            Ok(permits) => Some(permits),
+            Err(resp) => return *resp,
+        }
+    } else {
+        None
+    };
+
+    if let Err(err) = crate::storage_apply::ensure_pipeline_installed(&state, &id).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("failed to recover pipeline {id}: {err}"),
+        )
+            .into_response();
+    }
+
     if pipeline_req.options.schedule.is_some() {
         if matches!(
             runtime_status(&state, &flow_instance_id, &id),
@@ -1106,16 +1142,6 @@ pub async fn start_pipeline_handler(
         return (StatusCode::OK, format!("pipeline {id} scheduling enabled")).into_response();
     }
 
-    let _shared_mqtt_permits =
-        match try_acquire_shared_mqtt_pipeline_ops(&state, &id, &pipeline_req).await {
-            Ok(permits) => permits,
-            Err(resp) => return *resp,
-        };
-
-    let instance = match local_instance_response(&state, &flow_instance_id) {
-        Ok(instance) => instance,
-        Err(resp) => return *resp,
-    };
     match instance.start_pipeline(&id).await {
         Ok(_) => {
             audit.log_success();
@@ -1748,6 +1774,7 @@ mod tests {
             &pipeline_req,
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
+            Default::default(),
         )
         .expect("definition");
         instance
@@ -1803,6 +1830,7 @@ mod tests {
             &pipeline_req,
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
+            Default::default(),
         )
         .expect("build pipeline definition");
         instance
@@ -1857,6 +1885,7 @@ mod tests {
             &pipeline_req,
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
+            Default::default(),
         )
         .expect("build pipeline definition");
         instance

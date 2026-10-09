@@ -27,7 +27,7 @@ The current repository already has a few manager tests, but the spread is narrow
 
 - `import.rs`: one replace-snapshot happy path
 - `export.rs`: one export response happy path
-- `init_process.rs`: a few local unit tests
+- `apply_core.rs`: a few local unit tests
 - `mqtt_client.rs`: two delete-path tests
 - `pipeline/handlers.rs`: one busy-key start-path test
 - `worker/server.rs`: a couple of shared MQTT reconcile/delete tests
@@ -349,21 +349,21 @@ I recommend implementing this plan mostly in:
 #### 40. `init_json_apply_is_atomic_for_resources_and_metadata`
 
 - Target:
-  - `src/manager/src/init_process.rs`
+  - `src/manager/src/apply_core.rs`
 - Assert:
   - resources and init metadata appear together or not at all
 
 #### 41. `init_json_duplicate_conflict_does_not_advance_apply_metadata`
 
 - Target:
-  - `src/manager/src/init_process.rs`
+  - `src/manager/src/apply_core.rs`
 - Assert:
   - failed retry leaves old apply marker untouched
 
 #### 42. `init_json_rejects_undeclared_flow_instance_in_pipeline_bundle`
 
 - Target:
-  - `src/manager/src/init_process.rs`
+  - `src/manager/src/apply_core.rs`
 - Assert:
   - startup apply fails fast on undeclared instance binding
 

@@ -754,6 +754,8 @@ impl Default for EventtimeOptions {
 pub struct PipelineSnapshot {
     pub definition: Arc<PipelineDefinition>,
     pub streams: Vec<String>,
+    /// MQTT client keys bound when the current processor graph was built.
+    pub shared_mqtt_client_keys: Vec<String>,
     pub status: PipelineStatus,
     pub last_runtime_error: Option<PipelineRuntimeFailure>,
 }

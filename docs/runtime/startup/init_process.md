@@ -108,7 +108,8 @@ continue process startup regardless of the init result
 Logical application is partial, but the successful metadata subset is committed
 in one storage transaction. A commit failure exposes none of that subset.
 Managed schema and WASM files are staged under `<data_dir>/.init-staging/` and
-use rollback-capable installation.
+use the shared durable attachment publication journal. Startup first recovers
+an interrupted publication by its metadata transaction id.
 
 ## Static and Runtime Failures
 
@@ -119,10 +120,10 @@ start failure, or later processor failure does not roll back a statically valid
 artifact. The resource, revision, and pipeline desired run state remain stored;
 runtime status reports the real error.
 
-Pipeline failures are held only in the current runtime, separately from persisted
-`run_state`. Startup hydration creates fresh runtime state from the pipeline
-definition and its desired state. A desired-running pipeline is retried without
-restoring an old failure; a new failure records its reason and timestamp in memory.
+Hydration and online Apply failures are held in the current runtime, separately
+from persisted `run_state`. Startup hydration creates fresh runtime state from the
+committed pipeline definition and its desired state. A desired-running pipeline is retried; a new failure records
+its reason and timestamp in the current runtime.
 
 Every resource result is one of:
 
@@ -166,3 +167,16 @@ stored. Runtime status reports the connector failure; failure is not rewritten i
 the two-value desired state. On a later startup, hydration creates a fresh runtime
 and retries pipelines whose desired state is `running`. A failure of that new
 attempt records its own error in memory.
+
+## Policy Boundary
+
+Init and online Apply share revision selection, resource validation, metadata
+submission, and attachment publication. Init deliberately retains best-effort
+acceptance and does not add same-revision content comparison. Accepted independent
+resources can therefore combine new and retained old configuration; dependency
+presence does not guarantee business-level release consistency.
+
+Online Apply rejects a batch if any submitted static configuration is invalid.
+Neither entrance replans retained pipelines as a precondition for an upstream
+update. No Apply background retry loop is introduced. See the
+[three-entrance error examples](../../api/storage_errors.md).

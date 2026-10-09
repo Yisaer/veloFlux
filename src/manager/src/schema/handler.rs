@@ -1054,6 +1054,7 @@ mod tests {
             &pipeline_request,
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
+            Default::default(),
         )
         .expect("build pipeline definition");
         state
@@ -1198,6 +1199,7 @@ mod tests {
             &pipeline_request,
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
+            Default::default(),
         )
         .expect("build pipeline definition");
         state
@@ -1223,11 +1225,8 @@ mod tests {
             .expect("persist running desired state");
 
         let updated_archive = temp_dir.path().join("updated.proto.zip");
-        std::fs::write(&updated_archive, {
-            let zip = proto_zip_with_field("new_value");
-            zip
-        })
-        .expect("write updated proto archive");
+        std::fs::write(&updated_archive, proto_zip_with_field("new_value"))
+            .expect("write updated proto archive");
         let response = update_schema_handler(
             State(state.clone()),
             Path(schema_name.to_string()),
