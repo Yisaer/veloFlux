@@ -146,7 +146,8 @@ For shared streams:
 Current create-time constraints are:
 
 - shared streams cannot use stream type `memory`
-- shared streams cannot use stream type `nng_pubsub` in the first implementation
+- shared `nng_pubsub` streams use one source connector per flow instance and fan out the decoded
+  output to all consumers on that instance
 - shared streams cannot use decoder type `none`
 
 This preserves a consistent shared ingest pipeline shape: source -> optional sampler -> decoder ->
@@ -213,8 +214,8 @@ Cross-cutting constraints worth preserving in future work:
 - MQTT streams may optionally bind to a shared connector via `connector_key`, but the stream
   definition still owns the topic-level source identity
 - NNG pub/sub streams own a URL, topic prefix, and topic delimiter. They follow the same decode
-  boundary as other byte sources and do not support shared-stream promotion in the first
-  implementation.
+  boundary as other byte sources and support shared-stream promotion. A shared NNG stream owns one
+  NNG subscriber per flow instance; the shared runtime performs the downstream fan-out.
 - NNG pub/sub transport is derived from the URL scheme. `tcp://`, `ipc://`, and `inproc://` are
   supported; the stream request must not add a second `transport` or `inproc` field. Embedded
   `inproc` deployment requirements are documented in

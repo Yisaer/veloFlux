@@ -69,6 +69,7 @@ video_gstreamer = ["flow/video_gstreamer"]
 nng_pubsub = ["flow/nng_pubsub", "veloflux_sdv/nng_pubsub"]
 
 [dev-dependencies]
+anng = "0.1.3"
 bytes = "1"
 csv = "1.4"
 criterion = "0.5"

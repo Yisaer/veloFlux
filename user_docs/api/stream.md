@@ -63,6 +63,8 @@ Notes:
 - Alternatively, use `schema.ref` to reference a pre-defined named schema (see `user_docs/api/schema.md`). When `schema.ref` is set, `schema.type` and `schema.props` are ignored.
 - `decoder.type` must be registered in the runtime decoder registry (builtin: `json`; the SDV distribution additionally provides `gbf`, `busmirror`, and others).
 - `eventtime.type` must be registered in the runtime event-time registry (builtin: `unixtimestamp_s`, `unixtimestamp_ms`).
+- `shared: true` creates one shared ingest runtime per flow instance and fans out decoded output to all
+  pipelines consuming the stream. `nng_pubsub` streams support this mode.
 
 Response:
 
@@ -326,7 +328,7 @@ curl -s \
 - `name: string` (required, non-empty)
 - `revision: number` (required, positive JSON-safe integer)
 - `type: string` (required)
-  - Supported: `mqtt`, `history`, `file`
+  - Supported: `mqtt`, `history`, `file`, `nng_pubsub`
 - `schema: { type: string, props: object }` (required)
   - Alternatively: `schema: { ref: string }` to reference a named schema.
   - When `ref` is set, `type` and `props` are ignored.
@@ -368,6 +370,18 @@ File streams require `decoder.type = "file_line"`. Their built-in schema is
 `line: string` and `filename: string`. In `append_batch` mode, `line` contains the
 whole observed batch and may contain multiple lines; the existing field name is retained for
 compatibility. When `framing` is omitted, `append_batch` is used.
+
+`type == "nng_pubsub"`:
+
+- `url: string` (required) — NNG endpoint using `tcp://`, `ipc://`, or `inproc://`.
+- Optional `topic: string` — byte-prefix subscription; an empty value subscribes to all messages.
+- Optional `topic_delimiter: string` (default: `":"`) — separator between the topic prefix and
+  the payload in the NNG message body.
+
+NNG pub/sub streams use the same decoder boundary as other byte sources and may set `shared: true`.
+In shared mode, each flow instance owns one NNG subscriber and distributes decoded output to all
+consumer pipelines on that instance. NNG transport remains best-effort, so messages published
+before the subscriber is ready may still be lost.
 
 ### Sampler Configuration (`sampler`)
 

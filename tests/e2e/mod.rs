@@ -1,5 +1,7 @@
 mod file_source_checkpoint;
 mod http_sink_e2e;
+#[cfg(feature = "nng_pubsub")]
+mod nng_shared_stream;
 mod pipeline_stats;
 mod proto_decoder_e2e;
 mod proto_encoder_e2e;

@@ -180,7 +180,7 @@ The first implementation should:
 - centralize endpoint parsing while keeping socket ownership in source and sink;
 - support `tcp`, `ipc`, and `inproc` through the same connector kind;
 - add connector/pipeline readiness reporting;
-- keep `nng_pubsub` streams out of shared-stream promotion;
+- support `nng_pubsub` streams in shared-stream promotion;
 - add a host-process integration test using the shared-library build.
 
 The first implementation should not add a second FFI data plane for sending or

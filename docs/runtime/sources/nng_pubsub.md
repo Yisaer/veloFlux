@@ -41,6 +41,25 @@ messages; application data is not used as a connection readiness signal.
 NNG pub/sub is best-effort and lossy. Messages published before the subscriber connects or while
 subscriber queues overflow can be dropped by the protocol.
 
+## Shared Stream Behavior
+
+When an NNG stream is declared with `shared=true`, the flow instance creates one shared ingest
+runtime for the stream. That runtime owns one NNG `sub0` connector and runs the normal shared
+source pipeline:
+
+```text
+NNG sub0 -> optional sampler -> decoder -> shared fan-out
+```
+
+All consumer pipelines on the same flow instance subscribe to the decoded output of this runtime.
+The shared runtime is started when the first consumer attaches and may be reclaimed when the last
+consumer detaches; the stream definition remains installed and a later consumer can create a new
+NNG connector from the stored configuration.
+
+The shared fan-out is backpressured after a message has entered the runtime, but this does not
+change NNG pub/sub delivery guarantees. Messages published before the subscriber connects or
+dropped by NNG queues remain lossy.
+
 ## Embedded `inproc` deployments
 
 When veloFlux is embedded as a shared library, the same connector can use an

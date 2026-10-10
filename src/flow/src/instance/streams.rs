@@ -4,6 +4,8 @@ use tokio::time::{sleep, Duration, Instant};
 
 use crate::catalog::{CatalogError, StreamDefinition, StreamProps};
 use crate::connector::{MemoryTopicKind, MockSourceConnector};
+#[cfg(feature = "nng_pubsub")]
+use crate::connector::{NngPubSubSourceConfig, NngPubSubSourceConnector};
 use crate::shared_stream::{
     SharedStreamConfig, SharedStreamError, SharedStreamInfo, SharedStreamProcessorStats,
 };
@@ -427,8 +429,89 @@ impl FlowInstance {
             StreamProps::Video(_) => Err(FlowInstanceError::Invalid(
                 "video stream props cannot be used to create shared streams".to_string(),
             )),
+            #[cfg(feature = "nng_pubsub")]
+            StreamProps::NngPubSub(props) => {
+                let source_config = NngPubSubSourceConfig::new(
+                    definition.id(),
+                    props.url.clone(),
+                    props.topic.clone(),
+                )
+                .with_topic_delimiter(props.topic_delimiter.clone());
+
+                source_config
+                    .validate()
+                    .map_err(FlowInstanceError::Invalid)?;
+
+                let mut config = SharedStreamConfig::new(definition.id(), definition.schema());
+                config.stream_revision = definition.revision();
+                config.schema_version = definition.schema_version();
+                config.flow_instance_id = Arc::<str>::from(self.id.as_str());
+                config.set_decoder(definition.decoder().clone());
+
+                struct NngSharedStreamConnectorFactory {
+                    stream_id: String,
+                    flow_instance_id: Arc<str>,
+                    schema: Arc<datatypes::Schema>,
+                    decoder: crate::catalog::StreamDecoderConfig,
+                    source_config: NngPubSubSourceConfig,
+                    decoder_registry: Arc<crate::codec::DecoderRegistry>,
+                    spawner: crate::runtime::TaskSpawner,
+                }
+
+                impl crate::shared_stream::SharedStreamConnectorFactory for NngSharedStreamConnectorFactory {
+                    fn connector_id(&self) -> String {
+                        format!("{}_shared_source_connector", self.stream_id)
+                    }
+
+                    fn build(
+                        &self,
+                    ) -> Result<
+                        (
+                            Box<dyn crate::connector::SourceConnector>,
+                            Arc<dyn crate::codec::RecordDecoder>,
+                        ),
+                        crate::shared_stream::SharedStreamError,
+                    > {
+                        let connector = NngPubSubSourceConnector::new(
+                            self.connector_id(),
+                            self.source_config.clone(),
+                            Arc::clone(&self.flow_instance_id),
+                            self.spawner.clone(),
+                        );
+                        let decoder = self.decoder_registry.instantiate(
+                            &self.decoder,
+                            &self.stream_id,
+                            Arc::clone(&self.schema),
+                        );
+                        let decoder = decoder.map_err(|err| {
+                            crate::shared_stream::SharedStreamError::Internal(err.to_string())
+                        })?;
+                        Ok((Box::new(connector), decoder))
+                    }
+                }
+
+                let factory = Arc::new(NngSharedStreamConnectorFactory {
+                    stream_id: definition.id().to_string(),
+                    flow_instance_id: Arc::<str>::from(self.id.as_str()),
+                    schema: definition.schema(),
+                    decoder: definition.decoder().clone(),
+                    source_config,
+                    decoder_registry: Arc::clone(&self.decoder_registry),
+                    spawner: self.spawner.clone(),
+                });
+
+                config.set_connector_factory(factory);
+                if let Some(sampler) = definition.sampler() {
+                    config.set_sampler(sampler.clone());
+                }
+                self.shared_stream_registry
+                    .create_stream(config)
+                    .await
+                    .map_err(FlowInstanceError::from)
+            }
+            #[cfg(not(feature = "nng_pubsub"))]
             StreamProps::NngPubSub(_) => Err(FlowInstanceError::Invalid(
-                "nng_pubsub stream props cannot be used to create shared streams".to_string(),
+                "nng_pubsub shared streams require the nng_pubsub feature".to_string(),
             )),
             StreamProps::File(_) => Err(FlowInstanceError::Invalid(
                 "file stream props cannot be used to create shared streams".to_string(),
