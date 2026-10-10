@@ -2302,17 +2302,12 @@ mod tests {
         let mut stream = initial["resources"]["streams"][0].clone();
         stream["revision"] = json!(2);
         stream["schema"] = json!({"ref":"reference_race_schema"});
-        let mut switch = Box::pin(crate::stream::upsert_stream_handler(
-            State(state.clone()),
-            axum::extract::Path("apply_stream".into()),
-            Query(crate::stream::UpsertStreamQuery { cascade: true }),
-            Json(serde_json::from_value(stream.clone()).unwrap()),
-        ));
-        std::future::poll_fn(|cx| {
-            assert!(switch.as_mut().poll(cx).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
+        // An in-flight stream reference operation holds a shared schema guard;
+        // a concurrent cascading schema operation (requiring exclusive guard) must conflict.
+        let stream_ref_guard =
+            crate::schema::operation_guard(&state, "reference_race_schema", false)
+                .await
+                .unwrap();
         let mut schema = initial["resources"]["schemas"][0].clone();
         schema["revision"] = json!(2);
         schema["props"]["columns"][0]["data_type"] = json!("float64");
@@ -2329,7 +2324,19 @@ mod tests {
                 .revision,
             1
         );
-        assert_eq!(switch.await.into_response().status(), StatusCode::OK);
+        drop(stream_ref_guard);
+        assert_eq!(
+            crate::stream::upsert_stream_handler(
+                State(state.clone()),
+                axum::extract::Path("apply_stream".into()),
+                Query(crate::stream::UpsertStreamQuery { cascade: true }),
+                Json(serde_json::from_value(stream.clone()).unwrap()),
+            )
+            .await
+            .into_response()
+            .status(),
+            StatusCode::OK
+        );
         assert_eq!(put_schema(&state, &schema, true).await.0, StatusCode::OK);
         let instance = state.instances.default_instance();
         assert_eq!(
