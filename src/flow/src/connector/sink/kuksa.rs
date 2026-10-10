@@ -287,7 +287,7 @@ fn map_kuksa_error(err: KuksaClientError) -> SinkConnectorError {
 fn convert_value(value: &Value, data_type: DataType) -> Result<KuksaValue, SinkConnectorError> {
     let typed_value = match data_type {
         DataType::String => kuksa_value::TypedValue::String(match value {
-            Value::String(s) => s.clone(),
+            Value::String(s) => s.as_ref().clone(),
             other => {
                 return Err(SinkConnectorError::Other(format!(
                     "expected string, got {other:?}"

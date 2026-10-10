@@ -377,7 +377,7 @@ mod tests {
         let message = Message::new(
             Arc::<str>::from("s"),
             vec![Arc::<str>::from("value"), Arc::<str>::from("event_ts")],
-            vec![Arc::new(Value::Int64(7)), Arc::new(Value::Int64(1_500))],
+            vec![Value::Int64(7), Value::Int64(1_500)],
         );
         let batch = RecordBatch::new(vec![Tuple::new(vec![Arc::new(message)])]).expect("batch");
 

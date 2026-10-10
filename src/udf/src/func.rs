@@ -474,7 +474,7 @@ mod tests {
             .expect("bind runtime")
             .expect("WASM runtime");
 
-        let input = vec![Value::String("hello wasm".to_string())];
+        let input = vec![Value::String("hello wasm".to_string().into())];
         let result = udf.eval_batch(&[input], 1).expect("eval_batch");
         assert_eq!(result, vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))]);
     }
@@ -585,7 +585,7 @@ mod tests {
         // 10 KB string — one WASM page is 64 KB, but input + output + allocator
         // bookkeeping should still fit in one page.
         let big = "x".repeat(10_000);
-        let input = vec![Value::String(big.clone())];
+        let input = vec![Value::String(big.clone().into())];
         let result = udf.eval_batch(&[input], 1).expect("eval_batch");
         assert_eq!(result, vec![Ok(Value::Int64(42)), Ok(Value::Int64(43))]);
     }

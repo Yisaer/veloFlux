@@ -203,7 +203,7 @@ mod tests {
                     args: &[
                         Value::Bool(true),
                         Value::Int64(1),
-                        Value::String("a".to_string())
+                        Value::String("a".to_string().into())
                     ],
                     should_apply: true,
                 })
@@ -216,7 +216,7 @@ mod tests {
                     args: &[
                         Value::Bool(true),
                         Value::Int64(1),
-                        Value::String("a".to_string())
+                        Value::String("a".to_string().into())
                     ],
                     should_apply: true,
                 })
@@ -229,7 +229,7 @@ mod tests {
                     args: &[
                         Value::Bool(true),
                         Value::Int64(2),
-                        Value::String("a".to_string())
+                        Value::String("a".to_string().into())
                     ],
                     should_apply: true,
                 })

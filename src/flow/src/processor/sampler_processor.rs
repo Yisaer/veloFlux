@@ -525,7 +525,7 @@ mod tests {
         let message = Arc::new(Message::new(
             "test",
             vec![Arc::from("value")],
-            vec![Arc::new(Value::Int64(value))],
+            vec![Value::Int64(value)],
         ));
         let tuple = Tuple::new(vec![message]);
         let batch = RecordBatch::new(vec![tuple]).expect("create batch");
@@ -561,7 +561,7 @@ mod tests {
             assert_eq!(rows.len(), 1);
             let message = &rows[0].messages()[0];
             let (_, value) = message.entry_by_index(0).expect("get value");
-            assert_eq!(*value.as_ref(), Value::Int64(3));
+            assert_eq!(*value, Value::Int64(3));
         } else {
             panic!("Expected Collection data");
         }

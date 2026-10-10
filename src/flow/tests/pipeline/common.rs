@@ -287,7 +287,7 @@ fn datatype_value_to_json(value: &Value) -> JsonValue {
     match value {
         Value::Null => JsonValue::Null,
         Value::Bool(v) => JsonValue::Bool(*v),
-        Value::String(v) => JsonValue::String(v.clone()),
+        Value::String(v) => JsonValue::String(v.as_ref().clone()),
         Value::Bytes(v) => {
             use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
             use base64::Engine;

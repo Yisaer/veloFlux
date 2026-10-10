@@ -112,7 +112,7 @@ mod tests {
         let message = Arc::new(Message::new(
             "test",
             vec![Arc::from("value")],
-            vec![Arc::new(Value::Int64(1))],
+            vec![Value::Int64(1)],
         ));
         let tuple = Tuple::new(vec![message]);
         RecordBatch::new(vec![tuple]).expect("build batch")

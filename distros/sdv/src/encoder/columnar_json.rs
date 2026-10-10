@@ -221,7 +221,7 @@ fn write_json_value(buf: &mut Vec<u8>, val: &datatypes::Value) -> Result<(), Enc
         Uint64(v) => write_json_integer(buf, *v),
         Float32(v) => write_json_float(buf, *v),
         Float64(v) => write_json_float(buf, *v),
-        String(s) => serde_json::to_writer(buf, s).map_err(EncodeError::Serialization)?,
+        String(s) => serde_json::to_writer(buf, s.as_str()).map_err(EncodeError::Serialization)?,
         Bytes(bytes) => {
             let encoded = BASE64_STANDARD.encode(bytes.as_ref());
             serde_json::to_writer(buf, &encoded).map_err(EncodeError::Serialization)?;
@@ -294,8 +294,11 @@ mod tests {
 
     fn make_tuple(source: &str, keys: &[&str], vals: &[datatypes::Value]) -> Tuple {
         let keys_arc: Vec<Arc<str>> = keys.iter().map(|k| Arc::<str>::from(*k)).collect();
-        let vals_arc: Vec<Arc<datatypes::Value>> = vals.iter().cloned().map(Arc::new).collect();
-        let msg = Arc::new(Message::new(Arc::<str>::from(source), keys_arc, vals_arc));
+        let msg = Arc::new(Message::new(
+            Arc::<str>::from(source),
+            keys_arc,
+            vals.to_vec(),
+        ));
         Tuple::new(vec![msg])
     }
 
@@ -376,7 +379,7 @@ mod tests {
             &["a", "b"],
             &[
                 datatypes::Value::Int64(1),
-                datatypes::Value::String("x".to_string()),
+                datatypes::Value::String("x".to_string().into()),
             ],
         );
         let t2 = make_tuple(
@@ -384,7 +387,7 @@ mod tests {
             &["a", "b"],
             &[
                 datatypes::Value::Int64(2),
-                datatypes::Value::String("y".to_string()),
+                datatypes::Value::String("y".to_string().into()),
             ],
         );
         let batch = RecordBatch::new(vec![t1, t2]).unwrap();
@@ -513,7 +516,7 @@ mod tests {
 
         // Test String
         assert_eq!(
-            encoded(&datatypes::Value::String("hello".to_string())),
+            encoded(&datatypes::Value::String("hello".to_string().into())),
             serde_json::Value::String("hello".to_string())
         );
     }

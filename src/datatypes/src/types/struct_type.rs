@@ -124,8 +124,8 @@ fn get_default_value(dt: &ConcreteDatatype) -> Value {
         ConcreteDatatype::Uint16(_) => Value::Uint16(0),
         ConcreteDatatype::Uint32(_) => Value::Uint32(0),
         ConcreteDatatype::Uint64(_) => Value::Uint64(0),
-        ConcreteDatatype::String(_) => Value::String(String::new()),
-        ConcreteDatatype::Bytes(_) => Value::Bytes(bytes::Bytes::new()),
+        ConcreteDatatype::String(_) => Value::String(String::new().into()),
+        ConcreteDatatype::Bytes(_) => Value::Bytes(bytes::Bytes::new().into()),
         ConcreteDatatype::Bool(_) => Value::Bool(false),
         ConcreteDatatype::Timestamp(_) => {
             Value::Timestamp(crate::TimestampValue::from_epoch_micros(0))

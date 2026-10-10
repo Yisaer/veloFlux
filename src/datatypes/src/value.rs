@@ -34,9 +34,23 @@ impl TimestampValue {
     }
 }
 
-/// List value containing items and their datatype
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// List value sharing immutable items and their datatype.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ListValue {
+    inner: Arc<ListValueInner>,
+}
+
+impl std::fmt::Debug for ListValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListValue")
+            .field("items", &self.inner.items)
+            .field("datatype", &self.inner.datatype)
+            .finish()
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct ListValueInner {
     items: Vec<Value>,
     /// Inner values datatype, to distinguish empty lists of different datatypes
     datatype: Arc<ConcreteDatatype>,
@@ -44,64 +58,85 @@ pub struct ListValue {
 
 impl ListValue {
     pub fn new(items: Vec<Value>, datatype: Arc<ConcreteDatatype>) -> Self {
-        Self { items, datatype }
+        Self {
+            inner: Arc::new(ListValueInner { items, datatype }),
+        }
     }
 
     pub fn items(&self) -> &[Value] {
-        &self.items
+        &self.inner.items
     }
 
     pub fn datatype(&self) -> &ConcreteDatatype {
-        &self.datatype
+        &self.inner.datatype
     }
 
     /// Get element at the given index
     pub fn get(&self, index: usize) -> Option<&Value> {
-        self.items.get(index)
+        self.inner.items.get(index)
     }
 
     /// Get the length of the list
     pub fn len(&self) -> usize {
-        self.items.len()
+        self.inner.items.len()
     }
 
     /// Check if the list is empty
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.inner.items.is_empty()
     }
 }
 
-/// Struct value containing items and field definitions
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Struct value sharing immutable items and field definitions.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct StructValue {
+    inner: Arc<StructValueInner>,
+}
+
+impl std::fmt::Debug for StructValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StructValue")
+            .field("items", &self.inner.items)
+            .field("fields", &self.inner.fields)
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StructValueInner {
     items: Vec<Value>,
     fields: StructType,
 }
 
 impl StructValue {
     pub fn new(items: Vec<Value>, fields: StructType) -> Self {
-        Self { items, fields }
+        Self {
+            inner: Arc::new(StructValueInner { items, fields }),
+        }
     }
 
     pub fn items(&self) -> &[Value] {
-        &self.items
+        &self.inner.items
     }
 
     pub fn fields(&self) -> &StructType {
-        &self.fields
+        &self.inner.fields
     }
 
+    /// Move uniquely owned items, or shallow-clone the shared item container.
     pub fn into_parts(self) -> (Vec<Value>, StructType) {
-        (self.items, self.fields)
+        let inner = Arc::try_unwrap(self.inner).unwrap_or_else(|inner| inner.as_ref().clone());
+        (inner.items, inner.fields)
     }
 
     /// Get field value by field name
     pub fn get_field(&self, field_name: &str) -> Option<&Value> {
-        self.fields
+        self.inner
+            .fields
             .fields()
             .iter()
             .position(|field| field.name() == field_name)
-            .and_then(|index| self.items.get(index))
+            .and_then(|index| self.inner.items.get(index))
     }
 }
 
@@ -131,10 +166,10 @@ pub enum Value {
     Uint32(u32),
     /// 64-bit unsigned integer
     Uint64(u64),
-    /// String type
-    String(String),
-    /// Opaque bytes payload.
-    Bytes(Bytes),
+    /// Shared UTF-8 text; moving a String into Arc preserves its buffer.
+    String(Arc<String>),
+    /// Shared opaque bytes payload; moving Bytes preserves its backing storage.
+    Bytes(Arc<Bytes>),
     /// Boolean type
     Bool(bool),
     /// UTC timestamp type

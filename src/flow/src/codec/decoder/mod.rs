@@ -165,7 +165,7 @@ impl JsonDecoder {
                 let mut values = Vec::with_capacity(output_slots.len());
                 for slot in output_slots.iter() {
                     let Some(column) = columns_by_name.get(slot.as_ref()) else {
-                        values.push(Arc::new(Value::Null));
+                        values.push(Value::Null);
                         continue;
                     };
                     let projection_node =
@@ -181,7 +181,7 @@ impl JsonDecoder {
                             })
                         })
                         .unwrap_or(Value::Null);
-                    values.push(Arc::new(value));
+                    values.push(value);
                 }
                 drop(row);
                 let message = Arc::new(Message::new_shared_keys(
@@ -228,7 +228,7 @@ impl JsonDecoder {
                         })
                         .unwrap_or(Value::Null),
                 };
-                values.push(Arc::new(value));
+                values.push(value);
             }
             drop(row);
             let message = Arc::new(Message::new_shared_keys(
@@ -283,11 +283,11 @@ impl RecordDecoder for FileLineDecoder {
         let mut values = Vec::with_capacity(keys.len());
         for key in keys.iter() {
             let value = match key.as_ref() {
-                "line" => Value::String(line.clone()),
-                "filename" => Value::String(filename.clone()),
+                "line" => Value::String(line.clone().into()),
+                "filename" => Value::String(filename.clone().into()),
                 _ => Value::Null,
             };
-            values.push(Arc::new(value));
+            values.push(value);
         }
 
         let message = Arc::new(Message::new_shared_keys(
@@ -377,7 +377,7 @@ fn json_to_value(value: &JsonValue) -> Value {
                 Value::Null
             }
         }
-        JsonValue::String(s) => Value::String(s.clone()),
+        JsonValue::String(s) => Value::String(s.clone().into()),
         JsonValue::Array(items) => {
             let converted: Vec<Value> = items.iter().map(json_to_value).collect();
             let element_type = converted
@@ -480,7 +480,7 @@ fn json_to_bytes_value(value: &JsonValue) -> Value {
         JsonValue::String(s) => BASE64_STANDARD
             .decode(s.as_bytes())
             .map(Bytes::from)
-            .map(Value::Bytes)
+            .map(|bytes| Value::Bytes(bytes.into()))
             .unwrap_or(Value::Null),
         _ => Value::Null,
     }
@@ -648,11 +648,11 @@ mod tests {
 
         assert_eq!(
             tuple.value_by_name("logs", "line"),
-            Some(&Value::String("hello".to_string()))
+            Some(&Value::String("hello".to_string().into()))
         );
         assert_eq!(
             tuple.value_by_name("logs", "filename"),
-            Some(&Value::String("app.log".to_string()))
+            Some(&Value::String("app.log".to_string().into()))
         );
     }
 
@@ -675,7 +675,7 @@ mod tests {
         let entries = tuple.entries();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, ("logs", "line"));
-        assert_eq!(entries[0].1, &Value::String("hello".to_string()));
+        assert_eq!(entries[0].1, &Value::String("hello".to_string().into()));
     }
 
     #[test]
@@ -722,7 +722,7 @@ mod tests {
         );
         assert_eq!(
             tuple.value_by_name("orders", "status"),
-            Some(&Value::String("ok".to_string()))
+            Some(&Value::String("ok".to_string().into()))
         );
     }
 
@@ -820,7 +820,7 @@ mod tests {
 
         assert_eq!(
             tuple.value_by_name("frames", "payload"),
-            Some(&Value::Bytes(Bytes::from_static(b"hello")))
+            Some(&Value::Bytes(Bytes::from_static(b"hello").into()))
         );
     }
 
@@ -884,13 +884,13 @@ mod tests {
         assert_eq!(
             message
                 .entry_by_index(0)
-                .map(|(key, value)| (key.as_ref(), value.as_ref())),
+                .map(|(key, value)| (key.as_ref(), value)),
             Some(("a", &Value::Int64(10)))
         );
         assert_eq!(
             message
                 .entry_by_index(1)
-                .map(|(key, value)| (key.as_ref(), value.as_ref())),
+                .map(|(key, value)| (key.as_ref(), value)),
             Some(("b", &Value::Null))
         );
         assert_eq!(message.entry_by_index(2), None);

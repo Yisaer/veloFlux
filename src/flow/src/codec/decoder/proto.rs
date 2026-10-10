@@ -75,8 +75,7 @@ impl ProtobufDecoder {
         keep_set: Option<&HashSet<u32>>,
     ) -> Result<Tuple, CodecError> {
         let column_count = self.bundle.column_count;
-        let mut values: Vec<Arc<Value>> =
-            (0..column_count).map(|_| Arc::new(Value::Null)).collect();
+        let mut values: Vec<Value> = (0..column_count).map(|_| Value::Null).collect();
         let mut list_bufs: Vec<Vec<Value>> = vec![Vec::new(); column_count];
         let mut cursor = 0usize;
 
@@ -130,7 +129,7 @@ impl ProtobufDecoder {
                     info.nested_bundle.as_deref(),
                     0,
                 )?;
-                values[ci] = Arc::new(val);
+                values[ci] = val;
             }
         }
 
@@ -140,10 +139,7 @@ impl ProtobufDecoder {
                 continue;
             }
             let elem_dt = element_type_of_column(&self.schema, ci);
-            values[ci] = Arc::new(Value::List(ListValue::new(
-                std::mem::take(buf),
-                Arc::new(elem_dt),
-            )));
+            values[ci] = Value::List(ListValue::new(std::mem::take(buf), Arc::new(elem_dt)));
         }
 
         let message = Arc::new(Message::new_shared_keys(
@@ -389,12 +385,12 @@ fn decode_len_delimited_val(
         ConcreteDatatype::String(_) => {
             let bytes = read_length_delimited(data, cursor)?;
             String::from_utf8(bytes.to_vec())
-                .map(Value::String)
+                .map(|value| Value::String(value.into()))
                 .map_err(|e| CodecError::Other(format!("invalid UTF-8 in proto string: {e}")))
         }
         ConcreteDatatype::Bytes(_) => {
             let bytes = read_length_delimited(data, cursor)?;
-            Ok(Value::Bytes(Bytes::copy_from_slice(bytes)))
+            Ok(Value::Bytes(Bytes::copy_from_slice(bytes).into()))
         }
         ConcreteDatatype::Timestamp(_) => {
             let blob = read_length_delimited(data, cursor)?;

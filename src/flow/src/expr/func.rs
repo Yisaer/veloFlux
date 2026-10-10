@@ -180,13 +180,13 @@ impl UnaryFunc {
                                 Ok(Value::Int64(v as i64))
                             }
                             (Value::Int64(v), ConcreteDatatype::String(_)) => {
-                                Ok(Value::String(v.to_string()))
+                                Ok(Value::String(v.to_string().into()))
                             }
                             (Value::Float64(v), ConcreteDatatype::String(_)) => {
-                                Ok(Value::String(v.to_string()))
+                                Ok(Value::String(v.to_string().into()))
                             }
                             (Value::Bool(v), ConcreteDatatype::String(_)) => {
-                                Ok(Value::String(v.to_string()))
+                                Ok(Value::String(v.to_string().into()))
                             }
                             (Value::String(s), ConcreteDatatype::Int64(_)) => s
                                 .parse::<i64>()
@@ -390,7 +390,7 @@ impl BinaryFunc {
                         return Ok(Value::Uint64(a.saturating_add(*b)))
                     }
                     (Value::String(left_str), Value::String(right_str)) => {
-                        return Ok(Value::String(format!("{}{}", left_str, right_str)));
+                        return Ok(Value::String(format!("{}{}", left_str, right_str).into()));
                     }
                     _ => {}
                 }
@@ -876,13 +876,13 @@ mod tests {
     fn null_string_concat_returns_null() {
         assert_eq!(
             BinaryFunc::Add
-                .eval_binary(Value::Null, Value::String("x".to_string()))
+                .eval_binary(Value::Null, Value::String("x".to_string().into()))
                 .unwrap(),
             Value::Null
         );
         assert_eq!(
             BinaryFunc::Add
-                .eval_binary(Value::String("x".to_string()), Value::Null)
+                .eval_binary(Value::String("x".to_string().into()), Value::Null)
                 .unwrap(),
             Value::Null
         );
@@ -1017,7 +1017,7 @@ mod tests {
     #[test]
     fn unary_neg_type_error() {
         use super::UnaryFunc;
-        let result = UnaryFunc::Neg.eval_unary(Value::String("hello".to_string()));
+        let result = UnaryFunc::Neg.eval_unary(Value::String("hello".to_string().into()));
         assert!(result.is_err());
     }
 
@@ -1089,8 +1089,9 @@ mod tests {
         let cast = UnaryFunc::Cast(ConcreteDatatype::String(StringType));
         // Same type cast should work
         assert_eq!(
-            cast.eval_unary(Value::String("hello".to_string())).unwrap(),
-            Value::String("hello".to_string())
+            cast.eval_unary(Value::String("hello".to_string().into()))
+                .unwrap(),
+            Value::String("hello".to_string().into())
         );
     }
 
@@ -1137,11 +1138,11 @@ mod tests {
         assert_eq!(
             BinaryFunc::Add
                 .eval_binary(
-                    Value::String("hello".to_string()),
-                    Value::String(" world".to_string())
+                    Value::String("hello".to_string().into()),
+                    Value::String(" world".to_string().into())
                 )
                 .unwrap(),
-            Value::String("hello world".to_string())
+            Value::String("hello world".to_string().into())
         );
     }
 
@@ -1288,13 +1289,19 @@ mod tests {
         );
         assert_eq!(
             BinaryFunc::Eq
-                .eval_binary(Value::String("a".into()), Value::String("a".into()))
+                .eval_binary(
+                    Value::String("a".to_owned().into()),
+                    Value::String("a".to_owned().into())
+                )
                 .unwrap(),
             t
         );
         assert_eq!(
             BinaryFunc::Eq
-                .eval_binary(Value::String("a".into()), Value::String("b".into()))
+                .eval_binary(
+                    Value::String("a".to_owned().into()),
+                    Value::String("b".to_owned().into())
+                )
                 .unwrap(),
             f
         );

@@ -61,5 +61,8 @@ fn test_int64_type_casting_reject_string_bool() {
     let int64_type = Int64Type;
 
     assert_eq!(int64_type.try_cast(Value::Bool(true)), None);
-    assert_eq!(int64_type.try_cast(Value::String("123".to_string())), None);
+    assert_eq!(
+        int64_type.try_cast(Value::String("123".to_string().into())),
+        None
+    );
 }

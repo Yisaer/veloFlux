@@ -10,10 +10,10 @@ use std::sync::Arc;
 enum PartialMessages {
     Single {
         keys: Vec<Arc<str>>,
-        values: Vec<Arc<Value>>,
+        values: Vec<Value>,
     },
     Buckets {
-        buckets: Vec<(Vec<Arc<str>>, Vec<Arc<Value>>)>,
+        buckets: Vec<(Vec<Arc<str>>, Vec<Value>)>,
     },
 }
 
@@ -22,7 +22,7 @@ impl PartialMessages {
         &mut self,
         message_index: usize,
         key: Arc<str>,
-        value: Arc<Value>,
+        value: Value,
     ) -> Result<(), CollectionError> {
         match self {
             PartialMessages::Single { keys, values } => {

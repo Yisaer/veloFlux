@@ -18,7 +18,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 #[derive(Default)]
 struct SourceChangeGateState {
-    previous_tracked_row: Option<Vec<Option<Arc<Value>>>>,
+    previous_tracked_row: Option<Vec<Option<Value>>>,
 }
 
 pub struct SourceChangeGateProcessor {
@@ -71,7 +71,7 @@ fn extract_tracked_row(
     tuple: &Tuple,
     source_name: &str,
     tracked_column_indexes: &[usize],
-) -> Result<Vec<Option<Arc<Value>>>, ProcessorError> {
+) -> Result<Vec<Option<Value>>, ProcessorError> {
     let message = tuple.message_by_source(source_name).ok_or_else(|| {
         ProcessorError::ProcessingError(format!(
             "source change gate processor failed to resolve source `{source_name}` from runtime tuple"
@@ -83,7 +83,7 @@ fn extract_tracked_row(
         .map(|&index| {
             message
                 .entry_by_index(index)
-                .map(|(_, value)| Some(Arc::clone(value)))
+                .map(|(_, value)| Some(value.clone()))
                 .ok_or_else(|| {
                     ProcessorError::ProcessingError(format!(
                         "source change gate processor failed to resolve source `{source_name}` column index {index} from runtime tuple"

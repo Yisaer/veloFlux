@@ -237,7 +237,7 @@ mod tests {
         let message = Arc::new(Message::new(
             Arc::<str>::from("stream"),
             vec![Arc::<str>::from("a")],
-            vec![Arc::new(Value::Int64(1))],
+            vec![Value::Int64(1)],
         ));
         let mut tuple = Tuple::new(vec![message]);
         tuple.set_output_mask(vec![false]);
@@ -251,7 +251,7 @@ mod tests {
         let message = Arc::new(Message::new(
             Arc::<str>::from("stream"),
             vec![Arc::<str>::from("a"), Arc::<str>::from("b")],
-            vec![Arc::new(Value::Int64(1)), Arc::new(Value::Int64(2))],
+            vec![Value::Int64(1), Value::Int64(2)],
         ));
         let mut tuple = Tuple::new(vec![message]);
         tuple.set_output_mask(vec![false, true]);

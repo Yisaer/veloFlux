@@ -29,11 +29,11 @@ fn timestamp_type_casts_rfc3339_strings_only() {
     let timestamp_type = TimestampType;
 
     assert!(matches!(
-        timestamp_type.try_cast(Value::String("2026-05-08T10:20:30Z".to_string())),
+        timestamp_type.try_cast(Value::String("2026-05-08T10:20:30Z".to_string().into())),
         Some(Value::Timestamp(_))
     ));
     assert_eq!(
-        timestamp_type.try_cast(Value::String("2026-05-08 10:20:30".to_string())),
+        timestamp_type.try_cast(Value::String("2026-05-08 10:20:30".to_string().into())),
         None
     );
     assert_eq!(timestamp_type.try_cast(Value::Int64(1)), None);

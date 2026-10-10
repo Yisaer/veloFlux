@@ -356,9 +356,9 @@ async fn pipeline_table_scan_table_driven() {
                 ColumnCheck {
                     expected_name: "vehicle_id".to_string(),
                     expected_values: vec![
-                        Value::String("v1".into()),
-                        Value::String("v2".into()),
-                        Value::String("v1".into()),
+                        Value::String("v1".to_owned().into()),
+                        Value::String("v2".to_owned().into()),
+                        Value::String("v1".to_owned().into()),
                     ],
                 },
                 ColumnCheck {
@@ -438,8 +438,8 @@ async fn pipeline_table_scan_table_driven() {
                 ColumnCheck {
                     expected_name: "vehicle_id".to_string(),
                     expected_values: vec![
-                        Value::String("v1".into()),
-                        Value::String("v2".into()),
+                        Value::String("v1".to_owned().into()),
+                        Value::String("v2".to_owned().into()),
                     ],
                 },
                 ColumnCheck {
@@ -474,7 +474,7 @@ async fn pipeline_table_scan_table_driven() {
             column_checks: vec![
                 ColumnCheck {
                     expected_name: "vehicle_id".to_string(),
-                    expected_values: vec![Value::String("v1".into())],
+                    expected_values: vec![Value::String("v1".to_owned().into())],
                 },
                 ColumnCheck {
                     expected_name: "avg_speed".to_string(),
@@ -542,7 +542,10 @@ async fn pipeline_table_scan_memory_mock_table_driven() {
                 },
                 ColumnCheck {
                     expected_name: "vehicle_id".to_string(),
-                    expected_values: vec![Value::String("v1".into()), Value::String("v2".into())],
+                    expected_values: vec![
+                        Value::String("v1".to_owned().into()),
+                        Value::String("v2".to_owned().into()),
+                    ],
                 },
                 ColumnCheck {
                     expected_name: "speed".to_string(),

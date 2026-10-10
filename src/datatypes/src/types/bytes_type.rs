@@ -13,7 +13,7 @@ impl DataType for BytesType {
     }
 
     fn default_value(&self) -> Value {
-        Value::Bytes(Bytes::new())
+        Value::Bytes(Bytes::new().into())
     }
 
     fn try_cast(&self, from: Value) -> Option<Value> {

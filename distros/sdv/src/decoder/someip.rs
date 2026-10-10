@@ -48,7 +48,6 @@ pub struct SomeIpPayloadDecoder {
     /// Pre-computed index of the 'ts' column, if present.
     ts_index: Option<usize>,
     /// Cached Null value for filling output slots.
-    null_value: Arc<Value>,
     /// Cached projection state, as in CanDecoder.
     projection_cache: Mutex<Option<CachedProjection>>,
     /// Number of distinct plans (for seen-message tracking).
@@ -82,7 +81,6 @@ impl SomeIpPayloadDecoder {
                 .collect::<Vec<_>>(),
         );
         let ts_index = keys.iter().position(|k| k.as_ref() == "ts");
-        let null_value = Arc::new(Value::Null);
 
         let signal_name_pattern = signal_name_pattern.unwrap_or("{field}");
 
@@ -109,7 +107,6 @@ impl SomeIpPayloadDecoder {
             keys,
             source_name,
             ts_index,
-            null_value,
             projection_cache: Mutex::new(None),
             plan_count: plan_index,
         }
@@ -246,13 +243,12 @@ impl PayloadDecoder for SomeIpPayloadDecoder {
         let state = self.projection_state(projection);
 
         let out_width = state.slot_keys.len();
-        let null_val = &self.null_value;
-        let mut values: Vec<Arc<Value>> = (0..out_width).map(|_| Arc::clone(null_val)).collect();
+        let mut values: Vec<Value> = vec![Value::Null; out_width];
 
         if let Some(ts_idx) = self.ts_index
             && let Some(slot) = state.col_to_slot[ts_idx]
         {
-            values[slot] = Arc::new(Value::Int64(ts as i64));
+            values[slot] = Value::Int64(ts as i64);
         }
 
         // Last-frame-wins: iterate in reverse, decoding each unique
@@ -289,7 +285,7 @@ impl PayloadDecoder for SomeIpPayloadDecoder {
                 for (plan_field, col_idx) in &plan.field_to_index {
                     if plan_field == &name {
                         if let Some(slot) = state.col_to_slot[*col_idx] {
-                            values[slot] = Arc::new(to_veloflux_value(val));
+                            values[slot] = to_veloflux_value(val);
                         }
                         break;
                     }
@@ -320,8 +316,8 @@ fn to_veloflux_value(v: ArxmlValue) -> Value {
         ArxmlValue::F32(v) => Value::Float32(v),
         ArxmlValue::F64(v) => Value::Float64(v),
         ArxmlValue::Bool(v) => Value::Bool(v),
-        ArxmlValue::Str(v) => Value::String(v),
-        ArxmlValue::Bytes(v) => Value::Bytes(Bytes::from(v)),
+        ArxmlValue::Str(v) => Value::String(v.into()),
+        ArxmlValue::Bytes(v) => Value::Bytes(Bytes::from(v).into()),
         ArxmlValue::Struct(fields) => {
             let mut items = Vec::with_capacity(fields.len());
             let mut field_defs = Vec::with_capacity(fields.len());

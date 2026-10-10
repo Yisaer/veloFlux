@@ -544,7 +544,7 @@ impl CustomFunc for ConcatFunc {
         validate_arity(args, &[2])?;
         let a = nth_string_strict(args, 0)?;
         let b = nth_string_strict(args, 1)?;
-        Ok(Value::String(format!("{}{}", a, b)))
+        Ok(Value::String(format!("{}{}", a, b).into()))
     }
 
     fn name(&self) -> &str {
@@ -847,9 +847,9 @@ impl CustomFunc for SubstringFunc {
             None
         };
 
-        Ok(Value::String(substring_by_char_start_length(
-            &s, start, length,
-        )?))
+        Ok(Value::String(
+            substring_by_char_start_length(s, start, length)?.into(),
+        ))
     }
 
     fn name(&self) -> &str {
@@ -904,7 +904,7 @@ impl CustomFunc for SplitValueFunc {
             });
         }
 
-        Ok(Value::String(parts[actual as usize].to_string()))
+        Ok(Value::String(parts[actual as usize].to_string().into()))
     }
 
     fn name(&self) -> &str {
@@ -1043,15 +1043,15 @@ impl CustomFunc for FormatFunc {
 
         if args.len() == 2 {
             let s = format!("{:.*}", precision, v1);
-            return Ok(Value::String(s));
+            return Ok(Value::String(s.into()));
         }
 
         let Some(locale_str) = nth_string_or_null(args, 2)? else {
             return Ok(Value::Null);
         };
 
-        let s = format_decimal_with_locale(v1, precision, &locale_str, true)?;
-        Ok(Value::String(s))
+        let s = format_decimal_with_locale(v1, precision, locale_str, true)?;
+        Ok(Value::String(s.into()))
     }
 
     fn name(&self) -> &str {

@@ -201,8 +201,7 @@ impl MemoryMockTableProvider {
             .map(|column| {
                 Self::value_for_column(row, column)
                     .cloned()
-                    .map(Arc::new)
-                    .unwrap_or_else(|| Arc::new(Value::Null))
+                    .unwrap_or(Value::Null)
             })
             .collect();
         Tuple::with_timestamp(
@@ -401,9 +400,9 @@ mod tests {
             "table",
             vec![Arc::from("id"), Arc::from("ts"), Arc::from("value")],
             vec![
-                Arc::new(Value::String(id.to_string())),
-                Arc::new(Value::Int64(ts)),
-                Arc::new(Value::String(value.to_string())),
+                Value::String(id.to_string().into()),
+                Value::Int64(ts),
+                Value::String(value.to_string().into()),
             ],
         ))])
     }
@@ -443,7 +442,7 @@ mod tests {
         let mut lookup = request();
         lookup.equality_keys.push(LookupKey {
             column: "id".to_string(),
-            value: Value::String("v1".to_string()),
+            value: Value::String("v1".to_string().into()),
         });
         lookup.projection = vec!["value".to_string()];
         lookup.time_range = Some(LookupTimeRange {
@@ -456,7 +455,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].value_by_name("memory_table", "value"),
-            Some(&Value::String("third".to_string()))
+            Some(&Value::String("third".to_string().into()))
         );
         assert_eq!(provider.requests().len(), 1);
     }
@@ -473,7 +472,7 @@ mod tests {
         lookup.equality_keys = vec![
             LookupKey {
                 column: "id".to_string(),
-                value: Value::String("v1".to_string()),
+                value: Value::String("v1".to_string().into()),
             },
             LookupKey {
                 column: "ts".to_string(),
@@ -486,11 +485,11 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0].value_by_name("memory_table", "value"),
-            Some(&Value::String("first".to_string()))
+            Some(&Value::String("first".to_string().into()))
         );
         assert_eq!(
             rows[1].value_by_name("memory_table", "value"),
-            Some(&Value::String("third".to_string()))
+            Some(&Value::String("third".to_string().into()))
         );
     }
 
@@ -503,7 +502,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(
             rows[0].value_by_name("table", "value"),
-            Some(&Value::String("new".to_string()))
+            Some(&Value::String("new".to_string().into()))
         );
 
         let cancellation = CancellationToken::new();

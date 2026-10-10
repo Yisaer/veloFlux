@@ -927,19 +927,19 @@ mod tests {
         let lit_175 = ScalarExpr::literal(Value::Int64(175), ConcreteDatatype::Int64(Int64Type));
 
         let s = ScalarExpr::literal(
-            Value::String("S".to_string()),
+            Value::String("S".to_string().into()),
             ConcreteDatatype::String(StringType),
         );
         let m = ScalarExpr::literal(
-            Value::String("M".to_string()),
+            Value::String("M".to_string().into()),
             ConcreteDatatype::String(StringType),
         );
         let l = ScalarExpr::literal(
-            Value::String("L".to_string()),
+            Value::String("L".to_string().into()),
             ConcreteDatatype::String(StringType),
         );
         let xl = ScalarExpr::literal(
-            Value::String("XL".to_string()),
+            Value::String("XL".to_string().into()),
             ConcreteDatatype::String(StringType),
         );
 
@@ -956,25 +956,25 @@ mod tests {
         let tuple = tuple_with_affiliate_i64("a", 149);
         assert_eq!(
             expr.eval_with_tuple(&tuple).expect("eval"),
-            Value::String("S".to_string())
+            Value::String("S".to_string().into())
         );
 
         let tuple = tuple_with_affiliate_i64("a", 160);
         assert_eq!(
             expr.eval_with_tuple(&tuple).expect("eval"),
-            Value::String("M".to_string())
+            Value::String("M".to_string().into())
         );
 
         let tuple = tuple_with_affiliate_i64("a", 174);
         assert_eq!(
             expr.eval_with_tuple(&tuple).expect("eval"),
-            Value::String("L".to_string())
+            Value::String("L".to_string().into())
         );
 
         let tuple = tuple_with_affiliate_i64("a", 175);
         assert_eq!(
             expr.eval_with_tuple(&tuple).expect("eval"),
-            Value::String("XL".to_string())
+            Value::String("XL".to_string().into())
         );
     }
 
@@ -985,15 +985,15 @@ mod tests {
         let two = ScalarExpr::literal(Value::Int64(2), ConcreteDatatype::Int64(Int64Type));
 
         let s = ScalarExpr::literal(
-            Value::String("S".to_string()),
+            Value::String("S".to_string().into()),
             ConcreteDatatype::String(StringType),
         );
         let m = ScalarExpr::literal(
-            Value::String("M".to_string()),
+            Value::String("M".to_string().into()),
             ConcreteDatatype::String(StringType),
         );
         let other = ScalarExpr::literal(
-            Value::String("OTHER".to_string()),
+            Value::String("OTHER".to_string().into()),
             ConcreteDatatype::String(StringType),
         );
 
@@ -1006,19 +1006,19 @@ mod tests {
         let tuple = tuple_with_affiliate_i64("a", 1);
         assert_eq!(
             expr.eval_with_tuple(&tuple).expect("eval"),
-            Value::String("S".to_string())
+            Value::String("S".to_string().into())
         );
 
         let tuple = tuple_with_affiliate_i64("a", 2);
         assert_eq!(
             expr.eval_with_tuple(&tuple).expect("eval"),
-            Value::String("M".to_string())
+            Value::String("M".to_string().into())
         );
 
         let tuple = tuple_with_affiliate_i64("a", 3);
         assert_eq!(
             expr.eval_with_tuple(&tuple).expect("eval"),
-            Value::String("OTHER".to_string())
+            Value::String("OTHER".to_string().into())
         );
     }
 

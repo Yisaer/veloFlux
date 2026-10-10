@@ -255,7 +255,10 @@ impl CustomFunc for KeysFunc {
             return Ok(Value::Null);
         };
 
-        let items = map.into_keys().map(Value::String).collect();
+        let items = map
+            .into_keys()
+            .map(|value| Value::String(value.into()))
+            .collect();
         array_to_value(items)
     }
 
@@ -350,7 +353,7 @@ impl CustomFunc for ZipFunc {
                         });
                     }
                     let key = value_to_string(&items[0])?;
-                    map.insert(key, items[1].clone());
+                    map.insert(key.to_owned(), items[1].clone());
                 }
                 other => {
                     return Err(EvalError::TypeMismatch {
@@ -383,7 +386,7 @@ impl CustomFunc for ItemsFunc {
 
         let mut out = Vec::with_capacity(map.len());
         for (k, v) in map {
-            out.push(ah(vec![Value::String(k), v]));
+            out.push(ah(vec![Value::String(k.into()), v]));
         }
 
         Ok(Value::List(ListValue::new(
@@ -522,7 +525,7 @@ impl CustomFunc for EraseFunc {
         }
 
         let remove_keys: Vec<String> = match &args[1] {
-            Value::String(s) => vec![s.clone()],
+            Value::String(s) => vec![s.as_ref().clone()],
             Value::List(_) => value_to_string_vec(&args[1])?,
             other => {
                 return Err(EvalError::TypeMismatch {
@@ -725,7 +728,7 @@ impl CustomFunc for ObjToKvPairArrayFunc {
 
         for (k, v) in map {
             let mut pair = BTreeMap::new();
-            pair.insert(KV_PAIR_K_NAME.to_string(), Value::String(k));
+            pair.insert(KV_PAIR_K_NAME.to_string(), Value::String(k.into()));
             pair.insert(KV_PAIR_V_NAME.to_string(), v);
             out.push(map_to_value(pair)?);
         }

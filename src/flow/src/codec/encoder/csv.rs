@@ -433,7 +433,7 @@ mod tests {
         let message = Arc::new(Message::new(
             "vehicle",
             vec![Arc::from("source_name")],
-            vec![Arc::new(Value::String("v1,\"fast\"\nnext".to_string()))],
+            vec![Value::String("v1,\"fast\"\nnext".to_string().into())],
         ));
         let mut tuple = Tuple::new(vec![message]);
         tuple.add_affiliate_columns([(Arc::new("computed".to_string()), Value::Int64(42))]);
@@ -480,7 +480,7 @@ mod tests {
         ]));
         let composite = Value::Struct(StructValue::new(
             vec![
-                Value::String("a,b".to_string()),
+                Value::String("a,b".to_string().into()),
                 Value::List(ListValue::new(
                     vec![Value::Int64(1), Value::Null],
                     Arc::new(ConcreteDatatype::Int64(Int64Type)),
@@ -491,7 +491,7 @@ mod tests {
         let timestamp =
             TimestampValue::parse_rfc3339("2026-05-08T10:20:30.123456Z").expect("valid timestamp");
         let values = vec![
-            Value::Bytes(Bytes::from_static(b"hello")),
+            Value::Bytes(Bytes::from_static(b"hello").into()),
             Value::Timestamp(timestamp),
             composite,
             Value::Float64(f64::NAN),
@@ -501,11 +501,7 @@ mod tests {
         let keys = (0..values.len())
             .map(|index| Arc::from(format!("c{index}")))
             .collect();
-        let message = Arc::new(Message::new(
-            "values",
-            keys,
-            values.into_iter().map(Arc::new).collect(),
-        ));
+        let message = Arc::new(Message::new("values", keys, values.into_iter().collect()));
         let batch = RecordBatch::new(vec![Tuple::new(vec![message])]).expect("record batch");
         let layout = OutputLayout::new(vec![
             column(
@@ -598,7 +594,7 @@ mod tests {
             RecordBatch::new(vec![Tuple::new(vec![Arc::new(Message::new(
                 "stream",
                 vec![Arc::from("value")],
-                vec![Arc::new(Value::Int64(value))],
+                vec![Value::Int64(value)],
             ))])])
             .expect("record batch")
         };

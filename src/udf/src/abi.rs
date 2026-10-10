@@ -126,7 +126,7 @@ fn value_to_json(v: &Value) -> Result<serde_json::Value, AbiError> {
         Value::Float64(f) => serde_json::Number::from_f64(*f)
             .map(serde_json::Value::Number)
             .ok_or(AbiError::UnsupportedJsonType),
-        Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+        Value::String(s) => Ok(serde_json::Value::String(s.as_ref().clone())),
         Value::Bytes(_) => Err(AbiError::UnsupportedJsonType),
         Value::Timestamp(_) => Err(AbiError::UnsupportedJsonType),
         Value::List(_) | Value::Struct(_) => Err(AbiError::UnsupportedJsonType),
@@ -152,7 +152,7 @@ fn json_to_value(v: &serde_json::Value) -> Result<Value, AbiError> {
                 Err(AbiError::UnsupportedJsonType)
             }
         }
-        serde_json::Value::String(s) => Ok(Value::String(s.clone())),
+        serde_json::Value::String(s) => Ok(Value::String(s.clone().into())),
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
             Err(AbiError::UnsupportedJsonType)
         }

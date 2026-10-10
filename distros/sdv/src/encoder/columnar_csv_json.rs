@@ -319,8 +319,8 @@ mod tests {
     fn create_test_tuple(id: i64, name: &str) -> Tuple {
         let keys = vec![Arc::<str>::from("id"), Arc::<str>::from("name")];
         let values = vec![
-            Arc::new(datatypes::Value::Int64(id)),
-            Arc::new(datatypes::Value::String(name.to_string())),
+            datatypes::Value::Int64(id),
+            datatypes::Value::String(name.to_string().into()),
         ];
         let message = Arc::new(Message::new(Arc::<str>::from("test"), keys, values));
         Tuple::new(vec![message])
@@ -328,10 +328,7 @@ mod tests {
 
     fn create_empty_tuple() -> Tuple {
         let keys = vec![Arc::<str>::from("id"), Arc::<str>::from("name")];
-        let values = vec![
-            Arc::new(datatypes::Value::Null),
-            Arc::new(datatypes::Value::Null),
-        ];
+        let values = vec![datatypes::Value::Null, datatypes::Value::Null];
         let message = Arc::new(Message::new(Arc::<str>::from("test"), keys, values));
         Tuple::new(vec![message])
     }
@@ -511,7 +508,10 @@ mod tests {
         assert_eq!(value_to_string(&Value::Bool(true)), "true");
         assert_eq!(value_to_string(&Value::Int64(42)), "42");
         assert_eq!(value_to_string(&Value::Float64(3.14)), "3.14");
-        assert_eq!(value_to_string(&Value::String("test".to_string())), "test");
+        assert_eq!(
+            value_to_string(&Value::String("test".to_string().into())),
+            "test"
+        );
     }
 
     #[test]
@@ -546,8 +546,8 @@ mod tests {
         // List with strings
         let str_list = Value::List(ListValue::new(
             vec![
-                Value::String("a".to_string()),
-                Value::String("b".to_string()),
+                Value::String("a".to_string().into()),
+                Value::String("b".to_string().into()),
             ],
             Arc::new(datatypes::ConcreteDatatype::String(datatypes::StringType)),
         ));
@@ -598,10 +598,10 @@ mod tests {
             Arc::<str>::from("float32"),
         ];
         let values = vec![
-            Arc::new(datatypes::Value::Int8(42)),
-            Arc::new(datatypes::Value::Int16(1000)),
-            Arc::new(datatypes::Value::Bool(false)),
-            Arc::new(datatypes::Value::Float32(1.5)),
+            datatypes::Value::Int8(42),
+            datatypes::Value::Int16(1000),
+            datatypes::Value::Bool(false),
+            datatypes::Value::Float32(1.5),
         ];
         let message = Arc::new(Message::new(Arc::<str>::from("test"), keys, values));
         let tuple = Tuple::new(vec![message]);
@@ -627,10 +627,10 @@ mod tests {
             Arc::<str>::from("u64"),
         ];
         let values = vec![
-            Arc::new(datatypes::Value::Uint8(255)),
-            Arc::new(datatypes::Value::Uint16(65535)),
-            Arc::new(datatypes::Value::Uint32(4294967295)),
-            Arc::new(datatypes::Value::Uint64(1234567890)),
+            datatypes::Value::Uint8(255),
+            datatypes::Value::Uint16(65535),
+            datatypes::Value::Uint32(4294967295),
+            datatypes::Value::Uint64(1234567890),
         ];
         let message = Arc::new(Message::new(Arc::<str>::from("test"), keys, values));
         let tuple = Tuple::new(vec![message]);
@@ -653,9 +653,9 @@ mod tests {
             Arc::<str>::from("c"),
         ];
         let values = vec![
-            Arc::new(datatypes::Value::Int64(1)),
-            Arc::new(datatypes::Value::Int64(2)),
-            Arc::new(datatypes::Value::Int64(3)),
+            datatypes::Value::Int64(1),
+            datatypes::Value::Int64(2),
+            datatypes::Value::Int64(3),
         ];
         let message = Arc::new(Message::new(Arc::<str>::from("test"), keys, values));
         let mut tuple = Tuple::new(vec![message]);

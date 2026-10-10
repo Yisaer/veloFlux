@@ -276,7 +276,7 @@ pub fn f(v: f64) -> Value {
 
 #[cfg(test)]
 pub fn s(v: &str) -> Value {
-    Value::String(v.to_string())
+    Value::String(v.to_string().into())
 }
 
 #[cfg(test)]
@@ -357,7 +357,8 @@ pub fn assert_string(actual: Value, expected: &str) {
     match actual {
         Value::String(v) => {
             assert_eq!(
-                v, expected,
+                v.as_str(),
+                expected,
                 "expected String({expected:?}), got String({v:?})"
             );
         }
@@ -457,9 +458,9 @@ pub fn any_null(args: &[Value]) -> bool {
     args.iter().any(Value::is_null)
 }
 
-pub fn value_to_string(value: &Value) -> Result<String, EvalError> {
+pub fn value_to_string(value: &Value) -> Result<&str, EvalError> {
     match value {
-        Value::String(s) => Ok(s.clone()),
+        Value::String(s) => Ok(s.as_str()),
         other => Err(EvalError::TypeMismatch {
             expected: "string".to_string(),
             actual: format!("{:?}", other),
@@ -542,10 +543,10 @@ pub fn value_to_i64(value: &Value) -> Result<i64, EvalError> {
     }
 }
 
-pub fn nth_converted_or_null<T>(
-    args: &[Value],
+pub fn nth_converted_or_null<'a, T>(
+    args: &'a [Value],
     idx: usize,
-    convert: impl FnOnce(&Value) -> Result<T, EvalError>,
+    convert: impl FnOnce(&'a Value) -> Result<T, EvalError>,
 ) -> Result<Option<T>, EvalError> {
     match args.get(idx) {
         Some(Value::Null) => Ok(None),
@@ -557,7 +558,7 @@ pub fn nth_converted_or_null<T>(
     }
 }
 
-pub fn nth_string_or_null(args: &[Value], idx: usize) -> Result<Option<String>, EvalError> {
+pub fn nth_string_or_null(args: &[Value], idx: usize) -> Result<Option<&str>, EvalError> {
     nth_converted_or_null(args, idx, value_to_string)
 }
 
@@ -709,7 +710,7 @@ pub fn validate_at_least_arity(args: &[Value], min: usize) -> Result<(), EvalErr
 }
 
 // string helpers
-pub fn nth_string_strict(args: &[Value], idx: usize) -> Result<String, EvalError> {
+pub fn nth_string_strict(args: &[Value], idx: usize) -> Result<&str, EvalError> {
     match args.get(idx) {
         Some(v) => value_to_string(v),
         None => Err(EvalError::TypeMismatch {
@@ -727,7 +728,7 @@ pub fn unary_string_to_string(
     let Some(s) = nth_string_or_null(args, 0)? else {
         return Ok(Value::Null);
     };
-    Ok(Value::String(op(&s)))
+    Ok(Value::String(op(s).into()))
 }
 
 pub fn unary_string_to_i64(
@@ -738,7 +739,7 @@ pub fn unary_string_to_i64(
     let Some(s) = nth_string_or_null(args, 0)? else {
         return Ok(Value::Null);
     };
-    Ok(Value::Int64(op(&s)))
+    Ok(Value::Int64(op(s)))
 }
 
 fn binary_string_map<T>(
@@ -753,14 +754,14 @@ fn binary_string_map<T>(
     let Some(b) = nth_string_or_null(args, 1)? else {
         return Ok(Value::Null);
     };
-    Ok(wrap(op(&a, &b)))
+    Ok(wrap(op(a, b)))
 }
 
 pub fn binary_string_to_string(
     args: &[Value],
     op: impl FnOnce(&str, &str) -> String,
 ) -> Result<Value, EvalError> {
-    binary_string_map(args, op, Value::String)
+    binary_string_map(args, op, |value| Value::String(value.into()))
 }
 
 pub fn binary_string_to_bool(
@@ -788,7 +789,7 @@ pub fn binary_string_to_string_result(
     let Some(b) = nth_string_or_null(args, 1)? else {
         return Ok(Value::Null);
     };
-    Ok(Value::String(op(&a, &b)?))
+    Ok(Value::String(op(a, b)?.into()))
 }
 
 pub fn binary_string_to_bool_result(
@@ -802,7 +803,7 @@ pub fn binary_string_to_bool_result(
     let Some(b) = nth_string_or_null(args, 1)? else {
         return Ok(Value::Null);
     };
-    Ok(Value::Bool(op(&a, &b)?))
+    Ok(Value::Bool(op(a, b)?))
 }
 
 pub fn binary_string_to_i64_result(
@@ -816,7 +817,7 @@ pub fn binary_string_to_i64_result(
     let Some(b) = nth_string_or_null(args, 1)? else {
         return Ok(Value::Null);
     };
-    Ok(Value::Int64(op(&a, &b)?))
+    Ok(Value::Int64(op(a, b)?))
 }
 
 pub fn ternary_string_to_string(
@@ -833,7 +834,7 @@ pub fn ternary_string_to_string(
     let Some(c) = nth_string_or_null(args, 2)? else {
         return Ok(Value::Null);
     };
-    Ok(Value::String(op(&a, &b, &c)?))
+    Ok(Value::String(op(a, b, c)?.into()))
 }
 
 pub fn compile_regex(pattern: &str) -> Result<Regex, EvalError> {
@@ -890,7 +891,7 @@ pub fn string_nonnegative_i64_to_string(
         });
     }
 
-    Ok(Value::String(op(&s, n as usize)))
+    Ok(Value::String(op(s, n as usize).into()))
 }
 
 pub fn substring_by_char_start_length(
@@ -1039,7 +1040,7 @@ pub fn validate_two_arrays_or_null(args: &[Value]) -> Result<(), EvalError> {
 
 pub fn value_to_string_lossy(value: &Value) -> Result<String, EvalError> {
     match value {
-        Value::String(s) => Ok(s.clone()),
+        Value::String(s) => Ok(s.as_ref().clone()),
         Value::Bool(v) => Ok(v.to_string()),
         Value::Int8(v) => Ok(v.to_string()),
         Value::Int16(v) => Ok(v.to_string()),
@@ -1110,7 +1111,7 @@ pub fn nth_string_array_or_null(
 
     let mut out = Vec::with_capacity(values.len());
     for v in values {
-        out.push(value_to_string(&v)?);
+        out.push(value_to_string(&v)?.to_owned());
     }
     Ok(Some(out))
 }
@@ -1120,7 +1121,7 @@ pub fn value_to_string_vec(value: &Value) -> Result<Vec<String>, EvalError> {
         Value::List(list) => {
             let mut out = Vec::with_capacity(list.items().len());
             for item in list.items() {
-                out.push(value_to_string(item)?);
+                out.push(value_to_string(item)?.to_owned());
             }
             Ok(out)
         }
@@ -1165,7 +1166,7 @@ pub fn value_to_json_value(v: &Value) -> Result<serde_json::Value, EvalError> {
                 actual: format!("{:?}", x),
             }),
 
-        Value::String(s) => Ok(serde_json::Value::String(s.clone())),
+        Value::String(s) => Ok(serde_json::Value::String(s.as_ref().clone())),
         Value::Bytes(bytes) => Ok(serde_json::Value::String(
             BASE64_STANDARD.encode(bytes.as_ref()),
         )),
@@ -1217,7 +1218,7 @@ pub fn json_value_to_value(v: &serde_json::Value) -> Result<Value, EvalError> {
             }
         }
 
-        serde_json::Value::String(s) => Ok(Value::String(s.clone())),
+        serde_json::Value::String(s) => Ok(Value::String(s.clone().into())),
 
         serde_json::Value::Array(arr) => {
             let mut out = Vec::with_capacity(arr.len());
@@ -1263,7 +1264,7 @@ pub fn cast_to_bigint(v: &Value) -> Result<Value, EvalError> {
                 .map(Value::Int64)
                 .map_err(|_| EvalError::TypeMismatch {
                     expected: "string parseable as bigint".to_string(),
-                    actual: s.clone(),
+                    actual: s.as_ref().clone(),
                 })
         }
         other => Err(EvalError::TypeMismatch {
@@ -1292,7 +1293,7 @@ pub fn cast_to_float(v: &Value) -> Result<Value, EvalError> {
                 .map(Value::Float64)
                 .map_err(|_| EvalError::TypeMismatch {
                     expected: "string parseable as float".to_string(),
-                    actual: s.clone(),
+                    actual: s.as_ref().clone(),
                 })
         }
         other => Err(EvalError::TypeMismatch {
@@ -1306,25 +1307,24 @@ pub fn cast_to_string(v: &Value) -> Result<Value, EvalError> {
     match v {
         Value::Null => Ok(Value::Null),
         Value::String(s) => Ok(Value::String(s.clone())),
-        Value::Bool(x) => Ok(Value::String(x.to_string())),
-        Value::Int8(x) => Ok(Value::String(x.to_string())),
-        Value::Int16(x) => Ok(Value::String(x.to_string())),
-        Value::Int32(x) => Ok(Value::String(x.to_string())),
-        Value::Int64(x) => Ok(Value::String(x.to_string())),
-        Value::Uint8(x) => Ok(Value::String(x.to_string())),
-        Value::Uint16(x) => Ok(Value::String(x.to_string())),
-        Value::Uint32(x) => Ok(Value::String(x.to_string())),
-        Value::Uint64(x) => Ok(Value::String(x.to_string())),
-        Value::Float32(x) => Ok(Value::String(x.to_string())),
-        Value::Float64(x) => Ok(Value::String(x.to_string())),
-        Value::Timestamp(x) => {
-            x.to_rfc3339_utc()
-                .map(Value::String)
-                .ok_or_else(|| EvalError::TypeMismatch {
-                    expected: "timestamp representable as RFC3339".to_string(),
-                    actual: format!("{:?}", x),
-                })
-        }
+        Value::Bool(x) => Ok(Value::String(x.to_string().into())),
+        Value::Int8(x) => Ok(Value::String(x.to_string().into())),
+        Value::Int16(x) => Ok(Value::String(x.to_string().into())),
+        Value::Int32(x) => Ok(Value::String(x.to_string().into())),
+        Value::Int64(x) => Ok(Value::String(x.to_string().into())),
+        Value::Uint8(x) => Ok(Value::String(x.to_string().into())),
+        Value::Uint16(x) => Ok(Value::String(x.to_string().into())),
+        Value::Uint32(x) => Ok(Value::String(x.to_string().into())),
+        Value::Uint64(x) => Ok(Value::String(x.to_string().into())),
+        Value::Float32(x) => Ok(Value::String(x.to_string().into())),
+        Value::Float64(x) => Ok(Value::String(x.to_string().into())),
+        Value::Timestamp(x) => x
+            .to_rfc3339_utc()
+            .map(|value| Value::String(value.into()))
+            .ok_or_else(|| EvalError::TypeMismatch {
+                expected: "timestamp representable as RFC3339".to_string(),
+                actual: format!("{:?}", x),
+            }),
         other => Err(EvalError::TypeMismatch {
             expected: "castable to string".to_string(),
             actual: format!("{:?}", other),
@@ -1353,7 +1353,7 @@ pub fn cast_to_boolean(v: &Value) -> Result<Value, EvalError> {
                 "false" | "0" => Ok(Value::Bool(false)),
                 _ => Err(EvalError::TypeMismatch {
                     expected: "string parseable as boolean".to_string(),
-                    actual: s.clone(),
+                    actual: s.as_ref().clone(),
                 }),
             }
         }
@@ -1372,7 +1372,7 @@ pub fn cast_to_timestamp(v: &Value) -> Result<Value, EvalError> {
             .map(Value::Timestamp)
             .ok_or_else(|| EvalError::TypeMismatch {
                 expected: "string parseable as RFC3339 timestamp".to_string(),
-                actual: s.clone(),
+                actual: s.as_ref().clone(),
             }),
         other => Err(EvalError::TypeMismatch {
             expected: "castable to timestamp".to_string(),

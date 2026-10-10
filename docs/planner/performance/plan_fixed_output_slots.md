@@ -60,6 +60,39 @@ There is no runtime name-scan fallback.
 Overwriting a key updates its existing value slot, so every planned affiliate
 index remains stable.
 
+## Value Ownership
+
+A `Message` owns a contiguous `Vec<Value>`. Its constructors accept owned
+values, and indexed entry APIs borrow `&Value`. Shared messages and tuple message
+lists retain their existing `Arc` ownership, so direct SQL projections and
+window buffering share whole messages without copying cells.
+
+Consumers that materialize a new message or retain selected cells independently
+clone the selected `Value`s. Numeric values are copied inline. Strings share an
+`Arc<String>` payload; bytes share `Arc<Bytes>`. Lists and structs each share
+a single Arc containing their items and type metadata. Cloning
+these values retains their payload without copying text or nested elements.
+Unselected input columns can be released without retaining the original wide
+message. Constructing a complex payload adds one Arc allocation, while numeric
+cells still require no individual allocation.
+
+`ListValue::new` and `StructValue::new` move their input vectors into shared
+ownership, and their read APIs continue borrowing items. `StructValue::into_parts`
+moves a uniquely owned vector or shallow-clones a shared item container; changing
+the returned vector does not change other structs. Content equality and hashing
+are unchanged. String readers borrow `&str`; owning external APIs such as JSON
+DOM conversion copy text at that boundary.
+
+On 64-bit targets, dense fixed slots use 16 bytes per `Value`, including Null.
+All heap-backed variants use a single pointer, while numeric values remain inline.
+This reduces slot storage by 60% from the previous 40-byte representation. Wide,
+mostly-null messages can still use more slot memory than the historical 8-byte
+shared `Arc<Value::Null>` slots. Sparse slot storage is deferred.
+
+Constructing a bytes value adds one Arc allocation around the existing Bytes
+without copying its backing buffer. Readers borrow bytes; boundaries that require
+an owned Bytes clone the inner Bytes and retain its backing storage.
+
 ## Consumers
 
 - JSON, protobuf, and SDV columnar encoders iterate `OutputLayout.columns` and

@@ -372,7 +372,7 @@ mod tests {
                 Tuple::new(vec![Arc::new(Message::new(
                     "stream",
                     vec![Arc::from("a")],
-                    vec![Arc::new(Value::Int64(value))],
+                    vec![Value::Int64(value)],
                 ))])
             })
             .collect();

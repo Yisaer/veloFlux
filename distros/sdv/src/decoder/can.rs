@@ -678,8 +678,6 @@ pub struct CanDecoder {
     /// Number of distinct `msg_index` values; sizes per-decode scratch tables.
     message_count: usize,
     ts_index: Option<usize>,
-    /// Cached Null value to avoid allocating new Arc on every decode
-    null_value: Arc<Value>,
     projection_cache: Mutex<Option<ProjectionCache>>,
     identity_mapping: DbcIdentityMapping,
 }
@@ -891,7 +889,6 @@ impl CanDecoder {
             mux_resolver,
             message_count: next_msg_index,
             ts_index,
-            null_value: Arc::new(Value::Null),
             projection_cache: Mutex::new(None),
             identity_mapping,
         })
@@ -1156,12 +1153,10 @@ impl CanDecoder {
         }
 
         // `values` is already in output order (narrow slot row under VF-56, else
-        // full schema). Fill unwritten cells with the cached Null Arc — now at most
-        // union-width clones, not full-DBC width.
-        let null_arc = &self.null_value;
-        let finalized: Vec<Arc<Value>> = values
+        // full schema). Fill unwritten cells inline without per-cell allocations.
+        let finalized: Vec<Value> = values
             .into_iter()
-            .map(|opt| opt.map(Arc::new).unwrap_or_else(|| Arc::clone(null_arc)))
+            .map(|opt| opt.unwrap_or(Value::Null))
             .collect();
         let out_keys = match &slot_layout {
             Some(layout) => Arc::clone(&layout.keys),

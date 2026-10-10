@@ -209,7 +209,7 @@ impl KuraSinkConnector {
             Value::Uint64(v) => value_type::ValueType::Uint64(*v),
             Value::Float32(v) => value_type::ValueType::Float(*v),
             Value::Float64(v) => value_type::ValueType::Double(*v),
-            Value::String(s) => value_type::ValueType::String(s.clone()),
+            Value::String(s) => value_type::ValueType::String(s.as_ref().clone()),
             // Struct, list, bytes, and timestamp values have no standard VSS
             // wire representation; reject them explicitly.
             Value::Struct(_) => {
@@ -244,7 +244,7 @@ impl KuraSinkConnector {
     ) -> Result<kura_proto::ValueType, SinkConnectorError> {
         let value_type = match target_type {
             KuraMappingDataType::String => match value {
-                Value::String(value) => value_type::ValueType::String(value.clone()),
+                Value::String(value) => value_type::ValueType::String(value.as_ref().clone()),
                 _ => return Err(conversion_error(value, target_type)),
             },
             KuraMappingDataType::Bool => match as_signed_integer(value) {
@@ -538,7 +538,7 @@ mod tests {
             .collect::<Vec<_>>();
         let values = entries
             .iter()
-            .map(|(_, value)| Arc::new(value.clone()))
+            .map(|(_, value)| value.clone())
             .collect::<Vec<_>>();
         Tuple::new(vec![Arc::new(Message::new("", keys, values))])
     }
@@ -624,7 +624,7 @@ mod tests {
             value_type::ValueType::Uint8(1)
         ));
         assert!(matches!(
-            convert(Value::String("VIN".into()), KuraMappingDataType::String).unwrap(),
+            convert(Value::String("VIN".to_owned().into()), KuraMappingDataType::String).unwrap(),
             value_type::ValueType::String(value) if value == "VIN"
         ));
         assert!(matches!(

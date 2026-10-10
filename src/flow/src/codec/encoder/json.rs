@@ -363,7 +363,7 @@ fn write_json_value(
         Value::Bool(value) => {
             payload.extend_from_slice(if *value { b"true" } else { b"false" });
         }
-        Value::String(value) => write_json_serde(payload, value)?,
+        Value::String(value) => write_json_serde(payload, value.as_str())?,
         Value::Bytes(value) => {
             let encoded = BASE64_STANDARD.encode(value.as_ref());
             write_json_serde(payload, &encoded)?;
@@ -522,8 +522,8 @@ mod tests {
                 "orders".to_string(),
                 "status".to_string(),
                 vec![
-                    Value::String("ok".to_string()),
-                    Value::String("fail".to_string()),
+                    Value::String("ok".to_string().into()),
+                    Value::String("fail".to_string().into()),
                 ],
             ),
         ])
@@ -580,7 +580,7 @@ mod tests {
         let message = Arc::new(Message::new(
             "orders",
             vec![Arc::clone(&name), Arc::clone(&name)],
-            vec![Arc::new(Value::Int64(1)), Arc::new(Value::Int64(2))],
+            vec![Value::Int64(1), Value::Int64(2)],
         ));
         let mut tuple = Tuple::new(vec![message]);
         let layout = OutputLayout::new(
@@ -692,7 +692,7 @@ mod tests {
         let batch = batch_from_columns_simple(vec![(
             "events".to_string(),
             "text".to_string(),
-            vec![Value::String("雪\n\r".to_string())],
+            vec![Value::String("雪\n\r".to_string().into())],
         )])
         .expect("valid batch");
         let encoder =
@@ -781,7 +781,7 @@ mod tests {
         let batch = batch_from_columns_simple(vec![(
             "frames".to_string(),
             "payload".to_string(),
-            vec![Value::Bytes(bytes::Bytes::from_static(b"hello"))],
+            vec![Value::Bytes(bytes::Bytes::from_static(b"hello").into())],
         )])
         .expect("valid batch");
 
@@ -868,7 +868,7 @@ mod tests {
             (
                 "orders".to_string(),
                 "status".to_string(),
-                vec![Value::String("ok".to_string())],
+                vec![Value::String("ok".to_string().into())],
             ),
         ])
         .expect("batch1");
@@ -891,7 +891,7 @@ mod tests {
             (
                 "orders".to_string(),
                 "status".to_string(),
-                vec![Value::String("fail".to_string())],
+                vec![Value::String("fail".to_string().into())],
             ),
         ])
         .expect("batch2");

@@ -11,14 +11,14 @@ impl DataType for StringType {
     }
 
     fn default_value(&self) -> Value {
-        Value::String(String::new())
+        Value::String(String::new().into())
     }
 
     fn try_cast(&self, from: Value) -> Option<Value> {
         match from {
             Value::Null => Some(Value::Null),
             Value::String(s) => Some(Value::String(s)),
-            Value::Timestamp(ts) => ts.to_rfc3339_utc().map(Value::String),
+            Value::Timestamp(ts) => ts.to_rfc3339_utc().map(|value| Value::String(value.into())),
             _ => None,
         }
     }

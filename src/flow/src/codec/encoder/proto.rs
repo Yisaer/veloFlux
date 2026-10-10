@@ -671,7 +671,7 @@ mod tests {
         let batch = batch_from_columns_simple(vec![(
             "t".to_string(),
             "s".to_string(),
-            vec![Value::String("hello".to_string())],
+            vec![Value::String("hello".to_string().into())],
         )])
         .expect("batch");
 
@@ -807,7 +807,7 @@ mod tests {
         let batch = batch_from_columns_simple(vec![(
             "t".to_string(),
             "payload".to_string(),
-            vec![Value::Bytes(bytes::Bytes::from_static(raw))],
+            vec![Value::Bytes(bytes::Bytes::from_static(raw).into())],
         )])
         .expect("batch");
 
@@ -1124,7 +1124,7 @@ mod tests {
         let encoder = ProtobufEncoder::new(bundle);
 
         let struct_val = StructValue::new(
-            vec![Value::Int32(7), Value::String("hi".to_string())],
+            vec![Value::Int32(7), Value::String("hi".to_string().into())],
             inner_type,
         );
         let batch = batch_from_columns_simple(vec![(
@@ -1210,7 +1210,7 @@ mod tests {
             (
                 "t".to_string(),
                 "name".to_string(),
-                vec![Value::String("alice".to_string())],
+                vec![Value::String("alice".to_string().into())],
             ),
             (
                 "t".to_string(),
@@ -1227,7 +1227,7 @@ mod tests {
         assert_eq!(tuples[0].value_by_name("t", "id"), Some(&Value::Int64(1)));
         assert_eq!(
             tuples[0].value_by_name("t", "name"),
-            Some(&Value::String("alice".to_string()))
+            Some(&Value::String("alice".to_string().into()))
         );
         assert_eq!(
             tuples[0].value_by_name("t", "score"),

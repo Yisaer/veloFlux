@@ -81,11 +81,11 @@ impl CollectionLayoutNormalizeProcessor {
     }
 }
 
-fn value_by_name_with_index(msg: &Message, expected: &str) -> Option<(usize, Arc<Value>)> {
+fn value_by_name_with_index(msg: &Message, expected: &str) -> Option<(usize, Value)> {
     let mut idx = 0;
     while let Some((key, value)) = msg.entry_by_index(idx) {
         if key.as_ref() == expected {
-            return Some((idx, Arc::clone(value)));
+            return Some((idx, value.clone()));
         }
         idx += 1;
     }
@@ -132,7 +132,6 @@ fn normalize_collection(
 
     let mut missing = BTreeSet::<String>::new();
     let mut rows = Vec::with_capacity(input.num_rows());
-    let null = Arc::new(Value::Null);
     for tuple in input.rows() {
         if tuple.messages().len() != 1 {
             saw_non_single_message = true;
@@ -150,7 +149,7 @@ fn normalize_collection(
                 if let Some(key_idx) = key_indices.get(idx).and_then(|v| *v) {
                     msg.entry_by_index(key_idx).and_then(|(key, value)| {
                         if key.as_ref() == expected {
-                            Some(Arc::clone(value))
+                            Some(value.clone())
                         } else {
                             None
                         }
@@ -174,7 +173,7 @@ fn normalize_collection(
             if value.is_none() {
                 missing.insert(expected.to_string());
             }
-            values.push(value.unwrap_or_else(|| Arc::clone(&null)));
+            values.push(value.unwrap_or(Value::Null));
         }
 
         let msg = Arc::new(Message::new_shared_keys(
@@ -375,8 +374,7 @@ mod tests {
                 .map(|key| Arc::<str>::from(*key))
                 .collect::<Vec<_>>(),
         );
-        let shared_values = values.into_iter().map(Arc::new).collect();
-        Arc::new(Message::new_shared_keys(source, shared_keys, shared_values))
+        Arc::new(Message::new_shared_keys(source, shared_keys, values))
     }
 
     #[test]

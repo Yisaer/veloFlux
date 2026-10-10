@@ -16,7 +16,7 @@ pub(crate) struct OutputRowAccessor {
 }
 
 pub(crate) struct ExtractedOutputRow {
-    values: Vec<Option<Arc<Value>>>,
+    values: Vec<Option<Value>>,
 }
 
 impl OutputRowAccessor {
@@ -54,7 +54,7 @@ impl OutputRowAccessor {
                 column
                     .value_ref
                     .resolve(tuple)
-                    .map(|value| Some(Arc::new(value.clone())))
+                    .map(|value| Some(value.clone()))
                     .map_err(|error| ProcessorError::ProcessingError(error.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -64,14 +64,14 @@ impl OutputRowAccessor {
 }
 
 impl ExtractedOutputRow {
-    pub(crate) fn into_values_with_null_fill(self) -> Vec<Arc<Value>> {
+    pub(crate) fn into_values_with_null_fill(self) -> Vec<Value> {
         self.values
             .into_iter()
-            .map(|value| value.unwrap_or_else(|| Arc::new(Value::Null)))
+            .map(|value| value.unwrap_or(Value::Null))
             .collect()
     }
 
-    pub(crate) fn into_optional_values(self) -> Vec<Option<Arc<Value>>> {
+    pub(crate) fn into_optional_values(self) -> Vec<Option<Value>> {
         self.values
     }
 }

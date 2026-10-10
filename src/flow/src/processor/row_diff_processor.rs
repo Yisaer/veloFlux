@@ -19,10 +19,10 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 #[derive(Default)]
 struct RowDiffState {
-    previous_output_row: Option<Vec<Option<Arc<Value>>>>,
+    previous_output_row: Option<Vec<Option<Value>>>,
 }
 
-type RowDiffOutput = (Vec<Arc<Value>>, Arc<[bool]>);
+type RowDiffOutput = (Vec<Value>, Arc<[bool]>);
 
 pub struct RowDiffProcessor {
     id: String,
@@ -114,13 +114,13 @@ fn build_tracked_flags(
 fn extract_output_row(
     row_accessor: &OutputRowAccessor,
     tuple: &Tuple,
-) -> Result<Vec<Option<Arc<Value>>>, ProcessorError> {
+) -> Result<Vec<Option<Value>>, ProcessorError> {
     Ok(row_accessor.extract_row(tuple)?.into_optional_values())
 }
 
 fn build_diff_row(
-    tracked_current_values: &[Option<Arc<Value>>],
-    previous_tracked_row: Option<&[Option<Arc<Value>>]>,
+    tracked_current_values: &[Option<Value>],
+    previous_tracked_row: Option<&[Option<Value>]>,
     tracked_flags: &[bool],
     output_column_names: &[Arc<str>],
 ) -> Result<RowDiffOutput, ProcessorError> {
@@ -155,12 +155,7 @@ fn build_diff_row(
     for (idx, current_value) in tracked_current_values.iter().enumerate() {
         let is_tracked = tracked_flags.get(idx).copied().unwrap_or(false);
         if !is_tracked {
-            diff_values.push(
-                current_value
-                    .as_ref()
-                    .map(Arc::clone)
-                    .unwrap_or_else(|| Arc::new(Value::Null)),
-            );
+            diff_values.push(current_value.as_ref().cloned().unwrap_or(Value::Null));
             output_mask.push(true);
             continue;
         }
@@ -178,13 +173,13 @@ fn build_diff_row(
         let changed = previous_tracked_row
             .and_then(|previous| previous.get(idx))
             .and_then(|previous| previous.as_ref())
-            .is_none_or(|previous| previous.as_ref() != current_value.as_ref());
+            .is_none_or(|previous| previous != current_value);
 
         if changed {
-            diff_values.push(Arc::clone(current_value));
+            diff_values.push(current_value.clone());
             output_mask.push(true);
         } else {
-            diff_values.push(Arc::new(Value::Null));
+            diff_values.push(Value::Null);
             output_mask.push(false);
         }
     }
@@ -195,7 +190,7 @@ fn build_diff_row(
 fn materialize_diff_tuple(
     base_tuple: &Tuple,
     output_keys: &Arc<[Arc<str>]>,
-    diff_values: Vec<Arc<Value>>,
+    diff_values: Vec<Value>,
     output_mask: Arc<[bool]>,
 ) -> Tuple {
     let msg = Arc::new(Message::new_shared_keys(

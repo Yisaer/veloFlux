@@ -60,7 +60,7 @@ fn test_float32_type_casting() {
     // Test casting from unsupported types
     assert_eq!(float32_type.try_cast(Value::Bool(true)), None);
     assert_eq!(
-        float32_type.try_cast(Value::String("123.45".to_string())),
+        float32_type.try_cast(Value::String("123.45".to_string().into())),
         None
     );
 }

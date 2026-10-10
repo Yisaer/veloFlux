@@ -199,7 +199,7 @@ fn value_to_upon(value: &Value) -> Result<upon::Value, EncodeError> {
     match value {
         Value::Null => Ok(upon::Value::None),
         Value::Bool(value) => Ok(upon::Value::Bool(*value)),
-        Value::String(value) => Ok(upon::Value::String(value.clone())),
+        Value::String(value) => Ok(upon::Value::String(value.as_ref().clone())),
         Value::Bytes(value) => Ok(upon::Value::String(BASE64_STANDARD.encode(value.as_ref()))),
         Value::Float32(value) => Ok(upon::Value::Float(*value as f64)),
         Value::Float64(value) => Ok(upon::Value::Float(*value)),

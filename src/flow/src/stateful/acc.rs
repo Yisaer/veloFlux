@@ -781,7 +781,7 @@ mod tests {
             eval_all(
                 &function,
                 &[
-                    Value::String("a".to_string()),
+                    Value::String("a".to_string().into()),
                     Value::Null,
                     Value::Bool(false),
                     Value::Int64(3),
@@ -843,7 +843,7 @@ mod tests {
         let mut instance = function.create_instance();
         let err = instance
             .eval(StatefulEvalInput {
-                args: &[Value::String("x".to_string())],
+                args: &[Value::String("x".to_string().into())],
                 should_apply: true,
             })
             .expect_err("non-numeric value should fail");

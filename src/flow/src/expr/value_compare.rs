@@ -25,7 +25,7 @@ fn try_cast_to_float64(value: &Value) -> Option<f64> {
     })
 }
 
-fn try_cast_to_string(value: &Value) -> Option<String> {
+fn try_cast_to_string(value: &Value) -> Option<std::sync::Arc<String>> {
     let string_type = StringType;
     string_type.try_cast(value.clone()).and_then(|v| match v {
         Value::String(s) => Some(s),
@@ -185,15 +185,15 @@ mod tests {
     fn compare_strings() {
         assert_eq!(
             compare_values(
-                &Value::String("apple".to_string()),
-                &Value::String("banana".to_string())
+                &Value::String("apple".to_string().into()),
+                &Value::String("banana".to_string().into())
             ),
             Some(Ordering::Less)
         );
         assert_eq!(
             compare_values(
-                &Value::String("zebra".to_string()),
-                &Value::String("apple".to_string())
+                &Value::String("zebra".to_string().into()),
+                &Value::String("apple".to_string().into())
             ),
             Some(Ordering::Greater)
         );
@@ -253,12 +253,12 @@ mod tests {
     #[test]
     fn values_equal_same_type_string() {
         assert!(values_equal(
-            &Value::String("a".to_string()),
-            &Value::String("a".to_string())
+            &Value::String("a".to_string().into()),
+            &Value::String("a".to_string().into())
         ));
         assert!(!values_equal(
-            &Value::String("a".to_string()),
-            &Value::String("b".to_string())
+            &Value::String("a".to_string().into()),
+            &Value::String("b".to_string().into())
         ));
     }
 
@@ -283,7 +283,7 @@ mod tests {
     fn values_equal_rejects_non_numeric_cross_type() {
         // String "1" vs Int64(1) must NOT compare equal — no String fallback.
         assert!(!values_equal(
-            &Value::String("1".to_string()),
+            &Value::String("1".to_string().into()),
             &Value::Int64(1)
         ));
         // Bool vs Int is not numeric cross-type.

@@ -416,10 +416,10 @@ async fn stateful_function_table_driven() {
             input_data: vec![(
                 "a".to_string(),
                 vec![
-                    Value::String("x".to_string()),
+                    Value::String("x".to_string().into()),
                     Value::Null,
-                    Value::String("y".to_string()),
-                    Value::String("z".to_string()),
+                    Value::String("y".to_string().into()),
+                    Value::String("z".to_string().into()),
                 ],
             )],
             expected_outputs: vec![ExpectedCollection {
@@ -505,10 +505,10 @@ async fn stateful_function_table_driven() {
                 (
                     "k".to_string(),
                     vec![
-                        Value::String("A".to_string()),
-                        Value::String("B".to_string()),
-                        Value::String("A".to_string()),
-                        Value::String("B".to_string()),
+                        Value::String("A".to_string().into()),
+                        Value::String("B".to_string().into()),
+                        Value::String("A".to_string().into()),
+                        Value::String("B".to_string().into()),
                     ],
                 ),
                 (
@@ -528,10 +528,10 @@ async fn stateful_function_table_driven() {
                     ColumnCheck {
                         expected_name: "k".to_string(),
                         expected_values: vec![
-                            Value::String("A".to_string()),
-                            Value::String("B".to_string()),
-                            Value::String("A".to_string()),
-                            Value::String("B".to_string()),
+                            Value::String("A".to_string().into()),
+                            Value::String("B".to_string().into()),
+                            Value::String("A".to_string().into()),
+                            Value::String("B".to_string().into()),
                         ],
                     },
                     ColumnCheck {
@@ -556,11 +556,11 @@ async fn stateful_function_table_driven() {
                 (
                     "k".to_string(),
                     vec![
-                        Value::String("A".to_string()),
-                        Value::String("A".to_string()),
-                        Value::String("B".to_string()),
-                        Value::String("A".to_string()),
-                        Value::String("B".to_string()),
+                        Value::String("A".to_string().into()),
+                        Value::String("A".to_string().into()),
+                        Value::String("B".to_string().into()),
+                        Value::String("A".to_string().into()),
+                        Value::String("B".to_string().into()),
                     ],
                 ),
                 (
@@ -591,11 +591,11 @@ async fn stateful_function_table_driven() {
                     ColumnCheck {
                         expected_name: "k".to_string(),
                         expected_values: vec![
-                            Value::String("A".to_string()),
-                            Value::String("A".to_string()),
-                            Value::String("B".to_string()),
-                            Value::String("A".to_string()),
-                            Value::String("B".to_string()),
+                            Value::String("A".to_string().into()),
+                            Value::String("A".to_string().into()),
+                            Value::String("B".to_string().into()),
+                            Value::String("A".to_string().into()),
+                            Value::String("B".to_string().into()),
                         ],
                     },
                     ColumnCheck {
@@ -772,13 +772,13 @@ async fn stateful_function_table_driven() {
                 (
                     "k".to_string(),
                     vec![
-                        Value::String("A".to_string()),
-                        Value::String("B".to_string()),
-                        Value::String("B".to_string()),
-                        Value::String("A".to_string()),
-                        Value::String("A".to_string()),
-                        Value::String("A".to_string()),
-                        Value::String("B".to_string()),
+                        Value::String("A".to_string().into()),
+                        Value::String("B".to_string().into()),
+                        Value::String("B".to_string().into()),
+                        Value::String("A".to_string().into()),
+                        Value::String("A".to_string().into()),
+                        Value::String("A".to_string().into()),
+                        Value::String("B".to_string().into()),
                     ],
                 ),
                 (
@@ -825,13 +825,13 @@ async fn stateful_function_table_driven() {
                     ColumnCheck {
                         expected_name: "k".to_string(),
                         expected_values: vec![
-                            Value::String("A".to_string()),
-                            Value::String("B".to_string()),
-                            Value::String("B".to_string()),
-                            Value::String("A".to_string()),
-                            Value::String("A".to_string()),
-                            Value::String("A".to_string()),
-                            Value::String("B".to_string()),
+                            Value::String("A".to_string().into()),
+                            Value::String("B".to_string().into()),
+                            Value::String("B".to_string().into()),
+                            Value::String("A".to_string().into()),
+                            Value::String("A".to_string().into()),
+                            Value::String("A".to_string().into()),
+                            Value::String("B".to_string().into()),
                         ],
                     },
                     ColumnCheck {
@@ -859,11 +859,11 @@ async fn stateful_function_table_driven() {
                 (
                     "k".to_string(),
                     vec![
-                        Value::String("A".to_string()),
-                        Value::String("A".to_string()),
-                        Value::String("B".to_string()),
-                        Value::String("A".to_string()),
-                        Value::String("B".to_string()),
+                        Value::String("A".to_string().into()),
+                        Value::String("A".to_string().into()),
+                        Value::String("B".to_string().into()),
+                        Value::String("A".to_string().into()),
+                        Value::String("B".to_string().into()),
                     ],
                 ),
                 (
@@ -1421,10 +1421,10 @@ async fn stateful_function_table_driven() {
                 (
                     "b".to_string(),
                     vec![
-                        Value::String("x".to_string()),
-                        Value::String("x".to_string()),
-                        Value::String("y".to_string()),
-                        Value::String("y".to_string()),
+                        Value::String("x".to_string().into()),
+                        Value::String("x".to_string().into()),
+                        Value::String("y".to_string().into()),
+                        Value::String("y".to_string().into()),
                         Value::Null,
                     ],
                 ),
@@ -1473,9 +1473,9 @@ async fn stateful_function_table_driven() {
                 (
                     "b".to_string(),
                     vec![
-                        Value::String("x".to_string()),
-                        Value::String("x".to_string()),
-                        Value::String("x".to_string()),
+                        Value::String("x".to_string().into()),
+                        Value::String("x".to_string().into()),
+                        Value::String("x".to_string().into()),
                         Value::Null,
                         Value::Null,
                     ],
@@ -1514,10 +1514,10 @@ async fn stateful_function_table_driven() {
                 (
                     "b".to_string(),
                     vec![
-                        Value::String("x".to_string()),
-                        Value::String("y".to_string()),
-                        Value::String("y".to_string()),
-                        Value::String("y".to_string()),
+                        Value::String("x".to_string().into()),
+                        Value::String("y".to_string().into()),
+                        Value::String("y".to_string().into()),
+                        Value::String("y".to_string().into()),
                     ],
                 ),
                 (

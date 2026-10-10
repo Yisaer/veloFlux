@@ -184,7 +184,7 @@ mod tests {
         accumulator
             .update(&[struct_value(vec![
                 ("b", Value::Int64(3)),
-                ("c", Value::String("value".to_string())),
+                ("c", Value::String("value".to_string().into())),
             ])])
             .unwrap();
 
@@ -203,7 +203,7 @@ mod tests {
             &[
                 Value::Int64(1),
                 Value::Int64(3),
-                Value::String("value".to_string()),
+                Value::String("value".to_string().into()),
             ]
         );
     }

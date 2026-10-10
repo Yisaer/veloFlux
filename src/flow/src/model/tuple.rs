@@ -8,18 +8,18 @@ use std::time::SystemTime;
 pub struct Message {
     source: Arc<str>,
     keys: Arc<[Arc<str>]>,
-    values: Vec<Arc<Value>>,
+    values: Vec<Value>,
 }
 
 impl Message {
-    pub fn new(source: impl Into<Arc<str>>, keys: Vec<Arc<str>>, values: Vec<Arc<Value>>) -> Self {
+    pub fn new(source: impl Into<Arc<str>>, keys: Vec<Arc<str>>, values: Vec<Value>) -> Self {
         Self::new_shared_keys(source, Arc::from(keys), values)
     }
 
     pub fn new_shared_keys(
         source: impl Into<Arc<str>>,
         keys: Arc<[Arc<str>]>,
-        values: Vec<Arc<Value>>,
+        values: Vec<Value>,
     ) -> Self {
         debug_assert_eq!(
             keys.len(),
@@ -41,14 +41,14 @@ impl Message {
         self.keys
             .iter()
             .zip(self.values.iter())
-            .map(|(k, v)| (k.as_ref(), v.as_ref()))
+            .map(|(k, v)| (k.as_ref(), v))
     }
 
-    pub fn entry_by_index(&self, index: usize) -> Option<(&Arc<str>, &Arc<Value>)> {
+    pub fn entry_by_index(&self, index: usize) -> Option<(&Arc<str>, &Value)> {
         self.keys.get(index).zip(self.values.get(index))
     }
 
-    pub fn entry_by_name(&self, column: &str) -> Option<(&Arc<str>, &Arc<Value>)> {
+    pub fn entry_by_name(&self, column: &str) -> Option<(&Arc<str>, &Value)> {
         self.keys
             .iter()
             .position(|k| k.as_ref() == column)
@@ -59,11 +59,11 @@ impl Message {
         self.keys
             .iter()
             .position(|k| k.as_ref() == column)
-            .and_then(|idx| self.values.get(idx).map(|v| v.as_ref()))
+            .and_then(|idx| self.values.get(idx))
     }
 
     pub fn value_by_index(&self, index: usize) -> Option<&Value> {
-        self.values.get(index).map(|v| v.as_ref())
+        self.values.get(index)
     }
 }
 

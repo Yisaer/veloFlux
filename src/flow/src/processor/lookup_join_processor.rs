@@ -151,12 +151,10 @@ fn build_table_message(
         .column_schemas()
         .iter()
         .map(|column| {
-            Arc::new(
-                projected_values
-                    .get(&column.name)
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            )
+            projected_values
+                .get(&column.name)
+                .cloned()
+                .unwrap_or(Value::Null)
         })
         .collect();
     Ok(Arc::new(Message::new(

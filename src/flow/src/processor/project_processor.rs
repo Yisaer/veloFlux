@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn empty_projection_drops_upstream_affiliate() {
         let keys = vec![Arc::<str>::from("a")];
-        let values = vec![Arc::new(Value::Int64(1))];
+        let values = vec![Value::Int64(1)];
         let message = Arc::new(Message::new(Arc::<str>::from("stream"), keys, values));
         let timestamp = SystemTime::now();
         let mut input_tuple = Tuple::with_timestamp(Arc::from(vec![message]), timestamp);

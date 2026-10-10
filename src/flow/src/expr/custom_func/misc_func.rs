@@ -453,7 +453,7 @@ impl CustomFunc for ChrFunc {
                 if s.chars().count() != 1 {
                     return Err(EvalError::TypeMismatch {
                         expected: "single-character string".to_string(),
-                        actual: s.clone(),
+                        actual: s.as_ref().clone(),
                     });
                 }
                 Ok(Value::String(s.clone()))
@@ -464,7 +464,7 @@ impl CustomFunc for ChrFunc {
                     expected: "valid Unicode scalar value".to_string(),
                     actual: n.to_string(),
                 })?;
-                Ok(Value::String(ch.to_string()))
+                Ok(Value::String(ch.to_string().into()))
             }
         }
     }
@@ -494,11 +494,13 @@ impl CustomFunc for EncodeFunc {
         if !format.eq_ignore_ascii_case("base64") {
             return Err(EvalError::TypeMismatch {
                 expected: "base64".to_string(),
-                actual: format,
+                actual: format.to_owned(),
             });
         }
 
-        Ok(Value::String(BASE64_STANDARD.encode(input.as_bytes())))
+        Ok(Value::String(
+            BASE64_STANDARD.encode(input.as_bytes()).into(),
+        ))
     }
 
     fn name(&self) -> &str {
@@ -526,7 +528,7 @@ impl CustomFunc for DecodeFunc {
         if !format.eq_ignore_ascii_case("base64") {
             return Err(EvalError::TypeMismatch {
                 expected: "base64".to_string(),
-                actual: format,
+                actual: format.to_owned(),
             });
         }
 
@@ -543,7 +545,7 @@ impl CustomFunc for DecodeFunc {
             actual: e.to_string(),
         })?;
 
-        Ok(Value::String(s))
+        Ok(Value::String(s.into()))
     }
 
     fn name(&self) -> &str {
@@ -599,7 +601,9 @@ impl CustomFunc for Md5Func {
         let Some(s) = nth_string_or_null(args, 0)? else {
             return Ok(Value::Null);
         };
-        Ok(Value::String(format!("{:x}", md5::compute(s.as_bytes()))))
+        Ok(Value::String(
+            format!("{:x}", md5::compute(s.as_bytes())).into(),
+        ))
     }
 
     fn name(&self) -> &str {
@@ -621,7 +625,7 @@ impl CustomFunc for Sha1Func {
         };
         let mut h = Sha1::new();
         h.update(s.as_bytes());
-        Ok(Value::String(format!("{:x}", h.finalize())))
+        Ok(Value::String(format!("{:x}", h.finalize()).into()))
     }
 
     fn name(&self) -> &str {
@@ -643,7 +647,7 @@ impl CustomFunc for Sha256Func {
         };
         let mut h = Sha256::new();
         h.update(s.as_bytes());
-        Ok(Value::String(format!("{:x}", h.finalize())))
+        Ok(Value::String(format!("{:x}", h.finalize()).into()))
     }
 
     fn name(&self) -> &str {
@@ -665,7 +669,7 @@ impl CustomFunc for Sha384Func {
         };
         let mut h = Sha384::new();
         h.update(s.as_bytes());
-        Ok(Value::String(format!("{:x}", h.finalize())))
+        Ok(Value::String(format!("{:x}", h.finalize()).into()))
     }
 
     fn name(&self) -> &str {
@@ -687,7 +691,7 @@ impl CustomFunc for Sha512Func {
         };
         let mut h = Sha512::new();
         h.update(s.as_bytes());
-        Ok(Value::String(format!("{:x}", h.finalize())))
+        Ok(Value::String(format!("{:x}", h.finalize()).into()))
     }
 
     fn name(&self) -> &str {
@@ -707,7 +711,9 @@ impl CustomFunc for Crc32Func {
         let Some(s) = nth_string_or_null(args, 0)? else {
             return Ok(Value::Null);
         };
-        Ok(Value::String(format!("{:x}", crc32_hash(s.as_bytes()))))
+        Ok(Value::String(
+            format!("{:x}", crc32_hash(s.as_bytes())).into(),
+        ))
     }
 
     fn name(&self) -> &str {
@@ -761,12 +767,12 @@ impl CustomFunc for Hex2DecFunc {
         };
 
         if let Some(rest) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-            s = rest.to_string();
+            s = rest;
         }
 
-        let value = i64::from_str_radix(&s, 16).map_err(|_| EvalError::TypeMismatch {
+        let value = i64::from_str_radix(s, 16).map_err(|_| EvalError::TypeMismatch {
             expected: "valid hexadecimal string".to_string(),
-            actual: s,
+            actual: s.to_owned(),
         })?;
 
         Ok(Value::Int64(value))
@@ -789,7 +795,7 @@ impl CustomFunc for Dec2HexFunc {
         let Some(n) = nth_i64_or_null(args, 0)? else {
             return Ok(Value::Null);
         };
-        Ok(Value::String(format!("0x{:x}", n)))
+        Ok(Value::String(format!("0x{:x}", n).into()))
     }
 
     fn name(&self) -> &str {
@@ -815,7 +821,7 @@ impl CustomFunc for ToJsonFunc {
             actual: e.to_string(),
         })?;
 
-        Ok(Value::String(s))
+        Ok(Value::String(s.into()))
     }
 
     fn name(&self) -> &str {
@@ -842,7 +848,7 @@ impl CustomFunc for ParseJsonFunc {
         }
 
         let parsed: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| EvalError::TypeMismatch {
+            serde_json::from_str(text).map_err(|e| EvalError::TypeMismatch {
                 expected: "valid JSON string".to_string(),
                 actual: e.to_string(),
             })?;
@@ -882,7 +888,7 @@ impl CustomFunc for NewUuidFunc {
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
         validate_arity(args, &[0])?;
-        Ok(Value::String(uuid::Uuid::new_v4().to_string()))
+        Ok(Value::String(uuid::Uuid::new_v4().to_string().into()))
     }
 
     fn name(&self) -> &str {

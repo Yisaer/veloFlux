@@ -401,7 +401,7 @@ fn insert_sqlite_row(
                 _ => SqlValue::Null,
             },
             ColumnKind::Str => match value {
-                Value::String(v) => SqlValue::Text(v.clone()),
+                Value::String(v) => SqlValue::Text(v.as_ref().clone()),
                 _ => SqlValue::Null,
             },
         })
@@ -513,7 +513,7 @@ fn generate_row(columns: &[ColumnSpec], rng: &mut StdRng) -> Vec<Value> {
         .map(|col| match col.kind {
             ColumnKind::Int => Value::Int64(rng.gen_range(-10..=10)),
             ColumnKind::Bool => Value::Bool(rng.gen_bool(0.5)),
-            ColumnKind::Str => Value::String(random_string(rng, 1, 4)),
+            ColumnKind::Str => Value::String(random_string(rng, 1, 4).into()),
         })
         .collect()
 }
@@ -557,7 +557,7 @@ fn row_as_json_object(
             Value::Null => JsonValue::Null,
             Value::Int64(v) => JsonValue::Number((*v).into()),
             Value::Bool(v) => JsonValue::Bool(*v),
-            Value::String(v) => JsonValue::String(v.clone()),
+            Value::String(v) => JsonValue::String(v.as_ref().clone()),
             other => {
                 return Err(format!(
                     "unsupported value type for json encoding (col={}): {other:?}",

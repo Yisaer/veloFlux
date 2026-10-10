@@ -292,8 +292,7 @@ mod tests {
                 .map(|key| Arc::<str>::from(*key))
                 .collect::<Vec<_>>(),
         );
-        let shared_values = values.into_iter().map(Arc::new).collect();
-        Arc::new(Message::new_shared_keys(source, shared_keys, shared_values))
+        Arc::new(Message::new_shared_keys(source, shared_keys, values))
     }
 
     #[test]

@@ -310,13 +310,16 @@ fn current_timestamp_value() -> Value {
 }
 
 fn format_time_value(datetime: DateTime<Utc>) -> Value {
-    Value::String(format!(
-        "{:02}:{:02}:{:02}.{:06}",
-        datetime.hour(),
-        datetime.minute(),
-        datetime.second(),
-        datetime.timestamp_subsec_micros()
-    ))
+    Value::String(
+        format!(
+            "{:02}:{:02}:{:02}.{:06}",
+            datetime.hour(),
+            datetime.minute(),
+            datetime.second(),
+            datetime.timestamp_subsec_micros()
+        )
+        .into(),
+    )
 }
 
 fn is_leap_year(year: i32) -> bool {
@@ -359,7 +362,9 @@ impl CustomFunc for CurDateFunc {
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
         validate_arity(args, &[0])?;
-        Ok(Value::String(Utc::now().format("%Y-%m-%d").to_string()))
+        Ok(Value::String(
+            Utc::now().format("%Y-%m-%d").to_string().into(),
+        ))
     }
 
     fn name(&self) -> &str {
@@ -408,8 +413,9 @@ impl CustomFunc for FormatTimeFunc {
         };
         Ok(Value::String(
             timestamp_to_datetime(timestamp)?
-                .format(&format)
-                .to_string(),
+                .format(format)
+                .to_string()
+                .into(),
         ))
     }
 
@@ -426,7 +432,9 @@ impl CustomFunc for DayNameFunc {
     }
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        eval_unary_timestamp(args, |dt| Ok(Value::String(dt.format("%A").to_string())))
+        eval_unary_timestamp(args, |dt| {
+            Ok(Value::String(dt.format("%A").to_string().into()))
+        })
     }
 
     fn name(&self) -> &str {
@@ -548,7 +556,7 @@ impl CustomFunc for LastDayFunc {
                     actual: format!("{year:04}-{month:02}"),
                 }
             })?;
-            Ok(Value::String(date.format("%Y-%m-%d").to_string()))
+            Ok(Value::String(date.format("%Y-%m-%d").to_string().into()))
         })
     }
 
@@ -615,7 +623,9 @@ impl CustomFunc for MonthNameFunc {
     }
 
     fn eval_row(&self, args: &[Value]) -> Result<Value, EvalError> {
-        eval_unary_timestamp(args, |dt| Ok(Value::String(dt.format("%B").to_string())))
+        eval_unary_timestamp(args, |dt| {
+            Ok(Value::String(dt.format("%B").to_string().into()))
+        })
     }
 
     fn name(&self) -> &str {

@@ -134,11 +134,11 @@ fn convert_sql_value_to_scalar(value: &SqlValue) -> Result<ScalarExpr, Conversio
             }
         }
         SqlValue::SingleQuotedString(s) => Ok(ScalarExpr::Literal(
-            Value::String(s.clone()),
+            Value::String(s.clone().into()),
             ConcreteDatatype::String(StringType),
         )),
         SqlValue::DoubleQuotedString(s) => Ok(ScalarExpr::Literal(
-            Value::String(s.clone()),
+            Value::String(s.clone().into()),
             ConcreteDatatype::String(StringType),
         )),
         SqlValue::Boolean(b) => Ok(ScalarExpr::Literal(

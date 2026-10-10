@@ -730,7 +730,7 @@ impl CustomFunc for ConvFunc {
         let from_base = value_to_i64(&args[1])?;
         let to_base = value_to_i64(&args[2])?;
 
-        conv_impl(&s, from_base, to_base)
+        conv_impl(s, from_base, to_base)
     }
 
     fn name(&self) -> &str {
@@ -760,7 +760,7 @@ fn conv_impl(input: &str, mut from_base: i64, mut to_base: i64) -> Result<Value,
     let prefix = get_valid_prefix(trimmed, from_base as u32);
 
     if prefix.is_empty() {
-        return Ok(Value::String("0".to_string()));
+        return Ok(Value::String("0".to_string().into()));
     }
 
     let mut negative_input = false;
@@ -803,7 +803,7 @@ fn conv_impl(input: &str, mut from_base: i64, mut to_base: i64) -> Result<Value,
         s = format!("-{}", s);
     }
 
-    Ok(Value::String(s.to_uppercase()))
+    Ok(Value::String(s.to_uppercase().into()))
 }
 
 fn get_valid_prefix(s: &str, base: u32) -> String {
@@ -986,7 +986,7 @@ mod tests {
             eval(
                 &ConvFunc,
                 &[
-                    Value::String("A".to_string()),
+                    Value::String("A".to_string().into()),
                     Value::Int64(16),
                     Value::Int64(10),
                 ],
@@ -998,7 +998,7 @@ mod tests {
             eval(
                 &ConvFunc,
                 &[
-                    Value::String("1010".to_string()),
+                    Value::String("1010".to_string().into()),
                     Value::Int64(2),
                     Value::Int64(16),
                 ],
@@ -1023,7 +1023,7 @@ mod tests {
         assert_null(eval(
             &ConvFunc,
             &[
-                Value::String("10".to_string()),
+                Value::String("10".to_string().into()),
                 Value::Int64(1),
                 Value::Int64(10),
             ],
@@ -1033,7 +1033,7 @@ mod tests {
             eval(
                 &ConvFunc,
                 &[
-                    Value::String("XYZ".to_string()),
+                    Value::String("XYZ".to_string().into()),
                     Value::Int64(10),
                     Value::Int64(16),
                 ],
@@ -1050,7 +1050,7 @@ mod tests {
             eval(
                 &ConvFunc,
                 &[
-                    Value::String("   +1GZ".to_string()),
+                    Value::String("   +1GZ".to_string().into()),
                     Value::Int64(17),
                     Value::Int64(10),
                 ],
@@ -1062,7 +1062,7 @@ mod tests {
             eval(
                 &ConvFunc,
                 &[
-                    Value::String("-10".to_string()),
+                    Value::String("-10".to_string().into()),
                     Value::Int64(-10),
                     Value::Int64(16),
                 ],
@@ -1074,7 +1074,7 @@ mod tests {
             eval(
                 &ConvFunc,
                 &[
-                    Value::String("-10".to_string()),
+                    Value::String("-10".to_string().into()),
                     Value::Int64(-10),
                     Value::Int64(-16),
                 ],
@@ -1171,18 +1171,18 @@ mod tests {
 
         assert!(ConvFunc
             .validate_row(&[
-                Value::String("10".to_string()),
+                Value::String("10".to_string().into()),
                 Value::Int64(10),
                 Value::Int64(2)
             ])
             .is_ok());
         assert!(ConvFunc.validate_row(&[]).is_err());
         assert!(ConvFunc
-            .validate_row(&[Value::String("10".to_string())])
+            .validate_row(&[Value::String("10".to_string().into())])
             .is_err());
         assert!(ConvFunc
             .validate_row(&[
-                Value::String("10".to_string()),
+                Value::String("10".to_string().into()),
                 Value::Int64(10),
                 Value::Int64(2),
                 Value::Int64(8),
@@ -1234,26 +1234,26 @@ mod tests {
 
     #[test]
     fn test_type_errors_for_non_numeric_inputs() {
-        eval_err(&SinFunc, &[Value::String("abc".to_string())]);
+        eval_err(&SinFunc, &[Value::String("abc".to_string().into())]);
         eval_err(
             &Atan2Func,
-            &[Value::String("1".to_string()), Value::Float64(1.0)],
+            &[Value::String("1".to_string().into()), Value::Float64(1.0)],
         );
         eval_err(
             &RoundFunc,
-            &[Value::Float64(1.23), Value::String("2".to_string())],
+            &[Value::Float64(1.23), Value::String("2".to_string().into())],
         );
         eval_err(&BitAndFunc, &[Value::Int64(1), Value::Float64(2.0)]);
         eval_err(
             &BitOrFunc,
-            &[Value::String("1".to_string()), Value::Int64(2)],
+            &[Value::String("1".to_string().into()), Value::Int64(2)],
         );
         eval_err(&BitXorFunc, &[Value::Float64(1.0), Value::Int64(2)]);
         eval_err(&BitNotFunc, &[Value::Float64(1.0)]);
         eval_err(
             &ConvFunc,
             &[
-                Value::String("10".to_string()),
+                Value::String("10".to_string().into()),
                 Value::Float64(10.0),
                 Value::Int64(2),
             ],

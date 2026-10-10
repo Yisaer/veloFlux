@@ -198,9 +198,12 @@ mod tests {
         let func = NdvFunction::new();
         let mut acc = func.create_accumulator();
 
-        acc.update(&[Value::String("a".to_string())]).unwrap();
-        acc.update(&[Value::String("b".to_string())]).unwrap();
-        acc.update(&[Value::String("a".to_string())]).unwrap(); // duplicate
+        acc.update(&[Value::String("a".to_string().into())])
+            .unwrap();
+        acc.update(&[Value::String("b".to_string().into())])
+            .unwrap();
+        acc.update(&[Value::String("a".to_string().into())])
+            .unwrap(); // duplicate
 
         assert_eq!(acc.finalize(), Value::Int64(2)); // 2 distinct values
     }

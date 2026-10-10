@@ -289,7 +289,7 @@ async fn run_source_layout_test_case(test_case: SourceLayoutTestCase) {
                 .iter()
                 .map(|k| Arc::<str>::from(*k))
                 .collect();
-            let values: Vec<Arc<Value>> = row.values.iter().cloned().map(Arc::new).collect();
+            let values: Vec<Value> = row.values.iter().cloned().collect();
             let msg = Arc::new(Message::new_shared_keys(
                 Arc::clone(&topic_source),
                 Arc::from(keys),
@@ -1619,9 +1619,9 @@ async fn pipeline_table_driven_queries() {
                 (
                     "name".to_string(),
                     vec![
-                        Value::String("a".into()),
-                        Value::String("b".into()),
-                        Value::String("c".into()),
+                        Value::String("a".to_owned().into()),
+                        Value::String("b".to_owned().into()),
+                        Value::String("c".to_owned().into()),
                     ],
                 ),
             ],
@@ -1634,7 +1634,7 @@ async fn pipeline_table_driven_queries() {
                 },
                 ColumnCheck {
                     expected_name: "name".to_string(),
-                    expected_values: vec![Value::String("a".into())],
+                    expected_values: vec![Value::String("a".to_owned().into())],
                 },
             ],
         },
@@ -1688,9 +1688,9 @@ async fn pipeline_table_driven_queries() {
             column_checks: vec![ColumnCheck {
                 expected_name: "label".to_string(),
                 expected_values: vec![
-                    Value::String("zero".into()),
-                    Value::String("one".into()),
-                    Value::String("other".into()),
+                    Value::String("zero".to_owned().into()),
+                    Value::String("one".to_owned().into()),
+                    Value::String("other".to_owned().into()),
                 ],
             }],
         },
@@ -1834,15 +1834,15 @@ async fn pipeline_merge_agg_table_driven() {
                     "properties".to_string(),
                     vec![
                         Value::Struct(StructValue::new(
-                            vec![Value::Int64(1), Value::String("one".to_string())],
+                            vec![Value::Int64(1), Value::String("one".to_string().into())],
                             properties_type.clone(),
                         )),
                         Value::Struct(StructValue::new(
-                            vec![Value::Int64(2), Value::String("two".to_string())],
+                            vec![Value::Int64(2), Value::String("two".to_string().into())],
                             properties_type.clone(),
                         )),
                         Value::Struct(StructValue::new(
-                            vec![Value::Null, Value::String("three".to_string())],
+                            vec![Value::Null, Value::String("three".to_string().into())],
                             properties_type.clone(),
                         )),
                     ],
@@ -1857,7 +1857,7 @@ async fn pipeline_merge_agg_table_driven() {
             column_checks: vec![ColumnCheck {
                 expected_name: "merged".to_string(),
                 expected_values: vec![Value::Struct(StructValue::new(
-                    vec![Value::Null, Value::String("three".to_string())],
+                    vec![Value::Null, Value::String("three".to_string().into())],
                     properties_type.clone(),
                 ))],
             }],
@@ -2889,7 +2889,10 @@ async fn memory_source_json_timestamp_decodes_filters_and_encodes_utc() {
                 "expected_time".to_string(),
                 vec![Value::Timestamp(matching_ts)],
             ),
-            ("name".to_string(), vec![Value::String("match".to_string())]),
+            (
+                "name".to_string(),
+                vec![Value::String("match".to_string().into())],
+            ),
         ],
     )
     .await;
@@ -3273,12 +3276,12 @@ async fn memory_collection_source_layout_normalize_then_collection_sink_material
         Tuple::new(vec![Arc::new(Message::new_shared_keys(
             Arc::clone(&topic_source),
             Arc::from(vec![Arc::<str>::from("b"), Arc::<str>::from("a")]),
-            vec![Arc::new(Value::Int64(10)), Arc::new(Value::Int64(1))],
+            vec![Value::Int64(10), Value::Int64(1)],
         ))]),
         Tuple::new(vec![Arc::new(Message::new_shared_keys(
             Arc::clone(&topic_source),
             Arc::from(vec![Arc::<str>::from("b"), Arc::<str>::from("a")]),
-            vec![Arc::new(Value::Int64(20)), Arc::new(Value::Null)],
+            vec![Value::Int64(20), Value::Null],
         ))]),
     ];
     let batch = RecordBatch::new(rows).expect("create input record batch");

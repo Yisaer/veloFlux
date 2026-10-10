@@ -112,11 +112,11 @@ pub fn raw_frame_to_record_batch(
         Arc::<str>::from(VIDEO_TIMESTAMP_COLUMN),
     ];
     let values = vec![
-        Arc::new(Value::Bytes(frame.payload)),
-        Arc::new(Value::Int64(frame.width)),
-        Arc::new(Value::Int64(frame.height)),
-        Arc::new(Value::String(frame.format)),
-        Arc::new(Value::Timestamp(frame.timestamp)),
+        Value::Bytes(frame.payload.into()),
+        Value::Int64(frame.width),
+        Value::Int64(frame.height),
+        Value::String(frame.format.into()),
+        Value::Timestamp(frame.timestamp),
     ];
     let message = Arc::new(Message::new(stream_name, keys, values));
     let timestamp = UNIX_EPOCH
@@ -129,7 +129,7 @@ pub fn raw_frame_to_record_batch(
 
 pub fn raw_frame_from_tuple(row: &Tuple) -> Result<VideoRawFrame, VideoCodecError> {
     let payload = match required_field(row, VIDEO_PAYLOAD_COLUMN)? {
-        Value::Bytes(payload) => payload.clone(),
+        Value::Bytes(payload) => payload.as_ref().clone(),
         _ => {
             return Err(VideoCodecError::InvalidFieldType {
                 field: VIDEO_PAYLOAD_COLUMN,
@@ -157,7 +157,7 @@ pub fn raw_frame_from_tuple(row: &Tuple) -> Result<VideoRawFrame, VideoCodecErro
             });
         }
     };
-    VideoRawFrame::new(payload, width, height, format, timestamp)
+    VideoRawFrame::new(payload, width, height, format.as_str(), timestamp)
 }
 
 pub fn raw_frames_from_collection(
