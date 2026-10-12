@@ -5,7 +5,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use redb::{Database, ReadTransaction, ReadableTable, TableDefinition, WriteTransaction};
@@ -31,6 +31,7 @@ const ATTACHMENT_COMMIT_KEY: &str = "attachment_transaction";
 const UDFS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("udfs");
 const TOMBSTONES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("resource_tombstones");
 const TABLES_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("tables");
+const MODELS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("models");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageNamespace {
@@ -180,6 +181,17 @@ pub struct StoredUdf {
     pub raw_json: String,
 }
 
+/// Persisted metadata for an immutable ONNX model bundle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredModel {
+    pub name: String,
+    pub revision: u64,
+    pub model_sha256: String,
+    pub model_size_bytes: u64,
+    pub model_card_yaml: String,
+    pub test_vector_count: u32,
+}
+
 /// Resource identity namespace shared by live records and deletion watermarks.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -191,6 +203,7 @@ pub enum ResourceKind {
     Pipelines,
     Udfs,
     Tables,
+    Models,
 }
 
 impl ResourceKind {
@@ -203,6 +216,7 @@ impl ResourceKind {
             Self::Pipelines => PIPELINES_TABLE,
             Self::Udfs => UDFS_TABLE,
             Self::Tables => TABLES_TABLE,
+            Self::Models => MODELS_TABLE,
         }
     }
 }
@@ -251,6 +265,7 @@ resource_record!(StoredMqttClientConfig, SharedMqttClients);
 resource_record!(StoredMemoryTopic, MemoryTopics);
 resource_record!(StoredUdf, Udfs);
 resource_record!(StoredTable, Tables);
+resource_record!(StoredModel, Models);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataExportSnapshot {
@@ -263,6 +278,7 @@ pub struct MetadataExportSnapshot {
     pub memory_topics: Vec<StoredMemoryTopic>,
     pub udfs: Vec<StoredUdf>,
     pub tables: Vec<StoredTable>,
+    pub models: Vec<StoredModel>,
 }
 
 /// Information about an uploaded file returned by the list API.
@@ -500,6 +516,22 @@ impl MetadataStorage {
         self.delete_entry(TABLES_TABLE, id)
     }
 
+    pub fn create_model(&self, model: StoredModel) -> Result<(), StorageError> {
+        self.insert_if_absent(MODELS_TABLE, &model.name, &model)
+    }
+
+    pub fn get_model(&self, name: &str) -> Result<Option<StoredModel>, StorageError> {
+        self.get_entry(MODELS_TABLE, name)
+    }
+
+    pub fn list_models(&self) -> Result<Vec<StoredModel>, StorageError> {
+        self.list_entries(MODELS_TABLE)
+    }
+
+    pub fn delete_model(&self, name: &str) -> Result<(), StorageError> {
+        self.delete_entry(MODELS_TABLE, name)
+    }
+
     pub fn export_snapshot(&self) -> Result<MetadataExportSnapshot, StorageError> {
         let _guard = self.lock_db()?;
         let txn = self
@@ -517,6 +549,7 @@ impl MetadataStorage {
             memory_topics: Self::list_entries_in_read_txn(&txn, MEMORY_TOPICS_TABLE)?,
             udfs: Self::list_entries_in_read_txn(&txn, UDFS_TABLE)?,
             tables: Self::list_entries_in_read_txn(&txn, TABLES_TABLE)?,
+            models: Self::list_entries_in_read_txn(&txn, MODELS_TABLE)?,
         })
     }
 
@@ -627,6 +660,7 @@ impl MetadataStorage {
         check_resources!(&snapshot.memory_topics, MemoryTopics, topic);
         check_resources!(&snapshot.udfs, Udfs, name);
         check_resources!(&snapshot.tables, Tables, id);
+        check_resources!(&snapshot.models, Models, name);
         for marker in &snapshot.tombstones {
             if marker.identity.is_empty()
                 || marker.revision == 0
@@ -719,6 +753,9 @@ impl MetadataStorage {
         write_entries!(&txn, TABLES_TABLE, &snapshot.tables, |table| {
             table.id.as_str()
         })?;
+        write_entries!(&txn, MODELS_TABLE, &snapshot.models, |model| {
+            model.name.as_str()
+        })?;
         for marker in &snapshot.tombstones {
             {
                 let mut live = txn
@@ -788,6 +825,8 @@ impl MetadataStorage {
         txn.open_table(TOMBSTONES_TABLE)
             .map_err(StorageError::backend)?;
         txn.open_table(SCHEMAS_TABLE)
+            .map_err(StorageError::backend)?;
+        txn.open_table(MODELS_TABLE)
             .map_err(StorageError::backend)?;
         txn.commit().map_err(StorageError::backend)?;
         Ok(())
@@ -891,6 +930,7 @@ impl MetadataStorage {
                     ResourceKind::MemoryTopics => revision!(StoredMemoryTopic),
                     ResourceKind::Udfs => revision!(StoredUdf),
                     ResourceKind::Tables => revision!(StoredTable),
+                    ResourceKind::Models => revision!(StoredModel),
                 })
             }
             None => None,
@@ -1418,6 +1458,56 @@ impl StorageManager {
         self.metadata.delete_table(id)
     }
 
+    pub fn create_model(&self, model: StoredModel) -> Result<(), StorageError> {
+        self.metadata.create_model(model)
+    }
+
+    pub fn get_model(&self, name: &str) -> Result<Option<StoredModel>, StorageError> {
+        self.metadata.get_model(name)
+    }
+
+    pub fn list_models(&self) -> Result<Vec<StoredModel>, StorageError> {
+        self.metadata.list_models()
+    }
+
+    pub fn delete_model(&self, name: &str) -> Result<(), StorageError> {
+        self.metadata.delete_model(name)
+    }
+
+    /// Returns the directory containing installed model bundles.
+    pub fn models_dir(&self) -> PathBuf {
+        self.base_dir.join("models")
+    }
+
+    /// Publish an extracted model bundle under its immutable model name.
+    pub fn publish_model_bundle(&self, name: &str, staged_dir: &Path) -> Result<(), StorageError> {
+        fs::create_dir_all(self.models_dir()).map_err(StorageError::io)?;
+        let target = self.model_bundle_path(name)?;
+        if target.exists() {
+            return Err(StorageError::AlreadyExists(name.to_string()));
+        }
+        fs::rename(staged_dir, target).map_err(StorageError::io)
+    }
+
+    pub fn remove_model_bundle(&self, name: &str) -> Result<(), StorageError> {
+        let path = self.model_bundle_path(name)?;
+        match fs::remove_dir_all(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(StorageError::io(error)),
+        }
+    }
+
+    fn model_bundle_path(&self, name: &str) -> Result<PathBuf, StorageError> {
+        let mut components = Path::new(name).components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return Err(StorageError::InvalidInput(
+                "model name must be a single filesystem path component".to_string(),
+            ));
+        }
+        Ok(self.models_dir().join(name))
+    }
+
     pub fn get_tombstone(
         &self,
         kind: ResourceKind,
@@ -1493,6 +1583,7 @@ mod tests {
             memory_topics: vec![],
             udfs: vec![],
             tables: vec![],
+            models: vec![],
         }
     }
 
@@ -1999,6 +2090,7 @@ mod tests {
             memory_topics: vec![sample_memory_topic()],
             udfs: vec![],
             tables: vec![],
+            models: vec![],
         };
 
         storage
@@ -2048,6 +2140,7 @@ mod tests {
             memory_topics: vec![memory_topic.clone()],
             udfs: vec![],
             tables: vec![],
+            models: vec![],
         };
 
         storage

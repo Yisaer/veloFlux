@@ -274,6 +274,12 @@ pub(crate) async fn apply_manifest(
 ) -> Result<ApplyResponse, ApplyError> {
     crate::export::validate_resource_manifest(&manifest).map_err(invalid)?;
     normalize(&mut manifest.resources).map_err(invalid)?;
+    if !manifest.resources.models.is_empty() || !manifest.deletions.models.is_empty() {
+        return Err(invalid(
+            "model resources must be imported through /storage/import so their bundle files can be published atomically"
+                .to_string(),
+        ));
+    }
     apply_core::validate_incoming_identities(&manifest.resources).map_err(invalid)?;
     manifest
         .deletions
@@ -417,6 +423,7 @@ pub(crate) async fn apply_manifest(
         Default::default(),
         schema_tree.take(),
         &prepared.wasm_staged,
+        None,
     )
     .map_err(internal)?;
     let mut affected = apply_runtime(state, execution_scope, &pending, &mut results).await;
@@ -3116,6 +3123,7 @@ mod tests {
             &[],
             &state.storage.wasm_files_dir(),
             &state.storage.schemas_dir(),
+            &state.storage.models_dir(),
         )
         .unwrap();
         let mut multipart = b"--apply_boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"apply.zip\"\r\nContent-Type: application/zip\r\n\r\n".to_vec();
@@ -3229,6 +3237,7 @@ mod tests {
             memory_topics: vec![],
             udfs: vec![],
             tables: vec![],
+            models: vec![],
         };
         restarted
             .storage
@@ -3410,6 +3419,7 @@ mod tests {
                 &[],
                 &files.path().join("wasm_files"),
                 &files.path().join("schemas"),
+                &files.path().join("models"),
             )
             .unwrap()
         };

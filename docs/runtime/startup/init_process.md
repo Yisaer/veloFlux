@@ -19,6 +19,7 @@ and import use the same directory inside a ZIP envelope.
   compares it only for equality with the last completely applied init bundle.
 - `revision` is a required positive JSON safe integer on every schema, UDF,
   memory topic, shared MQTT client, stream, table, and pipeline.
+- Model entries are reserved for full storage import/export and are not supported by startup init directories. An init manifest may contain an empty `models` collection for format compatibility, but non-empty model entries make the init bundle incomplete and prevent its bundle version from advancing.
 - A resource from init replaces the stored resource only when its revision is
   strictly greater. Equal and lower revisions are `ignored_not_newer` without
   comparing content.

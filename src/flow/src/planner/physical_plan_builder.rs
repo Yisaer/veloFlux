@@ -14,18 +14,17 @@ use crate::planner::logical::{
 };
 use crate::planner::physical::physical_compute::PhysicalComputeField;
 use crate::planner::physical::physical_project::PhysicalProjectField;
-use crate::planner::physical::physical_wasm_udf_compute::PhysicalWasmUdfEvaluation;
 use crate::planner::physical::{
     DataDomain, LookupJoinKeySlot, PartitionGroupKey, PhysicalAggregation, PhysicalBatch,
-    PhysicalCompute, PhysicalDataSink, PhysicalDataSource, PhysicalDecoder,
-    PhysicalDecoderEventtimeSpec, PhysicalEmptySuppress, PhysicalEventtimeWatermark,
-    PhysicalFilter, PhysicalLookupJoin, PhysicalLookupJoinConfig,
-    PhysicalMemoryCollectionMaterialize, PhysicalOrder, PhysicalOrderKey, PhysicalPlan,
-    PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect, PhysicalRowDiff,
-    PhysicalSampler, PhysicalSharedStream, PhysicalSharedStreamRequirement, PhysicalSinkCompress,
-    PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSinkEncrypt, PhysicalSourceChangeGate,
-    PhysicalStatefulFunction, PhysicalTableScan, PhysicalTableScanSpec, PipelineStateUsage,
-    StatefulCall, WatermarkConfig,
+    PhysicalBatchFunctionCompute, PhysicalBatchFunctionEvaluation, PhysicalCompute,
+    PhysicalDataSink, PhysicalDataSource, PhysicalDecoder, PhysicalDecoderEventtimeSpec,
+    PhysicalEmptySuppress, PhysicalEventtimeWatermark, PhysicalFilter, PhysicalLookupJoin,
+    PhysicalLookupJoinConfig, PhysicalMemoryCollectionMaterialize, PhysicalOrder, PhysicalOrderKey,
+    PhysicalPlan, PhysicalProcessTimeWatermark, PhysicalProject, PhysicalResultCollect,
+    PhysicalRowDiff, PhysicalSampler, PhysicalSharedStream, PhysicalSharedStreamRequirement,
+    PhysicalSinkCompress, PhysicalSinkConnector, PhysicalSinkEncoder, PhysicalSinkEncrypt,
+    PhysicalSourceChangeGate, PhysicalStatefulFunction, PhysicalTableScan, PhysicalTableScanSpec,
+    PipelineStateUsage, StatefulCall, WatermarkConfig,
 };
 use crate::planner::shared_stream_plan::create_physical_plan_for_shared_stream;
 use crate::planner::sink::{CommonSinkProps, PipelineSink, PipelineSinkConnector};
@@ -47,32 +46,28 @@ pub struct PhysicalPlanBuildOptions {
     pub shared_slot_versions: HashMap<String, u64>,
 }
 
-struct WasmUdfLowerer<'a> {
+struct BatchFunctionLowerer<'a> {
     bindings: &'a SchemaBinding,
     registry: &'a crate::expr::custom_func::CustomFuncRegistry,
-    state: &'a mut WasmUdfLoweringState,
-    evaluations: Vec<PhysicalWasmUdfEvaluation>,
+    state: &'a mut BatchFunctionLoweringState,
+    evaluations: Vec<PhysicalBatchFunctionEvaluation>,
 }
 
-struct WasmUdfLoweringState {
+struct BatchFunctionLoweringState {
     next_id: usize,
-    outputs: HashMap<String, String>,
 }
 
-impl WasmUdfLoweringState {
+impl BatchFunctionLoweringState {
     fn new() -> Self {
-        Self {
-            next_id: 1,
-            outputs: HashMap::new(),
-        }
+        Self { next_id: 1 }
     }
 }
 
-impl<'a> WasmUdfLowerer<'a> {
+impl<'a> BatchFunctionLowerer<'a> {
     fn new(
         registry: &'a crate::expr::custom_func::CustomFuncRegistry,
         bindings: &'a SchemaBinding,
-        state: &'a mut WasmUdfLoweringState,
+        state: &'a mut BatchFunctionLoweringState,
     ) -> Self {
         Self {
             registry,
@@ -83,7 +78,7 @@ impl<'a> WasmUdfLowerer<'a> {
     }
 
     fn lower(&mut self, expr: &mut Expr) -> Result<(), String> {
-        let mut visitor = WasmUdfExprRewriter { lowerer: self };
+        let mut visitor = BatchFunctionExprRewriter { lowerer: self };
         match VisitMut::visit(expr, &mut visitor) {
             ControlFlow::Continue(()) => Ok(()),
             ControlFlow::Break(error) => Err(error),
@@ -91,11 +86,11 @@ impl<'a> WasmUdfLowerer<'a> {
     }
 }
 
-struct WasmUdfExprRewriter<'a, 'b> {
-    lowerer: &'a mut WasmUdfLowerer<'b>,
+struct BatchFunctionExprRewriter<'a, 'b> {
+    lowerer: &'a mut BatchFunctionLowerer<'b>,
 }
 
-impl VisitorMut for WasmUdfExprRewriter<'_, '_> {
+impl VisitorMut for BatchFunctionExprRewriter<'_, '_> {
     type Break = String;
 
     fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
@@ -103,10 +98,10 @@ impl VisitorMut for WasmUdfExprRewriter<'_, '_> {
             return ControlFlow::Continue(());
         };
         let name = function.name.to_string().to_lowercase();
-        let Some(udf) = self.lowerer.registry.get(&name) else {
+        let Some(batch_func) = self.lowerer.registry.get(&name) else {
             return ControlFlow::Continue(());
         };
-        if !udf.is_batch() {
+        if !batch_func.is_batch() {
             return ControlFlow::Continue(());
         }
         let args = match function
@@ -119,7 +114,7 @@ impl VisitorMut for WasmUdfExprRewriter<'_, '_> {
                     ..
                 } => Ok(expr.clone()),
                 _ => Err(format!(
-                    "WASM UDF '{name}' only supports expression arguments"
+                    "batch function '{name}' only supports expression arguments"
                 )),
             })
             .collect::<Result<Vec<_>, _>>()
@@ -128,12 +123,7 @@ impl VisitorMut for WasmUdfExprRewriter<'_, '_> {
             Err(error) => return ControlFlow::Break(error),
         };
         let original = expr.clone();
-        let key = format!("{original:?}");
-        if let Some(output_column) = self.lowerer.state.outputs.get(&key) {
-            *expr = Expr::Identifier(sqlparser::ast::Ident::new(output_column));
-            return ControlFlow::Continue(());
-        }
-        let output_column = format!("__vf_wasm_{}", self.lowerer.state.next_id);
+        let output_column = format!("__vf_batch_{}", self.lowerer.state.next_id);
         self.lowerer.state.next_id += 1;
         let args = match args
             .into_iter()
@@ -149,22 +139,20 @@ impl VisitorMut for WasmUdfExprRewriter<'_, '_> {
             Ok(args) => args,
             Err(error) => return ControlFlow::Break(error),
         };
-        self.lowerer.evaluations.push(PhysicalWasmUdfEvaluation {
-            output_column: output_column.clone(),
-            udf,
-            args,
-            original_expr: original,
-        });
         self.lowerer
-            .state
-            .outputs
-            .insert(key, output_column.clone());
+            .evaluations
+            .push(PhysicalBatchFunctionEvaluation {
+                output_column: output_column.clone(),
+                function: batch_func,
+                args,
+                original_expr: original,
+            });
         *expr = Expr::Identifier(sqlparser::ast::Ident::new(output_column));
         ControlFlow::Continue(())
     }
 }
 
-fn lower_wasm_udfs(
+fn lower_batch_functions(
     expressions: &mut [Expr],
     child: Arc<PhysicalPlan>,
     bindings: &SchemaBinding,
@@ -172,7 +160,8 @@ fn lower_wasm_udfs(
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     let evaluations = {
-        let mut lowerer = WasmUdfLowerer::new(registry, bindings, &mut builder.wasm_udf_state);
+        let mut lowerer =
+            BatchFunctionLowerer::new(registry, bindings, &mut builder.batch_function_state);
         for expression in expressions {
             lowerer.lower(expression)?;
         }
@@ -182,8 +171,8 @@ fn lower_wasm_udfs(
         return Ok(child);
     }
     let index = builder.allocate_index();
-    Ok(Arc::new(PhysicalPlan::WasmUdfCompute(
-        crate::planner::physical::PhysicalWasmUdfCompute::new(evaluations, child, index),
+    Ok(Arc::new(PhysicalPlan::BatchFunctionCompute(
+        PhysicalBatchFunctionCompute::new(evaluations, child, index),
     )))
 }
 
@@ -373,7 +362,7 @@ pub struct PhysicalPlanBuilder {
     /// Slot versions per shared source, populated by [`apply_shared_stream_slot_schemas`]
     /// before physical plan building.
     shared_slot_versions: HashMap<String, u64>,
-    wasm_udf_state: WasmUdfLoweringState,
+    batch_function_state: BatchFunctionLoweringState,
 }
 
 impl PhysicalPlanBuilder {
@@ -383,7 +372,7 @@ impl PhysicalPlanBuilder {
             node_cache: std::collections::HashMap::new(),
             memory_collection_materialize_cache: std::collections::HashMap::new(),
             shared_slot_versions: HashMap::new(),
-            wasm_udf_state: WasmUdfLoweringState::new(),
+            batch_function_state: BatchFunctionLoweringState::new(),
         }
     }
 
@@ -393,7 +382,7 @@ impl PhysicalPlanBuilder {
             node_cache: std::collections::HashMap::new(),
             memory_collection_materialize_cache: std::collections::HashMap::new(),
             shared_slot_versions: HashMap::new(),
-            wasm_udf_state: WasmUdfLoweringState::new(),
+            batch_function_state: BatchFunctionLoweringState::new(),
         }
     }
 
@@ -745,10 +734,10 @@ fn create_physical_stateful_function_with_builder(
         .collect();
     let custom_registry = registries.custom_func_registry();
     let evaluations = {
-        let mut lowerer = WasmUdfLowerer::new(
+        let mut lowerer = BatchFunctionLowerer::new(
             custom_registry.as_ref(),
             bindings,
-            &mut builder.wasm_udf_state,
+            &mut builder.batch_function_state,
         );
         for spec in &mut stateful_specs {
             for expr in &mut spec.args {
@@ -771,8 +760,8 @@ fn create_physical_stateful_function_with_builder(
             .pop()
             .ok_or_else(|| "stateful plan must have one child".to_string())?;
         let index = builder.allocate_index();
-        physical_children.push(Arc::new(PhysicalPlan::WasmUdfCompute(
-            crate::planner::physical::PhysicalWasmUdfCompute::new(evaluations, child, index),
+        physical_children.push(Arc::new(PhysicalPlan::BatchFunctionCompute(
+            PhysicalBatchFunctionCompute::new(evaluations, child, index),
         )));
     }
 
@@ -906,10 +895,10 @@ fn create_physical_window_with_builder(
     let mut window_spec = logical_window.spec.clone();
     let custom_registry = registries.custom_func_registry();
     let evaluations = {
-        let mut lowerer = WasmUdfLowerer::new(
+        let mut lowerer = BatchFunctionLowerer::new(
             custom_registry.as_ref(),
             bindings,
-            &mut builder.wasm_udf_state,
+            &mut builder.batch_function_state,
         );
         match &mut window_spec {
             LogicalWindowSpec::Tumbling { partition_by, .. }
@@ -950,8 +939,8 @@ fn create_physical_window_with_builder(
             .pop()
             .ok_or_else(|| "window plan must have one child".to_string())?;
         let index = builder.allocate_index();
-        physical_children.push(Arc::new(PhysicalPlan::WasmUdfCompute(
-            crate::planner::physical::PhysicalWasmUdfCompute::new(evaluations, child, index),
+        physical_children.push(Arc::new(PhysicalPlan::BatchFunctionCompute(
+            PhysicalBatchFunctionCompute::new(evaluations, child, index),
         )));
     }
 
@@ -1199,7 +1188,7 @@ fn create_physical_aggregation_with_builder(
     let child = physical_children
         .pop()
         .ok_or_else(|| "aggregation plan must have one child".to_string())?;
-    let child = lower_wasm_udfs(
+    let child = lower_batch_functions(
         &mut expressions,
         child,
         bindings,
@@ -1544,7 +1533,7 @@ fn create_physical_filter_with_builder_cached(
     let child = physical_children
         .pop()
         .ok_or_else(|| "filter plan must have one child".to_string())?;
-    let child = lower_wasm_udfs(
+    let child = lower_batch_functions(
         std::slice::from_mut(&mut predicate),
         child,
         bindings,
@@ -1609,7 +1598,7 @@ fn create_physical_order_with_builder_cached(
     let child = physical_children
         .pop()
         .ok_or_else(|| "order plan must have one child".to_string())?;
-    let child = lower_wasm_udfs(
+    let child = lower_batch_functions(
         &mut order_exprs,
         child,
         bindings,
@@ -1667,7 +1656,7 @@ fn create_physical_compute_with_builder_cached(
     let child = physical_children
         .pop()
         .ok_or_else(|| "compute plan must have one child".to_string())?;
-    let child = lower_wasm_udfs(
+    let child = lower_batch_functions(
         &mut expressions,
         child,
         bindings,
@@ -1720,7 +1709,7 @@ fn create_physical_project_with_builder_cached(
     let child = physical_children
         .pop()
         .ok_or_else(|| "project plan must have one child".to_string())?;
-    let child = lower_wasm_udfs(
+    let child = lower_batch_functions(
         &mut expressions,
         child,
         bindings,

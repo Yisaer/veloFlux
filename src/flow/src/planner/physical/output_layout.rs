@@ -224,7 +224,7 @@ impl PhysicalPlan {
                 Ok(layout)
             }
 
-            PhysicalPlan::WasmUdfCompute(plan) => {
+            PhysicalPlan::BatchFunctionCompute(plan) => {
                 let mut layout = passthrough_single_child(self)?;
                 for evaluation in &plan.evaluations {
                     let name: Arc<str> = Arc::from(evaluation.output_column.as_str());

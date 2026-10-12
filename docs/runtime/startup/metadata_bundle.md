@@ -8,9 +8,10 @@ schemas/<type>/<name>/
 wasm_files/<sha256>.wasm
 ```
 
-`manifest.json` uses `format_version: 1` and contains seven resource collections:
-memory topics, shared MQTT clients, schemas, streams, tables, pipelines, and
-UDFs.
+`manifest.json` uses `format_version: 1` and contains the resource collections
+for memory topics, shared MQTT clients, schemas, streams, tables, pipelines, and
+UDFs. Models are supported by full storage import/export, but startup init and
+incremental Apply accept only an empty `models` collection.
 Every resource or deletion requires a `revision` in `1..=9007199254740991`.
 `resources`, optional `deletions`, and each collection may be omitted; omitted
 collections are empty, while `null` and non-array collections are invalid.

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 datatypes = { path = "../datatypes" }
+model-runtime = { package = "veloflux-model-runtime", path = "../model-runtime", default-features = false, optional = true }
 parser = { path = "../parser" }
 build_info = { path = "../build_info" }
 veloflux_metrics = { path = "../metrics" }
@@ -74,6 +75,7 @@ tempfile = "3"
 tokio = { version = "1", default-features = false, features = ["macros", "net", "rt", "sync", "time", "test-util"] }
 
 [features]
+onnx = ["dep:model-runtime", "model-runtime/onnx"]
 deadlock_detection = ["parking_lot/deadlock_detection"]
 video_gstreamer = ["gstreamer", "gstreamer-app"]
 nng_pubsub = ["anng"]

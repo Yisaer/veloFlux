@@ -235,6 +235,7 @@ async fn import_accepts_omitted_resources_as_empty_snapshot() {
             "pipelines": 0,
             "udfs": 0,
             "tables": 0,
+            "models": 0,
         }),
     );
 }

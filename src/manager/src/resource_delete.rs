@@ -13,6 +13,7 @@ pub(crate) fn kind_name(kind: ResourceKind) -> &'static str {
         ResourceKind::Pipelines => "pipelines",
         ResourceKind::Udfs => "udfs",
         ResourceKind::Tables => "tables",
+        ResourceKind::Models => "models",
     }
 }
 
@@ -137,6 +138,7 @@ pub(crate) fn remove(resources: &mut ExportResources, marker: &StoredTombstone) 
         ResourceKind::Tables => resources
             .tables
             .retain(|v| v.definition.name != marker.identity),
+        ResourceKind::Models => resources.models.retain(|v| v.name != marker.identity),
     }
 }
 
@@ -294,6 +296,7 @@ pub(crate) async fn handler(
             .into_response(),
         #[cfg(not(feature = "wasm_udf"))]
         ResourceKind::Udfs => StatusCode::NOT_FOUND.into_response(),
+        ResourceKind::Models => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -427,7 +430,7 @@ pub(crate) async fn cleanup(
             }
             // UDF DELETE keeps already bound functions until restart, matching
             // the ordinary endpoint's runtime contract.
-            ResourceKind::Udfs | ResourceKind::Schemas => {}
+            ResourceKind::Udfs | ResourceKind::Schemas | ResourceKind::Models => {}
         }
     }
     // Bulk deletion reclaims WASM once for the final accepted metadata state.

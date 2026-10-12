@@ -51,6 +51,8 @@ pub struct ExportResources {
     pub udfs: Vec<ExportUdf>,
     #[serde(default)]
     pub tables: Vec<ExportTable>,
+    #[serde(default)]
+    pub models: Vec<ExportModel>,
 }
 
 impl ExportResources {
@@ -80,6 +82,7 @@ impl ExportResources {
             .clone());
         live!(udfs, Udfs, |v: &ExportUdf| v.name.to_ascii_lowercase());
         live!(tables, Tables, |v: &ExportTable| v.definition.name.clone());
+        live!(models, Models, |v: &ExportModel| v.name.clone());
         identities
     }
 }
@@ -117,6 +120,8 @@ pub struct ExportDeletions {
     pub udfs: Vec<NameDeletion>,
     #[serde(default)]
     pub tables: Vec<NameDeletion>,
+    #[serde(default)]
+    pub models: Vec<NameDeletion>,
 }
 
 impl ExportDeletions {
@@ -144,6 +149,7 @@ impl ExportDeletions {
         collect!(pipelines, Pipelines, id);
         collect!(udfs, Udfs, name);
         collect!(tables, Tables, name);
+        collect!(models, Models, name);
         markers
     }
 
@@ -159,6 +165,7 @@ impl ExportDeletions {
                 ResourceKind::Streams | ResourceKind::Tables => ResourceIdKind::StreamName,
                 ResourceKind::Pipelines => ResourceIdKind::PipelineId,
                 ResourceKind::Udfs => ResourceIdKind::UdfName,
+                ResourceKind::Models => ResourceIdKind::ModelName,
             };
             validate_resource_id(id_kind, &marker.identity)?;
             if !seen.insert((marker.kind, marker.identity.clone())) {
@@ -206,6 +213,10 @@ impl ExportDeletions {
                     revision,
                 }),
                 storage::ResourceKind::Tables => deletions.tables.push(NameDeletion {
+                    name: identity,
+                    revision,
+                }),
+                storage::ResourceKind::Models => deletions.models.push(NameDeletion {
                     name: identity,
                     revision,
                 }),
@@ -272,6 +283,19 @@ pub struct ExportSchema {
     pub props: serde_json::Map<String, serde_json::Value>,
 }
 
+/// Model metadata included in the export bundle. The model files are stored
+/// below `models/<name>/` in the same ZIP archive.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ExportModel {
+    pub name: String,
+    #[serde(deserialize_with = "crate::revision::deserialize_revision")]
+    pub revision: u64,
+    pub model_sha256: String,
+    pub model_size_bytes: u64,
+    pub model_card_yaml: String,
+    pub test_vector_count: u32,
+}
+
 pub async fn export_storage_handler(
     State(state): State<AppState>,
     Query(query): Query<ExportStorageQuery>,
@@ -320,8 +344,9 @@ pub async fn export_storage_handler(
         .collect();
     let wasm_dir = state.storage.wasm_files_dir();
     let schemas_dir = state.storage.schemas_dir();
+    let models_dir = state.storage.models_dir();
 
-    let zip = match build_zip(&manifest, &udf_shas, &wasm_dir, &schemas_dir) {
+    let zip = match build_zip(&manifest, &udf_shas, &wasm_dir, &schemas_dir, &models_dir) {
         Ok(data) => data,
         Err(err) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
@@ -405,6 +430,7 @@ pub(crate) fn build_zip(
     udf_shas: &[String],
     wasm_dir: &std::path::Path,
     schemas_dir: &std::path::Path,
+    models_dir: &std::path::Path,
 ) -> Result<Vec<u8>, String> {
     let manifest_json =
         serde_json::to_vec(manifest).map_err(|e| format!("serialize resource manifest: {e}"))?;
@@ -438,6 +464,19 @@ pub(crate) fn build_zip(
             &format!("schemas/{schema_type}/{}", schema.name),
         )
         .map_err(|e| format!("write schema {} to ZIP: {e}", schema.name))?;
+    }
+
+    for model in &manifest.resources.models {
+        let model_dir = models_dir.join(&model.name);
+        if !model_dir.is_dir() {
+            return Err(format!(
+                "model {} is missing from {}",
+                model.name,
+                model_dir.display()
+            ));
+        }
+        add_directory_to_zip(&mut zip, &model_dir, &format!("models/{}", model.name))
+            .map_err(|e| format!("write model {} to ZIP: {e}", model.name))?;
     }
 
     zip.finish()
@@ -564,6 +603,20 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
     }
     tables.sort_by(|a, b| a.definition.name.cmp(&b.definition.name));
 
+    let mut models = snapshot
+        .models
+        .into_iter()
+        .map(|model| ExportModel {
+            name: model.name,
+            revision: model.revision,
+            model_sha256: model.model_sha256,
+            model_size_bytes: model.model_size_bytes,
+            model_card_yaml: model.model_card_yaml,
+            test_vector_count: model.test_vector_count,
+        })
+        .collect::<Vec<_>>();
+    models.sort_by(|a, b| a.name.cmp(&b.name));
+
     Ok(ExportResources {
         memory_topics,
         shared_mqtt_clients,
@@ -572,6 +625,7 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
         pipelines,
         udfs,
         tables,
+        models,
     })
 }
 

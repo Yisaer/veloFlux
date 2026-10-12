@@ -43,6 +43,7 @@ pub(crate) enum ResourceIdKind {
     MemoryTopic,
     SharedMqttClientKey,
     UdfName,
+    ModelName,
 }
 
 impl ResourceIdKind {
@@ -57,8 +58,39 @@ impl ResourceIdKind {
             ResourceIdKind::MemoryTopic => "memory topic",
             ResourceIdKind::SharedMqttClientKey => "shared mqtt client key",
             ResourceIdKind::UdfName => "UDF name",
+            ResourceIdKind::ModelName => "model name",
         }
     }
+}
+
+/// Validate a model name used as both a resource identity and a bundle directory.
+pub(crate) fn validate_model_name(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("model name must not be empty".to_string());
+    }
+    if value.len() > MAX_RESOURCE_ID_LEN {
+        return Err(format!(
+            "model name must be at most {MAX_RESOURCE_ID_LEN} bytes"
+        ));
+    }
+    let mut chars = value.chars();
+    if !chars
+        .next()
+        .is_some_and(|character| character.is_ascii_alphabetic())
+    {
+        return Err("model name must start with an ASCII letter".to_string());
+    }
+    if value.ends_with('.') || value.contains("..") {
+        return Err("model name must not end with a dot or contain consecutive dots".to_string());
+    }
+    if !chars
+        .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '.')
+    {
+        return Err(
+            "model name may contain only ASCII letters, digits, underscores, and dots".to_string(),
+        );
+    }
+    Ok(())
 }
 
 const GRAMMAR_HINT: &str = "expected [A-Za-z][A-Za-z0-9_]{0,127}";

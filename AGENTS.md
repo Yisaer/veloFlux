@@ -11,7 +11,7 @@
 - `make fmt`, `make clippy` — 执行格式化与 lint（`-D warnings`）。
 
 ## 代码风格与命名约定
-- 运行 `make fmt`，遵循 Rustfmt 默认风格（4 空格缩进、尾随逗号）。
+- 遵循 Rustfmt 默认风格（4 空格缩进、尾随逗号）；需要格式化时运行 `make fmt`。
 - 代码、注释与标识符统一使用英文;使用 `snake_case` 命名条目、`CamelCase` 命名类型、SCREAMING_SNAKE_CASE 命名常量。
 - 遵守模块边界：parser 不依赖 flow；flow 只消费 `SelectStmt` 的输出（不直接消费原始 `sqlparser::Expr`）。
 
@@ -51,9 +51,9 @@
 
 ## 编码守则
 - 每次写代码前，必须先将代码修改的设计方案与我确认；未经确认不得直接改代码。
-- 每次修改完 Rust 代码后，必须立即运行 `make fmt` 与 `make clippy` 检查，确认通过后才能继续下一步。
+- 是否运行 `make fmt` 与 `make clippy` 由改动范围和风险判断：小范围或文档性修改不要求立即运行；涉及较大 Rust 改动、公共 API、构建配置或难以判断时，应先询问维护者。
 - 不用关心 `git status`，交给用户自己操作。
-- 开发完成的代码必须通过 `make fmt` 与 `make clippy`；提交/合并前优先用这两个命令自检（clippy 以 `-D warnings` 运行）。
+- 提交 PR 前优先运行 `make fmt` 与 `make clippy` 做最终自检（clippy 以 `-D warnings` 运行）；开发过程中根据改动范围自行决定是否提前运行。
 - 任何代码注释以及 `docs/` 下的文档编写均应使用英文。
 - 对同一 struct 的同一职责，尽量维护单一方法入口；允许但克制使用 `with_*` 变体，避免因少量参数差异扩散出多个近似方法。需要可选项/扩展点时，优先使用 Options/Config struct、枚举参数，或独立的 builder struct。
 - 当需要我们生成 PR title 和 PR description 时，PR title 必须通过 CI 的 `PR Title Lint`（Conventional Commits 规范）。

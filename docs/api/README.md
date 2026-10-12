@@ -13,3 +13,4 @@ This section contains runtime-facing HTTP and introspection contracts.
 - [Storage error comparison](storage_errors.md): init/Apply/import examples and retry contracts.
 
 - [Resource deletion and tombstones](storage_delete.md)
+- [ONNX model management](models.md): feature-gated model bundle upload and lifecycle API.

@@ -9,16 +9,16 @@ use std::collections::{BTreeSet, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use storage::{
-    MetadataExportSnapshot, StoredMemoryTopic, StoredMqttClientConfig, StoredPipelineRunState,
-    StoredSchema, StoredUdf,
+    MetadataExportSnapshot, StoredMemoryTopic, StoredModel, StoredMqttClientConfig,
+    StoredPipelineRunState, StoredSchema, StoredUdf,
 };
 use tokio::sync::TryAcquireError;
 use zip::ZipArchive;
 
 use crate::audit::ResourceMutationLog;
 use crate::export::{
-    ExportMemoryTopic, ExportResources, ExportUdf, ResourceManifestV1, build_export_resources,
-    validate_resource_manifest,
+    ExportMemoryTopic, ExportModel, ExportResources, ExportUdf, ResourceManifestV1,
+    build_export_resources, validate_resource_manifest,
 };
 use crate::pipeline::{AppState, CreatePipelineRequest, validate_create_request};
 use crate::resource_id::{ResourceIdKind, defaulted_flow_instance_id, validate_resource_id};
@@ -52,6 +52,7 @@ pub struct ImportResourceCounts {
     pub pipelines: usize,
     pub udfs: usize,
     pub tables: usize,
+    pub models: usize,
 }
 
 /// Accept a metadata bundle ZIP through a multipart `file` field.
@@ -204,6 +205,25 @@ pub async fn import_storage_handler(
         }
     }
 
+    let model_count = snapshot.models.len();
+    let validated_models_dir = tmp.path().join(".validated-models");
+    if let Err(err) = std::fs::create_dir(&validated_models_dir) {
+        let err = format!("create validated model staging directory: {err}");
+        audit.log_failure(&err);
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+    }
+    if model_count > 0 {
+        let models_src = tmp.path().join("models");
+        if let Err(err) = validate_and_copy_models_for_import(
+            &snapshot.models,
+            &models_src,
+            &validated_models_dir,
+        ) {
+            audit.log_failure(&err);
+            return (StatusCode::BAD_REQUEST, err).into_response();
+        }
+    }
+
     let previous_resources = match build_export_resources(state.storage.as_ref()) {
         Ok(resources) => resources,
         Err(err) => {
@@ -220,6 +240,7 @@ pub async fn import_storage_handler(
         pipelines: snapshot.pipelines.len(),
         udfs: udf_count,
         tables: snapshot.tables.len(),
+        models: model_count,
     };
     let referenced_wasm = snapshot
         .udfs
@@ -236,6 +257,7 @@ pub async fn import_storage_handler(
         },
         Some(schema_tree),
         &validated_wasm_dir,
+        Some(&validated_models_dir),
     ) {
         audit.log_failure(&err);
         return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
@@ -596,6 +618,7 @@ where
     }
 
     let udfs: Vec<StoredUdf> = validate_import_udfs(&bundle.resources.udfs)?;
+    let models = validate_import_models(&bundle.resources.models)?;
 
     let mut tables = Vec::with_capacity(bundle.resources.tables.len());
     let mut table_ids = BTreeSet::new();
@@ -658,7 +681,154 @@ where
         memory_topics,
         udfs,
         tables,
+        models,
     })
+}
+
+fn validate_import_models(models: &[ExportModel]) -> Result<Vec<StoredModel>, String> {
+    let mut names = BTreeSet::new();
+    let mut result = Vec::with_capacity(models.len());
+    for model in models {
+        crate::resource_id::validate_model_name(&model.name)?;
+        if !names.insert(model.name.clone()) {
+            return Err(format!("duplicate model name in bundle: {}", model.name));
+        }
+        if model.model_sha256.len() != 64
+            || !model
+                .model_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(format!("model '{}' has an invalid SHA-256", model.name));
+        }
+        if model.model_size_bytes == 0 || model.test_vector_count < 3 {
+            return Err(format!(
+                "model '{}' has invalid size or test-vector count",
+                model.name
+            ));
+        }
+        result.push(StoredModel {
+            name: model.name.clone(),
+            revision: model.revision,
+            model_sha256: model.model_sha256.clone(),
+            model_size_bytes: model.model_size_bytes,
+            model_card_yaml: model.model_card_yaml.clone(),
+            test_vector_count: model.test_vector_count,
+        });
+    }
+    Ok(result)
+}
+
+/// Validate exported model bundles and copy them into import attachment staging.
+pub(crate) fn validate_and_copy_models_for_import(
+    models: &[StoredModel],
+    models_src_dir: &Path,
+    models_dst_dir: &Path,
+) -> Result<(), String> {
+    for model in models {
+        let source = models_src_dir.join(&model.name);
+        let model_bytes = std::fs::read(source.join("model.onnx")).map_err(|error| {
+            format!(
+                "model '{}': read model.onnx from archive: {error}",
+                model.name
+            )
+        })?;
+        if model_bytes.is_empty() || model_bytes.len() as u64 != model.model_size_bytes {
+            return Err(format!(
+                "model '{}': model.onnx size does not match metadata",
+                model.name
+            ));
+        }
+        if sha256_hex(&model_bytes) != model.model_sha256 {
+            return Err(format!(
+                "model '{}': model.onnx SHA-256 does not match metadata",
+                model.name
+            ));
+        }
+        let card = std::fs::read_to_string(source.join("model.yaml")).map_err(|error| {
+            format!(
+                "model '{}': read model.yaml from archive: {error}",
+                model.name
+            )
+        })?;
+        if card != model.model_card_yaml {
+            return Err(format!(
+                "model '{}': model.yaml does not match metadata",
+                model.name
+            ));
+        }
+        let vector_count = count_model_test_vectors(&source.join("test_vectors"), &model.name)?;
+        if vector_count != model.test_vector_count as usize {
+            return Err(format!(
+                "model '{}': test-vector count does not match metadata",
+                model.name
+            ));
+        }
+        copy_model_tree(&source, &models_dst_dir.join(&model.name), &model.name)?;
+    }
+    Ok(())
+}
+
+fn count_model_test_vectors(path: &Path, model_name: &str) -> Result<usize, String> {
+    let mut inputs = BTreeSet::new();
+    let mut outputs = BTreeSet::new();
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| format!("model '{model_name}': read test_vectors: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("model '{model_name}': read vector: {error}"))?;
+        if !entry
+            .file_type()
+            .map_err(|error| format!("model '{model_name}': inspect vector: {error}"))?
+            .is_file()
+        {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(stem) = name
+            .strip_prefix("input-")
+            .and_then(|value| value.strip_suffix(".json"))
+        {
+            inputs.insert(stem.to_string());
+        }
+        if let Some(stem) = name
+            .strip_prefix("expected_output-")
+            .and_then(|value| value.strip_suffix(".json"))
+        {
+            outputs.insert(stem.to_string());
+        }
+    }
+    if inputs.len() < 3 || inputs != outputs {
+        return Err(format!(
+            "model '{model_name}': test_vectors must contain matching input/output pairs"
+        ));
+    }
+    Ok(inputs.len())
+}
+
+fn copy_model_tree(source: &Path, destination: &Path, model_name: &str) -> Result<(), String> {
+    std::fs::create_dir_all(destination)
+        .map_err(|error| format!("model '{model_name}': create staging directory: {error}"))?;
+    for entry in std::fs::read_dir(source)
+        .map_err(|error| format!("model '{model_name}': read bundle: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("model '{model_name}': read bundle entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("model '{model_name}': inspect bundle entry: {error}"))?;
+        let destination_path = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_model_tree(&entry.path(), &destination_path, model_name)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), destination_path)
+                .map_err(|error| format!("model '{model_name}': copy bundle file: {error}"))?;
+        } else {
+            return Err(format!(
+                "model '{model_name}': bundle contains a non-regular entry"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_import_udfs(udfs: &[ExportUdf]) -> Result<Vec<StoredUdf>, String> {
@@ -1022,6 +1192,7 @@ mod tests {
                 }],
                 udfs: vec![],
                 tables: vec![],
+                models: vec![],
             },
         }
     }
@@ -1057,6 +1228,7 @@ mod tests {
         wasm_dir: &std::path::Path,
         _uploads_dir: &std::path::Path,
         schemas_dir: &std::path::Path,
+        models_dir: &std::path::Path,
     ) -> Vec<u8> {
         let udf_shas: Vec<String> = bundle
             .resources
@@ -1064,7 +1236,7 @@ mod tests {
             .iter()
             .map(|u| u.wasm_sha256.clone())
             .collect();
-        crate::export::build_zip(bundle, &udf_shas, wasm_dir, schemas_dir)
+        crate::export::build_zip(bundle, &udf_shas, wasm_dir, schemas_dir, models_dir)
             .expect("build test export")
     }
 
@@ -1269,6 +1441,7 @@ mod tests {
             &[],
             &source.wasm_files_dir(),
             &source.schemas_dir(),
+            &source.models_dir(),
         )
         .unwrap();
         let extract = root.path().join("extract");
@@ -1474,6 +1647,7 @@ mod tests {
             &dir.path().join("wasm_files"),
             &dir.path().join("uploads"),
             &dir.path().join("schemas"),
+            &dir.path().join("models"),
         );
         let response = import_zip(state.clone(), zip_bytes).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1523,6 +1697,7 @@ mod tests {
             &dir.path().join("wasm_files"),
             &dir.path().join("uploads"),
             &dir.path().join("schemas"),
+            &dir.path().join("models"),
         );
         let response = import_zip(state.clone(), zip_bytes).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -1673,6 +1848,7 @@ mod tests {
             &source_storage.wasm_files_dir(),
             &source_storage.uploads_dir(),
             &source_storage.schemas_dir(),
+            &source_storage.models_dir(),
         );
 
         let target_dir = tempdir().unwrap();

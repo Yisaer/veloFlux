@@ -78,8 +78,8 @@ Hot-unregister is deferred to future work.
 1. **WASM UDFs integrate with the scalar expression system through physical lowering.** The
    parser and logical plan retain the original UDF calls. During physical-plan construction,
    WASM UDF subexpressions are materialized into temporary affiliate columns and the original
-   physical expression is rewritten to reference those columns. Processor-owned runtimes
-   execute the resulting collection-level batch evaluations without changing SQL semantics.
+   physical expression is rewritten to reference those columns. A generic batch-function
+   processor executes the resulting collection-level evaluations without changing SQL semantics.
 
 2. **WASM runtime: wasmtime.** wasmtime is a pure-Rust, production-grade WASM runtime
    with JIT compilation. It provides sandbox isolation, epoch-based interruption for
@@ -94,6 +94,42 @@ Hot-unregister is deferred to future work.
    metadata and exports `udf_batch`. The former row ABI was an implementation bridge for
    the MVP and is not part of the supported contract. The host never evaluates a WASM UDF
    through the row-level scalar evaluator.
+
+5. **One processor, multiple function evaluations and runtime instances.** The physical plan uses
+   one generic batch-function compute node for the batch functions in an expression group. Each
+   function occurrence is represented by a separate evaluation, while evaluations that have the
+   same function type and runtime binding configuration share one processor-owned runtime
+   instance. A runtime instance is not created for every SQL call.
+
+   For example:
+
+   ```sql
+   onnx(
+     wasm_udf1(a),
+     wasm_udf1(a),
+     wasm_udf2(a)
+   )
+   ```
+
+   creates four evaluations but only three runtime instances: `wasm_udf1`, `wasm_udf2`, and the
+   ONNX runtime bound to the referenced model. The two `wasm_udf1` evaluations reuse the same
+   instance.
+
+6. **Nested batch functions are ordered by dependency.** The planner extracts inner batch calls
+   first and replaces them with temporary affiliate columns. Therefore:
+
+   ```text
+   wasm_udf(onnx(a))
+       -> onnx(a) -> __vf_batch_1
+       -> wasm_udf(__vf_batch_1)
+
+   onnx(wasm_udf(a))
+       -> wasm_udf(a) -> __vf_batch_1
+       -> onnx(__vf_batch_1)
+   ```
+
+   The processor creation order is not the execution order. The ordered evaluations and their
+   temporary columns define the data dependency.
 
 ## Storage Design
 
@@ -181,8 +217,10 @@ Server-side behaviour:
    verify the batch execution export (`udf_batch`) together with `udf_metadata_ptr`,
    `udf_metadata_len`, and `memory`, verify `abi_version == 1`, and verify the memory
    cap.
-4. Write `<sha256>.wasm` to `wasm_files/`.
-5. Insert `StoredUdf` into the `udfs` redb table.
+4. Acquire the exclusive metadata and storage-operation guards, then stage the WASM file.
+5. Publish the staged WASM file and `StoredUdf` metadata through the attachment transaction
+   journal. If the process fails during publication, startup recovery either completes the
+   committed publication or removes the uncommitted file and metadata changes.
 6. Instantiate and hot-register the UDF into the running `CustomFuncRegistry` via
    `clone_and_add`. New pipelines created after this point can reference the UDF.
    Startup reload remains the recovery path after restart.
@@ -364,11 +402,11 @@ pub struct BoundWasmUdf {
 ```
 
 `WasmUdfDefinition` is referenced by the physical plan through a stable UDF identity.
-During physical-plan construction, each WASM call is lowered into a
-`PhysicalWasmUdfCompute` evaluation that writes an affiliate column. The resulting physical
-expression contains only ordinary column references and scalar functions. The compute
-processor owns the private batch runtime and never exposes a WASM UDF through the row-level
-scalar function path.
+During physical-plan construction, each WASM call is lowered into an evaluation in the shared
+`PhysicalBatchFunctionCompute` node that writes an affiliate column. The resulting physical
+expression contains only ordinary column references and scalar functions. The batch-function
+processor owns the private runtime set and never exposes a WASM UDF through the row-level scalar
+function path.
 
 Built-in functions continue to use the existing immutable `CustomFunc` path. WASM calls
 are bound to their processor-owned batch runtime during physical processor construction;
@@ -420,7 +458,7 @@ bound runtime for each distinct UDF definition used by that processor. The runti
 the mutable execution state and is reused for all collections processed by
 that processor. Different processors do not share a mutable `Instance`.
 
-For a stateless scalar UDF, multiple call sites of the same function inside one processor
+For a stateless batch UDF, multiple call sites of the same function inside one processor
 share the same processor-owned bound runtime. For example, both
 `wasm_udf(a) + wasm_udf(b)` and `wasm_udf(wasm_udf(a))` reuse the same `Store` and
 `Instance`; the nested call executes the inner and outer calls sequentially. Different
@@ -428,7 +466,7 @@ UDFs have different runtimes, and the same UDF used by two processors has one ru
 processor. This design avoids a per-row `Store` and `Instance` while retaining
 linear-memory isolation between processors and pipelines.
 
-Scalar UDFs using this model must be stateless: their result must depend only on the
+Batch UDFs using this model must be stateless: their result must depend only on the
 current arguments, not on mutable module state left by an earlier row or call site.
 Evaluator memory uses a scratch arena with a reusable high-water mark. Each row or
 batch starts allocation from the arena base; if the existing linear memory is large
@@ -528,9 +566,9 @@ are built; the registry never owns those mutable evaluators.
 
 Batch execution is a physical-plan operation, not an alternative inside the row-level
 expression evaluator. The parser and logical plan retain the original WASM UDF calls. While
-building the physical plan, each expression-bearing physical node lowers the WASM calls in
-its expressions into an upstream `PhysicalWasmUdfCompute` node and replaces them with ordered
-temporary affiliate-column references.
+building the physical plan, each expression-bearing physical node lowers the batch-function calls
+in its expressions into a shared `PhysicalBatchFunctionCompute` node and replaces them with
+ordered temporary affiliate-column references.
 
 For example:
 
@@ -550,10 +588,10 @@ The inner UDF produces a vector first; that vector is then used as an input colu
 the outer UDF. Temporary columns are internal affiliate columns and are not included in
 the final output layout.
 
-The processor-owned evaluator interface is conceptually:
+The processor-owned batch runtime interface is conceptually:
 
 ```rust
-pub trait WasmUdfEvaluator {
+pub trait BatchFunctionRuntime {
     /// Each argument vector has row_count elements. The result vector must also
     /// have row_count elements and preserve row alignment.
     fn eval_batch(&mut self, batch_args: &[Vec<Value>])
@@ -566,7 +604,7 @@ The WASM function receives vectors for all scalar arguments and returns a vector
 must preserve row alignment: output element `i` depends only on input elements at
 index `i`. This is vectorized scalar evaluation, not cross-row aggregation.
 
-The `WasmUdfComputeProcessor` receives one `Collection` and passes the complete collection
+The `BatchFunctionComputeProcessor` receives one `Collection` and passes the complete collection
 to each batch evaluation. The collection is the batch boundary; the processor does not
 split it into smaller batches. Evaluations are ordered by their temporary-column
 dependencies, and all results preserve the input row count and row order. The processor
@@ -575,11 +613,10 @@ global registry during scalar evaluation.
 
 Processor construction follows this sequence:
 
-1. Inspect the physical expressions and collect referenced WASM UDF definition IDs.
-2. Create one processor-owned `WasmRuntimeSet` and instantiate one runtime per distinct
-   definition used by that processor.
-3. Replace the physical expression's WASM function references with the bound runtime
-   functions.
+1. Inspect the physical expressions and collect referenced batch-function definition IDs.
+2. Create one processor-owned runtime set and instantiate one runtime per distinct function
+   definition and runtime binding configuration used by that processor.
+3. Associate each batch-function evaluation with its bound runtime instance.
 4. Reuse those runtimes for all collections handled by the processor.
 
 Built-in `CustomFunc` calls can continue through the existing scalar evaluator. A WASM
@@ -726,9 +763,9 @@ users of `veloflux-udf-sdk` never interact with it directly.
 ## Performance
 
 Store creation and module instantiation are not part of the collection hot path: the
-processor binds one runtime per distinct UDF and reuses it. Each collection performs one
-JSON serialization, one `udf_batch` call, and one JSON deserialization per UDF evaluation,
-instead of repeating those operations for every row.
+processor binds one runtime per distinct UDF definition and runtime configuration and reuses it.
+Each collection performs one JSON serialization, one `udf_batch` call, and one JSON
+deserialization per UDF evaluation, instead of repeating those operations for every row.
 
 The physical planner materializes nested UDF calls into dependency-ordered temporary columns.
 For `wasm_udf(wasm_udf(a, b), c)`, the inner call produces `col_1` and the outer call

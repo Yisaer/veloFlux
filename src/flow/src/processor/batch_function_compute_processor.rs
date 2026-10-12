@@ -1,9 +1,10 @@
-//! Collection-level processor for batch-only WASM UDF evaluations.
-
+//! Collection-level processor for batch-function evaluations.
 use crate::expr::custom_func::BatchFunc;
 use crate::expr::EvalRowContext;
 use crate::model::{Collection, RecordBatch};
-use crate::planner::physical::{PhysicalPlan, PhysicalWasmUdfCompute, PhysicalWasmUdfEvaluation};
+use crate::planner::physical::{
+    PhysicalBatchFunctionCompute, PhysicalBatchFunctionEvaluation, PhysicalPlan,
+};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams,
     send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
@@ -15,17 +16,15 @@ use crate::processor::{
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
-
-struct BoundEvaluation {
+struct BoundBatchEvaluation {
     output_name: Arc<String>,
     definition: Arc<dyn crate::expr::custom_func::CustomFunc>,
-    udf: Arc<dyn BatchFunc>,
+    runtime: Arc<dyn BatchFunc>,
     args: Vec<crate::expr::ScalarExpr>,
 }
-
-pub struct WasmUdfComputeProcessor {
+pub struct BatchFunctionComputeProcessor {
     id: String,
-    evaluations: Arc<Vec<BoundEvaluation>>,
+    evaluations: Arc<Vec<BoundBatchEvaluation>>,
     inputs: Vec<LinkReceiver<StreamData>>,
     control_inputs: Vec<LinkReceiver<ControlSignal>>,
     output: LinkOutput<StreamData>,
@@ -33,18 +32,16 @@ pub struct WasmUdfComputeProcessor {
     channel_capacities: ProcessorChannelCapacities,
     stats: Arc<ProcessorStats>,
 }
-
-impl WasmUdfComputeProcessor {
+impl BatchFunctionComputeProcessor {
     pub fn new(
         id: impl Into<String>,
-        plan: Arc<PhysicalWasmUdfCompute>,
+        plan: Arc<PhysicalBatchFunctionCompute>,
     ) -> Result<Self, ProcessorError> {
         Self::new_with_channel_capacities(id, plan, default_channel_capacities())
     }
-
     pub(crate) fn new_with_channel_capacities(
         id: impl Into<String>,
-        plan: Arc<PhysicalWasmUdfCompute>,
+        plan: Arc<PhysicalBatchFunctionCompute>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Result<Self, ProcessorError> {
         let evaluations = bind_evaluations(&plan.evaluations)?;
@@ -64,59 +61,55 @@ impl WasmUdfComputeProcessor {
             stats: Arc::new(ProcessorStats::collection_in_out()),
         })
     }
-
     pub fn from_physical_plan(
         id: impl Into<String>,
         plan: Arc<PhysicalPlan>,
     ) -> Result<Option<Self>, ProcessorError> {
         match plan.as_ref() {
-            PhysicalPlan::WasmUdfCompute(compute) => {
+            PhysicalPlan::BatchFunctionCompute(compute) => {
                 Ok(Some(Self::new(id, Arc::new(compute.clone()))?))
             }
             _ => Ok(None),
         }
     }
-
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         stats.declare_collection_in_out();
         self.stats = stats;
     }
 }
-
 fn bind_evaluation(
-    evaluation: &PhysicalWasmUdfEvaluation,
-) -> Result<BoundEvaluation, ProcessorError> {
-    let udf = evaluation
-        .udf
+    evaluation: &PhysicalBatchFunctionEvaluation,
+) -> Result<BoundBatchEvaluation, ProcessorError> {
+    let runtime = evaluation
+        .function
         .bind_batch_runtime()
         .map_err(ProcessorError::InvalidConfiguration)?
         .ok_or_else(|| {
             ProcessorError::InvalidConfiguration(format!(
-                "WASM UDF '{}' does not provide a batch runtime",
+                "batch function '{}' does not provide a batch runtime",
                 evaluation.output_column
             ))
         })?;
-    Ok(BoundEvaluation {
+    Ok(BoundBatchEvaluation {
         output_name: Arc::new(evaluation.output_column.clone()),
-        definition: Arc::clone(&evaluation.udf),
-        udf,
+        definition: Arc::clone(&evaluation.function),
+        runtime,
         args: evaluation.args.clone(),
     })
 }
-
 fn bind_evaluations(
-    evaluations: &[PhysicalWasmUdfEvaluation],
-) -> Result<Vec<BoundEvaluation>, ProcessorError> {
-    let mut bound: Vec<BoundEvaluation> = Vec::with_capacity(evaluations.len());
+    evaluations: &[PhysicalBatchFunctionEvaluation],
+) -> Result<Vec<BoundBatchEvaluation>, ProcessorError> {
+    let mut bound: Vec<BoundBatchEvaluation> = Vec::with_capacity(evaluations.len());
     for evaluation in evaluations {
         if let Some(existing) = bound
             .iter()
-            .find(|candidate| Arc::ptr_eq(&candidate.definition, &evaluation.udf))
+            .find(|candidate| Arc::ptr_eq(&candidate.definition, &evaluation.function))
         {
-            bound.push(BoundEvaluation {
+            bound.push(BoundBatchEvaluation {
                 output_name: Arc::new(evaluation.output_column.clone()),
-                definition: Arc::clone(&evaluation.udf),
-                udf: Arc::clone(&existing.udf),
+                definition: Arc::clone(&evaluation.function),
+                runtime: Arc::clone(&existing.runtime),
                 args: evaluation.args.clone(),
             });
         } else {
@@ -125,10 +118,9 @@ fn bind_evaluations(
     }
     Ok(bound)
 }
-
 fn apply_compute(
     input: Box<dyn Collection>,
-    evaluations: &[BoundEvaluation],
+    evaluations: &[BoundBatchEvaluation],
 ) -> Result<(Box<dyn Collection>, Vec<String>), ProcessorError> {
     let metadata = input.metadata().clone();
     let mut rows = input.into_rows().map_err(|error| {
@@ -154,16 +146,16 @@ fn apply_compute(
             }
         }
         let values = evaluation
-            .udf
+            .runtime
             .eval_batch(&columns, rows.len())
             .map_err(|error| {
                 ProcessorError::ProcessingError(format!(
-                    "WASM UDF batch evaluation failed: {error}"
+                    "batch function evaluation failed: {error}"
                 ))
             })?;
         if values.len() != rows.len() {
             return Err(ProcessorError::ProcessingError(format!(
-                "WASM UDF returned {} values for {} input rows",
+                "batch function returned {} values for {} input rows",
                 values.len(),
                 rows.len()
             )));
@@ -185,16 +177,14 @@ fn apply_compute(
         rows = next_rows;
     }
     let output = RecordBatch::new_with_metadata(rows, metadata).map_err(|error| {
-        ProcessorError::ProcessingError(format!("failed to build WASM UDF output: {error}"))
+        ProcessorError::ProcessingError(format!("failed to build batch function output: {error}"))
     })?;
     Ok((Box::new(output), errors))
 }
-
-impl Processor for WasmUdfComputeProcessor {
+impl Processor for BatchFunctionComputeProcessor {
     fn id(&self) -> &str {
         &self.id
     }
-
     fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let mut inputs = fan_in_streams(std::mem::take(&mut self.inputs));
         let mut controls = fan_in_control_streams(std::mem::take(&mut self.control_inputs));
@@ -223,11 +213,11 @@ impl Processor for WasmUdfComputeProcessor {
                             match result {
                                 Ok((collection, errors)) => {
                                     for error in errors {
-                                        stats.record_error_logged("WASM UDF compute error", error);
+                                        stats.record_error_logged("batch function compute error", error);
                                     }
                                     send_with_backpressure(&output, capacities.data, StreamData::collection(collection), Some(stats.as_ref())).await?
                                 }
-                                Err(error) => stats.record_error_logged("WASM UDF compute error", error.to_string()),
+                                Err(error) => stats.record_error_logged("batch function compute error", error.to_string()),
                             }
                         }
                         Some(Ok(data)) => {
@@ -242,21 +232,18 @@ impl Processor for WasmUdfComputeProcessor {
             }
         }))
     }
-
     fn add_input<R>(&mut self, receiver: R)
     where
         R: Into<LinkReceiver<StreamData>>,
     {
         self.inputs.push(receiver.into());
     }
-
     fn add_control_input<R>(&mut self, receiver: R)
     where
         R: Into<LinkReceiver<ControlSignal>>,
     {
         self.control_inputs.push(receiver.into());
     }
-
     fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
         self.output.subscribe()
     }
@@ -264,7 +251,6 @@ impl Processor for WasmUdfComputeProcessor {
         self.control_output.subscribe()
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,23 +259,38 @@ mod tests {
     use crate::model::{Message, Tuple};
     use datatypes::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
     #[derive(Debug)]
     struct TestBatchFunc {
         calls: Arc<AtomicUsize>,
         offset: i64,
         truncate_result: bool,
     }
-
     #[derive(Debug)]
     struct TestDefinition;
-
     impl crate::expr::custom_func::CustomFunc for TestDefinition {
         fn name(&self) -> &str {
             "test_udf"
         }
     }
+    #[derive(Debug)]
+    struct SharedTestDefinition {
+        bind_calls: Arc<AtomicUsize>,
+        eval_calls: Arc<AtomicUsize>,
+    }
+    impl crate::expr::custom_func::CustomFunc for SharedTestDefinition {
+        fn bind_batch_runtime(&self) -> Result<Option<Arc<dyn BatchFunc>>, String> {
+            self.bind_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(Arc::new(TestBatchFunc {
+                calls: Arc::clone(&self.eval_calls),
+                offset: 1,
+                truncate_result: false,
+            })))
+        }
 
+        fn name(&self) -> &str {
+            "shared_test_udf"
+        }
+    }
     impl BatchFunc for TestBatchFunc {
         fn eval_batch(
             &self,
@@ -323,10 +324,8 @@ mod tests {
             Ok(output)
         }
     }
-
     #[derive(Debug)]
     struct ZeroArgBatchFunc;
-
     impl BatchFunc for ZeroArgBatchFunc {
         fn eval_batch(
             &self,
@@ -337,10 +336,8 @@ mod tests {
             Ok((0..row_count).map(|_| Ok(Value::Int64(7))).collect())
         }
     }
-
     #[derive(Debug)]
     struct OneRowErrorBatchFunc;
-
     impl BatchFunc for OneRowErrorBatchFunc {
         fn eval_batch(
             &self,
@@ -364,7 +361,6 @@ mod tests {
                 .collect())
         }
     }
-
     fn input_batch() -> RecordBatch {
         let rows = [1_i64, 2]
             .into_iter()
@@ -378,47 +374,43 @@ mod tests {
             .collect();
         RecordBatch::new(rows).expect("create input batch")
     }
-
     fn source_column(index: usize) -> crate::expr::ScalarExpr {
         crate::expr::ScalarExpr::Column(ColumnRef::ByIndex {
             source_name: "stream".to_string(),
             column_index: index,
         })
     }
-
     fn affiliate_column(name: &str) -> crate::expr::ScalarExpr {
         crate::expr::ScalarExpr::Column(ColumnRef::ByName {
             column_name: name.to_string(),
         })
     }
-
     #[test]
     fn batch_compute_evaluates_full_collection_and_preserves_dependencies() {
         let first_calls = Arc::new(AtomicUsize::new(0));
         let second_calls = Arc::new(AtomicUsize::new(0));
         let evaluations = vec![
-            BoundEvaluation {
-                output_name: Arc::new("__vf_wasm_1".to_string()),
+            BoundBatchEvaluation {
+                output_name: Arc::new("__vf_batch_1".to_string()),
                 definition: Arc::new(TestDefinition),
-                udf: Arc::new(TestBatchFunc {
+                runtime: Arc::new(TestBatchFunc {
                     calls: Arc::clone(&first_calls),
                     offset: 1,
                     truncate_result: false,
                 }),
                 args: vec![source_column(0)],
             },
-            BoundEvaluation {
-                output_name: Arc::new("__vf_wasm_2".to_string()),
+            BoundBatchEvaluation {
+                output_name: Arc::new("__vf_batch_2".to_string()),
                 definition: Arc::new(TestDefinition),
-                udf: Arc::new(TestBatchFunc {
+                runtime: Arc::new(TestBatchFunc {
                     calls: Arc::clone(&second_calls),
                     offset: 10,
                     truncate_result: false,
                 }),
-                args: vec![affiliate_column("__vf_wasm_1")],
+                args: vec![affiliate_column("__vf_batch_1")],
             },
         ];
-
         let (output, errors) =
             apply_compute(Box::new(input_batch()), &evaluations).expect("batch compute");
         assert!(errors.is_empty());
@@ -427,36 +419,34 @@ mod tests {
         assert_eq!(second_calls.load(Ordering::Relaxed), 1);
         assert_eq!(rows.len(), 2);
         assert_eq!(
-            rows[0].affiliate().unwrap().value("__vf_wasm_1"),
+            rows[0].affiliate().unwrap().value("__vf_batch_1"),
             Some(&Value::Int64(2))
         );
         assert_eq!(
-            rows[0].affiliate().unwrap().value("__vf_wasm_2"),
+            rows[0].affiliate().unwrap().value("__vf_batch_2"),
             Some(&Value::Int64(12))
         );
         assert_eq!(
-            rows[1].affiliate().unwrap().value("__vf_wasm_1"),
+            rows[1].affiliate().unwrap().value("__vf_batch_1"),
             Some(&Value::Int64(3))
         );
         assert_eq!(
-            rows[1].affiliate().unwrap().value("__vf_wasm_2"),
+            rows[1].affiliate().unwrap().value("__vf_batch_2"),
             Some(&Value::Int64(13))
         );
     }
-
     #[test]
     fn batch_compute_rejects_result_length_mismatch() {
-        let evaluations = vec![BoundEvaluation {
-            output_name: Arc::new("__vf_wasm_1".to_string()),
+        let evaluations = vec![BoundBatchEvaluation {
+            output_name: Arc::new("__vf_batch_1".to_string()),
             definition: Arc::new(TestDefinition),
-            udf: Arc::new(TestBatchFunc {
+            runtime: Arc::new(TestBatchFunc {
                 calls: Arc::new(AtomicUsize::new(0)),
                 offset: 0,
                 truncate_result: true,
             }),
             args: vec![source_column(0)],
         }];
-
         let error = match apply_compute(Box::new(input_batch()), &evaluations) {
             Ok(_) => panic!("length mismatch should fail"),
             Err(error) => error,
@@ -465,45 +455,75 @@ mod tests {
             .to_string()
             .contains("returned 1 values for 2 input rows"));
     }
-
     #[test]
     fn batch_compute_preserves_row_count_for_zero_argument_udf() {
-        let evaluations = vec![BoundEvaluation {
-            output_name: Arc::new("__vf_wasm_1".to_string()),
+        let evaluations = vec![BoundBatchEvaluation {
+            output_name: Arc::new("__vf_batch_1".to_string()),
             definition: Arc::new(TestDefinition),
-            udf: Arc::new(ZeroArgBatchFunc),
+            runtime: Arc::new(ZeroArgBatchFunc),
             args: Vec::new(),
         }];
-
         let (output, errors) =
             apply_compute(Box::new(input_batch()), &evaluations).expect("batch compute");
         assert!(errors.is_empty());
         assert_eq!(output.rows().len(), 2);
         for row in output.rows() {
             assert_eq!(
-                row.affiliate().unwrap().value("__vf_wasm_1"),
+                row.affiliate().unwrap().value("__vf_batch_1"),
                 Some(&Value::Int64(7))
             );
         }
     }
-
     #[test]
     fn batch_compute_keeps_successful_rows_when_one_row_fails() {
-        let evaluations = vec![BoundEvaluation {
-            output_name: Arc::new("__vf_wasm_1".to_string()),
+        let evaluations = vec![BoundBatchEvaluation {
+            output_name: Arc::new("__vf_batch_1".to_string()),
             definition: Arc::new(TestDefinition),
-            udf: Arc::new(OneRowErrorBatchFunc),
+            runtime: Arc::new(OneRowErrorBatchFunc),
             args: vec![source_column(0)],
         }];
-
         let (output, errors) =
             apply_compute(Box::new(input_batch()), &evaluations).expect("batch compute");
         assert_eq!(output.rows().len(), 1);
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("row 1"));
         assert_eq!(
-            output.rows()[0].affiliate().unwrap().value("__vf_wasm_1"),
+            output.rows()[0].affiliate().unwrap().value("__vf_batch_1"),
             Some(&Value::Int64(1))
         );
+    }
+
+    #[test]
+    fn batch_compute_reuses_one_runtime_for_multiple_evaluations() {
+        let bind_calls = Arc::new(AtomicUsize::new(0));
+        let eval_calls = Arc::new(AtomicUsize::new(0));
+        let definition: Arc<dyn crate::expr::custom_func::CustomFunc> =
+            Arc::new(SharedTestDefinition {
+                bind_calls: Arc::clone(&bind_calls),
+                eval_calls: Arc::clone(&eval_calls),
+            });
+        let evaluations = vec![
+            PhysicalBatchFunctionEvaluation {
+                output_column: "__vf_batch_1".to_string(),
+                function: Arc::clone(&definition),
+                args: vec![source_column(0)],
+                original_expr: sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("x")),
+            },
+            PhysicalBatchFunctionEvaluation {
+                output_column: "__vf_batch_2".to_string(),
+                function: Arc::clone(&definition),
+                args: vec![source_column(0)],
+                original_expr: sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("x")),
+            },
+        ];
+        let bound = bind_evaluations(&evaluations).expect("bind batch evaluations");
+        assert_eq!(bind_calls.load(Ordering::Relaxed), 1);
+        assert!(Arc::ptr_eq(&bound[0].runtime, &bound[1].runtime));
+
+        let (output, errors) =
+            apply_compute(Box::new(input_batch()), &bound).expect("batch compute");
+        assert!(errors.is_empty());
+        assert_eq!(eval_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(output.rows().len(), 2);
     }
 }

@@ -6,7 +6,7 @@
 
 pub const RESERVED_USER_PREFIX: &str = "__vf_";
 pub const CSE_TEMP_PREFIX: &str = "__vf_cse_";
-pub const WASM_UDF_TEMP_PREFIX: &str = "__vf_wasm_";
+pub const BATCH_FUNCTION_TEMP_PREFIX: &str = "__vf_batch_";
 
 /// Returns true if `name` is a parser-produced placeholder column (e.g. `col_1`).
 pub fn is_parser_placeholder(name: &str) -> bool {
@@ -26,8 +26,8 @@ pub fn is_cse_temp(name: &str) -> bool {
     !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
 }
 
-pub fn is_wasm_udf_temp(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix(WASM_UDF_TEMP_PREFIX) else {
+pub fn is_batch_function_temp(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(BATCH_FUNCTION_TEMP_PREFIX) else {
         return false;
     };
     !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit())
@@ -35,7 +35,7 @@ pub fn is_wasm_udf_temp(name: &str) -> bool {
 
 /// Returns true if `name` is any internal derived column name.
 pub fn is_internal_derived(name: &str) -> bool {
-    is_parser_placeholder(name) || is_cse_temp(name) || is_wasm_udf_temp(name)
+    is_parser_placeholder(name) || is_cse_temp(name) || is_batch_function_temp(name)
 }
 
 /// Returns true if users must not define an alias with this name.

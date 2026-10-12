@@ -4,40 +4,40 @@ use crate::planner::physical::{BasePhysicalPlan, PhysicalPlan};
 use sqlparser::ast::Expr;
 use std::sync::Arc;
 
-/// One collection-level WASM UDF evaluation lowered from a SQL expression.
+/// One collection-level batch-function evaluation lowered from a SQL expression.
 #[derive(Clone)]
-pub struct PhysicalWasmUdfEvaluation {
+pub struct PhysicalBatchFunctionEvaluation {
     /// Internal affiliate column receiving one result per input row.
     pub output_column: String,
-    /// Immutable registry-side UDF definition.
-    pub udf: Arc<dyn CustomFunc>,
+    /// Immutable registry-side batch-function definition.
+    pub function: Arc<dyn CustomFunc>,
     /// Ordinary scalar expressions used to gather column-oriented arguments.
     pub args: Vec<ScalarExpr>,
     /// Original expression retained for explain and diagnostics.
     pub original_expr: Expr,
 }
 
-impl std::fmt::Debug for PhysicalWasmUdfEvaluation {
+impl std::fmt::Debug for PhysicalBatchFunctionEvaluation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PhysicalWasmUdfEvaluation")
+        f.debug_struct("PhysicalBatchFunctionEvaluation")
             .field("output_column", &self.output_column)
-            .field("udf", &self.udf)
+            .field("function", &self.function)
             .field("args", &self.args)
             .field("original_expr", &self.original_expr)
             .finish()
     }
 }
 
-/// Physical collection operator for batch-only WASM UDF evaluation.
+/// Physical collection operator for batch-function evaluation.
 #[derive(Debug, Clone)]
-pub struct PhysicalWasmUdfCompute {
+pub struct PhysicalBatchFunctionCompute {
     pub base: BasePhysicalPlan,
-    pub evaluations: Vec<PhysicalWasmUdfEvaluation>,
+    pub evaluations: Vec<PhysicalBatchFunctionEvaluation>,
 }
 
-impl PhysicalWasmUdfCompute {
+impl PhysicalBatchFunctionCompute {
     pub fn new(
-        evaluations: Vec<PhysicalWasmUdfEvaluation>,
+        evaluations: Vec<PhysicalBatchFunctionEvaluation>,
         child: Arc<PhysicalPlan>,
         index: i64,
     ) -> Self {

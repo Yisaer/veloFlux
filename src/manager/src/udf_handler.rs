@@ -5,8 +5,10 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Serialize;
+use std::fs;
 use std::sync::Arc;
 use storage::StoredUdf;
+use tokio::sync::TryAcquireError;
 use udf::WasmEngine;
 
 use crate::audit::ResourceMutationLog;
@@ -131,15 +133,51 @@ pub async fn upload_udf_handler(
         return (StatusCode::CONFLICT, err).into_response();
     }
 
-    let sha256 = sha256_hex(&wasm_bytes);
-    let wasm_dir = state.storage.wasm_files_dir();
-    let wasm_path = wasm_dir.join(format!("{sha256}.wasm"));
+    let _metadata_permit = match crate::storage_apply::acquire_exclusive_metadata(&state) {
+        Ok(permit) => permit,
+        Err(response) => return *response,
+    };
+    let _storage_permit = match state.try_acquire_storage_operation() {
+        Ok(permit) => permit,
+        Err(TryAcquireError::NoPermits) => {
+            return (
+                StatusCode::CONFLICT,
+                "another storage operation is in progress".to_string(),
+            )
+                .into_response();
+        }
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "storage operation guard closed".to_string(),
+            )
+                .into_response();
+        }
+    };
 
-    // Write .wasm file to disk (if it doesn't already exist)
-    if !wasm_path.exists()
-        && let Err(e) = std::fs::write(&wasm_path, &wasm_bytes)
+    if state.storage.get_udf(&name).ok().flatten().is_some() {
+        let err = format!("UDF '{name}' already exists");
+        audit.log_failure(&err);
+        return (StatusCode::CONFLICT, err).into_response();
+    }
+
+    let sha256 = sha256_hex(&wasm_bytes);
+    let work = match tempfile::Builder::new()
+        .prefix(".udf-upload.")
+        .tempdir_in(state.storage.base_dir())
     {
-        let err = format!("failed to write WASM file: {e}");
+        Ok(work) => work,
+        Err(error) => {
+            let err = format!("failed to create UDF upload staging: {error}");
+            audit.log_failure(&err);
+            return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+        }
+    };
+    let wasm_staging = work.path().join("wasm-staging");
+    if let Err(error) = fs::create_dir(&wasm_staging)
+        .and_then(|()| fs::write(wasm_staging.join(format!("{sha256}.wasm")), &wasm_bytes))
+    {
+        let err = format!("failed to stage WASM file: {error}");
         audit.log_failure(&err);
         return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
@@ -151,21 +189,26 @@ pub async fn upload_udf_handler(
         raw_json: serde_json::to_string(&metadata).unwrap_or_default(),
     };
 
-    match state.storage.create_udf(stored) {
-        Ok(()) => {}
-        Err(storage::StorageError::RevisionConflict(error)) => {
-            return (StatusCode::CONFLICT, error).into_response();
-        }
-        Err(storage::StorageError::AlreadyExists(_)) => {
-            let err = format!("UDF '{name}' already exists");
-            audit.log_failure(&err);
-            return (StatusCode::CONFLICT, err).into_response();
-        }
-        Err(e) => {
-            let err = format!("failed to persist UDF: {e}");
+    let mut snapshot = match state.storage.export_metadata_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let err = format!("failed to read metadata snapshot: {error}");
             audit.log_failure(&err);
             return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
+    };
+    snapshot.udfs.push(stored);
+    if let Err(error) = crate::attachments::publish_and_commit(
+        &state.storage,
+        snapshot,
+        Default::default(),
+        None,
+        &wasm_staging,
+        None,
+    ) {
+        let err = format!("failed to persist UDF: {error}");
+        audit.log_failure(&err);
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
     }
 
     // Hot-load: instantiate and register into the running instance

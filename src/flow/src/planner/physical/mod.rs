@@ -8,6 +8,7 @@ pub mod output_layout;
 pub mod physical_aggregation;
 pub mod physical_barrier;
 pub mod physical_batch;
+pub mod physical_batch_function_compute;
 pub mod physical_collection_layout_normalize;
 pub mod physical_column_filter;
 pub mod physical_compute;
@@ -34,7 +35,6 @@ pub mod physical_source_change_gate;
 pub mod physical_stateful_function;
 pub mod physical_streaming_aggregation;
 pub mod physical_table_scan;
-pub mod physical_wasm_udf_compute;
 pub mod physical_watermark;
 pub mod physical_window;
 pub mod pipeline_state_usage;
@@ -43,6 +43,9 @@ pub use base_physical::BasePhysicalPlan;
 pub use physical_aggregation::{AggregateCall, PhysicalAggregation};
 pub use physical_barrier::PhysicalBarrier;
 pub use physical_batch::PhysicalBatch;
+pub use physical_batch_function_compute::{
+    PhysicalBatchFunctionCompute, PhysicalBatchFunctionEvaluation,
+};
 pub use physical_collection_layout_normalize::PhysicalCollectionLayoutNormalize;
 pub use physical_column_filter::PhysicalColumnFilter;
 pub use physical_compute::{PhysicalCompute, PhysicalComputeField};
@@ -70,7 +73,6 @@ pub use physical_source_change_gate::PhysicalSourceChangeGate;
 pub use physical_stateful_function::{PartitionGroupKey, PhysicalStatefulFunction, StatefulCall};
 pub use physical_streaming_aggregation::{PhysicalStreamingAggregation, StreamingWindowSpec};
 pub use physical_table_scan::{PhysicalTableScan, PhysicalTableScanSpec};
-pub use physical_wasm_udf_compute::{PhysicalWasmUdfCompute, PhysicalWasmUdfEvaluation};
 pub use physical_watermark::{PhysicalWatermark, WatermarkConfig};
 pub use physical_window::{
     PhysicalCountWindow, PhysicalEosWindow, PhysicalSlidingWindow, PhysicalStateWindow,
@@ -97,7 +99,7 @@ pub enum PhysicalPlan {
     Filter(PhysicalFilter),
     LookupJoin(PhysicalLookupJoin),
     Compute(PhysicalCompute),
-    WasmUdfCompute(PhysicalWasmUdfCompute),
+    BatchFunctionCompute(PhysicalBatchFunctionCompute),
     Order(PhysicalOrder),
     Project(PhysicalProject),
     RowDiff(PhysicalRowDiff),
@@ -157,7 +159,7 @@ impl PhysicalPlan {
                     field.compiled_expr.bind_custom_functions(bindings);
                 }
             }
-            PhysicalPlan::WasmUdfCompute(_) => {}
+            PhysicalPlan::BatchFunctionCompute(_) => {}
             PhysicalPlan::Order(plan) => {
                 for key in &mut plan.keys {
                     key.compiled_expr.bind_custom_functions(bindings);
@@ -274,7 +276,7 @@ impl PhysicalPlan {
             PhysicalPlan::Filter(plan) => plan.base.children(),
             PhysicalPlan::LookupJoin(plan) => plan.base.children(),
             PhysicalPlan::Compute(plan) => plan.base.children(),
-            PhysicalPlan::WasmUdfCompute(plan) => plan.base.children(),
+            PhysicalPlan::BatchFunctionCompute(plan) => plan.base.children(),
             PhysicalPlan::Order(plan) => plan.base.children(),
             PhysicalPlan::Project(plan) => plan.base.children(),
             PhysicalPlan::RowDiff(plan) => plan.base.children(),
@@ -320,7 +322,7 @@ impl PhysicalPlan {
             PhysicalPlan::Filter(_) => "PhysicalFilter",
             PhysicalPlan::LookupJoin(_) => "PhysicalLookupJoin",
             PhysicalPlan::Compute(_) => "PhysicalCompute",
-            PhysicalPlan::WasmUdfCompute(_) => "PhysicalWasmUdfCompute",
+            PhysicalPlan::BatchFunctionCompute(_) => "PhysicalBatchFunctionCompute",
             PhysicalPlan::Order(_) => "PhysicalOrder",
             PhysicalPlan::Project(_) => "PhysicalProject",
             PhysicalPlan::RowDiff(_) => "PhysicalRowDiff",
@@ -365,7 +367,7 @@ impl PhysicalPlan {
             PhysicalPlan::Filter(plan) => plan.base.index(),
             PhysicalPlan::LookupJoin(plan) => plan.base.index(),
             PhysicalPlan::Compute(plan) => plan.base.index(),
-            PhysicalPlan::WasmUdfCompute(plan) => plan.base.index(),
+            PhysicalPlan::BatchFunctionCompute(plan) => plan.base.index(),
             PhysicalPlan::Order(plan) => plan.base.index(),
             PhysicalPlan::Project(plan) => plan.base.index(),
             PhysicalPlan::RowDiff(plan) => plan.base.index(),

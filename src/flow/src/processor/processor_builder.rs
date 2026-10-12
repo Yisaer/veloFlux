@@ -26,16 +26,17 @@ use crate::processor::decoder_processor::EventtimeDecodeConfig;
 use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
-    AggregationProcessor, BarrierControlSignalKind, BarrierProcessor, BatchProcessor,
-    CheckpointCoordinator, CheckpointTrigger, CollectionLayoutNormalizeProcessor, ComputeProcessor,
-    ControlSignal, ControlSourceProcessor, DataSourceProcessor, DecoderProcessor,
-    EmptySuppressProcessor, EosWindowProcessor, FilterProcessor, Ingress, InstantControlSignal,
-    LookupJoinProcessor, MemoryCollectionMaterializeProcessor, OrderProcessor, Processor,
-    ProcessorError, ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor,
-    SamplerProcessor, SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor,
-    SinkEncryptProcessor, SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor,
-    StateWindowProcessor, StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor,
-    TableScanProcessor, TumblingWindowProcessor, WasmUdfComputeProcessor, WatermarkProcessor,
+    AggregationProcessor, BarrierControlSignalKind, BarrierProcessor,
+    BatchFunctionComputeProcessor, BatchProcessor, CheckpointCoordinator, CheckpointTrigger,
+    CollectionLayoutNormalizeProcessor, ComputeProcessor, ControlSignal, ControlSourceProcessor,
+    DataSourceProcessor, DecoderProcessor, EmptySuppressProcessor, EosWindowProcessor,
+    FilterProcessor, Ingress, InstantControlSignal, LookupJoinProcessor,
+    MemoryCollectionMaterializeProcessor, OrderProcessor, Processor, ProcessorError,
+    ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor, SamplerProcessor,
+    SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor, SinkEncryptProcessor,
+    SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
+    StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor, TableScanProcessor,
+    TumblingWindowProcessor, WatermarkProcessor,
 };
 use crate::processor::{MetricKind, MetricSpec, ProcessorStats, ProcessorStatsHandle};
 use crate::runtime::TaskSpawner;
@@ -122,8 +123,8 @@ pub(crate) enum PlanProcessor {
     SourceChangeGate(SourceChangeGateProcessor),
     /// ComputeProcessor created from PhysicalCompute
     Compute(ComputeProcessor),
-    /// WasmUdfComputeProcessor created from PhysicalWasmUdfCompute
-    WasmUdfCompute(WasmUdfComputeProcessor),
+    /// BatchFunctionComputeProcessor created from PhysicalBatchFunctionCompute
+    BatchFunctionCompute(BatchFunctionComputeProcessor),
     /// OrderProcessor created from PhysicalOrder
     Order(OrderProcessor),
     /// ProjectProcessor created from PhysicalProject
@@ -438,7 +439,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.id(),
             PlanProcessor::SourceChangeGate(p) => p.id(),
             PlanProcessor::Compute(p) => p.id(),
-            PlanProcessor::WasmUdfCompute(p) => p.id(),
+            PlanProcessor::BatchFunctionCompute(p) => p.id(),
             PlanProcessor::Order(p) => p.id(),
             PlanProcessor::Project(p) => p.id(),
             PlanProcessor::RowDiff(p) => p.id(),
@@ -474,7 +475,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.checkpoint_key(),
             PlanProcessor::SourceChangeGate(p) => p.checkpoint_key(),
             PlanProcessor::Compute(p) => p.checkpoint_key(),
-            PlanProcessor::WasmUdfCompute(p) => p.checkpoint_key(),
+            PlanProcessor::BatchFunctionCompute(p) => p.checkpoint_key(),
             PlanProcessor::Order(p) => p.checkpoint_key(),
             PlanProcessor::Project(p) => p.checkpoint_key(),
             PlanProcessor::RowDiff(p) => p.checkpoint_key(),
@@ -510,7 +511,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(_) => "shared_source",
             PlanProcessor::SourceChangeGate(_) => "source_change_gate",
             PlanProcessor::Compute(_) => "compute",
-            PlanProcessor::WasmUdfCompute(_) => "wasm_udf_compute",
+            PlanProcessor::BatchFunctionCompute(_) => "batch_function_compute",
             PlanProcessor::Order(_) => "order",
             PlanProcessor::Project(_) => "project",
             PlanProcessor::RowDiff(_) => "row_diff",
@@ -553,7 +554,9 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::SourceChangeGate(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Compute(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::WasmUdfCompute(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::BatchFunctionCompute(p) => {
+                p.set_checkpoint_snapshot_collector(collector)
+            }
             PlanProcessor::Order(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Project(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::RowDiff(p) => p.set_checkpoint_snapshot_collector(collector),
@@ -594,7 +597,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::SourceChangeGate(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Compute(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::WasmUdfCompute(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::BatchFunctionCompute(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Order(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Project(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::RowDiff(p) => p.restore_checkpoint(snapshot),
@@ -630,7 +633,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::SourceChangeGate(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Compute(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::WasmUdfCompute(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::BatchFunctionCompute(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Order(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Project(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::RowDiff(p) => p.validate_checkpoint(snapshot),
@@ -666,7 +669,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.clear_checkpoint_restore(),
             PlanProcessor::SourceChangeGate(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Compute(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::WasmUdfCompute(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::BatchFunctionCompute(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Order(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Project(p) => p.clear_checkpoint_restore(),
             PlanProcessor::RowDiff(p) => p.clear_checkpoint_restore(),
@@ -702,7 +705,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.set_stats(stats),
             PlanProcessor::SourceChangeGate(p) => p.set_stats(stats),
             PlanProcessor::Compute(p) => p.set_stats(stats),
-            PlanProcessor::WasmUdfCompute(p) => p.set_stats(stats),
+            PlanProcessor::BatchFunctionCompute(p) => p.set_stats(stats),
             PlanProcessor::Order(p) => p.set_stats(stats),
             PlanProcessor::Project(p) => p.set_stats(stats),
             PlanProcessor::RowDiff(p) => p.set_stats(stats),
@@ -745,7 +748,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.start(spawner),
             PlanProcessor::SourceChangeGate(p) => p.start(spawner),
             PlanProcessor::Compute(p) => p.start(spawner),
-            PlanProcessor::WasmUdfCompute(p) => p.start(spawner),
+            PlanProcessor::BatchFunctionCompute(p) => p.start(spawner),
             PlanProcessor::Order(p) => p.start(spawner),
             PlanProcessor::Project(p) => p.start(spawner),
             PlanProcessor::RowDiff(p) => p.start(spawner),
@@ -782,7 +785,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.subscribe_output(),
             PlanProcessor::SourceChangeGate(p) => p.subscribe_output(),
             PlanProcessor::Compute(p) => p.subscribe_output(),
-            PlanProcessor::WasmUdfCompute(p) => p.subscribe_output(),
+            PlanProcessor::BatchFunctionCompute(p) => p.subscribe_output(),
             PlanProcessor::Order(p) => p.subscribe_output(),
             PlanProcessor::Project(p) => p.subscribe_output(),
             PlanProcessor::RowDiff(p) => p.subscribe_output(),
@@ -819,7 +822,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.subscribe_control_output(),
             PlanProcessor::SourceChangeGate(p) => p.subscribe_control_output(),
             PlanProcessor::Compute(p) => p.subscribe_control_output(),
-            PlanProcessor::WasmUdfCompute(p) => p.subscribe_control_output(),
+            PlanProcessor::BatchFunctionCompute(p) => p.subscribe_control_output(),
             PlanProcessor::Order(p) => p.subscribe_control_output(),
             PlanProcessor::Project(p) => p.subscribe_control_output(),
             PlanProcessor::RowDiff(p) => p.subscribe_control_output(),
@@ -856,7 +859,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.add_input(receiver),
             PlanProcessor::SourceChangeGate(p) => p.add_input(receiver),
             PlanProcessor::Compute(p) => p.add_input(receiver),
-            PlanProcessor::WasmUdfCompute(p) => p.add_input(receiver),
+            PlanProcessor::BatchFunctionCompute(p) => p.add_input(receiver),
             PlanProcessor::Order(p) => p.add_input(receiver),
             PlanProcessor::Project(p) => p.add_input(receiver),
             PlanProcessor::RowDiff(p) => p.add_input(receiver),
@@ -896,7 +899,7 @@ impl PlanProcessor {
             PlanProcessor::SharedSource(p) => p.add_control_input(receiver),
             PlanProcessor::SourceChangeGate(p) => p.add_control_input(receiver),
             PlanProcessor::Compute(p) => p.add_control_input(receiver),
-            PlanProcessor::WasmUdfCompute(p) => p.add_control_input(receiver),
+            PlanProcessor::BatchFunctionCompute(p) => p.add_control_input(receiver),
             PlanProcessor::Order(p) => p.add_control_input(receiver),
             PlanProcessor::Project(p) => p.add_control_input(receiver),
             PlanProcessor::RowDiff(p) => p.add_control_input(receiver),
@@ -2030,14 +2033,14 @@ fn create_processor_from_plan_node(
                 PlanProcessor::Compute(processor),
             ))
         }
-        PhysicalPlan::WasmUdfCompute(compute) => {
-            let processor = WasmUdfComputeProcessor::new_with_channel_capacities(
+        PhysicalPlan::BatchFunctionCompute(compute) => {
+            let processor = BatchFunctionComputeProcessor::new_with_channel_capacities(
                 processor_id.clone(),
                 Arc::new(compute.clone()),
                 channel_capacities,
             )?;
             Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::WasmUdfCompute(processor),
+                PlanProcessor::BatchFunctionCompute(processor),
             ))
         }
         PhysicalPlan::Order(order) => {
@@ -2478,7 +2481,7 @@ fn plan_output_domain(
         | PhysicalPlan::Filter(_)
         | PhysicalPlan::LookupJoin(_)
         | PhysicalPlan::Compute(_)
-        | PhysicalPlan::WasmUdfCompute(_)
+        | PhysicalPlan::BatchFunctionCompute(_)
         | PhysicalPlan::Order(_)
         | PhysicalPlan::Project(_)
         | PhysicalPlan::RowDiff(_)

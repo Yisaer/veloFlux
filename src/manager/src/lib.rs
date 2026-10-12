@@ -14,6 +14,8 @@ mod function;
 mod import;
 mod instances;
 mod memory_topic;
+#[cfg(feature = "onnx")]
+mod model_handler;
 mod mqtt_client;
 mod pipeline;
 mod resource_delete;
@@ -178,13 +180,15 @@ fn build_app(state: AppState) -> Router {
         )
         .route("/tables/:name", delete(resource_delete::handler))
         .route("/metrics", get(metrics_handler))
-        .route("/status", get(status::status_handler))
-        .layer(CorsLayer::permissive());
-    add_udf_routes(app)
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            storage_apply::coordinate_metadata,
-        ))
+        .route("/status", get(status::status_handler));
+    let coordinated_routes = add_model_routes(add_udf_routes(app)).layer(
+        axum::middleware::from_fn_with_state(state.clone(), storage_apply::coordinate_metadata),
+    );
+    let direct_routes = add_direct_model_routes(add_direct_udf_routes(Router::new()));
+    Router::new()
+        .merge(coordinated_routes)
+        .merge(direct_routes)
+        .layer(CorsLayer::permissive())
         .with_state(state)
 }
 
@@ -212,8 +216,7 @@ async fn metrics_handler() -> impl IntoResponse {
 
 #[cfg(feature = "wasm_udf")]
 fn add_udf_routes(app: Router<AppState>) -> Router<AppState> {
-    app.route("/udfs/upload", post(udf_handler::upload_udf_handler))
-        .route("/udfs", get(udf_handler::list_udfs_handler))
+    app.route("/udfs", get(udf_handler::list_udfs_handler))
         .route(
             "/udfs/:name",
             get(udf_handler::get_udf_handler).delete(resource_delete::handler),
@@ -222,6 +225,43 @@ fn add_udf_routes(app: Router<AppState>) -> Router<AppState> {
 
 #[cfg(not(feature = "wasm_udf"))]
 fn add_udf_routes(app: Router<AppState>) -> Router<AppState> {
+    app
+}
+
+#[cfg(feature = "wasm_udf")]
+fn add_direct_udf_routes(app: Router<AppState>) -> Router<AppState> {
+    app.route("/udfs/upload", post(udf_handler::upload_udf_handler))
+}
+
+#[cfg(not(feature = "wasm_udf"))]
+fn add_direct_udf_routes(app: Router<AppState>) -> Router<AppState> {
+    app
+}
+
+#[cfg(feature = "onnx")]
+fn add_model_routes(app: Router<AppState>) -> Router<AppState> {
+    app.route("/models", get(model_handler::list_models_handler))
+        .route("/models/:name", get(model_handler::get_model_handler))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn add_model_routes(app: Router<AppState>) -> Router<AppState> {
+    app
+}
+
+#[cfg(feature = "onnx")]
+fn add_direct_model_routes(app: Router<AppState>) -> Router<AppState> {
+    app.route(
+        "/models",
+        post(model_handler::upload_model_handler).layer(axum::extract::DefaultBodyLimit::max(
+            streaming_upload::MAX_MULTIPART_BODY_SIZE,
+        )),
+    )
+    .route("/models/:name", delete(model_handler::delete_model_handler))
+}
+
+#[cfg(not(feature = "onnx"))]
+fn add_direct_model_routes(app: Router<AppState>) -> Router<AppState> {
     app
 }
 

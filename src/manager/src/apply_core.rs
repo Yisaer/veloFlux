@@ -51,6 +51,8 @@ struct RawInitResources {
     udfs: Vec<serde_json::Value>,
     #[serde(default)]
     tables: Vec<serde_json::Value>,
+    #[serde(default)]
+    models: Vec<serde_json::Value>,
 }
 
 struct ParsedInitManifest {
@@ -244,6 +246,13 @@ fn parse_init_entries(mut raw: RawInitManifest) -> ParsedInitManifest {
     reject_cross_duplicates!(pipelines, "id", false);
     reject_cross_duplicates!(udfs, "name", true);
     reject_cross_duplicates!(tables, "name", false);
+    let unsupported_model_entries = raw.resources.models.len() + raw.deletions.models.len();
+    if unsupported_model_entries > 0 {
+        tracing::warn!(
+            entries = unsupported_model_entries,
+            "model resources are not supported by startup init directories"
+        );
+    }
     let bundle_version = raw.bundle_version;
     let (memory_topics, memory_errors) = decode_resource_entries(
         &bundle_version,
@@ -293,7 +302,7 @@ fn parse_init_entries(mut raw: RawInitManifest) -> ParsedInitManifest {
         false,
     );
     let mut deletions = crate::export::ExportDeletions::default();
-    let mut deletion_errors = cross_errors;
+    let mut deletion_errors = cross_errors || unsupported_model_entries > 0;
     macro_rules! decode_deletions {
         ($field:ident, $identity:literal, $canonical:expr) => {
             let (items, errors) = decode_resource_entries(
@@ -339,6 +348,7 @@ fn parse_init_entries(mut raw: RawInitManifest) -> ParsedInitManifest {
                 pipelines,
                 udfs,
                 tables,
+                models: Vec::new(),
             },
         },
         had_entry_errors: deletion_errors
@@ -726,6 +736,7 @@ where
         },
         schema_tree.take(),
         &staged_wasm,
+        None,
     )?;
 
     let mut cleanup_failed = false;
@@ -775,6 +786,7 @@ pub(crate) fn empty_resources() -> ExportResources {
         pipelines: Vec::new(),
         udfs: Vec::new(),
         tables: Vec::new(),
+        models: Vec::new(),
     }
 }
 
@@ -789,6 +801,7 @@ fn append_snapshot(target: &mut MetadataExportSnapshot, mut source: MetadataExpo
     target.memory_topics.append(&mut source.memory_topics);
     target.udfs.append(&mut source.udfs);
     target.tables.append(&mut source.tables);
+    target.models.append(&mut source.models);
 }
 
 pub(crate) fn empty_snapshot() -> MetadataExportSnapshot {
@@ -802,6 +815,7 @@ pub(crate) fn empty_snapshot() -> MetadataExportSnapshot {
         memory_topics: Vec::new(),
         udfs: Vec::new(),
         tables: Vec::new(),
+        models: Vec::new(),
     }
 }
 
@@ -1201,6 +1215,7 @@ pub(crate) fn build_apply_candidate(
         pipelines: Vec::new(),
         udfs: Vec::new(),
         tables: Vec::new(),
+        models: Vec::new(),
     };
     let mut results = Vec::new();
     macro_rules! merge {
@@ -1293,6 +1308,12 @@ pub(crate) fn build_apply_candidate(
         Tables,
         |item: &crate::export::ExportTable| item.definition.name.clone(),
         |item: &crate::export::ExportTable| item.definition.revision
+    );
+    merge!(
+        models,
+        Models,
+        |item: &crate::export::ExportModel| item.name.clone(),
+        |item: &crate::export::ExportModel| item.revision
     );
     let mut deletions = Vec::new();
     macro_rules! delete {
@@ -1392,6 +1413,12 @@ pub(crate) fn build_apply_candidate(
         Tables,
         |item: &crate::export::ExportTable| item.definition.name.clone(),
         |item: &crate::export::ExportTable| item.definition.revision
+    );
+    delete!(
+        models,
+        Models,
+        |item: &crate::export::ExportModel| item.name.clone(),
+        |item: &crate::export::ExportModel| item.revision
     );
     Ok(ApplyCandidate {
         resources: live,
@@ -1532,6 +1559,11 @@ pub(crate) fn filter_pending_snapshot(
             .tables
             .into_iter()
             .filter(|v| table_ids.contains(v.id.as_str()))
+            .collect(),
+        models: candidate
+            .models
+            .into_iter()
+            .filter(|v| pending.models.iter().any(|item| item.name == v.name))
             .collect(),
     }
 }
@@ -1789,6 +1821,7 @@ mod tests {
                 pipelines: Vec::new(),
                 udfs: Vec::new(),
                 tables: Vec::new(),
+                models: Vec::new(),
             },
         }
     }

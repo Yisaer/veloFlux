@@ -1024,7 +1024,7 @@ fn build_physical_node_with_prefix(
             });
             info.push(format!("temps=[{}]", temps));
         }
-        PhysicalPlan::WasmUdfCompute(compute) => {
+        PhysicalPlan::BatchFunctionCompute(compute) => {
             let temps = format_semicolon_items(
                 &compute.evaluations,
                 EXPLAIN_MAX_LIST_ITEMS,

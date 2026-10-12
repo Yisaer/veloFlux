@@ -8,10 +8,12 @@ axum = { version = "0.7", features = ["macros", "json", "multipart"] }
 bincode = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml = "0.9"
 tokio = { version = "1", default-features = false, features = ["fs", "io-util", "macros", "rt-multi-thread", "net", "sync"] }
 tracing = "0.1"
 tower-http = { version = "0.6", features = ["cors"] }
 flow = { path = "../flow" }
+model-runtime = { package = "veloflux-model-runtime", path = "../model-runtime", default-features = false, optional = true }
 parser = { path = "../parser" }
 storage = { path = "../storage" }
 udf = { path = "../udf", optional = true }
@@ -41,5 +43,6 @@ path = "src/lib.rs"
 
 [features]
 default = ["wasm_udf"]
+onnx = ["dep:model-runtime", "model-runtime/onnx"]
 deadlock_detection = ["flow/deadlock_detection", "parking_lot/deadlock_detection"]
 wasm_udf = ["dep:udf"]
