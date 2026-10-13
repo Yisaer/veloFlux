@@ -125,17 +125,23 @@ curl -X POST \
 ## Notes
 
 - The import API is defined as **full replace**, not partial upsert.
+- Import stores revisions without comparing them, but later incremental Apply calls
+  still require a greater revision than what import stored. Keep revisions monotonic
+  (timestamps or your own increasing counter) in the bundle so follow-up updates can overwrite.
 - Use `GET /storage/export?bundle_version=<version>` before import when a complete
   restorable backup is required.
 - Runtime errors are process-local and are not included in the import/export artifact. Imported pipeline
   `run_state` is desired state only; runtime failed state is managed by the running manager.
 - Because runtime reconciliation is out of scope for this endpoint, a restart or a separate runtime
-  apply workflow may still be required after import.
+  apply workflow may still be required after import. For an incremental example that creates
+  a new stream and its dependent pipeline in one atomic request, see [Apply](apply.md).
 
 ## Publication Failures
 
-Use `POST /storage/apply` for incremental live deployment, or
-`POST /storage/import` for full storage replacement.
+Use `POST /storage/apply` ([Apply](apply.md)) for incremental live deployment, or
+`POST /storage/import` for full storage replacement. To deploy a new stream
+together with a pipeline that reads from it, send both in a single Apply
+manifest instead of creating the pipeline first.
 
 Import reads previous resources before publishing any managed files. Metadata
 transaction failure triggers journal recovery of schema backups and new WASM
