@@ -84,3 +84,10 @@
 - `decoder` / `encoder`：`decoder processor` 负责将 `[]byte` 转为 `Collection`/`Tuple`；`encoder` 负责将 `Collection`/`Tuple` 转为 `[]byte`。
 - 性能约束：processor 处理 `Collection`/`Tuple` 时尽可能避免值拷贝（优先借用/引用或零拷贝结构）。
 - Hot path 约束：对于 processor 中的高频路径（尤其是 `partition key` 相关逻辑），避免使用 `format!("{:?}", key_values)` 这类写法；这类实现通常会同时引入 `Vec<Value>` 分配、`String` 分配和 `Debug` 格式化开销，容易成为明显的 CPU 热点。优先保持结构化 key，并直接使用可 `Hash` / `Eq` 的数据结构作为 key。
+- Sink transform 融合审计结论：按 plan index 统计 DAG 的消费者数量，融合跨度内任何共享节点均保留独立执行，避免多 sink 重复推进 pipeline-state；Immediate 空集合保留编码 delivery，batch 空集合不启动 delivery；fused stats 只统计任务输入/输出边界，native 输出计 Collection/row，encoded 输出计 message/byte。
+- Sink transform 字节路径审计结论：HTTP、MQTT、自定义 connector 分支保留独立转换任务，以维持 SinkConnector::max_delivery_bytes 的增量检查；压缩器自然 drain 的空块不得传给 encrypt.write，但 finish 必须完成；融合节点内部 Filter/Project/Order 必须绑定 custom function runtime，begin/write 错误必须记录并 abort delivery。
+- Sink transform 等价性结论：encoded control terminal 按 SinkEncoderProcessor 先 flush 后转发，flush/send 错误在相同边界记录；native control 保持 BatchProcessor 原有顺序。count batch 每完成一批即等待发送背压，禁止先累计所有完成 payload；编码输出计数在成功发送后更新。fused native 输出布局复用 projection 推导，encoded 输出布局使用 captured encoder layout，保证优化前后布局契约一致。
+
+- Sink stage 维护结论：standalone 与 fused 共用 EncoderStage、BatchPolicy、NativeBatchStage 和完整 compress/encrypt delivery handler；融合仅以内联调用替换内部 channel，不再组装整批字节。编码器错误结束当前输入，转换错误在本 stage 恢复，含转换 stage 的 ChannelClosed 必须退出；最终输出指标只在成功发送后更新。
+
+- Sink stage 边界结论：共享 encoded/native 输入入口必须在 row preparation 后复查固定 deadline，先 flush 到期旧批次再追加新输入；旧批次编码 flush 的可恢复错误按 timer 边界记录，不得额外丢弃新 collection。fused messages_aborted 按 encoder delivery 生命周期去重，未发 START 的失败也覆盖；各 stage 错误仍独立计 error_count，下一 delivery 开始时重置记账。

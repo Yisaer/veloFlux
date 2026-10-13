@@ -1,13 +1,15 @@
 //! Sink encoder processor combines batching and chunked sink encoding.
 
 use crate::codec::SinkEncoder;
-use crate::model::Collection;
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::batch_policy::BatchPolicy;
 use crate::processor::data_metrics::EncoderMetrics;
+use crate::processor::delivery_output::ChannelDeliveryOutput;
+use crate::processor::encoder_stage::EncoderStage;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
@@ -17,7 +19,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 #[cfg(test)]
 use tokio::sync::broadcast;
-use tokio::time::{sleep_until, Duration, Instant, Sleep};
+use tokio::time::{Duration, Instant, Sleep};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 pub struct SinkEncoderProcessor {
@@ -33,80 +35,12 @@ pub struct SinkEncoderProcessor {
     stats: Arc<ProcessorStats>,
 }
 
-#[derive(Default)]
-struct DeliveryEncoding {
-    row_count: usize,
-    active: bool,
-    emitted_chunk: bool,
-    pending_start_chunk: Option<bytes::Bytes>,
-}
-
-enum StreamingBatchMode {
-    Immediate,
-    CountOnly { count: usize },
-    DurationOnly { duration: Duration },
-    Combined { count: usize, duration: Duration },
-}
-
-impl StreamingBatchMode {
-    fn new(batch_count: Option<usize>, batch_duration: Option<Duration>) -> Self {
-        match (batch_count, batch_duration) {
-            (Some(count), Some(duration)) => Self::Combined { count, duration },
-            (Some(count), None) => Self::CountOnly { count },
-            (None, Some(duration)) => Self::DurationOnly { duration },
-            (None, None) => Self::Immediate,
-        }
-    }
-
-    fn count_threshold(&self) -> Option<usize> {
-        match self {
-            StreamingBatchMode::CountOnly { count }
-            | StreamingBatchMode::Combined { count, .. } => Some(*count),
-            StreamingBatchMode::Immediate | StreamingBatchMode::DurationOnly { .. } => None,
-        }
-    }
-
-    fn duration(&self) -> Option<Duration> {
-        match self {
-            StreamingBatchMode::DurationOnly { duration }
-            | StreamingBatchMode::Combined { duration, .. } => Some(*duration),
-            StreamingBatchMode::Immediate | StreamingBatchMode::CountOnly { .. } => None,
-        }
-    }
-}
-
 impl SinkEncoderProcessor {
     pub(crate) fn validate_batch_config(
-        batch_count: Option<usize>,
-        batch_duration: Option<Duration>,
+        count: Option<usize>,
+        duration: Option<Duration>,
     ) -> Result<(), ProcessorError> {
-        if matches!(batch_count, Some(0)) {
-            return Err(ProcessorError::InvalidConfiguration(
-                "sink encoder processor requires batch_count > 0 when configured".to_string(),
-            ));
-        }
-        if let Some(duration) = batch_duration {
-            let millis = duration.as_millis();
-            if millis == 0 {
-                return Err(ProcessorError::InvalidConfiguration(
-                    "sink encoder processor requires batch_duration >= 1ms when configured"
-                        .to_string(),
-                ));
-            }
-            if !duration.subsec_nanos().is_multiple_of(1_000_000) {
-                return Err(ProcessorError::InvalidConfiguration(
-                    "sink encoder processor requires batch_duration to use millisecond precision"
-                        .to_string(),
-                ));
-            }
-            if u64::try_from(millis).is_err() {
-                return Err(ProcessorError::InvalidConfiguration(
-                    "sink encoder processor requires batch_duration to fit in u64 milliseconds"
-                        .to_string(),
-                ));
-            }
-        }
-        Ok(())
+        BatchPolicy::validate(count, duration, "sink encoder processor")
     }
 
     pub fn new(
@@ -161,372 +95,10 @@ impl SinkEncoderProcessor {
             .map_err(|_| ProcessorError::ProcessingError("sink encoder mutex poisoned".to_string()))
     }
 
-    fn start_delivery(
-        encoder: &mut dyn SinkEncoder,
-        delivery: &mut DeliveryEncoding,
-    ) -> Result<(), ProcessorError> {
-        let start_chunk = encoder.begin_delivery().map_err(|err| {
-            ProcessorError::ProcessingError(format!("encoder begin error: {err}"))
-        })?;
-        delivery.row_count = 0;
-        delivery.active = true;
-        delivery.emitted_chunk = false;
-        delivery.pending_start_chunk = start_chunk.filter(|chunk| !chunk.is_empty());
-        Ok(())
-    }
-
-    fn combine_chunks(chunks: [Option<bytes::Bytes>; 3]) -> Option<bytes::Bytes> {
-        let mut count = 0;
-        let mut total_len = 0;
-        for chunk in chunks.iter().flatten() {
-            if !chunk.is_empty() {
-                count += 1;
-                total_len += chunk.len();
-            }
-        }
-
-        match count {
-            0 => None,
-            1 => chunks.into_iter().flatten().find(|chunk| !chunk.is_empty()),
-            _ => {
-                let mut bytes = Vec::with_capacity(total_len);
-                for chunk in chunks.into_iter().flatten() {
-                    if !chunk.is_empty() {
-                        bytes.extend_from_slice(&chunk);
-                    }
-                }
-                Some(bytes.into())
-            }
-        }
-    }
-
-    fn take_pending_start_and_combine(
-        delivery: &mut DeliveryEncoding,
-        chunk: Option<bytes::Bytes>,
-    ) -> Option<bytes::Bytes> {
-        if delivery.emitted_chunk {
-            chunk
-        } else {
-            Self::combine_chunks([delivery.pending_start_chunk.take(), chunk, None])
-        }
-    }
-
-    async fn emit_intermediate_chunk(
-        chunk: Option<bytes::Bytes>,
-        delivery: &mut DeliveryEncoding,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-        metrics: &EncoderMetrics,
-    ) -> Result<(), ProcessorError> {
-        let chunk = Self::take_pending_start_and_combine(delivery, chunk);
-        let Some(chunk) = chunk else {
-            return Ok(());
-        };
-        let output_bytes = chunk.len();
-        let is_first_chunk = !delivery.emitted_chunk;
-        let data = if is_first_chunk {
-            StreamData::encoded_delivery_start(chunk)
-        } else {
-            StreamData::encoded_delivery_chunk(chunk)
-        };
-        send_with_backpressure(output, data_channel_capacity, data, Some(stats.as_ref())).await?;
-        metrics.record_output_bytes(output_bytes);
-        if is_first_chunk {
-            delivery.emitted_chunk = true;
-        }
-        Ok(())
-    }
-
-    async fn abort_delivery(
-        encoder: &mut dyn SinkEncoder,
-        delivery: &mut DeliveryEncoding,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-        metrics: &EncoderMetrics,
-    ) -> Result<(), ProcessorError> {
-        if !delivery.active {
-            return Ok(());
-        }
-
-        encoder.abort_delivery();
-        metrics.record_message_aborted();
-        let should_emit_abort = delivery.emitted_chunk;
-        *delivery = DeliveryEncoding::default();
-
-        if should_emit_abort {
-            send_with_backpressure(
-                output,
-                data_channel_capacity,
-                StreamData::encoded_delivery_abort(),
-                Some(stats.as_ref()),
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
-    async fn finish_delivery(
-        processor_id: &str,
-        encoder: &mut dyn SinkEncoder,
-        delivery: &mut DeliveryEncoding,
-        prefix_chunk: Option<bytes::Bytes>,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-        metrics: &EncoderMetrics,
-    ) -> Result<(), ProcessorError> {
-        if !delivery.active {
-            return Ok(());
-        }
-
-        let end_chunk = match encoder.finish_delivery() {
-            Ok(chunk) => chunk,
-            Err(err) => {
-                Self::abort_delivery(
-                    encoder,
-                    delivery,
-                    output,
-                    data_channel_capacity,
-                    stats,
-                    metrics,
-                )
-                .await?;
-                return Err(ProcessorError::ProcessingError(format!(
-                    "encoder finish error: {err}"
-                )));
-            }
-        };
-        let chunk = if delivery.emitted_chunk {
-            Self::combine_chunks([prefix_chunk, end_chunk, None])
-        } else {
-            Self::combine_chunks([delivery.pending_start_chunk.take(), prefix_chunk, end_chunk])
-        };
-        let chunk = chunk.unwrap_or_default();
-        let output_bytes = chunk.len();
-        let data = if delivery.emitted_chunk {
-            StreamData::encoded_delivery_end(chunk)
-        } else {
-            StreamData::encoded_delivery_single(chunk)
-        };
-        *delivery = DeliveryEncoding::default();
-        send_with_backpressure(output, data_channel_capacity, data, Some(stats.as_ref())).await?;
-        metrics.record_output_bytes(output_bytes);
-        metrics.record_message_out();
-        tracing::debug!(processor_id = %processor_id, "flushed encoded delivery");
-        Ok(())
-    }
-
-    fn append_collection_to_delivery(
-        encoder: &mut dyn SinkEncoder,
-        delivery: &mut DeliveryEncoding,
-        collection: &dyn Collection,
-    ) -> Result<Option<bytes::Bytes>, ProcessorError> {
-        if !delivery.active {
-            Self::start_delivery(encoder, delivery)?;
-        }
-
-        let chunk = match encoder.append(collection) {
-            Ok(chunk) => chunk,
-            Err(err) => {
-                return Err(ProcessorError::ProcessingError(format!(
-                    "encoder append error: {err}"
-                )));
-            }
-        };
-        delivery.row_count += collection.num_rows();
-        Ok(chunk)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_collection(
-        processor_id: &str,
-        collection: Box<dyn Collection>,
-        encoder: &mut dyn SinkEncoder,
-        delivery: &mut DeliveryEncoding,
-        mode: &StreamingBatchMode,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        timer: &mut Option<Pin<Box<Sleep>>>,
-        grid_origin: Instant,
-        stats: &Arc<ProcessorStats>,
-        metrics: &EncoderMetrics,
-    ) -> Result<(), ProcessorError> {
-        let row_total = collection.num_rows();
-        stats.record_collection_in(row_total as u64);
-
-        if row_total == 0 {
-            if matches!(mode, StreamingBatchMode::Immediate) {
-                Self::start_delivery(encoder, delivery)?;
-                Self::finish_delivery(
-                    processor_id,
-                    encoder,
-                    delivery,
-                    None,
-                    output,
-                    data_channel_capacity,
-                    stats,
-                    metrics,
-                )
-                .await?;
-            }
-            return Ok(());
-        }
-
-        if let Some(count) = mode.count_threshold() {
-            let mut offset = 0;
-            while offset < row_total {
-                let remaining_capacity = count - delivery.row_count;
-                let take_rows = remaining_capacity.min(row_total - offset);
-                let end = offset + take_rows;
-                let segment;
-                let collection_segment: &dyn Collection = if offset == 0 && end == row_total {
-                    collection.as_ref()
-                } else {
-                    segment = collection.slice(offset, end).map_err(|err| {
-                        ProcessorError::ProcessingError(format!("collection slice error: {err}"))
-                    })?;
-                    segment.as_ref()
-                };
-                let chunk = match Self::append_collection_to_delivery(
-                    encoder,
-                    delivery,
-                    collection_segment,
-                ) {
-                    Ok(chunk) => chunk,
-                    Err(err) => {
-                        Self::abort_delivery(
-                            encoder,
-                            delivery,
-                            output,
-                            data_channel_capacity,
-                            stats,
-                            metrics,
-                        )
-                        .await?;
-                        return Err(err);
-                    }
-                };
-                offset = end;
-
-                if delivery.row_count >= count {
-                    Self::finish_delivery(
-                        processor_id,
-                        encoder,
-                        delivery,
-                        chunk,
-                        output,
-                        data_channel_capacity,
-                        stats,
-                        metrics,
-                    )
-                    .await?;
-                } else {
-                    Self::emit_intermediate_chunk(
-                        chunk,
-                        delivery,
-                        output,
-                        data_channel_capacity,
-                        stats,
-                        metrics,
-                    )
-                    .await?;
-                }
-            }
-        } else {
-            let chunk =
-                match Self::append_collection_to_delivery(encoder, delivery, collection.as_ref()) {
-                    Ok(chunk) => chunk,
-                    Err(err) => {
-                        Self::abort_delivery(
-                            encoder,
-                            delivery,
-                            output,
-                            data_channel_capacity,
-                            stats,
-                            metrics,
-                        )
-                        .await?;
-                        return Err(err);
-                    }
-                };
-            if matches!(mode, StreamingBatchMode::Immediate) {
-                Self::finish_delivery(
-                    processor_id,
-                    encoder,
-                    delivery,
-                    chunk,
-                    output,
-                    data_channel_capacity,
-                    stats,
-                    metrics,
-                )
-                .await?;
-                return Ok(());
-            }
-            Self::emit_intermediate_chunk(
-                chunk,
-                delivery,
-                output,
-                data_channel_capacity,
-                stats,
-                metrics,
-            )
-            .await?;
-        }
-
-        if let Some(duration) = mode.duration() {
-            Self::schedule_timer(timer, grid_origin, duration, delivery.row_count > 0);
-        }
-        Ok(())
-    }
-
-    /// Fixed-grid boundary handling.
-    ///
-    /// The batch flush deadline is aligned to a fixed processing-time grid
-    /// `grid_origin + k * duration` (captured once at processor start), NOT to the
-    /// arrival of each batch's first sample. Anchoring to a fixed grid keeps every
-    /// window the same fixed partition of the timeline, so a periodic source of the
-    /// same period yields exactly `duration / period` rows per window instead of an
-    /// extra boundary sample per batch.
-    ///
-    /// The window is left-closed / right-open `[t, t+duration)`: a sample landing on
-    /// a boundary belongs to the next window. That is realized by the `biased`
-    /// select (the timer arm is polled before the input arm), so the boundary flush
-    /// happens before the coincident sample is appended.
-    ///
-    /// The grid origin is data-independent (processor start), so the first window is
-    /// naturally a partial one — it is emitted as-is; every subsequent window is a
-    /// full-length grid cell.
+    #[cfg(test)]
     fn next_boundary(grid_origin: Instant, duration: Duration, now: Instant) -> Instant {
-        let elapsed = now.saturating_duration_since(grid_origin);
-        let period_ms = duration.as_millis();
-        let next_boundary_ms = (elapsed.as_millis() / period_ms + 1)
-            .checked_mul(period_ms)
-            .expect("validated batch duration keeps boundary offset representable");
-        let boundary_offset = Duration::from_millis(
-            u64::try_from(next_boundary_ms)
-                .expect("validated batch duration keeps boundary offset within u64 milliseconds"),
-        );
-        grid_origin + boundary_offset
-    }
-
-    fn schedule_timer(
-        timer: &mut Option<Pin<Box<Sleep>>>,
-        grid_origin: Instant,
-        duration: Duration,
-        has_data: bool,
-    ) {
-        if has_data {
-            if timer.is_none() {
-                let boundary = Self::next_boundary(grid_origin, duration, Instant::now());
-                *timer = Some(Box::pin(sleep_until(boundary)));
-            }
-        } else if timer.is_some() {
-            *timer = None;
-        }
+        BatchPolicy::next_boundary(grid_origin, duration, now)
     }
 }
 
@@ -546,7 +118,7 @@ impl Processor for SinkEncoderProcessor {
         if let Err(err) = Self::validate_batch_config(self.batch_count, self.batch_duration) {
             return ProcessorStart::failed(spawner, err);
         }
-        let mut encoder = match self.take_encoder() {
+        let encoder = match self.take_encoder() {
             Ok(Some(encoder)) => encoder,
             Ok(None) => {
                 return ProcessorStart::failed(
@@ -560,7 +132,7 @@ impl Processor for SinkEncoderProcessor {
         };
         let batch_count = self.batch_count;
         let batch_duration = self.batch_duration;
-        let mode = StreamingBatchMode::new(batch_count, batch_duration);
+        let mut stage = EncoderStage::new(encoder, BatchPolicy::new(batch_count, batch_duration));
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
         let metrics = EncoderMetrics::new(stats.as_ref());
@@ -568,11 +140,13 @@ impl Processor for SinkEncoderProcessor {
 
         let processor_span = stats.processor_span();
         ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            let mut delivery = DeliveryEncoding::default();
             let mut timer: Option<Pin<Box<Sleep>>> = None;
             // Fixed grid origin, captured once before any sample arrives so batch
             // boundaries never re-anchor to a batch's first sample. See `next_boundary`.
             let grid_origin = Instant::now();
+            let mut stage_output = ChannelDeliveryOutput {
+                output: &output, capacity: channel_capacities.data, stats: &stats,
+            };
             loop {
                 tokio::select! {
                     biased;
@@ -581,16 +155,7 @@ impl Processor for SinkEncoderProcessor {
                             let is_terminal = control_signal.is_terminal();
                             if is_terminal {
                                 if let Err(err) = async {
-                                    SinkEncoderProcessor::finish_delivery(
-                                        &processor_id,
-                                        encoder.as_mut(),
-                                        &mut delivery,
-                                        None,
-                                        &output,
-                                        channel_capacities.data,
-                                        &stats,
-                                        &metrics,
-                                    )
+                                    stage.flush(&processor_id, &mut stage_output, Some(&metrics))
                                     .await?;
                                     Ok::<(), ProcessorError>(())
                                 }
@@ -625,16 +190,7 @@ impl Processor for SinkEncoderProcessor {
                         }
                     }, if timer.is_some() => {
                         if let Err(err) = async {
-                            SinkEncoderProcessor::finish_delivery(
-                                &processor_id,
-                                encoder.as_mut(),
-                                &mut delivery,
-                                None,
-                                &output,
-                                channel_capacities.data,
-                                &stats,
-                                &metrics,
-                            )
+                            stage.flush(&processor_id, &mut stage_output, Some(&metrics))
                             .await?;
                             Ok::<(), ProcessorError>(())
                         }
@@ -643,9 +199,7 @@ impl Processor for SinkEncoderProcessor {
                             tracing::error!(processor_id = %processor_id, error = %err, "flush error");
                             stats.record_error(err.to_string());
                         }
-                        if let Some(duration) = mode.duration() {
-                            SinkEncoderProcessor::schedule_timer(&mut timer, grid_origin, duration, delivery.row_count > 0);
-                        }
+                        stage.schedule_timer(&mut timer, grid_origin);
                     }
                     item = input_streams.next() => {
                         match item {
@@ -653,20 +207,9 @@ impl Processor for SinkEncoderProcessor {
                                 log_received_data(&processor_id, &data);
                                 match data {
                                     StreamData::Collection(collection) => {
+                                        stats.record_collection_in(collection.num_rows() as u64);
                                         let handle_start = std::time::Instant::now();
-                                        let res = SinkEncoderProcessor::handle_collection(
-                                                &processor_id,
-                                                collection,
-                                                encoder.as_mut(),
-                                                &mut delivery,
-                                                &mode,
-                                                &output,
-                                                channel_capacities.data,
-                                                &mut timer,
-                                                grid_origin,
-                                                &stats,
-                                                &metrics,
-                                            )
+                                        let res = stage.feed(&processor_id, collection, &mut stage_output, &mut timer, grid_origin, Some(&metrics))
                                         .await;
                                         // For synchronous processors, handle duration includes downstream send/backpressure
                                         // time (if a flush happens on the input path).
@@ -684,16 +227,7 @@ impl Processor for SinkEncoderProcessor {
                                         let is_terminal = data.is_terminal();
                                         if is_terminal {
                                             if let Err(err) = async {
-                                                SinkEncoderProcessor::finish_delivery(
-                                                    &processor_id,
-                                                    encoder.as_mut(),
-                                                    &mut delivery,
-                                                    None,
-                                                    &output,
-                                                    channel_capacities.data,
-                                                    &stats,
-                                                    &metrics,
-                                                )
+                                                stage.flush(&processor_id, &mut stage_output, Some(&metrics))
                                                 .await?;
                                                 Ok::<(), ProcessorError>(())
                                             }
@@ -714,14 +248,7 @@ impl Processor for SinkEncoderProcessor {
                                             tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
                                             return Ok(());
                                         }
-                                        if let Some(duration) = mode.duration() {
-                                            SinkEncoderProcessor::schedule_timer(
-                                                &mut timer,
-                                                grid_origin,
-                                                duration,
-                                                delivery.row_count > 0,
-                                            );
-                                        }
+                                        stage.schedule_timer(&mut timer, grid_origin);
                                     }
                                 }
                             }
@@ -735,16 +262,7 @@ impl Processor for SinkEncoderProcessor {
                             }
                             None => {
                                 if let Err(err) = async {
-                                    SinkEncoderProcessor::finish_delivery(
-                                        &processor_id,
-                                        encoder.as_mut(),
-                                        &mut delivery,
-                                        None,
-                                        &output,
-                                        channel_capacities.data,
-                                        &stats,
-                                        &metrics,
-                                    )
+                                    stage.flush(&processor_id, &mut stage_output, Some(&metrics))
                                     .await?;
                                     Ok::<(), ProcessorError>(())
                                 }

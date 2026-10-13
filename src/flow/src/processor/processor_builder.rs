@@ -21,8 +21,13 @@ use crate::processor::base::{
     normalize_channel_capacity, LinkKind, LinkReceiver, ProcessorChannelCapacities,
     DEFAULT_CONTROL_CHANNEL_CAPACITY, DEFAULT_DATA_CHANNEL_CAPACITY,
 };
+use crate::processor::byte_stage::{CompressDriver, EncryptDriver};
 use crate::processor::data_metrics::DataMetricDomains;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
+use crate::processor::filter_processor::FilterStage;
+use crate::processor::inline_delivery::ByteTransformChain;
+use crate::processor::order_processor::OrderStage;
+use crate::processor::project_processor::ProjectStage;
 use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
@@ -30,7 +35,7 @@ use crate::processor::{
     BatchFunctionComputeProcessor, BatchProcessor, CheckpointCoordinator, CheckpointTrigger,
     CollectionLayoutNormalizeProcessor, ComputeProcessor, ControlSignal, ControlSourceProcessor,
     DataSourceProcessor, DecoderProcessor, EmptySuppressProcessor, EosWindowProcessor,
-    FilterProcessor, Ingress, InstantControlSignal, LookupJoinProcessor,
+    FilterProcessor, FusedTransformProcessor, Ingress, InstantControlSignal, LookupJoinProcessor,
     MemoryCollectionMaterializeProcessor, OrderProcessor, Processor, ProcessorError,
     ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor, SamplerProcessor,
     SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor, SinkEncryptProcessor,
@@ -159,6 +164,8 @@ pub(crate) enum PlanProcessor {
     EosWindow(EosWindowProcessor),
     /// SinkProcessor created from PhysicalDataSink
     Sink(SinkProcessor),
+    /// FusedTransformProcessor created from PhysicalFusedTransform
+    FusedTransform(Box<FusedTransformProcessor>),
     /// ResultCollectProcessor created from PhysicalResultCollect
     ResultCollect(ResultCollectProcessor),
     /// BarrierProcessor created from PhysicalBarrier
@@ -457,6 +464,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.id(),
             PlanProcessor::EosWindow(p) => p.id(),
             PlanProcessor::Sink(p) => p.id(),
+            PlanProcessor::FusedTransform(p) => p.id(),
             PlanProcessor::ResultCollect(p) => p.id(),
             PlanProcessor::Barrier(p) => p.id(),
             PlanProcessor::Sampler(p) => p.id(),
@@ -493,6 +501,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.checkpoint_key(),
             PlanProcessor::EosWindow(p) => p.checkpoint_key(),
             PlanProcessor::Sink(p) => p.checkpoint_key(),
+            PlanProcessor::FusedTransform(p) => p.checkpoint_key(),
             PlanProcessor::ResultCollect(p) => p.checkpoint_key(),
             PlanProcessor::Barrier(p) => p.checkpoint_key(),
             PlanProcessor::Sampler(p) => p.checkpoint_key(),
@@ -529,6 +538,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(_) => "state_window",
             PlanProcessor::EosWindow(_) => "eos_window",
             PlanProcessor::Sink(_) => "sink",
+            PlanProcessor::FusedTransform(_) => "fused_transform",
             PlanProcessor::ResultCollect(_) => "result_collect",
             PlanProcessor::Barrier(_) => "barrier",
             PlanProcessor::Sampler(_) => "sampler",
@@ -576,6 +586,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::EosWindow(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Sink(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::FusedTransform(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::ResultCollect(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Barrier(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Sampler(p) => p.set_checkpoint_snapshot_collector(collector),
@@ -615,6 +626,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::EosWindow(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Sink(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::FusedTransform(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::ResultCollect(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Barrier(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Sampler(p) => p.restore_checkpoint(snapshot),
@@ -651,6 +663,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::EosWindow(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Sink(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::FusedTransform(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::ResultCollect(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Barrier(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Sampler(p) => p.validate_checkpoint(snapshot),
@@ -687,6 +700,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.clear_checkpoint_restore(),
             PlanProcessor::EosWindow(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Sink(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::FusedTransform(p) => p.clear_checkpoint_restore(),
             PlanProcessor::ResultCollect(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Barrier(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Sampler(p) => p.clear_checkpoint_restore(),
@@ -723,6 +737,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.set_stats(stats),
             PlanProcessor::EosWindow(p) => p.set_stats(stats),
             PlanProcessor::Sink(p) => p.set_stats(stats),
+            PlanProcessor::FusedTransform(p) => p.set_stats(stats),
             PlanProcessor::ResultCollect(p) => p.set_stats(stats),
             PlanProcessor::Barrier(p) => p.set_stats(stats),
             PlanProcessor::Sampler(p) => p.set_stats(stats),
@@ -766,6 +781,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.start(spawner),
             PlanProcessor::EosWindow(p) => p.start(spawner),
             PlanProcessor::Sink(p) => p.start(spawner),
+            PlanProcessor::FusedTransform(p) => p.start(spawner),
             PlanProcessor::ResultCollect(p) => p.start(spawner),
             PlanProcessor::Barrier(p) => p.start(spawner),
             PlanProcessor::Sampler(p) => p.start(spawner),
@@ -803,6 +819,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.subscribe_output(),
             PlanProcessor::EosWindow(p) => p.subscribe_output(),
             PlanProcessor::Sink(p) => p.subscribe_output(),
+            PlanProcessor::FusedTransform(p) => p.subscribe_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_output(),
             PlanProcessor::Barrier(p) => p.subscribe_output(),
             PlanProcessor::Sampler(p) => p.subscribe_output(),
@@ -840,6 +857,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.subscribe_control_output(),
             PlanProcessor::EosWindow(p) => p.subscribe_control_output(),
             PlanProcessor::Sink(p) => p.subscribe_control_output(),
+            PlanProcessor::FusedTransform(p) => p.subscribe_control_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_control_output(),
             PlanProcessor::Barrier(p) => p.subscribe_control_output(),
             PlanProcessor::Sampler(p) => p.subscribe_control_output(),
@@ -877,6 +895,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.add_input(receiver),
             PlanProcessor::EosWindow(p) => p.add_input(receiver),
             PlanProcessor::Sink(p) => p.add_input(receiver),
+            PlanProcessor::FusedTransform(p) => p.add_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_input(receiver),
             PlanProcessor::Barrier(p) => p.add_input(receiver),
             PlanProcessor::Sampler(p) => p.add_input(receiver),
@@ -917,6 +936,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.add_control_input(receiver),
             PlanProcessor::EosWindow(p) => p.add_control_input(receiver),
             PlanProcessor::Sink(p) => p.add_control_input(receiver),
+            PlanProcessor::FusedTransform(p) => p.add_control_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_control_input(receiver),
             PlanProcessor::Barrier(p) => p.add_control_input(receiver),
             PlanProcessor::Sampler(p) => p.add_control_input(receiver),
@@ -2349,6 +2369,89 @@ fn create_processor_from_plan_node(
                 processor,
             )))
         }
+        PhysicalPlan::FusedTransform(fused_plan) => {
+            if fused_plan.batch_count.is_some() || fused_plan.batch_duration.is_some() {
+                crate::processor::batch_processor::BatchProcessor::validate_batch_config(
+                    fused_plan.batch_count,
+                    fused_plan.batch_duration,
+                )?;
+            }
+            let processor_id = format!("{}_{}", processor_id, fused_plan.sink_id);
+            let encoder_runtime = match fused_plan.encoder.as_ref() {
+                Some(encoder_config) => {
+                    let encoder_impl = context
+                        .encoder_registry()?
+                        .instantiate(encoder_config)
+                        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+                    let encoder_impl = attach_encoder_output_layout(
+                        fused_plan.encoder_output_layout.as_ref(),
+                        encoder_impl,
+                    )?;
+                    Some(
+                        encoder_impl
+                            .start_encoder()
+                            .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?,
+                    )
+                }
+                None => None,
+            };
+            let compress_writer = match fused_plan.compress.as_ref() {
+                Some(codec) => Some(
+                    codec
+                        .build_writer()
+                        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?,
+                ),
+                None => None,
+            };
+            let encrypt_writer = match fused_plan.encrypt.as_ref() {
+                Some(encrypt) => {
+                    let config = crate::codec::SinkEncryptionConfig {
+                        algorithm: encrypt.algorithm,
+                        key_id: encrypt.key_id.clone(),
+                        key_bits: encrypt.key_bits,
+                        key: Arc::clone(&encrypt.key),
+                    };
+                    let writer = crate::codec::AesGcmStreamWriter::from_config(&config)
+                        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+                    if writer.key_bits() != encrypt.key_bits {
+                        return Err(ProcessorError::InvalidConfiguration(format!(
+                            "sink encrypt key_bits mismatch for key_id `{}`",
+                            encrypt.key_id
+                        )));
+                    }
+                    Some(writer)
+                }
+                None => None,
+            };
+            // Assemble the whole task configuration at once: the processor
+            // stores it whole and moves it into the task at start. The byte
+            // stages compose in pipeline order (compress before encrypt) so
+            // the fused task reuses the standalone stage logic.
+            let byte_pipeline = ByteTransformChain::new(
+                compress_writer.map(CompressDriver::new),
+                encrypt_writer.map(|writer| EncryptDriver::new(Box::new(writer))),
+            );
+            let stages = crate::processor::fused_transform_processor::FusedRowStages {
+                filter: fused_plan.filter.as_ref().map(FilterStage::from_plan),
+                project: ProjectStage::from_plan(&fused_plan.project),
+                order: fused_plan.order.as_ref().map(OrderStage::from_plan),
+                filter_before_order: fused_plan.filter_before_order,
+                empty_suppress_omit: fused_plan.empty_suppress_omit,
+                empty_suppress_counters: None,
+            };
+            let processor = FusedTransformProcessor::new_with_channel_capacities(
+                processor_id.clone(),
+                stages,
+                encoder_runtime,
+                byte_pipeline,
+                fused_plan.batch_count,
+                fused_plan.batch_duration,
+                channel_capacities,
+            );
+            Ok(ProcessorBuildOutput::with_processor(
+                PlanProcessor::FusedTransform(Box::new(processor)),
+            ))
+        }
         PhysicalPlan::ResultCollect(_result_collect) => {
             let mut processor = ResultCollectProcessor::new(processor_id.clone());
             processor.set_input_domain(plan_input_domain(
@@ -2470,6 +2573,11 @@ fn plan_output_domain(
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string())),
         },
         PhysicalPlan::DataSink(_) | PhysicalPlan::SinkConnector(_) => Ok(DataDomain::Message),
+        PhysicalPlan::FusedTransform(fused) => Ok(if fused.encoder.is_some() {
+            DataDomain::Message
+        } else {
+            DataDomain::Collection
+        }),
         PhysicalPlan::ResultCollect(_) | PhysicalPlan::Barrier(_) => {
             plan_input_domain(plan, merger_registry)
         }

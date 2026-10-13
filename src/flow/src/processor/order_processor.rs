@@ -3,8 +3,9 @@
 //! Semantics: sorting is applied within each incoming Collection (no global ordering across batches).
 
 use crate::expr::value_compare;
+use crate::expr::ScalarExpr;
 use crate::model::{Collection, RecordBatch, Tuple};
-use crate::planner::physical::{PhysicalOrder, PhysicalOrderKey, PhysicalPlan};
+use crate::planner::physical::{PhysicalOrder, PhysicalPlan};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
@@ -22,7 +23,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 pub struct OrderProcessor {
     id: String,
-    physical_order: Arc<PhysicalOrder>,
+    order_stage: OrderStage,
     inputs: Vec<LinkReceiver<StreamData>>,
     control_inputs: Vec<LinkReceiver<ControlSignal>>,
     output: LinkOutput<StreamData>,
@@ -48,7 +49,7 @@ impl OrderProcessor {
         );
         Self {
             id: id.into(),
-            physical_order,
+            order_stage: OrderStage::from_plan(&physical_order),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -75,7 +76,8 @@ impl OrderProcessor {
     }
 
     fn compare_key_values(
-        key: &PhysicalOrderKey,
+        idx: usize,
+        key: &OrderKey,
         left: &Value,
         right: &Value,
     ) -> Result<Ordering, String> {
@@ -90,120 +92,142 @@ impl OrderProcessor {
             return Ok(Ordering::Less);
         }
 
-        let ord = Self::compare_values(left, right).ok_or_else(|| {
+        let ord = OrderProcessor::compare_values(left, right).ok_or_else(|| {
             format!(
-                "ORDER BY key '{}' is not comparable (left={:?}, right={:?})",
-                key.original_expr, left, right
+                "ORDER BY key #{} is not comparable (left={:?}, right={:?})",
+                idx, left, right
             )
         })?;
 
         Ok(if key.asc { ord } else { ord.reverse() })
     }
+}
 
-    fn apply_order(
-        physical_order: &PhysicalOrder,
-        collection: Box<dyn Collection>,
-        stats: Option<&ProcessorStats>,
-    ) -> Result<Box<dyn Collection>, ProcessorError> {
-        let metadata = collection.metadata().clone();
-        let rows = collection.into_rows().map_err(|e| {
-            ProcessorError::ProcessingError(format!("Failed to materialize rows: {}", e))
-        })?;
+/// Task-facing ORDER BY key: the compiled expression plus direction.
+/// The original SQL text and plan topology stay in the plan node.
+#[derive(Clone, Debug)]
+pub(crate) struct OrderKey {
+    pub compiled: ScalarExpr,
+    pub asc: bool,
+}
 
-        if rows.is_empty() || physical_order.keys.is_empty() {
-            return Ok(Box::new(
-                RecordBatch::new_with_metadata(rows, metadata).map_err(|e| {
-                    ProcessorError::ProcessingError(format!("Failed to build record batch: {}", e))
-                })?,
-            ));
-        }
+/// Task-facing ORDER BY configuration, converted once from the plan node.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct OrderStage {
+    pub keys: Vec<OrderKey>,
+}
 
-        let mut sortable_rows: Vec<SortableRow> = Vec::with_capacity(rows.len());
-        let mut key_representatives: Vec<Option<Value>> = vec![None; physical_order.keys.len()];
-        'rows: for row in rows {
-            let mut key_values = Vec::with_capacity(physical_order.keys.len());
-            for key in &physical_order.keys {
-                let value = match key.compiled_expr.eval_with_tuple(&row) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        if let Some(stats) = stats {
-                            stats.record_error_logged(
-                                "order processor error",
-                                format!(
-                                    "Failed to evaluate ORDER BY key '{}': {}",
-                                    key.original_expr, error
-                                ),
-                            );
-                        }
-                        continue 'rows;
-                    }
-                };
-                key_values.push(value);
-            }
-
-            for (idx, (key, value)) in physical_order
+impl OrderStage {
+    pub(crate) fn from_plan(order: &PhysicalOrder) -> Self {
+        Self {
+            keys: order
                 .keys
                 .iter()
-                .zip(key_values.iter())
-                .enumerate()
-            {
-                if value.is_null() {
+                .map(|key| OrderKey {
+                    compiled: key.compiled_expr.clone(),
+                    asc: key.asc,
+                })
+                .collect(),
+        }
+    }
+}
+
+pub(crate) fn apply_order(
+    collection: Box<dyn Collection>,
+    order: &OrderStage,
+    stats: Option<&ProcessorStats>,
+) -> Result<Box<dyn Collection>, ProcessorError> {
+    let metadata = collection.metadata().clone();
+    let rows = collection.into_rows().map_err(|e| {
+        ProcessorError::ProcessingError(format!("Failed to materialize rows: {}", e))
+    })?;
+
+    if rows.is_empty() || order.keys.is_empty() {
+        return Ok(Box::new(
+            RecordBatch::new_with_metadata(rows, metadata).map_err(|e| {
+                ProcessorError::ProcessingError(format!("Failed to build record batch: {}", e))
+            })?,
+        ));
+    }
+
+    let mut sortable_rows: Vec<SortableRow> = Vec::with_capacity(rows.len());
+    let mut key_representatives: Vec<Option<Value>> = vec![None; order.keys.len()];
+    'rows: for row in rows {
+        let mut key_values = Vec::with_capacity(order.keys.len());
+        for (idx, key) in order.keys.iter().enumerate() {
+            let value = match key.compiled.eval_with_tuple(&row) {
+                Ok(value) => value,
+                Err(error) => {
+                    if let Some(stats) = stats {
+                        stats.record_error_logged(
+                            "order processor error",
+                            format!("Failed to evaluate ORDER BY key #{}: {}", idx, error),
+                        );
+                    }
+                    continue 'rows;
+                }
+            };
+            key_values.push(value);
+        }
+
+        for (idx, (key, value)) in order.keys.iter().zip(key_values.iter()).enumerate() {
+            if value.is_null() {
+                continue;
+            }
+            if OrderProcessor::compare_values(value, value).is_none() {
+                if let Some(stats) = stats {
+                    stats.record_error_logged(
+                        "order processor error",
+                        format!(
+                            "ORDER BY key #{} is not comparable (value={:?})",
+                            idx, value
+                        ),
+                    );
+                }
+                continue 'rows;
+            }
+            if let Some(representative) = &key_representatives[idx] {
+                if OrderProcessor::compare_key_values(idx, key, value, representative).is_ok() {
                     continue;
                 }
-                if Self::compare_values(value, value).is_none() {
-                    if let Some(stats) = stats {
-                        stats.record_error_logged(
-                            "order processor error",
-                            format!(
-                                "ORDER BY key '{}' is not comparable (value={:?})",
-                                key.original_expr, value
-                            ),
-                        );
-                    }
-                    continue 'rows;
+                if let Some(stats) = stats {
+                    stats.record_error_logged(
+                        "order processor error",
+                        format!(
+                            "ORDER BY key #{} is not comparable (left={:?}, right={:?})",
+                            idx, value, representative
+                        ),
+                    );
                 }
-                if let Some(representative) = &key_representatives[idx] {
-                    if Self::compare_key_values(key, value, representative).is_ok() {
-                        continue;
-                    }
-                    if let Some(stats) = stats {
-                        stats.record_error_logged(
-                            "order processor error",
-                            format!(
-                                "ORDER BY key '{}' is not comparable (left={:?}, right={:?})",
-                                key.original_expr, value, representative
-                            ),
-                        );
-                    }
-                    continue 'rows;
-                }
-                key_representatives[idx] = Some(value.clone());
+                continue 'rows;
             }
-
-            sortable_rows.push(SortableRow { row, key_values });
+            key_representatives[idx] = Some(value.clone());
         }
 
-        sortable_rows.sort_unstable_by(|left, right| {
-            for (key, (left_value, right_value)) in physical_order
-                .keys
-                .iter()
-                .zip(left.key_values.iter().zip(right.key_values.iter()))
-            {
-                let ord = Self::compare_key_values(key, left_value, right_value)
-                    .unwrap_or(Ordering::Equal);
-                if ord != Ordering::Equal {
-                    return ord;
-                }
-            }
-            Ordering::Equal
-        });
-
-        let rows = sortable_rows.into_iter().map(|row| row.row).collect();
-
-        let batch = RecordBatch::new_with_metadata(rows, metadata)
-            .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
-        Ok(Box::new(batch))
+        sortable_rows.push(SortableRow { row, key_values });
     }
+
+    sortable_rows.sort_unstable_by(|left, right| {
+        for (idx, (key, (left_value, right_value))) in order
+            .keys
+            .iter()
+            .zip(left.key_values.iter().zip(right.key_values.iter()))
+            .enumerate()
+        {
+            let ord = OrderProcessor::compare_key_values(idx, key, left_value, right_value)
+                .unwrap_or(Ordering::Equal);
+            if ord != Ordering::Equal {
+                return ord;
+            }
+        }
+        Ordering::Equal
+    });
+
+    let rows = sortable_rows.into_iter().map(|row| row.row).collect();
+
+    let batch = RecordBatch::new_with_metadata(rows, metadata)
+        .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
+    Ok(Box::new(batch))
 }
 
 struct SortableRow {
@@ -225,7 +249,7 @@ impl Processor for OrderProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
-        let physical_order = Arc::clone(&self.physical_order);
+        let order_stage = self.order_stage.clone();
         let stats = Arc::clone(&self.stats);
 
         tracing::info!(processor_id = %id, "order processor starting");
@@ -262,9 +286,9 @@ impl Processor for OrderProcessor {
                                 match data {
                                     StreamData::Collection(collection) => {
                                         let handle_start = std::time::Instant::now();
-                                        match Self::apply_order(
-                                            physical_order.as_ref(),
+                                        match apply_order(
                                             collection,
+                                            &order_stage,
                                             Some(stats.as_ref()),
                                         ) {
                                             Ok(out_collection) => {

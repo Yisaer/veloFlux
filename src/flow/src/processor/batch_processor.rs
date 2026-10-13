@@ -1,12 +1,15 @@
 //! BatchProcessor - aggregates collections based on count/duration thresholds.
 
 use crate::expr::ScalarExpr;
-use crate::model::{Collection, RecordBatch, Tuple};
+use crate::model::{Collection, Tuple};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::batch_policy::BatchPolicy;
+use crate::processor::delivery_output::ChannelDeliveryOutput;
+use crate::processor::native_batch_stage::NativeBatchStage;
 use crate::processor::window_partition::{eval_partition_key, PartitionKey};
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -20,7 +23,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::broadcast;
-use tokio::time::{sleep_until, Duration, Instant, Sleep};
+use tokio::time::{Duration, Instant, Sleep};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 /// Processor that buffers collections before releasing them downstream.
@@ -37,11 +40,7 @@ pub struct BatchProcessor {
     stats: Arc<ProcessorStats>,
 }
 
-enum BatchMode {
-    CountOnly { count: usize },
-    DurationOnly { duration: Duration },
-    Combined { count: usize, duration: Duration },
-}
+pub(crate) type BatchMode = BatchPolicy;
 
 struct CountPartitionBuffers {
     buffer_ids: HashMap<PartitionKey, usize>,
@@ -80,46 +79,17 @@ impl BatchProcessor {
         Self::batch_mode(batch_count, batch_duration).map(|_| ())
     }
 
-    fn validate_batch_duration(duration: Duration) -> Result<Duration, ProcessorError> {
-        let millis = duration.as_millis();
-        if millis == 0 {
-            return Err(ProcessorError::InvalidConfiguration(
-                "batch processor requires batch_duration >= 1ms when configured".to_string(),
-            ));
-        }
-        if !duration.subsec_nanos().is_multiple_of(1_000_000) {
-            return Err(ProcessorError::InvalidConfiguration(
-                "batch processor requires batch_duration to use millisecond precision".to_string(),
-            ));
-        }
-        if u64::try_from(millis).is_err() {
-            return Err(ProcessorError::InvalidConfiguration(
-                "batch processor requires batch_duration to fit in u64 milliseconds".to_string(),
-            ));
-        }
-        Ok(duration)
-    }
-
-    fn batch_mode(
+    pub(crate) fn batch_mode(
         batch_count: Option<usize>,
         batch_duration: Option<Duration>,
     ) -> Result<BatchMode, ProcessorError> {
-        match (batch_count, batch_duration) {
-            (Some(0), _) => Err(ProcessorError::InvalidConfiguration(
-                "batch processor requires batch_count > 0 when configured".to_string(),
-            )),
-            (Some(count), Some(duration)) => Ok(BatchMode::Combined {
-                count,
-                duration: Self::validate_batch_duration(duration)?,
-            }),
-            (Some(count), None) => Ok(BatchMode::CountOnly { count }),
-            (None, Some(duration)) => Ok(BatchMode::DurationOnly {
-                duration: Self::validate_batch_duration(duration)?,
-            }),
-            (None, None) => Err(ProcessorError::InvalidConfiguration(
-                "batch processor requires batch_count or batch_duration".to_string(),
-            )),
+        BatchPolicy::validate(batch_count, batch_duration, "batch processor")?;
+        if batch_count.is_none() && batch_duration.is_none() {
+            return Err(ProcessorError::InvalidConfiguration(
+                "batch processor requires batch_count or batch_duration".into(),
+            ));
         }
+        Ok(BatchPolicy::new(batch_count, batch_duration))
     }
 
     pub fn new(
@@ -181,33 +151,7 @@ impl BatchProcessor {
         self.stats = stats;
     }
 
-    fn append_collection(buffer: &mut Vec<Tuple>, collection: &dyn Collection) {
-        buffer.extend(collection.rows().iter().cloned());
-    }
-
-    async fn emit_batch(
-        processor_id: &str,
-        rows: Vec<Tuple>,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
-        let row_count = rows.len() as u64;
-        let batch = RecordBatch::new(rows)
-            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
-        let collection: Box<dyn Collection> = Box::new(batch);
-        send_with_backpressure(
-            output,
-            data_channel_capacity,
-            StreamData::collection(collection),
-            Some(stats.as_ref()),
-        )
-        .await?;
-        stats.record_collection_out(row_count);
-        tracing::info!(processor_id = %processor_id, "flushed batch");
-        Ok(())
-    }
-
+    #[allow(clippy::too_many_arguments)]
     async fn flush_all(
         processor_id: &str,
         buffer: &mut Vec<Tuple>,
@@ -215,28 +159,14 @@ impl BatchProcessor {
         data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
-        if buffer.is_empty() {
-            return Ok(());
-        }
-        let rows = std::mem::take(buffer);
-        Self::emit_batch(processor_id, rows, output, data_channel_capacity, stats).await
+        let mut stage_output = ChannelDeliveryOutput {
+            output,
+            capacity: data_channel_capacity,
+            stats,
+        };
+        NativeBatchStage::flush_all(processor_id, buffer, &mut stage_output, stats).await
     }
-
-    async fn flush_count(
-        processor_id: &str,
-        buffer: &mut Vec<Tuple>,
-        output: &LinkOutput<StreamData>,
-        count: usize,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
-        if buffer.len() < count {
-            return Ok(());
-        }
-        let rows: Vec<Tuple> = buffer.drain(..count).collect();
-        Self::emit_batch(processor_id, rows, output, data_channel_capacity, stats).await
-    }
-
+    #[allow(clippy::too_many_arguments)]
     async fn drain_by_count(
         processor_id: &str,
         buffer: &mut Vec<Tuple>,
@@ -245,20 +175,14 @@ impl BatchProcessor {
         data_channel_capacity: usize,
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
-        while buffer.len() >= count {
-            Self::flush_count(
-                processor_id,
-                buffer,
-                output,
-                count,
-                data_channel_capacity,
-                stats,
-            )
-            .await?;
-        }
-        Ok(())
+        let mut stage_output = ChannelDeliveryOutput {
+            output,
+            capacity: data_channel_capacity,
+            stats,
+        };
+        NativeBatchStage::drain_by_count(processor_id, buffer, &mut stage_output, count, stats)
+            .await
     }
-
     fn append_partitioned_collection(
         partitions: &mut CountPartitionBuffers,
         partition_by_scalars: &[ScalarExpr],
@@ -316,42 +240,17 @@ impl BatchProcessor {
         Ok(())
     }
 
-    /// Next flush boundary on a fixed processing-time grid `grid_origin + k*duration`.
-    ///
-    /// The grid origin is captured once at processor start (before any tuple), so
-    /// duration-based batch windows are a fixed partition of the timeline and never
-    /// re-anchor to a batch's first tuple. Combined with the `biased` select (timer
-    /// arm before input arm), the window is left-closed / right-open `[t, t+duration)`
-    /// — a tuple on the boundary falls into the next window. This keeps a periodic
-    /// source of the same period at exactly `duration / period` tuples per window
-    /// instead of over-collecting the closing-edge tuple.
-    fn next_boundary(grid_origin: Instant, duration: Duration, now: Instant) -> Instant {
-        let elapsed = now.saturating_duration_since(grid_origin);
-        let period_ms = duration.as_millis();
-        let next_boundary_ms = (elapsed.as_millis() / period_ms + 1)
-            .checked_mul(period_ms)
-            .expect("validated batch duration keeps boundary offset representable");
-        let boundary_offset = Duration::from_millis(
-            u64::try_from(next_boundary_ms)
-                .expect("validated batch duration keeps boundary offset within u64 milliseconds"),
-        );
-        grid_origin + boundary_offset
+    #[cfg(test)]
+    fn next_boundary(origin: Instant, duration: Duration, now: Instant) -> Instant {
+        BatchPolicy::next_boundary(origin, duration, now)
     }
-
-    fn schedule_timer(
+    pub(crate) fn schedule_timer(
         timer: &mut Option<Pin<Box<Sleep>>>,
-        grid_origin: Instant,
+        origin: Instant,
         duration: Duration,
         has_data: bool,
     ) {
-        if has_data {
-            if timer.is_none() {
-                let boundary = Self::next_boundary(grid_origin, duration, Instant::now());
-                *timer = Some(Box::pin(sleep_until(boundary)));
-            }
-        } else if timer.is_some() {
-            *timer = None;
-        }
+        BatchPolicy::schedule_timer(timer, origin, duration, has_data);
     }
 }
 
@@ -495,6 +394,7 @@ impl Processor for BatchProcessor {
             }, processor_span)));
         }
 
+        let policy = BatchPolicy::new(self.batch_count, self.batch_duration);
         let processor_span = stats.processor_span();
         ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
             let mut buffer: Vec<Tuple> = Vec::new();
@@ -556,52 +456,14 @@ impl Processor for BatchProcessor {
                                     StreamData::Collection(collection) => {
                                         stats.record_collection_in(collection.num_rows() as u64);
                                         let handle_start = std::time::Instant::now();
-                                        BatchProcessor::append_collection(
-                                            &mut buffer,
-                                            collection.as_ref(),
-                                        );
-                                        let res = match &mode {
-                                            BatchMode::CountOnly { count } => {
-                                                BatchProcessor::drain_by_count(
-                                                    &processor_id,
-                                                    &mut buffer,
-                                                    &output,
-                                                    *count,
-                                                    channel_capacities.data,
-                                                    &stats,
-                                                )
-                                                .await
-                                            }
-                                            BatchMode::DurationOnly { duration } => {
-                                                BatchProcessor::schedule_timer(
-                                                    &mut timer,
-                                                    grid_origin,
-                                                    *duration,
-                                                    !buffer.is_empty(),
-                                                );
-                                                Ok(())
-                                            }
-                                            BatchMode::Combined { count, duration } => {
-                                                let res = BatchProcessor::drain_by_count(
-                                                    &processor_id,
-                                                    &mut buffer,
-                                                    &output,
-                                                    *count,
-                                                    channel_capacities.data,
-                                                    &stats,
-                                                )
-                                                .await;
-                                                if res.is_ok() {
-                                                    BatchProcessor::schedule_timer(
-                                                        &mut timer,
-                                                        grid_origin,
-                                                        *duration,
-                                                        !buffer.is_empty(),
-                                                    );
-                                                }
-                                                res
-                                            }
+                                        let mut stage_output = ChannelDeliveryOutput {
+                                            output: &output, capacity: channel_capacities.data, stats: &stats,
                                         };
+                                        let res = NativeBatchStage::feed(
+                                            &processor_id, collection.rows().iter().cloned(),
+                                            &mut buffer, &mut stage_output, &mut timer,
+                                            grid_origin, &policy, &stats,
+                                        ).await;
                                         // Handle duration measures per-collection processing wall time. If this handle
                                         // triggers one or more count-based flushes, the downstream send/backpressure
                                         // time is intentionally included.

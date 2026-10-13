@@ -72,9 +72,20 @@ first observed data variant. Receiving data outside the planned domain is a pipe
 Conversion boundaries deliberately expose different units by direction. A decoder declares
 message/byte input and collection/row output. An encoder declares collection/row input and
 message/byte output; it does not expose `records_out` because rows are not its output domain.
+A fused transform declares collection input and either collection output
+(`encoder:none`) or encoded message/byte output. Internal filter/project
+collections do not contribute output counters.
+Its processor kind is `fused_transform`; the separate connector retains kind
+`sink`. Encoded output counters describe the final stage's successfully
+forwarded chunks and completed deliveries, excluding internal encoder output.
+For a fused task, `messages_aborted` counts distinct aborted deliveries; multiple
+stage failures in the same delivery increment it once and each increments
+`error_count`.
+
 Every sink declares message output. A collection-native sink declares collection/row input and
 message output; retaining a collection as the payload representation does not turn the sink output
 back into a collection metric boundary.
+
 
 ## Metric Categories
 

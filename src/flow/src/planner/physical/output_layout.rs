@@ -312,6 +312,13 @@ impl PhysicalPlan {
                 passthrough_single_child(self)
             }
 
+            PhysicalPlan::FusedTransform(plan) => {
+                if let Some(output_layout) = plan.encoder_output_layout.as_ref() {
+                    return Ok(plan_layout_from_materialized_output(output_layout.as_ref()));
+                }
+                derive_project_layout(&plan.project, self)
+            }
+
             PhysicalPlan::StreamingAggregation(_) => passthrough_single_child(self),
             PhysicalPlan::RowDiff(plan) => Ok(plan_layout_from_materialized_output(
                 plan.output_layout.as_ref(),
@@ -770,6 +777,55 @@ mod tests {
         assert_eq!(
             layout.columns[1].value_ref,
             OutputValueRef::Affiliate { affiliate_index: 0 }
+        );
+        let PhysicalPlan::Project(project_plan) = &project else {
+            unreachable!()
+        };
+        let input = Arc::clone(&project_plan.base.children[0]);
+        let mut fused = crate::planner::physical::PhysicalFusedTransform::new(
+            input,
+            2,
+            "sink".into(),
+            None,
+            project_plan.clone(),
+            None,
+            true,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            PhysicalPlan::FusedTransform(fused.clone())
+                .output_layout()
+                .expect("native fused layout"),
+            layout
+        );
+        // Captured encoder layouts may additionally reorder/filter outputs.
+        let captured = Arc::new(OutputLayout::new(vec![
+            layout.columns[1].clone(),
+            layout.columns[0].clone(),
+        ]));
+        fused.encoder = Some(SinkEncoderConfig::json());
+        fused.encoder_output_layout = Some(Arc::clone(&captured));
+        let mut encoder = PhysicalSinkEncoder::new(
+            vec![Arc::new(project.clone())],
+            3,
+            "sink".into(),
+            SinkEncoderConfig::json(),
+            CommonSinkProps::default(),
+        );
+        encoder.output_layout = Some(captured);
+        assert_eq!(
+            PhysicalPlan::FusedTransform(fused)
+                .output_layout()
+                .expect("encoded fused layout"),
+            PhysicalPlan::SinkEncoder(encoder)
+                .output_layout()
+                .expect("unfused encoded layout")
         );
     }
 

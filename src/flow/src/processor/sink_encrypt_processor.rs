@@ -9,7 +9,12 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::byte_stage::EncryptDriver;
 use crate::processor::data_metrics::{TransformMetrics, SINK_ENCRYPT_METRICS};
+use crate::processor::delivery_output::ChannelDeliveryOutput;
+use crate::processor::delivery_transform::{
+    abort_encrypt_in_flight, handle_encrypt_delivery, EncryptDelivery,
+};
 use crate::processor::EncodedDeliveryFlags;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -30,15 +35,8 @@ pub struct SinkEncryptProcessor {
     control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     // Taken into the task on first start.
-    writer: Mutex<Option<Box<dyn EncryptWriter>>>,
+    driver: Mutex<Option<EncryptDriver>>,
     stats: Arc<ProcessorStats>,
-}
-
-#[derive(Default)]
-struct EncryptDelivery {
-    active: bool,
-    /// Whether a START chunk has already been forwarded downstream.
-    emitted_chunk: bool,
 }
 
 impl SinkEncryptProcessor {
@@ -63,7 +61,7 @@ impl SinkEncryptProcessor {
             output,
             control_output,
             channel_capacities,
-            writer: Mutex::new(Some(writer)),
+            driver: Mutex::new(Some(EncryptDriver::new(writer))),
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -72,10 +70,10 @@ impl SinkEncryptProcessor {
         self.stats = stats;
     }
 
-    fn take_writer(&self) -> Result<Option<Box<dyn EncryptWriter>>, ProcessorError> {
-        self.writer
+    fn take_driver(&self) -> Result<Option<EncryptDriver>, ProcessorError> {
+        self.driver
             .lock()
-            .map(|mut w| w.take())
+            .map(|mut guard| guard.take())
             .map_err(|_| ProcessorError::ProcessingError("encrypt writer mutex poisoned".into()))
     }
 }
@@ -93,7 +91,7 @@ impl Processor for SinkEncryptProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
-        let mut writer = match self.take_writer() {
+        let mut driver = match self.take_driver() {
             Ok(Some(w)) => w,
             Ok(None) => {
                 return ProcessorStart::failed(
@@ -150,7 +148,7 @@ impl Processor for SinkEncryptProcessor {
                                     StreamData::EncodedDelivery { flags, bytes } => {
                                         let handle_start = std::time::Instant::now();
                                         let res = handle_delivery_with_metrics(
-                                            writer.as_mut(),
+                                            &mut driver,
                                             &mut delivery,
                                             flags,
                                             bytes,
@@ -190,7 +188,7 @@ impl Processor for SinkEncryptProcessor {
                                         let is_terminal = data.is_terminal();
                                         if is_terminal && delivery.active {
                                             abort_in_flight(
-                                                writer.as_mut(),
+                                                &mut driver,
                                                 &mut delivery,
                                                 &output,
                                                 channel_capacities.data,
@@ -224,7 +222,7 @@ impl Processor for SinkEncryptProcessor {
                             None => {
                                 if delivery.active {
                                     abort_in_flight(
-                                        writer.as_mut(),
+                                        &mut driver,
                                         &mut delivery,
                                         &output,
                                         channel_capacities.data,
@@ -277,7 +275,7 @@ impl Processor for SinkEncryptProcessor {
 
 #[cfg(test)]
 async fn handle_delivery(
-    writer: &mut dyn EncryptWriter,
+    driver: &mut EncryptDriver,
     delivery: &mut EncryptDelivery,
     flags: EncodedDeliveryFlags,
     bytes: Bytes,
@@ -286,7 +284,7 @@ async fn handle_delivery(
     stats: &Arc<ProcessorStats>,
 ) -> Result<(), ProcessorError> {
     handle_delivery_with_metrics(
-        writer,
+        driver,
         delivery,
         flags,
         bytes,
@@ -300,7 +298,7 @@ async fn handle_delivery(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_delivery_with_metrics(
-    writer: &mut dyn EncryptWriter,
+    driver: &mut EncryptDriver,
     delivery: &mut EncryptDelivery,
     flags: EncodedDeliveryFlags,
     bytes: Bytes,
@@ -309,181 +307,26 @@ async fn handle_delivery_with_metrics(
     stats: &Arc<ProcessorStats>,
     metrics: &TransformMetrics,
 ) -> Result<(), ProcessorError> {
-    metrics.record_input_bytes(bytes.len());
-
-    let is_abort = flags.contains(EncodedDeliveryFlags::ABORT);
-    let is_start = flags.contains(EncodedDeliveryFlags::START);
-    let is_end = flags.contains(EncodedDeliveryFlags::END);
-
-    if is_abort {
-        metrics.record_aborted();
-        writer.abort_delivery();
-        let was_started = delivery.emitted_chunk;
-        *delivery = EncryptDelivery::default();
-        if was_started {
-            send_with_backpressure(
-                output,
-                data_channel_capacity,
-                StreamData::encoded_delivery_abort(),
-                Some(stats.as_ref()),
-            )
-            .await?;
-        }
-        return Ok(());
-    }
-
-    if is_start {
-        if delivery.active {
-            return fail_delivery(
-                writer,
-                delivery,
-                output,
-                data_channel_capacity,
-                stats,
-                metrics,
-                "START received while delivery already active",
-            )
-            .await;
-        }
-
-        let mut out = Vec::new();
-        if let Err(e) = writer.begin_delivery(&mut out) {
-            return fail_delivery(
-                writer,
-                delivery,
-                output,
-                data_channel_capacity,
-                stats,
-                metrics,
-                &e.to_string(),
-            )
-            .await;
-        }
-
-        if is_end {
-            metrics.record_message_in();
-            if let Err(e) = writer.finish(&bytes, &mut out) {
-                return fail_delivery(
-                    writer,
-                    delivery,
-                    output,
-                    data_channel_capacity,
-                    stats,
-                    metrics,
-                    &e.to_string(),
-                )
-                .await;
-            }
-            let output_bytes = out.len();
-            send_with_backpressure(
-                output,
-                data_channel_capacity,
-                StreamData::encoded_delivery_single(out),
-                Some(stats.as_ref()),
-            )
-            .await?;
-            metrics.record_output_bytes(output_bytes);
-            metrics.record_message_out();
-            *delivery = EncryptDelivery::default();
-            return Ok(());
-        }
-
-        if !bytes.is_empty() {
-            if let Err(e) = writer.write(&bytes, &mut out) {
-                return fail_delivery(
-                    writer,
-                    delivery,
-                    output,
-                    data_channel_capacity,
-                    stats,
-                    metrics,
-                    &e.to_string(),
-                )
-                .await;
-            }
-        }
-
-        let output_bytes = out.len();
-        send_with_backpressure(
-            output,
-            data_channel_capacity,
-            StreamData::encoded_delivery_start(out),
-            Some(stats.as_ref()),
-        )
-        .await?;
-        metrics.record_output_bytes(output_bytes);
-        delivery.active = true;
-        delivery.emitted_chunk = true;
-        return Ok(());
-    }
-
-    if !delivery.active {
-        return Err(ProcessorError::ProcessingError(
-            "chunk/END received without active delivery".into(),
-        ));
-    }
-
-    if is_end {
-        metrics.record_message_in();
-        let mut out = Vec::new();
-        if let Err(e) = writer.finish(&bytes, &mut out) {
-            return fail_delivery(
-                writer,
-                delivery,
-                output,
-                data_channel_capacity,
-                stats,
-                metrics,
-                &e.to_string(),
-            )
-            .await;
-        }
-        *delivery = EncryptDelivery::default();
-        let output_bytes = out.len();
-        send_with_backpressure(
-            output,
-            data_channel_capacity,
-            StreamData::encoded_delivery_end(out),
-            Some(stats.as_ref()),
-        )
-        .await?;
-        metrics.record_output_bytes(output_bytes);
-        metrics.record_message_out();
-        return Ok(());
-    }
-
-    if bytes.is_empty() {
-        return Ok(());
-    }
-
-    let mut out = Vec::new();
-    if let Err(e) = writer.write(&bytes, &mut out) {
-        return fail_delivery(
-            writer,
-            delivery,
-            output,
-            data_channel_capacity,
-            stats,
-            metrics,
-            &e.to_string(),
-        )
-        .await;
-    }
-    let output_bytes = out.len();
-    send_with_backpressure(
+    let mut output = ChannelDeliveryOutput {
         output,
-        data_channel_capacity,
-        StreamData::encoded_delivery_chunk(out),
-        Some(stats.as_ref()),
+        capacity: data_channel_capacity,
+        stats,
+    };
+    handle_encrypt_delivery(
+        driver,
+        delivery,
+        flags,
+        bytes,
+        &mut output,
+        stats,
+        Some(metrics),
     )
-    .await?;
-    metrics.record_output_bytes(output_bytes);
-
-    Ok(())
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn abort_in_flight(
-    writer: &mut dyn EncryptWriter,
+    driver: &mut EncryptDriver,
     delivery: &mut EncryptDelivery,
     output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
@@ -491,56 +334,20 @@ async fn abort_in_flight(
     metrics: &TransformMetrics,
     processor_id: &str,
 ) {
-    metrics.record_aborted();
-    writer.abort_delivery();
-    let was_started = delivery.emitted_chunk;
-    *delivery = EncryptDelivery::default();
-    if was_started {
-        if let Err(err) = send_with_backpressure(
-            output,
-            data_channel_capacity,
-            StreamData::encoded_delivery_abort(),
-            Some(stats.as_ref()),
-        )
-        .await
-        {
-            tracing::error!(
-                processor_id = %processor_id,
-                error = %err,
-                "failed to forward ABORT during in-flight abort"
-            );
-        }
-    }
-    tracing::error!(
-        processor_id = %processor_id,
-        "aborted in-flight delivery: terminal signal received mid-delivery"
-    );
-    stats.record_error("terminal signal received mid-delivery".to_string());
-}
-
-async fn fail_delivery(
-    writer: &mut dyn EncryptWriter,
-    delivery: &mut EncryptDelivery,
-    output: &LinkOutput<StreamData>,
-    data_channel_capacity: usize,
-    stats: &Arc<ProcessorStats>,
-    metrics: &TransformMetrics,
-    reason: &str,
-) -> Result<(), ProcessorError> {
-    metrics.record_aborted();
-    writer.abort_delivery();
-    let was_started = delivery.emitted_chunk;
-    *delivery = EncryptDelivery::default();
-    if was_started {
-        send_with_backpressure(
-            output,
-            data_channel_capacity,
-            StreamData::encoded_delivery_abort(),
-            Some(stats.as_ref()),
-        )
-        .await?;
-    }
-    Err(ProcessorError::ProcessingError(reason.to_string()))
+    let mut output = ChannelDeliveryOutput {
+        output,
+        capacity: data_channel_capacity,
+        stats,
+    };
+    abort_encrypt_in_flight(
+        driver,
+        delivery,
+        &mut output,
+        stats,
+        Some(metrics),
+        processor_id,
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -588,11 +395,11 @@ mod tests {
         let output = LinkOutput::broadcast(16);
         let mut output_rx = output.subscribe().expect("output receiver");
         let stats = Arc::new(ProcessorStats::default());
-        let mut writer = writer();
+        let mut driver = EncryptDriver::new(Box::new(writer()));
         let mut delivery = EncryptDelivery::default();
 
         handle_delivery(
-            &mut writer,
+            &mut driver,
             &mut delivery,
             EncodedDeliveryFlags::START | EncodedDeliveryFlags::END,
             Bytes::from_static(b"hello"),
@@ -622,11 +429,11 @@ mod tests {
         let output = LinkOutput::broadcast(16);
         let mut output_rx = output.subscribe().expect("output receiver");
         let stats = Arc::new(ProcessorStats::default());
-        let mut writer = writer();
+        let mut driver = EncryptDriver::new(Box::new(writer()));
         let mut delivery = EncryptDelivery::default();
 
         handle_delivery(
-            &mut writer,
+            &mut driver,
             &mut delivery,
             EncodedDeliveryFlags::START,
             Bytes::new(),
@@ -647,7 +454,7 @@ mod tests {
         );
 
         handle_delivery(
-            &mut writer,
+            &mut driver,
             &mut delivery,
             EncodedDeliveryFlags::empty(),
             Bytes::new(),
@@ -660,7 +467,7 @@ mod tests {
         assert_no_output(&mut output_rx).await;
 
         handle_delivery(
-            &mut writer,
+            &mut driver,
             &mut delivery,
             EncodedDeliveryFlags::END,
             Bytes::new(),
@@ -685,11 +492,11 @@ mod tests {
         let output = LinkOutput::broadcast(16);
         let mut output_rx = output.subscribe().expect("output receiver");
         let stats = Arc::new(ProcessorStats::default());
-        let mut writer = writer();
+        let mut driver = EncryptDriver::new(Box::new(writer()));
         let mut delivery = EncryptDelivery::default();
 
         handle_delivery(
-            &mut writer,
+            &mut driver,
             &mut delivery,
             EncodedDeliveryFlags::ABORT,
             Bytes::new(),
@@ -702,7 +509,7 @@ mod tests {
         assert_no_output(&mut output_rx).await;
 
         handle_delivery(
-            &mut writer,
+            &mut driver,
             &mut delivery,
             EncodedDeliveryFlags::START,
             Bytes::from_static(b"hello"),
@@ -715,7 +522,7 @@ mod tests {
         let _ = recv_output(&mut output_rx).await;
 
         handle_delivery(
-            &mut writer,
+            &mut driver,
             &mut delivery,
             EncodedDeliveryFlags::ABORT,
             Bytes::new(),
@@ -739,11 +546,11 @@ mod tests {
         let output = LinkOutput::broadcast(16);
         let mut output_rx = output.subscribe().expect("output receiver");
         let stats = Arc::new(ProcessorStats::default());
-        let mut writer = writer();
+        let mut driver = EncryptDriver::new(Box::new(writer()));
         let mut delivery = EncryptDelivery::default();
 
         let err = handle_delivery(
-            &mut writer,
+            &mut driver,
             &mut delivery,
             EncodedDeliveryFlags::empty(),
             Bytes::from_static(b"chunk"),
@@ -756,7 +563,7 @@ mod tests {
         assert!(err.to_string().contains("without active delivery"));
 
         handle_delivery(
-            &mut writer,
+            &mut driver,
             &mut delivery,
             EncodedDeliveryFlags::START,
             Bytes::from_static(b"hello"),
@@ -769,7 +576,7 @@ mod tests {
         let _ = recv_output(&mut output_rx).await;
 
         let err = handle_delivery(
-            &mut writer,
+            &mut driver,
             &mut delivery,
             EncodedDeliveryFlags::START,
             Bytes::from_static(b"again"),

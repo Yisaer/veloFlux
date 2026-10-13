@@ -1163,7 +1163,7 @@ fn plan_explain_video_table_driven() {
             name: "video_source_projection_filter_uses_tuple_path",
             sql: "SELECT payload, width FROM camera WHERE width > 0",
             sinks: vec![build_nop_json_sink("json_sink", None)],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=camera","decoder=none","schema=[payload, width]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=width > 0"],"operator":"Filter"}],"id":"Project_2","info":["fields=[payload; width]"],"operator":"Project"}],"id":"DataSink_3","info":["sink_id=json_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_4","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=camera","schema=[payload, width]"],"operator":"PhysicalDataSource"}],"id":"PhysicalFilter_1","info":["predicate=width > 0"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_2","info":["fields=[payload; width]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=json_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=json_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=camera","decoder=none","schema=[payload, width]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=width > 0"],"operator":"Filter"}],"id":"Project_2","info":["fields=[payload; width]"],"operator":"Project"}],"id":"DataSink_3","info":["sink_id=json_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_4","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=camera","schema=[payload, width]"],"operator":"PhysicalDataSource"}],"id":"PhysicalFusedTransform_4","info":["sink_id=json_sink","encoder=json","fused=filter+project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_3","info":["sink_id=json_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
             covers: &["source.video.tuple_input"],
         },
         Case {
@@ -1284,7 +1284,7 @@ fn plan_explain_with_sinks_table_driven() {
                     SinkEncoderConfig::json(),
                 ),
             )],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a + 1]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=memory","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a + 1]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=memory","topic=demo_bytes","kind=bytes"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a + 1]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=memory","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_4","info":["sink_id=test_sink","encoder=json","fused=project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=memory","topic=demo_bytes","kind=bytes"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         Case {
             name: "http_multipart_sink_includes_non_sensitive_body_summary",
@@ -1314,17 +1314,32 @@ fn plan_explain_with_sinks_table_driven() {
             expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=http","encoder=json","body=multipart","file_field_name=d","static_fields=2"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=http","body=multipart","file_field_name=d","static_fields=2"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         Case {
-            name: "omit_if_empty_full_output_inserts_empty_suppress_between_project_and_encoder",
+            name: "omit_if_empty_full_output_fuses_empty_suppress",
             sql: "SELECT a FROM stream",
             sinks: vec![build_nop_json_omit_if_empty_sink("test_sink", None)],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","output.omit_if_empty=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalEmptySuppress_4","info":["sink_id=test_sink","omit_if_empty=true"],"operator":"PhysicalEmptySuppress"}],"id":"PhysicalSinkEncoder_5","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","output.omit_if_empty=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_5","info":["sink_id=test_sink","encoder=json","fused=project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         // coverage-covers: sink.connector.nop_collection
+        // coverage-covers: sink.fused_stateless_sink
         Case {
             name: "nop_sink_with_none_encoder_skips_sink_encoder",
             sql: "SELECT a FROM stream",
             sinks: vec![build_nop_none_sink("test_sink")],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_4","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=none"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_2","info":["sink_id=test_sink","encoder=none","fused=project"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalDataSink_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_4","info":[],"operator":"PhysicalResultCollect"}}"##,
+        },
+        // coverage-covers: sink.fused_stateless_sink
+        Case {
+            name: "filter_order_project_fuses_in_peel_sequence",
+            sql: "SELECT a FROM stream WHERE a > 1 ORDER BY a",
+            sinks: vec![build_nop_json_sink("test_sink", None)],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=a > 1"],"operator":"Filter"}],"id":"Order_2","info":["keys=[a ASC]"],"operator":"Order"}],"id":"Project_3","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_4","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_5","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_6","info":["sink_id=test_sink","encoder=json","fused=filter+order+project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_5","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_7","info":[],"operator":"PhysicalResultCollect"}}"##,
+        },
+        // coverage-covers: sink.fused_stateless_sink
+        Case {
+            name: "stateful_filter_fuses_stateless_sink_via_collection_path",
+            sql: "SELECT a FROM stream WHERE last_hit_count() < 3",
+            sinks: vec![build_nop_json_sink("test_sink", None)],
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=last_hit_count() < 3"],"operator":"Filter"}],"id":"Project_2","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_3","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_4","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_5","info":["sink_id=test_sink","encoder=json","fused=filter+project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_4","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
     ];
 
@@ -1596,7 +1611,7 @@ fn plan_explain_additional_physical_pairings_table_driven() {
             name: "shared_stream_sampler_placement_keeps_sampler_before_decoder",
             sql: "SELECT a FROM shared_stream_sampler",
             sinks: vec![build_nop_json_sink("test_sink", None)],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=shared_stream_sampler","decoder=json","schema=[a]","sampler.strategy=latest"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"shared/shared_stream_sampler/PhysicalDataSource_0","info":["scope=shared_stream","source=shared_stream_sampler","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"shared/shared_stream_sampler/PhysicalSampler_1","info":["scope=shared_stream","interval=100ms","strategy=latest"],"operator":"PhysicalSampler"}],"id":"shared/shared_stream_sampler/PhysicalDecoder_2","info":["scope=shared_stream","decoder=json"],"operator":"PhysicalDecoder"}],"id":"shared/shared_stream_sampler/PhysicalResultCollect_3","info":["scope=shared_stream"],"operator":"PhysicalResultCollect"}],"id":"PhysicalSharedStream_0","info":["source=shared_stream_sampler","schema=[a]"],"operator":"PhysicalSharedStream"}],"id":"PhysicalProject_1","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_3","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_2","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_4","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=shared_stream_sampler","decoder=json","schema=[a]","sampler.strategy=latest"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"shared/shared_stream_sampler/PhysicalDataSource_0","info":["scope=shared_stream","source=shared_stream_sampler","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"shared/shared_stream_sampler/PhysicalSampler_1","info":["scope=shared_stream","interval=100ms","strategy=latest"],"operator":"PhysicalSampler"}],"id":"shared/shared_stream_sampler/PhysicalDecoder_2","info":["scope=shared_stream","decoder=json"],"operator":"PhysicalDecoder"}],"id":"shared/shared_stream_sampler/PhysicalResultCollect_3","info":["scope=shared_stream"],"operator":"PhysicalResultCollect"}],"id":"PhysicalSharedStream_0","info":["source=shared_stream_sampler","schema=[a]"],"operator":"PhysicalSharedStream"}],"id":"PhysicalFusedTransform_3","info":["sink_id=test_sink","encoder=json","fused=project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_2","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_4","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         Case {
             name: "two_sinks_inserts_physical_barrier_for_shared_tail",
@@ -1973,7 +1988,7 @@ fn plan_explain_pipeline_state_sink_output_table_driven() {
             sink: build_nop_json_omit_if_empty_sink("test_sink", None),
             covers: &["syntax.pipeline_state", "sink.output.omit_if_empty"],
             expected: Expected::Explain(
-                r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]"],"operator":"Aggregation"}],"id":"Filter_3","info":["predicate=last_agg_hit_count() < 3"],"operator":"Filter"}],"id":"Project_4","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_5","info":["sink_id=test_sink","connector=nop","encoder=json","output.omit_if_empty=true"],"operator":"DataSink"}],"id":"Tail_6","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFilter_4","info":["predicate=last_agg_hit_count() < 3"],"operator":"PhysicalFilter"}],"id":"PhysicalProject_5","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}],"id":"PhysicalEmptySuppress_7","info":["sink_id=test_sink","omit_if_empty=true"],"operator":"PhysicalEmptySuppress"}],"id":"PhysicalSinkEncoder_8","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_6","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_9","info":[],"operator":"PhysicalResultCollect"}}"##,
+                r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=count","count=4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]"],"operator":"Aggregation"}],"id":"Filter_3","info":["predicate=last_agg_hit_count() < 3"],"operator":"Filter"}],"id":"Project_4","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_5","info":["sink_id=test_sink","connector=nop","encoder=json","output.omit_if_empty=true"],"operator":"DataSink"}],"id":"Tail_6","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","window=count","count=4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFusedTransform_8","info":["sink_id=test_sink","encoder=json","fused=filter+project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_6","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_9","info":[],"operator":"PhysicalResultCollect"}}"##,
             ),
         },
         Case {
@@ -2041,7 +2056,7 @@ fn plan_explain_csv_encoder_table_driven() {
                 "planner.physical.output_layout_fixed_slots",
             ],
             expected: Expected::Explain(
-                r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as vin; b + 1 as adjusted]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=csv"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a as vin; b + 1 as adjusted]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=csv"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+                r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as vin; b + 1 as adjusted]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=csv"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_4","info":["sink_id=test_sink","encoder=csv","fused=project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
             ),
         },
         Case {
@@ -2055,7 +2070,7 @@ fn plan_explain_csv_encoder_table_driven() {
                 "planner.physical.output_layout_fixed_slots",
             ],
             expected: Expected::Explain(
-                r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_enc","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=csv","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_enc","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalIncSinkEncoder_5","info":["sink_id=test_sink","encoder=csv","batch_count=2"],"operator":"PhysicalIncSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
+                r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_enc","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=csv","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_enc","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_5","info":["sink_id=test_sink","encoder=csv","fused=project+encoder","batch_count=2"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
             ),
         },
         Case {
@@ -2108,7 +2123,7 @@ fn plan_explain_template_encoder_table_driven() {
             "sink.encoder.template",
             "planner.physical.output_layout_fixed_slots",
         ],
-        expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as c; b + 1 as d]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=template"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a as c; b + 1 as d]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=template"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+        expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a as c; b + 1 as d]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=template"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_4","info":["sink_id=test_sink","encoder=template","fused=project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
     }];
 
     for case in cases {
@@ -2153,35 +2168,35 @@ fn plan_explain_optimizer_table_driven() {
                 "sink.output.batching",
                 "planner.physical.output_layout_fixed_slots",
             ],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_enc","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_enc","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalIncSinkEncoder_5","info":["sink_id=test_sink","encoder=json","batch_count=10"],"operator":"PhysicalIncSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_enc","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_enc","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_5","info":["sink_id=test_sink","encoder=json","fused=project+encoder","batch_count=10"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         PhysicalOptimizerCase {
             name: "optimize_rewrites_streaming_agg",
             sql: "SELECT sum(a) FROM stream_ab GROUP BY tumblingwindow('ss', 10),b",
             sinks: SINK_NO_BATCH,
             covers: &["planner.physical.streaming_aggregation_rewrite"],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=tumbling","unit=Seconds","length=10"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_4","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_5","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=tumbling","unit=Seconds","length=10","mode=processing_time","interval=10"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=tumbling","unit=Seconds","length=10"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_5","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_7","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_6","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_8","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=tumbling","unit=Seconds","length=10"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_4","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_5","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=tumbling","unit=Seconds","length=10","mode=processing_time","interval=10"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=tumbling","unit=Seconds","length=10"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFusedTransform_7","info":["sink_id=test_sink","encoder=json","fused=project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_6","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_8","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         PhysicalOptimizerCase {
             name: "optimize_rewrites_streaming_agg_for_sliding_window",
             sql: "SELECT sum(a) FROM stream_ab GROUP BY slidingwindow('ss', 10),b",
             sinks: SINK_NO_BATCH,
             covers: &["planner.physical.streaming_aggregation_rewrite"],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_4","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_5","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_5","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_7","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_6","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_8","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_4","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_5","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFusedTransform_7","info":["sink_id=test_sink","encoder=json","fused=project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_6","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_8","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         PhysicalOptimizerCase {
             name: "optimize_rewrites_streaming_agg_for_state_window",
             sql: "SELECT sum(a) FROM stream_ab GROUP BY statewindow(a > 0, a = 4), b",
             sinks: SINK_NO_BATCH,
             covers: &["planner.physical.streaming_aggregation_rewrite"],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=state","open=a > 0","emit=a = 4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_4","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_5","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=state","open=a > 0","emit=a = 4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_4","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_6","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_5","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_7","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=state","open=a > 0","emit=a = 4"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_4","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_5","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalStreamingAggregation_3","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=state","open=a > 0","emit=a = 4"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFusedTransform_6","info":["sink_id=test_sink","encoder=json","fused=project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_5","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_7","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
         PhysicalOptimizerCase {
             name: "physical_plan_sliding_without_lookahead_includes_watermark_for_gc",
             sql: "SELECT sum(a) FROM stream_ab GROUP BY slidingwindow('ss', 10),b",
             sinks: SINK_NO_BATCH,
             covers: &["planner.physical.streaming_aggregation_rewrite"],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_4","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_5","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalProject_5","info":["fields=[col_1 as sum(a)]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_7","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_6","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_8","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Window_1","info":["kind=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"Window"}],"id":"Aggregation_2","info":["aggregates=[sum(a) -> col_1]","group_by=[b]"],"operator":"Aggregation"}],"id":"Project_3","info":["fields=[col_1 as sum(a)]"],"operator":"Project"}],"id":"DataSink_4","info":["sink_id=test_sink","connector=nop","encoder=json"],"operator":"DataSink"}],"id":"Tail_5","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProcessTimeWatermark_2","info":["window=sliding","unit=Seconds","lookback=10","lookahead=none","mode=processing_time","interval=1"],"operator":"PhysicalProcessTimeWatermark"}],"id":"PhysicalStreamingAggregation_4","info":["calls=[sum(a) -> col_1]","group_by=[b]","window=sliding","unit=Seconds","lookback=10","lookahead=none"],"operator":"PhysicalStreamingAggregation"}],"id":"PhysicalFusedTransform_7","info":["sink_id=test_sink","encoder=json","fused=project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_6","info":["sink_id=test_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_8","info":[],"operator":"PhysicalResultCollect"}}"##,
         },
     ];
 
@@ -3027,7 +3042,7 @@ fn plan_explain_batch_table_driven() {
             name: "json_encoder_with_batch_embeds_in_sink_encoder",
             sql: "SELECT a, b FROM stream_ab",
             sinks: vec![build_nop_json_sink("json_sink", Some(10))],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=json_sink","connector=nop","encoder=json","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; b]"],"operator":"PhysicalProject"}],"id":"PhysicalIncSinkEncoder_5","info":["sink_id=json_sink","encoder=json","batch_count=10"],"operator":"PhysicalIncSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=json_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=json_sink","connector=nop","encoder=json","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_5","info":["sink_id=json_sink","encoder=json","fused=project+encoder","batch_count=10"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_3","info":["sink_id=json_sink","connector=nop"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_6","info":[],"operator":"PhysicalResultCollect"}}"##,
             required_fragments: &[],
             covers: &[
                 "sink.output.batching",
@@ -3035,10 +3050,10 @@ fn plan_explain_batch_table_driven() {
             ],
         },
         Case {
-            name: "kuksa_sink_with_batch_uses_physical_batch",
+            name: "kuksa_sink_with_batch_fuses_batch_into_sink",
             sql: "SELECT a, b FROM stream_ab",
             sinks: vec![build_kuksa_sink_with_batch("kuksa_sink", 10)],
-            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=kuksa_sink","connector=kuksa","encoder=none","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; b]"],"operator":"PhysicalProject"}],"id":"PhysicalBatch_4","info":["sink_id=kuksa_sink","batch_count=10"],"operator":"PhysicalBatch"}],"id":"PhysicalDataSink_3","info":["sink_id=kuksa_sink","connector=kuksa"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_ab","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; b]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=kuksa_sink","connector=kuksa","encoder=none","batching=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_ab","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_4","info":["sink_id=kuksa_sink","encoder=none","fused=project","batch_count=10"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalDataSink_3","info":["sink_id=kuksa_sink","connector=kuksa"],"operator":"PhysicalDataSink"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##,
             required_fragments: &[],
             covers: &["sink.output.batching"],
         },
@@ -3052,13 +3067,14 @@ fn plan_explain_batch_table_driven() {
             )],
             expected: "",
             required_fragments: &[
-                "\"operator\":\"PhysicalIncSinkEncoder\"",
+                "\"operator\":\"PhysicalFusedTransform\"",
                 "encoder=mock_buffering_encoder",
                 "batch_count=1000",
             ],
             covers: &[
                 "sink.output.batching",
                 "planner.physical.streaming_encoder_rewrite",
+                "sink.fused_stateless_sink",
             ],
         },
     ];
@@ -3108,7 +3124,7 @@ fn plan_explain_sink_retry_table_driven() {
             max_attempts: Some(3),
             ..Default::default()
         })],
-        expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","retry_up_to=uncertain","retry_max_attempts=3","retry_initial_backoff_ms=1000","retry_max_backoff_ms=30000","retry_jitter=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a]"],"operator":"PhysicalProject"}],"id":"PhysicalSinkEncoder_4","info":["sink_id=test_sink","encoder=json"],"operator":"PhysicalSinkEncoder"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop","retry_up_to=uncertain","retry_max_attempts=3","retry_initial_backoff_ms=1000","retry_max_backoff_ms=30000","retry_jitter=true"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##.to_string(),
+        expected: r##"{"logical":{"children":[{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a]"],"operator":"Project"}],"id":"DataSink_2","info":["sink_id=test_sink","connector=nop","encoder=json","retry_up_to=uncertain","retry_max_attempts=3","retry_initial_backoff_ms=1000","retry_max_backoff_ms=30000","retry_jitter=true"],"operator":"DataSink"}],"id":"Tail_3","info":["sink_count=1"],"operator":"Tail"},"options":null,"physical":{"children":[{"children":[{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream","schema=[a]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a]"],"operator":"PhysicalDecoder"}],"id":"PhysicalFusedTransform_4","info":["sink_id=test_sink","encoder=json","fused=project+encoder"],"operator":"PhysicalFusedTransform"}],"id":"PhysicalSinkConnector_3","info":["sink_id=test_sink","connector=nop","retry_up_to=uncertain","retry_max_attempts=3","retry_initial_backoff_ms=1000","retry_max_backoff_ms=30000","retry_jitter=true"],"operator":"PhysicalSinkConnector"}],"id":"PhysicalResultCollect_5","info":[],"operator":"PhysicalResultCollect"}}"##.to_string(),
     }];
 
     cases.push(Case {
@@ -3135,5 +3151,105 @@ fn plan_explain_sink_retry_table_driven() {
     for case in cases {
         let got = explain_json(case.sql, case.sinks);
         assert_eq!(got, case.expected, "case={}", case.name);
+    }
+}
+
+// coverage-covers: sink.fused_stateless_sink, syntax.pipeline_state
+#[test]
+fn shared_pipeline_state_stays_outside_per_sink_fusion() {
+    fn collect_ids(node: &serde_json::Value, operator: &str, ids: &mut Vec<String>) {
+        if node["operator"] == operator {
+            ids.push(node["id"].as_str().expect("plan id").to_string());
+        }
+        for child in node["children"].as_array().expect("children") {
+            collect_ids(child, operator, ids);
+        }
+    }
+    for (sql, shared_operator) in [
+        (
+            "SELECT last_hit_count() AS n FROM stream",
+            "PhysicalProject",
+        ),
+        (
+            "SELECT a FROM stream WHERE last_hit_count() < 2",
+            "PhysicalFilter",
+        ),
+    ] {
+        let sinks = ["sink_a", "sink_b"]
+            .into_iter()
+            .map(|id| {
+                PipelineSink::new(
+                    id,
+                    PipelineSinkConnector::new(
+                        id,
+                        SinkConnectorConfig::Nop(NopSinkConfig::default()),
+                        SinkEncoderConfig::json(),
+                    ),
+                )
+            })
+            .collect();
+        let explain: serde_json::Value =
+            serde_json::from_str(&explain_json(sql, sinks)).expect("explain JSON");
+        let mut ids = Vec::new();
+        collect_ids(&explain["physical"], shared_operator, &mut ids);
+        assert_eq!(
+            ids.len(),
+            2,
+            "both sink branches retain the shared stage: {sql}"
+        );
+        assert_eq!(ids[0], ids[1], "one shared processor: {sql}");
+        let mut fused = Vec::new();
+        collect_ids(&explain["physical"], "PhysicalFusedTransform", &mut fused);
+        assert!(fused.is_empty(), "shared spine must not fuse: {sql}");
+    }
+}
+
+// coverage-covers: sink.fused_stateless_sink, sink.output.batching
+#[test]
+fn delivery_limited_connectors_keep_incremental_byte_processing() {
+    for connector in [
+        SinkConnectorConfig::Http(
+            HttpSinkConfig::new("http://localhost/upload").with_max_body_size(64),
+        ),
+        SinkConnectorConfig::Mqtt(
+            flow::connector::MqttSinkConfig::new("limited", "mqtt://localhost:1883", "output", 0)
+                .with_max_packet_size(64),
+        ),
+        SinkConnectorConfig::Custom(CustomSinkConnectorConfig {
+            kind: "http".into(),
+            settings: json!({"max_body_size": 64}),
+        }),
+    ] {
+        for common in [
+            CommonSinkProps::default(),
+            CommonSinkProps {
+                batch_count: Some(1000),
+                batch_duration: None,
+            },
+            CommonSinkProps {
+                batch_count: None,
+                batch_duration: Some(Duration::from_secs(60)),
+            },
+        ] {
+            let batching = common.is_batching_enabled();
+            let sql = "SELECT a FROM stream WHERE a > 0 ORDER BY a";
+            let sink = PipelineSink::new(
+                "limited",
+                PipelineSinkConnector::new("limited", connector.clone(), SinkEncoderConfig::json()),
+            )
+            .with_common_props(common);
+            let explain = explain_json(sql, vec![sink]);
+            assert!(
+                !explain.contains("PhysicalFusedTransform"),
+                "preserve streamed size checks: {explain}"
+            );
+            assert!(explain.contains(if batching {
+                "PhysicalIncSinkEncoder"
+            } else {
+                "PhysicalSinkEncoder"
+            }));
+            assert!(explain.contains("PhysicalProject"));
+            assert!(explain.contains("PhysicalFilter"));
+        }
     }
 }

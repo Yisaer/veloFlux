@@ -4,6 +4,7 @@ use crate::planner::physical::{
     output_layout::OutputLayout, PhysicalBarrier, PhysicalPlan, PhysicalStreamingAggregation,
     StreamingWindowSpec,
 };
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// A physical optimization rule.
@@ -29,6 +30,7 @@ pub fn optimize_physical_plan(
         Box::new(StreamingEncoderRewrite),
         Box::new(AttachEncoderOutputLayout),
         Box::new(RemovePlannerColumnFilter),
+        Box::new(FuseStatelessTransform),
         Box::new(InsertBarrierForFanIn),
     ];
     let mut current = physical_plan;
@@ -57,6 +59,274 @@ struct InsertBarrierForFanIn;
 /// This eliminates one data-pass between BatchProcessor and SinkEncoderProcessor
 /// for registered `SinkEncoder` implementations.
 struct StreamingEncoderRewrite;
+
+/// Rule: fuse the pure transform chain on a sink branch
+/// (`[Order?] -> [Filter?] -> Project -> [EmptySuppress?] -> [Batch?]
+/// -> [Encode?] -> [Compress?] -> [Encrypt?]`) into `FusedTransform`,
+/// leaving the sink connector (external I/O, like lookup joins) standalone.
+///
+/// This eliminates one channel hop plus wakeup per fused stage on the hot
+/// path. Anything outside the exact shape keeps the unfused plan:
+/// row-diff / column-filter nodes inside the span (anything else peels).
+/// Pipeline-state counters ride along untouched: the fused task threads
+/// the same state handles into the same stage functions.
+struct FuseStatelessTransform;
+
+impl PhysicalOptRule for FuseStatelessTransform {
+    fn name(&self) -> &str {
+        "fuse_stateless_transform"
+    }
+
+    fn optimize(
+        &self,
+        plan: Arc<PhysicalPlan>,
+        _encoder_registry: &EncoderRegistry,
+    ) -> Arc<PhysicalPlan> {
+        // Count edges in the DAG, not Arc owners: previous rules rebuild
+        // shared nodes while preserving their plan indices.
+        fn count_consumers(
+            plan: &PhysicalPlan,
+            visited: &mut HashSet<i64>,
+            consumers: &mut HashMap<i64, usize>,
+        ) {
+            if !visited.insert(plan.get_plan_index()) {
+                return;
+            }
+            for child in plan.children() {
+                *consumers.entry(child.get_plan_index()).or_default() += 1;
+                count_consumers(child, visited, consumers);
+            }
+        }
+        let mut consumers = HashMap::new();
+        count_consumers(&plan, &mut HashSet::new(), &mut consumers);
+        fuse_stateless_transform(plan, &consumers)
+    }
+}
+
+fn fuse_stateless_transform(
+    plan: Arc<PhysicalPlan>,
+    consumers: &HashMap<i64, usize>,
+) -> Arc<PhysicalPlan> {
+    let children: Vec<Arc<PhysicalPlan>> = plan
+        .children()
+        .iter()
+        .map(|child| fuse_stateless_transform(Arc::clone(child), consumers))
+        .collect();
+
+    match plan.as_ref() {
+        PhysicalPlan::SinkConnector(_) | PhysicalPlan::DataSink(_) => {
+            if let Some(fused) = try_fuse_stateless_transform(plan.as_ref(), &children, consumers) {
+                return fused;
+            }
+            rebuild_with_children(plan.as_ref(), children)
+        }
+        _ => rebuild_with_children(plan.as_ref(), children),
+    }
+}
+
+fn try_fuse_stateless_transform(
+    plan: &PhysicalPlan,
+    children: &[Arc<PhysicalPlan>],
+    consumers: &HashMap<i64, usize>,
+) -> Option<Arc<PhysicalPlan>> {
+    let sink = match plan {
+        PhysicalPlan::SinkConnector(sink) | PhysicalPlan::DataSink(sink) => sink,
+        _ => return None,
+    };
+    if children.len() != 1 {
+        return None;
+    }
+    // These connectors can impose a delivery-size limit. Keep their byte
+    // stream visible to SinkProcessor so it checks each piece before the
+    // batch completes; custom connector limits are unknown to the planner.
+    if matches!(
+        sink.connector.connector,
+        crate::planner::sink::SinkConnectorConfig::Http(_)
+            | crate::planner::sink::SinkConnectorConfig::Mqtt(_)
+            | crate::planner::sink::SinkConnectorConfig::Custom(_)
+    ) {
+        return None;
+    }
+    // Walk down from the connector, collecting one optional stage of each
+    // kind. Shapes rejected upstream (e.g. file without an encoder) never
+    // reach this rule. Anything else bails.
+    let mut node = children[0].as_ref();
+    let mut encrypt = None;
+    if let PhysicalPlan::SinkEncrypt(encrypt_node) = node {
+        if encrypt_node.base.children.len() != 1 {
+            return None;
+        }
+        encrypt = Some(crate::codec::encrypt::SinkEncryptionConfig {
+            algorithm: encrypt_node.algorithm,
+            key_id: encrypt_node.key_id.clone(),
+            key_bits: encrypt_node.key_bits,
+            key: Arc::clone(&encrypt_node.key),
+        });
+        node = encrypt_node.base.children.first()?.as_ref();
+    }
+    let mut compress = None;
+    if let PhysicalPlan::SinkCompress(compress_node) = node {
+        if compress_node.base.children.len() != 1 {
+            return None;
+        }
+        compress = Some(compress_node.codec.clone());
+        node = compress_node.base.children.first()?.as_ref();
+    }
+    // Optional Immediate encoder below the optional transforms. Batching is
+    // supported in both pre-fusion shapes: standalone `Batch` (encoder none)
+    // and `Batch` already fused into `IncSinkEncoder` by
+    // `StreamingEncoderRewrite` (this rule runs after it).
+    //
+    // `peel_post_project` accepts the optional Order / EmptySuppress nodes
+    // sitting between the projection and the encoder (in either order, at
+    // most once each) and returns the projection underneath.
+    fn peel_post_project(
+        node: &PhysicalPlan,
+    ) -> Option<(bool, crate::planner::physical::PhysicalProject)> {
+        let mut node = node;
+        let mut empty_suppress_omit = false;
+        // EmptySuppress sits directly above the projection (sink-level
+        // omit-if-empty); anything else below the encoder must be Project.
+        if let PhysicalPlan::EmptySuppress(suppress_node) = node {
+            if suppress_node.base.children.len() != 1 {
+                return None;
+            }
+            empty_suppress_omit = suppress_node.omit_if_empty;
+            node = suppress_node.base.children.first()?.as_ref();
+        }
+        let PhysicalPlan::Project(project) = node else {
+            return None;
+        };
+        Some((empty_suppress_omit, project.clone()))
+    }
+    let (encoder, encoder_output_layout, batch, project_node, empty_suppress_omit) = match node {
+        PhysicalPlan::SinkEncoder(encoder) => {
+            if encoder.base.children.len() != 1 {
+                return None;
+            }
+            let grandchild = encoder.base.children.first()?;
+            let (empty_suppress_omit, project) = peel_post_project(grandchild.as_ref())?;
+            (
+                Some(encoder.encoder.clone()),
+                encoder.output_layout.clone(),
+                None,
+                project,
+                empty_suppress_omit,
+            )
+        }
+        PhysicalPlan::IncSinkEncoder(encoder) => {
+            if encoder.base.children.len() != 1 {
+                return None;
+            }
+            let grandchild = encoder.base.children.first()?;
+            let (empty_suppress_omit, project) = peel_post_project(grandchild.as_ref())?;
+            (
+                Some(encoder.encoder.clone()),
+                encoder.output_layout.clone(),
+                Some((encoder.common.batch_count, encoder.common.batch_duration)),
+                project,
+                empty_suppress_omit,
+            )
+        }
+        PhysicalPlan::Batch(batch) => {
+            if batch.base.children.len() != 1 {
+                return None;
+            }
+            let grandchild = batch.base.children.first()?;
+            let (empty_suppress_omit, project) = peel_post_project(grandchild.as_ref())?;
+            (
+                None,
+                None,
+                Some((batch.common.batch_count, batch.common.batch_duration)),
+                project,
+                empty_suppress_omit,
+            )
+        }
+        PhysicalPlan::Project(project) => (None, None, None, project.clone(), false),
+        _ => return None,
+    };
+    let project_children = project_node.base.children.clone();
+    if project_children.len() != 1 {
+        return None;
+    }
+    // Optional Order / Filter below the projection (at most one each,
+    // in either order -- ORDER BY sorts source rows, WHERE filters them).
+    // The fused node takes over the innermost input as its own child.
+    // Pipeline-state counters ride along untouched: the fused task threads
+    // the same state handles into the same stage functions.
+    let mut node = project_children[0].as_ref();
+    let mut order = None;
+    let mut filter = None;
+    let mut filter_before_order = true;
+    for _ in 0..2 {
+        match node {
+            PhysicalPlan::Order(order_node) => {
+                if order.is_some() || order_node.base.children.len() != 1 {
+                    return None;
+                }
+                order = Some(order_node.clone());
+                // Peel [.., Filter, Order]: Order is deeper, so it runs first.
+                if filter.is_some() {
+                    filter_before_order = false;
+                }
+                node = order_node.base.children.first()?.as_ref();
+            }
+            PhysicalPlan::Filter(filter_node) => {
+                if filter.is_some() || filter_node.base.children.len() != 1 {
+                    return None;
+                }
+                filter = Some(filter_node.clone());
+                // Peel [.., Order, Filter]: Filter is deeper, so it runs first.
+                if order.is_some() {
+                    filter_before_order = true;
+                }
+                node = filter_node.base.children.first()?.as_ref();
+            }
+            _ => break,
+        }
+    }
+    // Never duplicate a shared stage into per-sink tasks. Besides extra
+    // work, cloned pipeline-state handles would advance once per sink.
+    let mut consumed = children[0].as_ref();
+    while consumed.get_plan_index() != node.get_plan_index() {
+        if consumers
+            .get(&consumed.get_plan_index())
+            .copied()
+            .unwrap_or(0)
+            > 1
+        {
+            return None;
+        }
+        consumed = consumed.children().first()?.as_ref();
+    }
+    let input = Arc::new(node.clone());
+    // The fused node takes the index of the outermost consumed stage; the
+    // sink connector node above it is untouched (external I/O never fuses).
+    let fused_index = children[0].get_plan_index();
+    let (batch_count, batch_duration) = batch.unwrap_or((None, None));
+    let fused = crate::planner::physical::PhysicalFusedTransform::new(
+        input,
+        fused_index,
+        sink.connector.sink_id.clone(),
+        filter,
+        project_node,
+        order,
+        filter_before_order,
+        empty_suppress_omit,
+        encoder,
+        encoder_output_layout,
+        compress,
+        encrypt,
+        batch_count,
+        batch_duration,
+    );
+    let mut new_sink = sink.clone();
+    new_sink.base.children = vec![Arc::new(PhysicalPlan::FusedTransform(fused))];
+    Some(match plan {
+        PhysicalPlan::SinkConnector(_) => Arc::new(PhysicalPlan::SinkConnector(new_sink)),
+        _ => Arc::new(PhysicalPlan::DataSink(new_sink)),
+    })
+}
 
 /// Rule: preserve final encoder output schema before rewrites delay materialization.
 struct AttachEncoderOutputLayout;
@@ -576,6 +846,11 @@ fn rebuild_with_children(
             let mut new = sink.clone();
             new.base.children = children;
             Arc::new(PhysicalPlan::SinkConnector(new))
+        }
+        PhysicalPlan::FusedTransform(fused) => {
+            let mut new = fused.clone();
+            new.base.children = children;
+            Arc::new(PhysicalPlan::FusedTransform(new))
         }
         PhysicalPlan::Sampler(sampler) => {
             let mut new = sampler.clone();

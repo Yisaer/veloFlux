@@ -9,7 +9,12 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::byte_stage::CompressDriver;
 use crate::processor::data_metrics::{TransformMetrics, SINK_COMPRESS_METRICS};
+use crate::processor::delivery_output::ChannelDeliveryOutput;
+use crate::processor::delivery_transform::{
+    abort_compress_in_flight, handle_compress_delivery, CompressDelivery,
+};
 use crate::processor::EncodedDeliveryFlags;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -30,16 +35,8 @@ pub struct SinkCompressProcessor {
     control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
     // Taken into the task on first start.
-    writer: Mutex<Option<Box<dyn CompressWriter>>>,
+    driver: Mutex<Option<CompressDriver>>,
     stats: Arc<ProcessorStats>,
-}
-
-#[derive(Default)]
-struct CompressDelivery {
-    active: bool,
-    /// Whether a START chunk has already been forwarded to downstream.
-    /// Used to decide whether ABORT must be propagated.
-    emitted_chunk: bool,
 }
 
 impl SinkCompressProcessor {
@@ -64,7 +61,7 @@ impl SinkCompressProcessor {
             output,
             control_output,
             channel_capacities,
-            writer: Mutex::new(Some(writer)),
+            driver: Mutex::new(Some(CompressDriver::new(writer))),
             stats: Arc::new(ProcessorStats::default()),
         }
     }
@@ -73,10 +70,10 @@ impl SinkCompressProcessor {
         self.stats = stats;
     }
 
-    fn take_writer(&self) -> Result<Option<Box<dyn CompressWriter>>, ProcessorError> {
-        self.writer
+    fn take_driver(&self) -> Result<Option<CompressDriver>, ProcessorError> {
+        self.driver
             .lock()
-            .map(|mut w| w.take())
+            .map(|mut guard| guard.take())
             .map_err(|_| ProcessorError::ProcessingError("compress writer mutex poisoned".into()))
     }
 }
@@ -94,7 +91,7 @@ impl Processor for SinkCompressProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
-        let mut writer = match self.take_writer() {
+        let mut driver = match self.take_driver() {
             Ok(Some(w)) => w,
             Ok(None) => {
                 return ProcessorStart::failed(
@@ -159,7 +156,7 @@ impl Processor for SinkCompressProcessor {
                                     StreamData::EncodedDelivery { flags, bytes } => {
                                         let handle_start = std::time::Instant::now();
                                         let res = handle_delivery_with_metrics(
-                                            writer.as_mut(),
+                                            &mut driver,
                                             &mut delivery,
                                             flags,
                                             bytes,
@@ -200,7 +197,7 @@ impl Processor for SinkCompressProcessor {
                                         let is_terminal = data.is_terminal();
                                         if is_terminal && delivery.active {
                                             abort_in_flight(
-                                                writer.as_mut(),
+                                                &mut driver,
                                                 &mut delivery,
                                                 &output,
                                                 channel_capacities.data,
@@ -237,7 +234,7 @@ impl Processor for SinkCompressProcessor {
                                 // truncation): abort first, then forward the terminal.
                                 if delivery.active {
                                     abort_in_flight(
-                                        writer.as_mut(),
+                                        &mut driver,
                                         &mut delivery,
                                         &output,
                                         channel_capacities.data,
@@ -291,7 +288,7 @@ impl Processor for SinkCompressProcessor {
 /// Handle one `EncodedDelivery` event through the compress state machine.
 #[allow(clippy::too_many_arguments)]
 async fn handle_delivery_with_metrics(
-    writer: &mut dyn CompressWriter,
+    driver: &mut CompressDriver,
     delivery: &mut CompressDelivery,
     flags: EncodedDeliveryFlags,
     bytes: Bytes,
@@ -300,145 +297,26 @@ async fn handle_delivery_with_metrics(
     stats: &Arc<ProcessorStats>,
     metrics: &TransformMetrics,
 ) -> Result<(), ProcessorError> {
-    metrics.record_input_bytes(bytes.len());
-
-    let is_abort = flags.contains(EncodedDeliveryFlags::ABORT);
-    let is_start = flags.contains(EncodedDeliveryFlags::START);
-    let is_end = flags.contains(EncodedDeliveryFlags::END);
-
-    if is_abort {
-        metrics.record_aborted();
-        writer.abort_delivery();
-        let was_started = delivery.emitted_chunk;
-        *delivery = CompressDelivery::default();
-        if was_started {
-            // Forward ABORT only if downstream already received a START.
-            // ABORT is not a completed delivery → not counted in record_out.
-            send_with_backpressure(
-                output,
-                data_channel_capacity,
-                StreamData::encoded_delivery_abort(),
-                Some(stats.as_ref()),
-            )
-            .await?;
-        }
-        return Ok(());
-    }
-
-    if is_start {
-        if delivery.active {
-            return fail_delivery(
-                writer,
-                delivery,
-                output,
-                data_channel_capacity,
-                stats,
-                metrics,
-                "START received while delivery already active",
-            )
-            .await;
-        }
-        if let Err(e) = writer.begin_delivery() {
-            return fail_delivery(
-                writer,
-                delivery,
-                output,
-                data_channel_capacity,
-                stats,
-                metrics,
-                &e.to_string(),
-            )
-            .await;
-        }
-        delivery.active = true;
-    } else if !delivery.active {
-        return Err(ProcessorError::ProcessingError(
-            "chunk/END received without active delivery".into(),
-        ));
-    }
-
-    if is_end {
-        metrics.record_message_in();
-    }
-
-    // Compress the input bytes (if any).
-    let mut out = Vec::new();
-    if !bytes.is_empty() {
-        if let Err(e) = writer.write(&bytes, &mut out) {
-            return fail_delivery(
-                writer,
-                delivery,
-                output,
-                data_channel_capacity,
-                stats,
-                metrics,
-                &e.to_string(),
-            )
-            .await;
-        }
-    }
-
-    if is_end {
-        if let Err(e) = writer.finish(&mut out) {
-            return fail_delivery(
-                writer,
-                delivery,
-                output,
-                data_channel_capacity,
-                stats,
-                metrics,
-                &e.to_string(),
-            )
-            .await;
-        }
-        *delivery = CompressDelivery::default();
-        // Always forward END (even if out is empty).
-        let output_bytes = out.len();
-        let data = if is_start {
-            StreamData::encoded_delivery_single(out)
-        } else {
-            StreamData::encoded_delivery_end(out)
-        };
-        send_with_backpressure(output, data_channel_capacity, data, Some(stats.as_ref())).await?;
-        metrics.record_output_bytes(output_bytes);
-        metrics.record_message_out();
-    } else if is_start {
-        // Always forward START (even if out is empty). START is not a completed
-        // delivery → not counted in record_out.
-        let output_bytes = out.len();
-        send_with_backpressure(
-            output,
-            data_channel_capacity,
-            StreamData::encoded_delivery_start(out),
-            Some(stats.as_ref()),
-        )
-        .await?;
-        metrics.record_output_bytes(output_bytes);
-        delivery.emitted_chunk = true;
-    } else if !out.is_empty() {
-        // Middle chunk: only forward when natural drain produced output.
-        // Not a completed delivery → not counted in record_out.
-        let output_bytes = out.len();
-        send_with_backpressure(
-            output,
-            data_channel_capacity,
-            StreamData::encoded_delivery_chunk(out),
-            Some(stats.as_ref()),
-        )
-        .await?;
-        metrics.record_output_bytes(output_bytes);
-    }
-
-    Ok(())
+    let mut output = ChannelDeliveryOutput {
+        output,
+        capacity: data_channel_capacity,
+        stats,
+    };
+    handle_compress_delivery(
+        driver,
+        delivery,
+        flags,
+        bytes,
+        &mut output,
+        stats,
+        Some(metrics),
+    )
+    .await
 }
 
-/// Abort an in-progress delivery: reset writer state, notify downstream if a
-/// START was already emitted, record the error, and reset the delivery state.
-///
-/// This does **not** return an error — the caller records the error separately
-/// and decides whether to propagate it.
+#[allow(clippy::too_many_arguments)]
 async fn abort_in_flight(
-    writer: &mut dyn CompressWriter,
+    driver: &mut CompressDriver,
     delivery: &mut CompressDelivery,
     output: &LinkOutput<StreamData>,
     data_channel_capacity: usize,
@@ -446,59 +324,20 @@ async fn abort_in_flight(
     metrics: &TransformMetrics,
     processor_id: &str,
 ) {
-    metrics.record_aborted();
-    writer.abort_delivery();
-    let was_started = delivery.emitted_chunk;
-    *delivery = CompressDelivery::default();
-    if was_started {
-        if let Err(err) = send_with_backpressure(
-            output,
-            data_channel_capacity,
-            StreamData::encoded_delivery_abort(),
-            Some(stats.as_ref()),
-        )
-        .await
-        {
-            tracing::error!(
-                processor_id = %processor_id,
-                error = %err,
-                "failed to forward ABORT during in-flight abort"
-            );
-        }
-    }
-    tracing::error!(
-        processor_id = %processor_id,
-        "aborted in-flight delivery: terminal signal received mid-delivery"
-    );
-    stats.record_error("terminal signal received mid-delivery".to_string());
-}
-
-/// Reset writer + delivery state and notify downstream when START was already
-/// emitted, then surface the error.
-async fn fail_delivery(
-    writer: &mut dyn CompressWriter,
-    delivery: &mut CompressDelivery,
-    output: &LinkOutput<StreamData>,
-    data_channel_capacity: usize,
-    stats: &Arc<ProcessorStats>,
-    metrics: &TransformMetrics,
-    reason: &str,
-) -> Result<(), ProcessorError> {
-    metrics.record_aborted();
-    writer.abort_delivery();
-    let was_started = delivery.emitted_chunk;
-    *delivery = CompressDelivery::default();
-    if was_started {
-        // ABORT is not a completed delivery → not counted in record_out.
-        send_with_backpressure(
-            output,
-            data_channel_capacity,
-            StreamData::encoded_delivery_abort(),
-            Some(stats.as_ref()),
-        )
-        .await?;
-    }
-    Err(ProcessorError::ProcessingError(reason.to_string()))
+    let mut output = ChannelDeliveryOutput {
+        output,
+        capacity: data_channel_capacity,
+        stats,
+    };
+    abort_compress_in_flight(
+        driver,
+        delivery,
+        &mut output,
+        stats,
+        Some(metrics),
+        processor_id,
+    )
+    .await;
 }
 
 #[cfg(test)]

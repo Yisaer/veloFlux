@@ -104,13 +104,12 @@ async fn someip_explain() {
             &format!("      └─DataSource_0     | source={name}, decoder=gbf, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]"),
             "",
             "Physical Plan Explain:",
-            "- id                                 | info",
-            "  PhysicalResultCollect_5            |",
-            &format!("  └─PhysicalSinkConnector_3          | sink_id={sink_id}, connector=nop"),
-            &format!("    └─PhysicalSinkEncoder_4          | sink_id={sink_id}, encoder=json"),
-            "      └─PhysicalProject_2            | fields=[ts; DTE_SlotID; DTE_SlotType; DTE_SlotStatus]",
-            "        └─PhysicalDecoder_1          | decoder=gbf, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]",
-            &format!("          └─PhysicalDataSource_0     | source={name}, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]"),
+            "- id                               | info",
+            "  PhysicalResultCollect_5          |",
+            &format!("  └─PhysicalSinkConnector_3        | sink_id={sink_id}, connector=nop"),
+            &format!("    └─PhysicalFusedTransform_4     | sink_id={sink_id}, encoder=json, fused=project+encoder"),
+            "      └─PhysicalDecoder_1          | decoder=gbf, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]",
+            &format!("        └─PhysicalDataSource_0     | source={name}, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]"),
         ].join("\n");
         assert_explain_eq(&explain, &expected, "case1");
     }
@@ -162,14 +161,13 @@ async fn someip_explain() {
             ),
             "",
             "Physical Plan Explain:",
-            "- id                                 | info",
-            "  PhysicalResultCollect_5            |",
-            &format!("  └─PhysicalSinkConnector_3          | sink_id={sink_id}, connector=nop"),
-            &format!("    └─PhysicalSinkEncoder_4          | sink_id={sink_id}, encoder=json"),
-            &format!("      └─PhysicalProject_2            | fields=[ts; {project_fields}]"),
-            &format!("        └─PhysicalDecoder_1          | decoder=gbf, schema=[ts, {col_flat}]"),
+            "- id                               | info",
+            "  PhysicalResultCollect_5          |",
+            &format!("  └─PhysicalSinkConnector_3        | sink_id={sink_id}, connector=nop"),
+            &format!("    └─PhysicalFusedTransform_4     | sink_id={sink_id}, encoder=json, fused=project+encoder"),
+            &format!("      └─PhysicalDecoder_1          | decoder=gbf, schema=[ts, {col_flat}]"),
             &format!(
-                "          └─PhysicalDataSource_0     | source={name}, schema=[ts, {col_flat}]"
+                "        └─PhysicalDataSource_0     | source={name}, schema=[ts, {col_flat}]"
             ),
         ]
         .join("\n");

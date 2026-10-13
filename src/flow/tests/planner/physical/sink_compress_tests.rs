@@ -1,11 +1,13 @@
 use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema};
 use flow::catalog::{MqttStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
 use flow::codec::CompressionCodec;
+use flow::connector::sink::file::FileRetentionConfig;
+use flow::connector::FileSinkConfig;
 use flow::planner::logical::create_logical_plan;
 use flow::sql_conversion::{SchemaBinding, SchemaBindingEntry, SourceBindingKind};
 use flow::{
-    NopSinkConfig, PipelineRegistries, PipelineSink, PipelineSinkConnector, SinkConnectorConfig,
-    SinkEncoderConfig,
+    ConnectorString, NopSinkConfig, PipelineRegistries, PipelineSink, PipelineSinkConnector,
+    SinkConnectorConfig, SinkEncoderConfig,
 };
 use parser::parse_sql;
 use std::collections::HashMap;
@@ -87,27 +89,37 @@ fn no_compression_does_not_insert_sink_compress() {
         !operators.contains(&"PhysicalSinkCompress".to_string()),
         "unexpected PhysicalSinkCompress in explain: {operators:?}"
     );
-    assert!(operators.contains(&"PhysicalSinkEncoder".to_string()));
+    assert!(
+        operators.contains(&"PhysicalSinkEncoder".to_string())
+            || operators.contains(&"PhysicalFusedTransform".to_string()),
+        "expected an encoder stage (standalone or fused) in explain: {operators:?}"
+    );
 }
 
 // coverage-covers: planner.physical.sink_compress_insertion
+// coverage-covers: sink.fused_stateless_sink
 #[test]
-fn gzip_compression_inserts_sink_compress_with_codec_gzip() {
+fn gzip_compression_fuses_compress_with_codec_gzip() {
     let json = explain_json(build_sink_with_compression(Some(CompressionCodec::gzip())));
     let mut operators = Vec::new();
     collect_operators(&json, &mut operators);
     assert!(
-        operators.contains(&"PhysicalSinkCompress".to_string()),
-        "expected PhysicalSinkCompress in explain: {operators:?}"
+        operators.contains(&"PhysicalFusedTransform".to_string()),
+        "expected PhysicalFusedTransform in explain: {operators:?}"
     );
     let json_str = serde_json::to_string(&json).unwrap();
     assert!(
         json_str.contains("codec=gzip"),
         "expected codec=gzip info: {json_str}"
     );
+    assert!(
+        json_str.contains("fused=project+encoder+compress"),
+        "expected fused compress stage: {json_str}"
+    );
 }
 
 // coverage-covers: planner.physical.sink_compress_insertion
+// coverage-covers: sink.fused_stateless_sink
 #[test]
 fn zstd_compression_with_level_shows_level_in_explain() {
     let json = explain_json(build_sink_with_compression(Some(
@@ -116,8 +128,8 @@ fn zstd_compression_with_level_shows_level_in_explain() {
     let mut operators = Vec::new();
     collect_operators(&json, &mut operators);
     assert!(
-        operators.contains(&"PhysicalSinkCompress".to_string()),
-        "expected PhysicalSinkCompress in explain: {operators:?}"
+        operators.contains(&"PhysicalFusedTransform".to_string()),
+        "expected PhysicalFusedTransform in explain: {operators:?}"
     );
     let json_str = serde_json::to_string(&json).unwrap();
     assert!(
@@ -131,37 +143,72 @@ fn zstd_compression_with_level_shows_level_in_explain() {
 }
 
 // coverage-covers: planner.physical.sink_compress_insertion
+// coverage-covers: sink.fused_stateless_sink
 #[test]
-fn sink_compress_is_placed_between_encoder_and_connector() {
+fn file_sink_with_gzip_fuses_delivery_chain() {
+    let connector = PipelineSinkConnector::new(
+        "test_connector",
+        SinkConnectorConfig::File(FileSinkConfig {
+            sink_name: "test_sink".to_string(),
+            pipeline_id: "test_pipeline".to_string(),
+            path: "/tmp/fused-file-sink-test".to_string(),
+            filename_pattern: ConnectorString::plain("{seq}.json"),
+            retention: FileRetentionConfig::default(),
+        }),
+        SinkEncoderConfig::json(),
+    )
+    .with_compression(Some(CompressionCodec::gzip()));
+    let json = explain_json(PipelineSink::new("test_sink", connector));
+    let mut operators = Vec::new();
+    collect_operators(&json, &mut operators);
+    assert!(
+        operators.contains(&"PhysicalFusedTransform".to_string()),
+        "expected PhysicalFusedTransform in explain: {operators:?}"
+    );
+    assert!(
+        !operators.contains(&"PhysicalSinkCompress".to_string()),
+        "compress stage should fuse, not stand alone: {operators:?}"
+    );
+    let json_str = serde_json::to_string(&json).unwrap();
+    assert!(
+        json_str.contains("connector=file"),
+        "expected connector=file info: {json_str}"
+    );
+    assert!(
+        json_str.contains("codec=gzip"),
+        "expected codec=gzip info: {json_str}"
+    );
+    assert!(
+        json_str.contains("fused=project+encoder+compress"),
+        "expected fused compress chain: {json_str}"
+    );
+}
+
+// coverage-covers: planner.physical.sink_compress_insertion
+// coverage-covers: sink.fused_stateless_sink
+#[test]
+fn sink_compress_is_fused_between_encoder_and_connector() {
     let json = explain_json(build_sink_with_compression(Some(CompressionCodec::gzip())));
 
-    fn find_compress_child(v: &serde_json::Value) -> Option<String> {
-        if let Some(op) = v.get("operator").and_then(|o| o.as_str()) {
-            if op == "PhysicalSinkCompress" {
-                if let Some(children) = v.get("children").and_then(|c| c.as_array()) {
-                    if let Some(first) = children.first() {
-                        return first
-                            .get("operator")
-                            .and_then(|o| o.as_str())
-                            .map(str::to_string);
-                    }
-                }
-            }
+    fn find_fused_stages(v: &serde_json::Value) -> Option<String> {
+        if v.get("operator").and_then(|o| o.as_str()) == Some("PhysicalFusedTransform") {
+            return v.get("info").and_then(|i| i.as_array()).and_then(|info| {
+                info.iter().find_map(|entry| {
+                    entry
+                        .as_str()
+                        .and_then(|s| s.strip_prefix("fused=").map(str::to_string))
+                })
+            });
         }
-        if let Some(children) = v.get("children").and_then(|c| c.as_array()) {
-            for child in children {
-                if let Some(result) = find_compress_child(child) {
-                    return Some(result);
-                }
-            }
-        }
-        None
+        v.get("children")
+            .and_then(|c| c.as_array())
+            .and_then(|children| children.iter().find_map(|child| find_fused_stages(child)))
     }
 
-    let child_of_compress = find_compress_child(&json);
     assert_eq!(
-        child_of_compress.as_deref(),
-        Some("PhysicalSinkEncoder"),
-        "PhysicalSinkCompress should have PhysicalSinkEncoder as child, got: {child_of_compress:?}"
+        find_fused_stages(&json).as_deref(),
+        Some("project+encoder+compress"),
+        "fused compress chain mismatch: {}",
+        serde_json::to_string(&json).unwrap(),
     );
 }

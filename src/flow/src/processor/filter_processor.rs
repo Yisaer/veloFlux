@@ -31,11 +31,8 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 pub struct FilterProcessor {
     /// Processor identifier
     id: String,
-    /// Physical filter configuration
-    physical_filter: Arc<PhysicalFilter>,
-    /// Processor-local state for pipeline state functions (e.g. last_hit_count).
-    pub(crate) processor_state: Option<Arc<ProcessorState>>,
-    pub(crate) pipeline_state_usage: PipelineStateUsage,
+    /// Task-facing filter configuration, converted once at construction.
+    filter_stage: FilterStage,
     /// Input channels for receiving data
     inputs: Vec<LinkReceiver<StreamData>>,
     /// Control input channels
@@ -66,9 +63,7 @@ impl FilterProcessor {
         );
         Self {
             id: id.into(),
-            processor_state: physical_filter.processor_state.clone(),
-            pipeline_state_usage: physical_filter.pipeline_state_usage,
-            physical_filter,
+            filter_stage: FilterStage::from_plan(&physical_filter),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -93,19 +88,41 @@ impl FilterProcessor {
     }
 }
 
+/// Task-facing filter configuration: the compiled predicate plus the
+/// pipeline-state handles it may update. Built once from the plan node
+/// (or held directly); the raw SQL AST and plan topology never cross
+/// into tasks.
+#[derive(Clone, Debug)]
+pub(crate) struct FilterStage {
+    pub expr: ScalarExpr,
+    pub state: Option<Arc<ProcessorState>>,
+    pub usage: PipelineStateUsage,
+}
+
+impl FilterStage {
+    pub(crate) fn from_plan(filter: &PhysicalFilter) -> Self {
+        Self {
+            expr: filter.scalar_predicate.clone(),
+            state: filter.processor_state.clone(),
+            usage: filter.pipeline_state_usage,
+        }
+    }
+}
+
 /// Apply filter to a collection, optionally tracking pipeline state updates.
 ///
 /// `last_hit_count()` is row-scoped and increments after each accepted row.
 /// `last_hit_time_unix_ms()` is row-scoped and updates after each accepted row.
 /// `last_agg_hit_count()` is collection-scoped and increments once after a
 /// non-empty filtered collection is produced.
-fn apply_filter(
+pub(crate) fn apply_filter(
     input_collection: &dyn Collection,
-    filter_expr: &ScalarExpr,
-    state: Option<&ProcessorState>,
-    state_usage: PipelineStateUsage,
+    filter: &FilterStage,
     stats: Option<&ProcessorStats>,
 ) -> Result<Box<dyn Collection>, ProcessorError> {
+    let filter_expr = &filter.expr;
+    let state = filter.state.as_deref();
+    let state_usage = filter.usage;
     let mut kept = Vec::with_capacity(input_collection.num_rows());
     for tuple in input_collection.rows() {
         let result = match filter_expr.eval_with_tuple(tuple) {
@@ -195,9 +212,13 @@ mod tests {
             last_hit_time_unix_ms: true,
             ..PipelineStateUsage::default()
         };
+        let stage = FilterStage {
+            expr,
+            state: Some(state.clone()),
+            usage,
+        };
 
-        let output = apply_filter(&input, &expr, Some(state.as_ref()), usage, None)
-            .expect("filter should succeed");
+        let output = apply_filter(&input, &stage, None).expect("filter should succeed");
 
         assert_eq!(output.num_rows(), 2);
         assert_eq!(state.last_hit_time_unix_ms.load(Ordering::Relaxed), 2000);
@@ -221,9 +242,7 @@ impl Processor for FilterProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
-        let filter_expr = self.physical_filter.scalar_predicate.clone();
-        let state_usage = self.pipeline_state_usage;
-        let processor_state = self.processor_state.clone();
+        let filter_stage = self.filter_stage.clone();
         let stats = Arc::clone(&self.stats);
         tracing::info!(processor_id = %id, "filter processor starting");
 
@@ -269,9 +288,7 @@ impl Processor for FilterProcessor {
                                         let handle_start = std::time::Instant::now();
                                         let result = apply_filter(
                                             collection.as_ref(),
-                                            &filter_expr,
-                                            processor_state.as_deref(),
-                                            state_usage,
+                                            &filter_stage,
                                             Some(stats.as_ref()),
                                         );
                                         match result {

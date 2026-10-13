@@ -204,7 +204,7 @@ impl Processor for EmptySuppressProcessor {
     }
 }
 
-fn collection_is_effectively_empty(collection: &dyn Collection) -> bool {
+pub(crate) fn collection_is_effectively_empty(collection: &dyn Collection) -> bool {
     if collection.num_rows() == 0 {
         return true;
     }

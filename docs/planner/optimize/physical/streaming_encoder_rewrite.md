@@ -58,8 +58,12 @@ The fused node carries:
 | Physical node          | Processor                                                     |
 |------------------------|---------------------------------------------------------------|
 | `PhysicalBatch`        | `BatchProcessor` (standalone)                                 |
-| `PhysicalSinkEncoder`  | `SinkEncoderProcessor` in `StreamingBatchMode::Immediate`     |
+| `PhysicalSinkEncoder`  | `SinkEncoderProcessor` in `BatchPolicy::Immediate`     |
 | `PhysicalIncSinkEncoder` | `SinkEncoderProcessor` in `CountOnly` / `DurationOnly` / `Combined` |
+
+Both modes delegate encoding, count slicing, framing, and recovery to the shared
+`EncoderStage`. The standalone processor connects it to a channel; eligible
+`PhysicalFusedTransform` chains connect it directly to the shared byte stages.
 
 ## Output Layout
 

@@ -18,6 +18,7 @@ pub mod physical_decoder;
 pub mod physical_empty_suppress;
 pub mod physical_eventtime_watermark;
 pub mod physical_filter;
+pub mod physical_fused_transform;
 pub mod physical_inc_sink_encoder;
 pub mod physical_lookup_join;
 pub mod physical_memory_collection_materialize;
@@ -56,6 +57,7 @@ pub use physical_decoder::PhysicalDecoderEventtimeSpec;
 pub use physical_empty_suppress::PhysicalEmptySuppress;
 pub use physical_eventtime_watermark::PhysicalEventtimeWatermark;
 pub use physical_filter::PhysicalFilter;
+pub use physical_fused_transform::PhysicalFusedTransform;
 pub use physical_inc_sink_encoder::PhysicalIncSinkEncoder;
 pub use physical_lookup_join::{LookupJoinKeySlot, PhysicalLookupJoin, PhysicalLookupJoinConfig};
 pub use physical_memory_collection_materialize::PhysicalMemoryCollectionMaterialize;
@@ -112,6 +114,7 @@ pub enum PhysicalPlan {
     DataSink(PhysicalDataSink),
     SinkConnector(PhysicalDataSink),
     SinkEncoder(PhysicalSinkEncoder),
+    FusedTransform(PhysicalFusedTransform),
 
     IncSinkEncoder(PhysicalIncSinkEncoder),
     SinkCompress(PhysicalSinkCompress),
@@ -150,9 +153,30 @@ impl PhysicalPlan {
             }
         }
 
+        fn bind_project(plan: &mut PhysicalProject, bindings: &CustomFuncBindings) {
+            for field in Arc::make_mut(&mut plan.fields) {
+                field.compiled_expr.bind_custom_functions(bindings);
+            }
+        }
+
+        fn bind_order(plan: &mut PhysicalOrder, bindings: &CustomFuncBindings) {
+            for key in &mut plan.keys {
+                key.compiled_expr.bind_custom_functions(bindings);
+            }
+        }
+
         match self {
             PhysicalPlan::Filter(plan) => {
                 plan.scalar_predicate.bind_custom_functions(bindings);
+            }
+            PhysicalPlan::FusedTransform(plan) => {
+                if let Some(filter) = &mut plan.filter {
+                    filter.scalar_predicate.bind_custom_functions(bindings);
+                }
+                bind_project(&mut plan.project, bindings);
+                if let Some(order) = &mut plan.order {
+                    bind_order(order, bindings);
+                }
             }
             PhysicalPlan::Compute(plan) => {
                 for field in &mut plan.fields {
@@ -160,17 +184,8 @@ impl PhysicalPlan {
                 }
             }
             PhysicalPlan::BatchFunctionCompute(_) => {}
-            PhysicalPlan::Order(plan) => {
-                for key in &mut plan.keys {
-                    key.compiled_expr.bind_custom_functions(bindings);
-                }
-            }
-            PhysicalPlan::Project(plan) => {
-                let fields = Arc::make_mut(&mut plan.fields);
-                for field in fields {
-                    field.compiled_expr.bind_custom_functions(bindings);
-                }
-            }
+            PhysicalPlan::Order(plan) => bind_order(plan, bindings),
+            PhysicalPlan::Project(plan) => bind_project(plan, bindings),
             PhysicalPlan::Aggregation(plan) => {
                 bind_aggregate_calls(&mut plan.aggregate_calls, bindings);
                 bind_scalars(&mut plan.group_by_scalars, bindings);
@@ -289,6 +304,7 @@ impl PhysicalPlan {
             PhysicalPlan::DataSink(plan) | PhysicalPlan::SinkConnector(plan) => {
                 plan.base.children()
             }
+            PhysicalPlan::FusedTransform(plan) => plan.base.children(),
             PhysicalPlan::SinkEncoder(plan) => plan.base.children(),
 
             PhysicalPlan::IncSinkEncoder(plan) => plan.base.children(),
@@ -334,6 +350,7 @@ impl PhysicalPlan {
             PhysicalPlan::Batch(_) => "PhysicalBatch",
             PhysicalPlan::DataSink(_) => "PhysicalDataSink",
             PhysicalPlan::SinkConnector(_) => "PhysicalSinkConnector",
+            PhysicalPlan::FusedTransform(_) => "PhysicalFusedTransform",
             PhysicalPlan::SinkEncoder(_) => "PhysicalSinkEncoder",
 
             PhysicalPlan::IncSinkEncoder(_) => "PhysicalIncSinkEncoder",
@@ -378,6 +395,7 @@ impl PhysicalPlan {
             PhysicalPlan::SourceChangeGate(plan) => plan.base.index(),
             PhysicalPlan::Batch(plan) => plan.base.index(),
             PhysicalPlan::DataSink(plan) | PhysicalPlan::SinkConnector(plan) => plan.base.index(),
+            PhysicalPlan::FusedTransform(plan) => plan.base.index(),
             PhysicalPlan::SinkEncoder(plan) => plan.base.index(),
 
             PhysicalPlan::IncSinkEncoder(plan) => plan.base.index(),

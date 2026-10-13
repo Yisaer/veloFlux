@@ -184,6 +184,7 @@ fn normalize_plan_topology(lines: &[String]) -> Vec<String> {
                 "physicalresultcollect",
                 "physicalsinkconnector",
                 "physicalsinkencoder",
+                "physicalfusedtransform",
                 "physicalproject",
                 "physicalfilter",
                 "physicaldecoder",
@@ -350,9 +351,7 @@ fn supported_sql_fragments_match_expected_physical_explain_shape() {
                 vec![
                     "physicalresultcollect",
                     "physicalsinkconnector",
-                    "physicalsinkencoder",
-                    "physicalproject",
-                    "physicalfilter",
+                    "physicalfusedtransform",
                     "physicaldecoder",
                     "physicaldatasource",
                 ],

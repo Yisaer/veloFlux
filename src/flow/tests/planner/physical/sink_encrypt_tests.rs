@@ -87,25 +87,6 @@ fn collect_operators(v: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-fn find_operator_child(v: &serde_json::Value, operator: &str) -> Option<String> {
-    if v.get("operator").and_then(|o| o.as_str()) == Some(operator) {
-        return v
-            .get("children")
-            .and_then(|c| c.as_array())
-            .and_then(|children| children.first())
-            .and_then(|first| first.get("operator"))
-            .and_then(|o| o.as_str())
-            .map(str::to_string);
-    }
-    v.get("children")
-        .and_then(|c| c.as_array())
-        .and_then(|children| {
-            children
-                .iter()
-                .find_map(|child| find_operator_child(child, operator))
-        })
-}
-
 // coverage-covers: planner.physical.sink_encrypt_insertion
 #[test]
 fn no_encryption_does_not_insert_sink_encrypt() {
@@ -113,19 +94,25 @@ fn no_encryption_does_not_insert_sink_encrypt() {
     let mut operators = Vec::new();
     collect_operators(&json, &mut operators);
     assert!(!operators.contains(&"PhysicalSinkEncrypt".to_string()));
-    assert!(operators.contains(&"PhysicalSinkEncoder".to_string()));
+    assert!(
+        operators.contains(&"PhysicalSinkEncoder".to_string())
+            || operators.contains(&"PhysicalFusedTransform".to_string()),
+        "expected an encoder stage (standalone or fused) in explain: {operators:?}"
+    );
 }
 
 // coverage-covers: planner.physical.sink_encrypt_insertion
+// coverage-covers: sink.fused_stateless_sink
 #[test]
-fn aes_encryption_inserts_sink_encrypt_with_redacted_explain() {
+fn aes_encryption_fuses_encrypt_with_redacted_explain() {
     let raw_key = hex::encode([7u8; 32]);
     let json = explain_json(build_sink(None, Some(encryption_config())));
     let mut operators = Vec::new();
     collect_operators(&json, &mut operators);
-    assert!(operators.contains(&"PhysicalSinkEncrypt".to_string()));
+    assert!(operators.contains(&"PhysicalFusedTransform".to_string()));
 
     let json_str = serde_json::to_string(&json).unwrap();
+    assert!(json_str.contains("fused=project+encoder+encrypt"));
     assert!(json_str.contains("algorithm=aes-gcm"));
     assert!(json_str.contains("key_bits=256"));
     assert!(json_str.contains("key_id=sink-aes-v1"));
@@ -137,23 +124,33 @@ fn aes_encryption_inserts_sink_encrypt_with_redacted_explain() {
 }
 
 // coverage-covers: planner.physical.sink_encrypt_insertion
+// coverage-covers: sink.fused_stateless_sink
 #[test]
-fn gzip_and_aes_tree_is_connector_encrypt_compress_encoder() {
+fn gzip_and_aes_fuse_into_connector_encrypt_compress_encoder_chain() {
     let json = explain_json(build_sink(
         Some(CompressionCodec::gzip()),
         Some(encryption_config()),
     ));
 
+    fn find_fused_stages(v: &serde_json::Value) -> Option<String> {
+        if v.get("operator").and_then(|o| o.as_str()) == Some("PhysicalFusedTransform") {
+            return v.get("info").and_then(|i| i.as_array()).and_then(|info| {
+                info.iter().find_map(|entry| {
+                    entry
+                        .as_str()
+                        .and_then(|s| s.strip_prefix("fused=").map(str::to_string))
+                })
+            });
+        }
+        v.get("children")
+            .and_then(|c| c.as_array())
+            .and_then(|children| children.iter().find_map(|child| find_fused_stages(child)))
+    }
+
     assert_eq!(
-        find_operator_child(&json, "PhysicalSinkConnector").as_deref(),
-        Some("PhysicalSinkEncrypt")
-    );
-    assert_eq!(
-        find_operator_child(&json, "PhysicalSinkEncrypt").as_deref(),
-        Some("PhysicalSinkCompress")
-    );
-    assert_eq!(
-        find_operator_child(&json, "PhysicalSinkCompress").as_deref(),
-        Some("PhysicalSinkEncoder")
+        find_fused_stages(&json).as_deref(),
+        Some("project+encoder+compress+encrypt"),
+        "fused delivery chain mismatch: {}",
+        serde_json::to_string(&json).unwrap(),
     );
 }

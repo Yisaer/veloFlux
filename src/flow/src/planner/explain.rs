@@ -1222,6 +1222,53 @@ fn build_physical_node_with_prefix(
                 }
             }
         }
+        PhysicalPlan::FusedTransform(fused) => {
+            info.push(format!("sink_id={}", fused.sink_id));
+            match fused.encoder.as_ref() {
+                Some(encoder) => info.push(format!("encoder={}", encoder.kind_str())),
+                None => info.push("encoder=none".to_string()),
+            }
+            let mut stages = Vec::new();
+            if fused.filter.is_some() && fused.filter_before_order {
+                stages.push("filter");
+            }
+            if fused.order.is_some() {
+                stages.push("order");
+            }
+            if fused.filter.is_some() && !fused.filter_before_order {
+                stages.push("filter");
+            }
+            stages.push("project");
+            if fused.encoder.is_some() {
+                stages.push("encoder");
+            }
+            if fused.compress.is_some() {
+                stages.push("compress");
+            }
+            if fused.encrypt.is_some() {
+                stages.push("encrypt");
+            }
+            info.push(format!("fused={}", stages.join("+")));
+            if let Some(compress) = fused.compress.as_ref() {
+                info.push(format!("codec={}", compress.kind_str()));
+                if let Some(level) = compress.level_display() {
+                    info.push(format!("level={level}"));
+                }
+            }
+            if let Some(encrypt) = fused.encrypt.as_ref() {
+                info.push(format!("algorithm={}", encrypt.algorithm.as_str()));
+                info.push(format!("key_bits={}", encrypt.key_bits));
+                info.push(format!("key_id={}", encrypt.key_id));
+            }
+            if fused.batch_count.is_some() || fused.batch_duration.is_some() {
+                if let Some(count) = fused.batch_count {
+                    info.push(format!("batch_count={}", count));
+                }
+                if let Some(duration) = fused.batch_duration {
+                    info.push(format!("batch_duration_ms={}", duration.as_millis()));
+                }
+            }
+        }
         PhysicalPlan::IncSinkEncoder(encoder) => {
             info.push(format!("sink_id={}", encoder.sink_id));
             info.push(format!("encoder={}", encoder.encoder.kind_str()));

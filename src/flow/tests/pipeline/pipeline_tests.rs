@@ -4292,94 +4292,109 @@ impl flow::CustomFunc for DoubleUdf {
     }
 }
 
+#[derive(Debug)]
+struct DoubleUdfDefinition;
+
+impl flow::CustomFunc for DoubleUdfDefinition {
+    fn name(&self) -> &str {
+        "double"
+    }
+    fn validate_row(&self, args: &[Value]) -> Result<(), flow::expr::func::EvalError> {
+        flow::CustomFunc::validate_row(&DoubleUdf, args)
+    }
+    fn bind_runtime(&self) -> Result<Option<Arc<dyn flow::CustomFunc>>, String> {
+        Ok(Some(Arc::new(DoubleUdf)))
+    }
+}
+
 // coverage-covers: stream.function.custom_udf, sink.connector.memory_output
 #[tokio::test]
 async fn udf() {
-    let test_name = "udf";
-    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
-        "default", None,
-    ))
-    .expect("create flow instance");
+    for (test_name, sql, expected) in [
+        (
+            "udf_project",
+            "SELECT double(a) AS doubled FROM stream",
+            vec![2, 4, 6],
+        ),
+        (
+            "udf_filter_order_project",
+            "SELECT double(a) AS doubled FROM stream WHERE double(a) > 2 ORDER BY double(a) DESC",
+            vec![6, 4],
+        ),
+    ] {
+        let instance = FlowInstance::new(
+            flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
+        )
+        .expect("create flow instance");
 
-    // Register the mock UDF
-    let registry = instance.custom_func_registry();
-    let new_registry = registry
-        .clone_and_add(Arc::new(DoubleUdf))
-        .expect("register double UDF");
-    instance.set_custom_func_registry(new_registry);
+        // Register the mock UDF
+        let registry = instance.custom_func_registry();
+        let new_registry = registry
+            .clone_and_add(Arc::new(DoubleUdfDefinition))
+            .expect("register double UDF");
+        instance.set_custom_func_registry(new_registry);
 
-    let (input_topic, output_topic) =
-        make_memory_topics("pipeline_table_driven_queries", test_name);
-    declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
+        let (input_topic, output_topic) =
+            make_memory_topics("pipeline_table_driven_queries", test_name);
+        declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
 
-    let input_data = vec![(
-        "a".to_string(),
-        vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
-    )];
-    install_memory_stream_schema(&instance, &input_topic, &input_data).await;
+        let input_data = vec![(
+            "a".to_string(),
+            vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+        )];
+        install_memory_stream_schema(&instance, &input_topic, &input_data).await;
 
-    let mut output = instance
-        .open_memory_subscribe_bytes(&output_topic)
-        .expect("subscribe output bytes");
+        let mut output = instance
+            .open_memory_subscribe_bytes(&output_topic)
+            .expect("subscribe output bytes");
 
-    let pipeline_id = format!("pipe_{}", output_topic);
-    let sql = "SELECT double(a) AS doubled FROM stream";
-    let pipeline = PipelineDefinition::new(
-        pipeline_id.clone(),
-        sql,
-        vec![SinkDefinition::new(
-            "mem_sink",
-            SinkType::Memory,
-            SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
-        )],
-    );
+        let pipeline_id = format!("pipe_{}", output_topic);
+        let pipeline = PipelineDefinition::new(
+            pipeline_id.clone(),
+            sql,
+            vec![SinkDefinition::new(
+                "mem_sink",
+                SinkType::Memory,
+                SinkProps::Memory(MemorySinkProps::new(output_topic.clone())),
+            )],
+        );
 
-    instance
-        .create_pipeline(CreatePipelineRequest::new(pipeline))
-        .expect("create pipeline");
-    instance
-        .start_pipeline(&pipeline_id)
-        .await
-        .expect("start pipeline");
+        instance
+            .create_pipeline(CreatePipelineRequest::new(pipeline))
+            .expect("create pipeline");
+        instance
+            .start_pipeline(&pipeline_id)
+            .await
+            .expect("start pipeline");
 
-    let columns: Vec<(String, String, Vec<Value>)> = input_data
-        .into_iter()
-        .map(|(col_name, values)| ("stream".to_string(), col_name, values))
-        .collect();
-    let batch = batch_from_columns_simple(columns).expect("build input batch");
-    let timeout_duration = Duration::from_secs(10);
-    publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
+        let columns: Vec<(String, String, Vec<Value>)> = input_data
+            .into_iter()
+            .map(|(col_name, values)| ("stream".to_string(), col_name, values))
+            .collect();
+        let batch = batch_from_columns_simple(columns).expect("build input batch");
+        let timeout_duration = Duration::from_secs(10);
+        publish_input_collection(&instance, &input_topic, Box::new(batch), timeout_duration).await;
 
-    let first_output = recv_next_json(&mut output, timeout_duration).await;
-    println!("first_output: {first_output:?}");
-    let rows = first_output
-        .as_array()
-        .expect("output should be a JSON array");
-    assert_eq!(rows.len(), 3, "should have 3 rows");
-    assert_eq!(
-        rows[0]["doubled"].as_i64(),
-        Some(2),
-        "1 doubled should be 2"
-    );
-    assert_eq!(
-        rows[1]["doubled"].as_i64(),
-        Some(4),
-        "2 doubled should be 4"
-    );
-    assert_eq!(
-        rows[2]["doubled"].as_i64(),
-        Some(6),
-        "3 doubled should be 6"
-    );
+        let first_output = recv_next_json(&mut output, timeout_duration).await;
+        println!("first_output: {first_output:?}");
+        let rows = first_output
+            .as_array()
+            .expect("output should be a JSON array");
+        let actual: Vec<i64> = rows
+            .iter()
+            .map(|row| row["doubled"].as_i64().expect("integer UDF output"))
+            .collect();
+        assert_eq!(actual, expected, "runtime-bound UDF: {sql}");
 
-    instance
-        .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
-        .await
-        .expect("stop pipeline");
-    instance
-        .delete_pipeline(&pipeline_id)
-        .await
-        .expect("delete pipeline");
+        instance
+            .stop_pipeline(&pipeline_id, PipelineStopMode::Quick, timeout_duration)
+            .await
+            .expect("stop pipeline");
+        instance
+            .delete_pipeline(&pipeline_id)
+            .await
+            .expect("delete pipeline");
+    }
 }
 
 // ── protobuf decoder tests ─────────────────────────────────────────────
@@ -4684,4 +4699,51 @@ async fn memory_source_bytes_topic_with_protobuf_decoder_respects_column_pruning
         .delete_pipeline(&pipeline_id)
         .await
         .expect("delete pipeline");
+}
+
+// coverage-covers: sink.fused_stateless_sink, syntax.pipeline_state
+#[tokio::test]
+async fn shared_pipeline_state_is_evaluated_once_for_mixed_sink_branches() {
+    for (name, sql, values) in [
+        (
+            "shared_stateful_project",
+            "SELECT last_hit_count() AS n FROM stream",
+            vec![0, 1, 2],
+        ),
+        (
+            "shared_stateful_filter",
+            "SELECT a AS n FROM stream WHERE last_hit_count() < 2",
+            vec![1, 2],
+        ),
+    ] {
+        run_mixed_output_kinds_case(MixedOutputKindsCase {
+            name,
+            source_name: "stream",
+            sql,
+            input_data: vec![(
+                "a".into(),
+                vec![Value::Int64(1), Value::Int64(2), Value::Int64(3)],
+            )],
+            expected_json: JsonValue::Array(
+                values.iter().map(|n| serde_json::json!({"n": n})).collect(),
+            ),
+            expected_rows: values.len(),
+            expected_message_count: 1,
+            expected_affiliate_none: true,
+            expected_collection_columns: vec![ColumnCheck {
+                expected_name: "n".into(),
+                expected_values: values
+                    .into_iter()
+                    .map(|value| {
+                        if name == "shared_stateful_project" {
+                            Value::Uint64(value as u64)
+                        } else {
+                            Value::Int64(value)
+                        }
+                    })
+                    .collect(),
+            }],
+        })
+        .await;
+    }
 }

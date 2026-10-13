@@ -98,6 +98,13 @@ features:
       - docs/runtime/sinks/README.md
     status: active
 
+  - id: sink.fused_stateless_sink
+    title: Fused stateless transform
+    summary: Fuse eligible sink transform chains (filter, order, projection, optional batching, encoding, compression, encryption) while retaining standalone connectors and shared or delivery-limited stages.
+    doc_refs:
+      - docs/planner/optimize/physical/operator_fusion_plan.md
+    status: active
+
   - id: sink.compress.gzip_delivery
     title: Gzip compression delivery transform
     summary: Apply gzip compression to sink delivery output via PhysicalSinkCompress.

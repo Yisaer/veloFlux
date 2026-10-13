@@ -532,4 +532,57 @@ mod tests {
             "VIN-UPDATED"
         );
     }
+
+    // coverage-covers: sink.fused_stateless_sink
+    #[test]
+    fn delivery_limit_is_checked_incrementally_before_end() {
+        use super::super::{AccumulatorAction, DeliveryAccumulator};
+        use bytes::Bytes;
+        let mut accumulator = DeliveryAccumulator::new();
+        assert!(matches!(
+            accumulator
+                .push(
+                    EncodedDeliveryFlags::START,
+                    Bytes::from_static(b"ab"),
+                    false,
+                    Some(4)
+                )
+                .expect("start"),
+            AccumulatorAction::Pending
+        ));
+        assert!(matches!(
+            accumulator
+                .push(
+                    EncodedDeliveryFlags::empty(),
+                    Bytes::from_static(b"cd"),
+                    false,
+                    Some(4)
+                )
+                .expect("exact limit"),
+            AccumulatorAction::Pending
+        ));
+        let error = accumulator
+            .push(
+                EncodedDeliveryFlags::empty(),
+                Bytes::from_static(b"e"),
+                false,
+                Some(4),
+            )
+            .err()
+            .expect("over limit before END");
+        assert!(error.to_string().contains("exceeds connector limit 4"));
+        assert!(!accumulator.is_active());
+        assert!(accumulator.buffer.is_empty());
+        assert!(matches!(
+            accumulator
+                .push(
+                    EncodedDeliveryFlags::START | EncodedDeliveryFlags::END,
+                    Bytes::from_static(b"ok"),
+                    false,
+                    Some(4)
+                )
+                .expect("fresh delivery"),
+            AccumulatorAction::Completed(_)
+        ));
+    }
 }
