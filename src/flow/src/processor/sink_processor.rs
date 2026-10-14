@@ -32,6 +32,10 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 #[path = "sink_processor_retry_tests.rs"]
 mod sink_processor_retry_tests;
 
+#[cfg(test)]
+#[path = "sink_processor_native_tests.rs"]
+mod sink_processor_native_tests;
+
 const SINK_READY_TIMEOUT: Duration = Duration::from_secs(2);
 const SINK_CHECKPOINT_OPERATOR_KIND: &str = "sink";
 const SINK_CHECKPOINT_STATE_VERSION: u32 = 1;
@@ -172,6 +176,48 @@ impl PendingDelivery {
             from_checkpoint: false,
         }
     }
+}
+
+/// State required only by encoded deliveries. Native collection sinks retain
+/// the common connector/control loop without allocating this state.
+struct EncodedDeliveryState {
+    accumulator: DeliveryAccumulator,
+    delivery_cache: VecDeque<PendingDelivery>,
+    pending_delivery: Option<PendingDelivery>,
+    parked_control_terminal: Option<ControlSignal>,
+}
+
+impl EncodedDeliveryState {
+    fn new(mut delivery_cache: VecDeque<PendingDelivery>) -> Self {
+        let pending_delivery = delivery_cache.pop_front();
+        Self {
+            accumulator: DeliveryAccumulator::new(),
+            delivery_cache,
+            pending_delivery,
+            parked_control_terminal: None,
+        }
+    }
+
+    fn prepare_attempt(&mut self, property_registry: &PropertyRegistry) -> Option<DeliveryAttempt> {
+        let delivery = self.pending_delivery.as_mut()?;
+        if delivery.retry_at.is_some() {
+            return None;
+        }
+        Some(DeliveryAttempt {
+            payload: delivery.payload.clone(),
+            properties: delivery
+                .properties
+                .get_or_insert_with(|| property_registry.snapshot())
+                .clone(),
+            next_attempt: delivery.attempt.saturating_add(1),
+        })
+    }
+}
+
+struct DeliveryAttempt {
+    payload: Bytes,
+    properties: PropertyContext,
+    next_attempt: usize,
 }
 
 enum DeliveryAttemptOutcome {
@@ -698,7 +744,8 @@ impl Processor for SinkProcessor {
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
-        let metrics = SinkMetrics::new(stats.as_ref(), self.input_domain);
+        let input_domain = self.input_domain;
+        let metrics = SinkMetrics::new(stats.as_ref(), input_domain);
         let retry_config = self.retry_config.clone();
         let checkpoint_key = self.checkpoint_key.clone();
         let checkpoint_snapshot_collector = self.checkpoint_snapshot_collector.clone();
@@ -736,67 +783,44 @@ impl Processor for SinkProcessor {
                     return Err(err);
                 }
             }
-            let mut accumulator = DeliveryAccumulator::new();
-            let mut delivery_cache = restored_delivery_cache;
-            let mut delivery_mode = if delivery_cache.is_empty() {
-                SinkDeliveryMode::Running
-            } else {
-                tracing::info!(
-                    processor_id = %processor_id,
-                    restored_deliveries = delivery_cache.len(),
-                    "sink starting checkpoint delivery replay"
-                );
+            // Keep the large delivery machine off the native task's frame.
+            // Restored deliveries still take the encoded replay path.
+            let restored_deliveries = restored_delivery_cache.len();
+            let replaying = restored_deliveries != 0;
+            let mut encoded_state = (input_domain == DataDomain::Message || replaying)
+                .then(|| Box::new(EncodedDeliveryState::new(restored_delivery_cache)));
+            let mut delivery_mode = if replaying {
+                tracing::info!(processor_id = %processor_id, restored_deliveries, "sink starting checkpoint delivery replay");
                 SinkDeliveryMode::Replaying
-            };
-            let mut pending_delivery = if delivery_mode == SinkDeliveryMode::Replaying {
-                delivery_cache.pop_front()
             } else {
-                None
+                SinkDeliveryMode::Running
             };
-            let mut parked_control_terminal: Option<ControlSignal> = None;
 
             loop {
-                if pending_delivery.is_none() && !accumulator.is_active() {
-                    if let Some(control_signal) = parked_control_terminal.take() {
-                        Self::forward_control_terminal(
-                            &control_output,
-                            channel_capacities.control,
-                            &mut connector,
-                            control_signal,
-                        )
-                        .await?;
-                        tracing::info!(processor_id = %processor_id, "stopped");
-                        return Ok(());
+                if let Some(state) = encoded_state.as_mut() {
+                    if state.pending_delivery.is_none() && !state.accumulator.is_active() {
+                        if let Some(control_signal) = state.parked_control_terminal.take() {
+                            Self::forward_control_terminal(
+                                &control_output, channel_capacities.control,
+                                &mut connector, control_signal,
+                            ).await?;
+                            tracing::info!(processor_id = %processor_id, "stopped");
+                            return Ok(());
+                        }
                     }
                 }
 
-                let retry_deadline = pending_delivery
-                    .as_ref()
+                let retry_deadline = encoded_state.as_ref()
+                    .and_then(|state| state.pending_delivery.as_ref())
                     .and_then(|delivery| delivery.retry_at)
                     .filter(|_| delivery_mode != SinkDeliveryMode::Capturing);
-                let attempt_ready = delivery_mode != SinkDeliveryMode::Capturing
-                    && pending_delivery
-                        .as_ref()
-                        .is_some_and(|delivery| delivery.retry_at.is_none());
-                let attempt_payload = pending_delivery
-                    .as_ref()
-                    .filter(|_| attempt_ready)
-                    .map(|delivery| delivery.payload.clone())
-                    .unwrap_or_default();
-                let attempt_properties = pending_delivery
-                    .as_mut()
-                    .filter(|_| attempt_ready)
-                    .map(|delivery| {
-                        delivery
-                            .properties
-                            .get_or_insert_with(|| property_registry.snapshot())
-                            .clone()
-                    })
-                    .unwrap_or_default();
-                let next_attempt = pending_delivery
-                    .as_ref()
-                    .map_or(0, |delivery| delivery.attempt.saturating_add(1));
-                let attempt_start = Instant::now();
+                let attempt = if delivery_mode != SinkDeliveryMode::Capturing {
+                    encoded_state.as_mut().and_then(|state| state.prepare_attempt(&property_registry))
+                } else {
+                    None
+                };
+                let has_pending_delivery = encoded_state.as_ref()
+                    .is_some_and(|state| state.pending_delivery.is_some());
 
                 tokio::select! {
                     biased;
@@ -814,16 +838,18 @@ impl Processor for SinkProcessor {
 	                            ControlAction::Continue => {}
 	                            ControlAction::Capture(control_signal) => {
                                     if delivery_mode != SinkDeliveryMode::Capturing {
-                                        if let Some(mut delivery) = pending_delivery.take() {
-                                            delivery.uncertain = attempt_ready || connector.active_delivery;
-                                            delivery.retry_at = None;
-                                            delivery_cache.push_front(delivery);
+                                        if let Some(state) = encoded_state.as_mut() {
+                                            if let Some(mut delivery) = state.pending_delivery.take() {
+                                                delivery.uncertain = attempt.is_some() || connector.active_delivery;
+                                                delivery.retry_at = None;
+                                                state.delivery_cache.push_front(delivery);
+                                            }
                                         }
                                         connector.abort_active_delivery().await;
                                         delivery_mode = SinkDeliveryMode::Capturing;
                                         tracing::info!(
                                             processor_id = %processor_id,
-                                            cached_deliveries = delivery_cache.len(),
+                                            cached_deliveries = encoded_state.as_ref().map_or(0, |state| state.delivery_cache.len()),
                                             "sink entered delivery capture mode"
                                         );
                                     }
@@ -837,8 +863,10 @@ impl Processor for SinkProcessor {
 	                            ControlAction::Deactivate => control_active = false,
 	                            ControlAction::Terminal(control_signal) => {
                                     control_active = false;
-                                    if pending_delivery.is_some() || accumulator.is_active() {
-                                        parked_control_terminal = Some(control_signal);
+                                    if let Some(state) = encoded_state.as_mut().filter(|state| {
+                                        state.pending_delivery.is_some() || state.accumulator.is_active()
+                                    }) {
+                                        state.parked_control_terminal = Some(control_signal);
                                     } else {
                                         Self::forward_control_terminal(
                                             &control_output,
@@ -855,12 +883,20 @@ impl Processor for SinkProcessor {
 	                    }
 
                     // ── ② active connector attempt ──
-                    attempt_result = connector.attempt_delivery(attempt_payload.as_ref(), &attempt_properties), if attempt_ready => {
-                        stats.record_handle_duration(attempt_start.elapsed());
-                        let delivery = pending_delivery
+                    (attempt_result, attempt_duration) = async {
+                        let attempt = attempt.as_ref().expect("active delivery attempt");
+                        // Disabled select branches must not read clocks or build
+                        // connector futures for native collection traffic.
+                        let attempt_start = Instant::now();
+                        let result = connector.attempt_delivery(attempt.payload.as_ref(), &attempt.properties).await;
+                        (result, attempt_start.elapsed())
+                    }, if attempt.is_some() => {
+                        stats.record_handle_duration(attempt_duration);
+                        let state = encoded_state.as_mut().expect("encoded delivery state");
+                        let delivery = state.pending_delivery
                             .as_mut()
                             .expect("pending delivery exists while attempt is active");
-                        delivery.attempt = next_attempt;
+                        delivery.attempt = attempt.as_ref().expect("active delivery attempt").next_attempt;
                         delivery.retry_at = None;
                         match Self::handle_delivery_attempt_result(
                             &processor_id,
@@ -872,7 +908,7 @@ impl Processor for SinkProcessor {
                             attempt_result,
                         ) {
                             DeliveryAttemptOutcome::Delivered => {
-                                let delivery = pending_delivery.take().expect("pending delivery exists");
+                                let delivery = state.pending_delivery.take().expect("pending delivery exists");
                                 if forward_data {
                                     Self::forward_encoded_events(
                                         &output,
@@ -883,8 +919,8 @@ impl Processor for SinkProcessor {
                                     .await?;
                                 }
                                 if delivery_mode == SinkDeliveryMode::Replaying {
-                                    pending_delivery = delivery_cache.pop_front();
-                                    if pending_delivery.is_none() {
+                                    state.pending_delivery = state.delivery_cache.pop_front();
+                                    if state.pending_delivery.is_none() {
                                         delivery_mode = SinkDeliveryMode::Running;
                                         tracing::info!(
                                             processor_id = %processor_id,
@@ -895,7 +931,7 @@ impl Processor for SinkProcessor {
                             }
                             DeliveryAttemptOutcome::RetryPending => {}
                             DeliveryAttemptOutcome::Dropped => {
-                                pending_delivery = None;
+                                state.pending_delivery = None;
                             }
                             DeliveryAttemptOutcome::ReplayFailed(error) => {
                                 return Err(ProcessorError::ProcessingError(format!(
@@ -906,15 +942,17 @@ impl Processor for SinkProcessor {
                     }
 
                     // ── ③ retry timer — active when backoff is pending ──
-                    _ = sleep_until(retry_deadline.unwrap_or_else(Instant::now)), if retry_deadline.is_some() => {
-                        let Some(delivery) = pending_delivery.as_mut() else {
+                    _ = async {
+                        sleep_until(retry_deadline.expect("active retry deadline")).await;
+                    }, if retry_deadline.is_some() => {
+                        let Some(delivery) = encoded_state.as_mut().and_then(|state| state.pending_delivery.as_mut()) else {
                             continue;
                         };
                         delivery.retry_at = None;
                     }
 
                     // ── ④ data — only when no delivery is pending or retrying ──
-                    item = input_streams.next(), if pending_delivery.is_none() => {
+                    item = input_streams.next(), if !has_pending_delivery => {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
@@ -925,7 +963,8 @@ impl Processor for SinkProcessor {
                                     StreamData::EncodedDelivery { flags, bytes } => {
                                         let handle_start = Instant::now();
                                         metrics.record_input_bytes(bytes.len());
-                                        match accumulator.push(flags, bytes, forward_data, max_delivery_bytes)? {
+                                        let state = encoded_state.as_mut().expect("encoded delivery state");
+                                        match state.accumulator.push(flags, bytes, forward_data, max_delivery_bytes)? {
                                             AccumulatorAction::Pending => {
                                                 stats.record_handle_duration(handle_start.elapsed());
                                             }
@@ -952,9 +991,9 @@ impl Processor for SinkProcessor {
                                                     &retry_config,
                                                 );
                                                 if delivery_mode == SinkDeliveryMode::Capturing {
-                                                    delivery_cache.push_back(delivery);
+                                                    state.delivery_cache.push_back(delivery);
                                                 } else {
-                                                    pending_delivery = Some(delivery);
+                                                    state.pending_delivery = Some(delivery);
                                                 }
                                             }
                                         }
@@ -997,7 +1036,7 @@ impl Processor for SinkProcessor {
                                     }
                                     data => {
                                         let is_terminal = data.is_terminal();
-                                        if is_terminal && accumulator.is_active() {
+                                        if is_terminal && encoded_state.as_ref().is_some_and(|state| state.accumulator.is_active()) {
                                             return Err(ProcessorError::ProcessingError(
                                                 "encoded delivery protocol error: terminal received while delivery is active"
                                                     .to_string(),
@@ -1031,7 +1070,10 @@ impl Processor for SinkProcessor {
                                                         &checkpoint_key,
                                                         SINK_CHECKPOINT_OPERATOR_KIND,
                                                         SINK_CHECKPOINT_STATE_VERSION,
-                                                        Self::checkpoint_state(&delivery_cache),
+                                                        match encoded_state.as_ref() {
+                                                            Some(state) => Self::checkpoint_state(&state.delivery_cache),
+                                                            None => Self::checkpoint_state(&VecDeque::new()),
+                                                        },
                                                     ),
                                                 )
                                                 .map_err(|err| {
@@ -1059,7 +1101,7 @@ impl Processor for SinkProcessor {
                                 continue;
 	                            }
 	                            None => {
-                                    if accumulator.is_active() {
+                                    if encoded_state.as_ref().is_some_and(|state| state.accumulator.is_active()) {
                                         return Err(ProcessorError::ProcessingError(
                                             "encoded delivery protocol error: data channel closed while delivery is active"
                                                 .to_string(),
