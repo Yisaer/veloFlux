@@ -1,3 +1,5 @@
+#[cfg(feature = "onnx")]
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use crate::expr::custom_func::CustomFuncBindings;
@@ -277,6 +279,161 @@ impl PhysicalPlan {
             | PhysicalPlan::Watermark(_)
             | PhysicalPlan::Sampler(_) => {}
         }
+    }
+
+    /// Collect model names from ONNX calls embedded in this physical plan.
+    #[cfg(feature = "onnx")]
+    pub fn referenced_onnx_models(&self) -> BTreeSet<String> {
+        fn collect_scalars(scalars: &[ScalarExpr], models: &mut BTreeSet<String>) {
+            for scalar in scalars {
+                scalar.collect_function_string_arguments("onnx", models);
+            }
+        }
+
+        fn collect_aggregate_calls(calls: &[AggregateCall], models: &mut BTreeSet<String>) {
+            for call in calls {
+                collect_scalars(&call.args, models);
+            }
+        }
+
+        fn collect_project(plan: &PhysicalProject, models: &mut BTreeSet<String>) {
+            for field in plan.fields.iter() {
+                field
+                    .compiled_expr
+                    .collect_function_string_arguments("onnx", models);
+            }
+        }
+
+        fn collect_order(plan: &PhysicalOrder, models: &mut BTreeSet<String>) {
+            for key in &plan.keys {
+                key.compiled_expr
+                    .collect_function_string_arguments("onnx", models);
+            }
+        }
+
+        let mut models = BTreeSet::new();
+        match self {
+            PhysicalPlan::Filter(plan) => plan
+                .scalar_predicate
+                .collect_function_string_arguments("onnx", &mut models),
+            PhysicalPlan::FusedTransform(plan) => {
+                if let Some(filter) = &plan.filter {
+                    filter
+                        .scalar_predicate
+                        .collect_function_string_arguments("onnx", &mut models);
+                }
+                collect_project(&plan.project, &mut models);
+                if let Some(order) = &plan.order {
+                    collect_order(order, &mut models);
+                }
+            }
+            PhysicalPlan::Compute(plan) => {
+                for field in &plan.fields {
+                    field
+                        .compiled_expr
+                        .collect_function_string_arguments("onnx", &mut models);
+                }
+            }
+            PhysicalPlan::BatchFunctionCompute(_) => {}
+            PhysicalPlan::Order(plan) => collect_order(plan, &mut models),
+            PhysicalPlan::Project(plan) => collect_project(plan, &mut models),
+            PhysicalPlan::Aggregation(plan) => {
+                collect_aggregate_calls(&plan.aggregate_calls, &mut models);
+                collect_scalars(&plan.group_by_scalars, &mut models);
+            }
+            PhysicalPlan::StatefulFunction(plan) => {
+                for call in &plan.calls {
+                    collect_scalars(&call.arg_scalars, &mut models);
+                    if let Some(expr) = &call.when_scalar {
+                        expr.collect_function_string_arguments("onnx", &mut models);
+                    }
+                    collect_scalars(&call.partition_by_scalars, &mut models);
+                }
+            }
+            PhysicalPlan::StreamingAggregation(plan) => {
+                collect_aggregate_calls(&plan.aggregate_calls, &mut models);
+                collect_scalars(&plan.group_by_scalars, &mut models);
+                match &plan.window {
+                    StreamingWindowSpec::Tumbling {
+                        partition_by_scalars,
+                        ..
+                    }
+                    | StreamingWindowSpec::Count {
+                        partition_by_scalars,
+                        ..
+                    } => collect_scalars(partition_by_scalars, &mut models),
+                    StreamingWindowSpec::Sliding {
+                        partition_by_scalars,
+                        trigger_condition_scalar,
+                        ..
+                    } => {
+                        collect_scalars(partition_by_scalars, &mut models);
+                        if let Some(expr) = trigger_condition_scalar {
+                            expr.collect_function_string_arguments("onnx", &mut models);
+                        }
+                    }
+                    StreamingWindowSpec::State {
+                        open_scalar,
+                        emit_scalar,
+                        partition_by_scalars,
+                        ..
+                    } => {
+                        open_scalar.collect_function_string_arguments("onnx", &mut models);
+                        emit_scalar.collect_function_string_arguments("onnx", &mut models);
+                        collect_scalars(partition_by_scalars, &mut models);
+                    }
+                    StreamingWindowSpec::Eos => {}
+                }
+            }
+            PhysicalPlan::TumblingWindow(plan) => {
+                collect_scalars(&plan.partition_by_scalars, &mut models)
+            }
+            PhysicalPlan::CountWindow(plan) => {
+                collect_scalars(&plan.partition_by_scalars, &mut models)
+            }
+            PhysicalPlan::SlidingWindow(plan) => {
+                collect_scalars(&plan.partition_by_scalars, &mut models);
+                if let Some(expr) = &plan.trigger_condition_scalar {
+                    expr.collect_function_string_arguments("onnx", &mut models);
+                }
+            }
+            PhysicalPlan::StateWindow(plan) => {
+                collect_scalars(&plan.partition_by_scalars, &mut models);
+                plan.open_scalar
+                    .collect_function_string_arguments("onnx", &mut models);
+                plan.emit_scalar
+                    .collect_function_string_arguments("onnx", &mut models);
+            }
+            PhysicalPlan::DataSource(_)
+            | PhysicalPlan::TableScan(_)
+            | PhysicalPlan::Decoder(_)
+            | PhysicalPlan::CollectionLayoutNormalize(_)
+            | PhysicalPlan::MemoryCollectionMaterialize(_)
+            | PhysicalPlan::LookupJoin(_)
+            | PhysicalPlan::RowDiff(_)
+            | PhysicalPlan::ColumnFilter(_)
+            | PhysicalPlan::EmptySuppress(_)
+            | PhysicalPlan::SharedStream(_)
+            | PhysicalPlan::SourceChangeGate(_)
+            | PhysicalPlan::Batch(_)
+            | PhysicalPlan::DataSink(_)
+            | PhysicalPlan::SinkConnector(_)
+            | PhysicalPlan::SinkEncoder(_)
+            | PhysicalPlan::IncSinkEncoder(_)
+            | PhysicalPlan::SinkCompress(_)
+            | PhysicalPlan::SinkEncrypt(_)
+            | PhysicalPlan::ResultCollect(_)
+            | PhysicalPlan::Barrier(_)
+            | PhysicalPlan::EosWindow(_)
+            | PhysicalPlan::ProcessTimeWatermark(_)
+            | PhysicalPlan::EventtimeWatermark(_)
+            | PhysicalPlan::Watermark(_)
+            | PhysicalPlan::Sampler(_) => {}
+        }
+        for child in self.children() {
+            models.extend(child.referenced_onnx_models());
+        }
+        models
     }
 
     /// Get the children of this physical plan

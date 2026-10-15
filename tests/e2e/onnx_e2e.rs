@@ -68,6 +68,28 @@ fn mnist_input() -> Vec<f32> {
     input
 }
 
+async fn wait_for_model_prepared(
+    http: &reqwest::Client,
+    manager_base: &str,
+    model_name: &str,
+    expected: bool,
+) -> serde_json::Value {
+    for _ in 0..50 {
+        let response = http
+            .get(format!("{manager_base}/models/{model_name}/status"))
+            .send()
+            .await
+            .expect("get model runtime status");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = response.json().await.expect("decode model status");
+        if body["prepared"] == expected {
+            return body;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("model '{model_name}' did not reach prepared={expected}");
+}
+
 fn identity_model_bundle() -> Vec<u8> {
     let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
@@ -127,6 +149,26 @@ outputs:
     archive.finish().unwrap().into_inner()
 }
 
+fn registry_rebuild_udf_module() -> Vec<u8> {
+    wat::parse_str(
+        r#"
+        (module
+            (import "host" "alloc" (func $alloc (param i32) (result i32)))
+            (memory (export "memory") 1 256)
+            (data (i32.const 128) "{\"abi_version\":1,\"name\":\"onnx_fvt_udf\",\"description\":\"registry rebuild fixture\",\"args\":[],\"return_type\":\"any\",\"execution_mode\":\"batch\"}")
+
+            (func (export "udf_metadata_ptr") (result i32)
+                i32.const 128)
+            (func (export "udf_metadata_len") (result i32)
+                i32.const 135)
+            (func (export "udf_batch") (param i32 i32) (result i32)
+                i32.const 0)
+        )
+        "#,
+    )
+    .expect("parse registry rebuild UDF module")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn onnx_model_stream_pipeline_fvt() {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
@@ -162,6 +204,61 @@ async fn onnx_model_stream_pipeline_fvt() {
     let model: serde_json::Value = model_response.json().await.unwrap();
     assert_eq!(model["name"], "mnist_8");
     assert_eq!(model["test_vector_count"], 3);
+    let model_status = http
+        .get(format!("{manager_base}/models/mnist_8/status"))
+        .send()
+        .await
+        .expect("get initial model status");
+    assert_eq!(model_status.status(), StatusCode::OK);
+    let model_status: serde_json::Value = model_status.json().await.unwrap();
+    assert_eq!(model_status["prepared"], false);
+    assert_eq!(model_status["prepare_count"], 0);
+
+    let udf_upload = reqwest::multipart::Form::new()
+        .text("name", "onnx_fvt_udf")
+        .text("revision", "1")
+        .part(
+            "wasm_file",
+            reqwest::multipart::Part::bytes(registry_rebuild_udf_module())
+                .file_name("onnx_fvt_udf.wasm")
+                .mime_str("application/wasm")
+                .unwrap(),
+        );
+    let udf_response = http
+        .post(format!("{manager_base}/udfs/upload"))
+        .multipart(udf_upload)
+        .send()
+        .await
+        .expect("upload registry rebuild UDF");
+    assert_eq!(udf_response.status(), StatusCode::OK);
+
+    let export_response = http
+        .get(format!(
+            "{manager_base}/storage/export?bundle_version=onnx-registry-rebuild"
+        ))
+        .send()
+        .await
+        .expect("export storage for registry rebuild");
+    assert_eq!(export_response.status(), StatusCode::OK);
+    let export_archive = export_response
+        .bytes()
+        .await
+        .expect("read registry rebuild export");
+    let import_response = http
+        .post(format!("{manager_base}/storage/import"))
+        .multipart(
+            reqwest::multipart::Form::new().part(
+                "file",
+                reqwest::multipart::Part::bytes(export_archive.to_vec())
+                    .file_name("onnx-registry-rebuild.zip")
+                    .mime_str("application/zip")
+                    .unwrap(),
+            ),
+        )
+        .send()
+        .await
+        .expect("import storage for registry rebuild");
+    assert_eq!(import_response.status(), StatusCode::OK);
 
     let stream_name = format!("onnx_fvt_stream_{}", random_suffix());
     let output_topic = format!("onnx_fvt_output_{}", random_suffix());
@@ -227,6 +324,8 @@ async fn onnx_model_stream_pipeline_fvt() {
         .await
         .expect("start pipeline");
     assert_eq!(start_response.status(), StatusCode::OK);
+    let model_status = wait_for_model_prepared(&http, &manager_base, "mnist_8", true).await;
+    assert_eq!(model_status["prepare_count"], 1);
 
     injector
         .send_shared_mock_stream_payload(
@@ -259,6 +358,47 @@ async fn onnx_model_stream_pipeline_fvt() {
         );
     }
 
+    let second_output_topic = format!("onnx_fvt_output_second_{}", random_suffix());
+    let second_pipeline_id = format!("onnx_fvt_pipeline_second_{}", random_suffix());
+    let second_topic_response = http
+        .post(format!("{manager_base}/memory/topics"))
+        .json(&serde_json::json!({
+            "topic": second_output_topic,
+            "revision": 1,
+            "kind": "bytes"
+        }))
+        .send()
+        .await
+        .expect("create second output topic");
+    assert_eq!(second_topic_response.status(), StatusCode::CREATED);
+    let second_pipeline_response = http
+        .post(format!("{manager_base}/pipelines"))
+        .json(&serde_json::json!({
+            "id": second_pipeline_id,
+            "revision": 1,
+            "sql": format!("SELECT onnx('mnist_8', image) AS result FROM {stream_name}"),
+            "sinks": [{
+                "id": "onnx_fvt_output_second",
+                "type": "memory",
+                "props": {"topic": second_output_topic},
+                "encoder": {"type": "json", "props": {}}
+            }]
+        }))
+        .send()
+        .await
+        .expect("create second pipeline");
+    assert_eq!(second_pipeline_response.status(), StatusCode::CREATED);
+    let second_start_response = http
+        .post(format!(
+            "{manager_base}/pipelines/{second_pipeline_id}/start"
+        ))
+        .send()
+        .await
+        .expect("start second pipeline");
+    assert_eq!(second_start_response.status(), StatusCode::OK);
+    let model_status = wait_for_model_prepared(&http, &manager_base, "mnist_8", true).await;
+    assert_eq!(model_status["prepare_count"], 1);
+
     let stop_response = http
         .post(format!(
             "{manager_base}/pipelines/{pipeline_id}/stop?mode=graceful&timeout_ms=5000"
@@ -267,9 +407,26 @@ async fn onnx_model_stream_pipeline_fvt() {
         .await
         .expect("stop pipeline");
     assert_eq!(stop_response.status(), StatusCode::OK);
+    let model_status = wait_for_model_prepared(&http, &manager_base, "mnist_8", true).await;
+    assert_eq!(model_status["prepare_count"], 1);
+
+    let second_stop_response = http
+        .post(format!(
+            "{manager_base}/pipelines/{second_pipeline_id}/stop?mode=graceful&timeout_ms=5000"
+        ))
+        .send()
+        .await
+        .expect("stop second pipeline");
+    assert_eq!(second_stop_response.status(), StatusCode::OK);
+    let model_status = wait_for_model_prepared(&http, &manager_base, "mnist_8", false).await;
+    assert_eq!(model_status["prepare_count"], 1);
 
     for (resource, path) in [
         ("pipeline", format!("/pipelines/{pipeline_id}")),
+        (
+            "second pipeline",
+            format!("/pipelines/{second_pipeline_id}"),
+        ),
         ("stream", format!("/streams/{stream_name}")),
         ("model", "/models/mnist_8".to_string()),
     ] {
@@ -396,6 +553,58 @@ async fn onnx_composite_input_cardinality_fvt() {
         .expect("start identity pipeline");
     assert_eq!(start_response.status(), StatusCode::OK);
 
+    let model_status = wait_for_model_prepared(&http, &manager_base, "identity_4", true).await;
+    assert_eq!(model_status["prepare_count"], 1);
+
+    // Send multiple independent rows through one runtime. A regression that prepares the
+    // model from eval_row would increase prepare_count for these rows.
+    for _ in 0..16 {
+        injector
+            .send_shared_mock_stream_payload(
+                &stream_name,
+                serde_json::to_vec(&serde_json::json!({
+                    "pairs": [
+                        {"left": 1.0, "right": 2.0},
+                        {"left": 3.0, "right": 4.0}
+                    ]
+                }))
+                .unwrap(),
+            )
+            .await
+            .expect("send repeated identity input");
+    }
+    let mut repeated_outputs = Vec::new();
+    timeout(Duration::from_secs(10), async {
+        while repeated_outputs.len() < 16 {
+            match output
+                .recv()
+                .await
+                .expect("receive repeated identity output")
+            {
+                MemoryData::Bytes(payload) => {
+                    let rows: Vec<serde_json::Value> =
+                        serde_json::from_slice(&payload).expect("decode repeated identity output");
+                    repeated_outputs.extend(rows);
+                }
+                MemoryData::Collection(_) => continue,
+            }
+        }
+    })
+    .await
+    .expect("timeout waiting for repeated identity outputs");
+    assert_eq!(repeated_outputs.len(), 16);
+    for row in &repeated_outputs {
+        assert_eq!(
+            row["result"]["pairs"],
+            serde_json::json!([
+                {"left": 1.0, "right": 2.0},
+                {"left": 3.0, "right": 4.0}
+            ])
+        );
+    }
+    let model_status = wait_for_model_prepared(&http, &manager_base, "identity_4", true).await;
+    assert_eq!(model_status["prepare_count"], 1);
+
     injector
         .send_shared_mock_stream_payload(
             &stream_name,
@@ -463,6 +672,8 @@ async fn onnx_composite_input_cardinality_fvt() {
         .await
         .expect("stop identity pipeline");
     assert_eq!(stop_response.status(), StatusCode::OK);
+    let model_status = wait_for_model_prepared(&http, &manager_base, "identity_4", false).await;
+    assert_eq!(model_status["prepare_count"], 1);
     for (resource, path) in [
         ("pipeline", format!("/pipelines/{pipeline_id}")),
         ("stream", format!("/streams/{stream_name}")),

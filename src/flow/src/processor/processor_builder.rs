@@ -293,6 +293,8 @@ struct ProcessorBuilderContext {
     aggregate_registry: Option<Arc<AggregateFunctionRegistry>>,
     stateful_registry: Option<Arc<StatefulFunctionRegistry>>,
     custom_func_registry: Arc<CustomFuncRegistry>,
+    #[cfg(feature = "onnx")]
+    prepared_models: Arc<HashMap<String, Arc<model_runtime::PreparedOnnxModel>>>,
     shared_stream_registry: Option<Arc<SharedStreamRegistry>>,
     eventtime: Option<EventtimePipelineContext>,
     merger_registry: Option<Arc<MergerRegistry>>,
@@ -314,8 +316,14 @@ struct PipelineLinkKindCounts {
 
 impl ProcessorBuilderContext {
     fn custom_func_bindings(&self) -> Result<CustomFuncBindings, ProcessorError> {
-        CustomFuncBindings::from_registry(&self.custom_func_registry)
-            .map_err(ProcessorError::InvalidConfiguration)
+        #[cfg(feature = "onnx")]
+        let result = CustomFuncBindings::from_registry_with_prepared_models(
+            &self.custom_func_registry,
+            &self.prepared_models,
+        );
+        #[cfg(not(feature = "onnx"))]
+        let result = CustomFuncBindings::from_registry(&self.custom_func_registry);
+        result.map_err(ProcessorError::InvalidConfiguration)
     }
 
     fn catalog(&self) -> Result<Arc<Catalog>, ProcessorError> {
@@ -3003,6 +3011,19 @@ fn create_processor_pipeline_with_context(
             "checkpoint store is required when checkpointing is enabled".to_string(),
         ));
     }
+    #[cfg(feature = "onnx")]
+    {
+        let mut prepared_models = HashMap::new();
+        if let Some(model_registry) = context.custom_func_registry.model_registry() {
+            for model_name in physical_plan.referenced_onnx_models() {
+                let model = model_registry
+                    .acquire(&model_name)
+                    .map_err(ProcessorError::InvalidConfiguration)?;
+                prepared_models.insert(model_name, model);
+            }
+        }
+        context.prepared_models = Arc::new(prepared_models);
+    }
     context.checkpoint_keys = build_checkpoint_keys(&physical_plan);
     context.output_link_kinds = classify_output_link_kinds(&physical_plan);
     let link_kind_counts = count_pipeline_link_kinds(&physical_plan, &context.output_link_kinds);
@@ -3168,6 +3189,8 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
             stateful_registry: None,
             custom_func_registry: CustomFuncRegistry::new(Default::default())
                 .expect("default custom registry"),
+            #[cfg(feature = "onnx")]
+            prepared_models: Arc::new(HashMap::new()),
             shared_stream_registry: None,
             eventtime: None,
             merger_registry: Some(Arc::clone(&options.merger_registry)),
@@ -3206,6 +3229,8 @@ pub(crate) fn create_processor_pipeline(
             aggregate_registry: Some(dependencies.aggregate_registry),
             stateful_registry: Some(dependencies.stateful_registry),
             custom_func_registry: dependencies.custom_func_registry,
+            #[cfg(feature = "onnx")]
+            prepared_models: Arc::new(HashMap::new()),
             shared_stream_registry: Some(dependencies.shared_stream_registry),
             eventtime: dependencies.eventtime,
             merger_registry: Some(dependencies.merger_registry),
@@ -3556,6 +3581,8 @@ mod tests {
             stateful_registry: Some(stateful_registry),
             custom_func_registry: CustomFuncRegistry::new(Default::default())
                 .expect("default custom registry"),
+            #[cfg(feature = "onnx")]
+            prepared_models: Arc::new(HashMap::new()),
             shared_stream_registry: None,
             eventtime: None,
             merger_registry: None,

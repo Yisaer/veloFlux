@@ -3,6 +3,8 @@ use crate::expr::func::{BinaryFunc, EvalError, UnaryFunc};
 use crate::model::{Collection, CollectionMetadata, Tuple};
 use crate::processor::processor_state::ProcessorState;
 use datatypes::{ConcreteDatatype, StructField, StructType, StructValue, Value};
+#[cfg(feature = "onnx")]
+use std::collections::BTreeSet;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -441,6 +443,61 @@ impl ScalarExpr {
                 }
                 if let Some(expr) = else_expr {
                     expr.bind_custom_functions(bindings);
+                }
+            }
+            ScalarExpr::Column(_)
+            | ScalarExpr::OriginRow { .. }
+            | ScalarExpr::Wildcard { .. }
+            | ScalarExpr::Literal(_, _)
+            | ScalarExpr::PipelineState { .. }
+            | ScalarExpr::ProcessorState { .. }
+            | ScalarExpr::WindowMetadata { .. } => {}
+        }
+    }
+
+    /// Collect literal string arguments used by a named custom function.
+    #[cfg(feature = "onnx")]
+    pub fn collect_function_string_arguments(
+        &self,
+        function_name: &str,
+        values: &mut BTreeSet<String>,
+    ) {
+        match self {
+            ScalarExpr::CallUnary { expr, .. } | ScalarExpr::FieldAccess { expr, .. } => {
+                expr.collect_function_string_arguments(function_name, values);
+            }
+            ScalarExpr::CallBinary { expr1, expr2, .. } => {
+                expr1.collect_function_string_arguments(function_name, values);
+                expr2.collect_function_string_arguments(function_name, values);
+            }
+            ScalarExpr::ListIndex { expr, index_expr } => {
+                expr.collect_function_string_arguments(function_name, values);
+                index_expr.collect_function_string_arguments(function_name, values);
+            }
+            ScalarExpr::CallFunc { func, args } => {
+                if func.name().eq_ignore_ascii_case(function_name) {
+                    if let Some(ScalarExpr::Literal(Value::String(value), _)) = args.first() {
+                        values.insert(value.to_string());
+                    }
+                }
+                for arg in args {
+                    arg.collect_function_string_arguments(function_name, values);
+                }
+            }
+            ScalarExpr::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                if let Some(operand) = operand {
+                    operand.collect_function_string_arguments(function_name, values);
+                }
+                for (when_expr, then_expr) in when_then {
+                    when_expr.collect_function_string_arguments(function_name, values);
+                    then_expr.collect_function_string_arguments(function_name, values);
+                }
+                if let Some(else_expr) = else_expr {
+                    else_expr.collect_function_string_arguments(function_name, values);
                 }
             }
             ScalarExpr::Column(_)

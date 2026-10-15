@@ -3,7 +3,7 @@
 ## Status
 
 This document records the design for ONNX model inference in veloFlux. The Cargo feature gate,
-model upload/storage slice, shared lazy model registry, SQL registration, planner binding, and
+model upload/storage slice, shared prepared-model registry, SQL registration, planner binding, and
 row-based custom-function execution are implemented. The first runtime target is CPU inference through tract
 and does not include TFLite or NCNN execution.
 
@@ -130,23 +130,25 @@ The planner specializes the generic SQL call using the literal model name and mo
 validates the argument count and veloFlux-native input schema, and fixes the return type to the
 metadata-declared output struct. Nested expressions use the normal scalar dependency order.
 
-Row-based execution does not imply loading the model for every row. The process-wide
-`ModelRegistry` caches an immutable `Arc<PreparedOnnxModel>` by model name, revision, and content
-hash. A processor-bound ONNX custom-function instance reuses that prepared model for every row.
-Model loading and model inference are separate concerns: the first implementation invokes the
-prepared model once per row, while a future optimization may use tensor-level batching for models
-whose ONNX input graph supports a batch dimension.
+Row-based execution does not imply loading the model for every row. After the physical plan has
+been built, the runtime collects the literal model names referenced by the plan and acquires the
+prepared models before creating the processors. A processor-bound ONNX custom-function instance
+reuses its acquired prepared model for every row. `eval_row` performs inference only; it must not
+perform first-use graph loading or preparation. The first implementation invokes the prepared
+model once per row, while a future optimization may use tensor-level batching for models whose
+ONNX input graph supports a batch dimension.
 
 ### Model and pipeline ownership
 
 Model metadata is a storage resource, while a prepared ONNX graph is a runtime resource. Startup
 loads model metadata and schemas so planning can resolve literal model names without loading every
-graph into memory. When a pipeline containing `onnx(...)` starts, its processor binds the ONNX
-custom function and loads the prepared model on demand.
+graph into memory. When a pipeline runtime is built, after planning and before processor creation,
+it acquires the prepared models referenced by that pipeline.
 
-The runtime cache shares the immutable prepared graph and weights across pipelines. Each pipeline
-still owns its row execution context and any runtime state that is not safe to share. The
-relationship is:
+The runtime cache shares immutable prepared graphs and weights across pipelines. Two pipelines
+using the same model revision hold two `Arc` references to one prepared graph; they do not prepare
+two copies. Each pipeline still owns its row execution context and any runtime state that is not
+safe to share. The relationship is:
 
 ```text
 StoredModel
@@ -154,21 +156,44 @@ StoredModel
 
 ModelRuntimeCache
   └── (model name, revision, SHA-256)
-        └── Arc<PreparedOnnxModel>
-              ├── Pipeline A / scalar ONNX custom function
-              └── Pipeline B / scalar ONNX custom function
+        └── shared PreparedOnnxModel
+              ├── Pipeline A runtime / Arc handle
+              └── Pipeline B runtime / Arc handle
 ```
 
-`PreparedOnnxModel` must be immutable. A model's mutable execution state must remain local to its
-processor-bound scalar function or to a narrower invocation scope. This prevents one pipeline's
-row-level errors from affecting another pipeline. If the selected ONNX runtime cannot execute one
-session concurrently, pipelines use separate execution sessions that still reference the shared
-model metadata and cache entry.
+The registry cache should not permanently own prepared models with a strong `Arc`. The cache uses
+the model key for de-duplication and retains a `Weak<PreparedOnnxModel>` entry, while running
+pipeline runtimes hold the strong `Arc` handles. When the last runtime is stopped, deleted, or
+rebuilt, its processor pipeline and model handles are dropped and the prepared graph is released.
+This also releases old revisions after the last pipeline using them exits.
+
+Stopped pipelines retain their definitions and model dependencies for validation, but do not retain
+a processor runtime or a prepared graph. Starting them builds a new runtime and acquires the
+current model revision.
+
+`PreparedOnnxModel` must be immutable. The current tract implementation shares one immutable
+`TypedSimplePlan` through `Arc` when multiple pipeline runtimes use the same cache key. Concurrent
+inference on that shared plan is covered by a runtime unit test. A model's mutable execution state
+must remain local to its processor-bound scalar function or to a narrower invocation scope. This
+prevents one pipeline's row-level errors from affecting another pipeline. If a future backend
+requires isolated execution state, that state may be made pipeline-local without duplicating the
+prepared graph and weights.
 
 The cache key includes the model revision and content hash. Because model versions are immutable,
-loading a new model version cannot reuse a prepared graph for an older version. A model referenced
-by a running or persisted pipeline should not be deleted until the dependency is removed or the
-pipeline is stopped and recreated without that model.
+loading a new model version cannot reuse a prepared graph for an older version. A running pipeline
+continues to use the immutable revision that it acquired; a newly built or restarted runtime uses
+the current metadata revision. A model referenced by a stored pipeline cannot be deleted until
+the dependency is removed, even when that pipeline is stopped and no prepared graph is resident.
+
+Model release is ownership-driven rather than dependent on a periodic scan. The runtime `Arc`
+handles provide the authoritative memory lifetime across stop, delete, rebuild, and failed-start
+cleanup paths. An optional patrol task may remove dead weak cache entries and expose diagnostics,
+but it is not responsible for deciding whether an in-flight runtime still owns a model.
+
+The model API exposes `GET /models/:name/status` for runtime observability. Its `prepared` field
+indicates whether the current model cache key still has a strong runtime reference, and
+`prepare_count` verifies that concurrent pipelines share one preparation. This endpoint describes
+runtime ownership; it is not an operating-system memory or RSS measurement.
 
 ## Cargo feature design
 
@@ -244,16 +269,19 @@ The manager layer owns ONNX-specific validation and lifecycle orchestration:
 2. validate the bundle layout and model-card schema;
 3. calculate content hashes;
 4. publish the bundle and persist model metadata atomically;
-5. load the model through the enabled runtime;
+5. prepare the model through the enabled runtime when the pipeline runtime is created, after
+   planning and before processor creation;
 6. validate the model's veloFlux input/output schema against the ONNX graph's tensor types,
    dimensions, batch behavior, opset, and operator restrictions;
 7. run all supplied test vectors.
 
 The first four steps are implemented for upload and full storage import. Upload-time graph
-validation and test-vector execution are deferred. Runtime binding loads and prepares the graph on
-demand; the planner consumes the persisted veloFlux schema rather than infer a signature
-dynamically. Processor execution supports bool, signed/unsigned integer, floating-point, and string
-scalar values. List and struct values are recursively flattened into tensor leaves for inputs and
+validation and test-vector execution are deferred. Runtime binding loads and prepares the graph
+during pipeline runtime creation, after planning and before processor creation; it does not defer
+preparation until the first input row. The planner consumes the persisted veloFlux schema rather
+than infer a signature dynamically. Processor execution supports bool, signed/unsigned integer,
+floating-point, and string scalar values. List and struct values are recursively flattened into
+tensor leaves for inputs and
 decoded back into the declared recursive schema for outputs. All model outputs are returned as one
 struct value.
 Composite list elements and list fields inside structs require an explicit cardinality in the model
@@ -292,8 +320,9 @@ model-runtime
 
 The model runtime must expose a small application-facing abstraction instead of leaking tract
 types into planner and storage code. The abstraction should provide model metadata, prepared-model
-loading, and inference operations; the tract implementation owns model loading, optimization, and
-tensor conversion. Prepared-model loading should be lazy and shared through a runtime cache, while
+acquisition, and inference operations; the tract implementation owns model loading, optimization,
+and tensor conversion. Prepared-model acquisition occurs after planning and before processor
+creation, is shared through the runtime cache, and is owned by active pipeline runtimes while
 execution contexts remain pipeline-local.
 
 Models are immutable. Replacing the graph, input order, or input meaning requires a new versioned
@@ -321,7 +350,8 @@ implementations should not be introduced until there is a concrete model and per
 - Register `onnx(...)` only when the feature is enabled.
 - Validate literal model names and input contracts during planning.
 - Evaluate `onnx(...)` through the ordinary scalar custom-function path.
-- Load and optimize ONNX models with tract through the shared lazy runtime registry. **Implemented.**
+- Acquire and optimize only referenced ONNX models with tract before processor creation, sharing
+  immutable prepared graphs across active pipeline runtimes. **Implemented.**
 - Convert recursive veloFlux input values to ONNX tensor leaves and decode tensor outputs into the
   declared recursive veloFlux schema.
 - Validate the supplied test vectors during upload.

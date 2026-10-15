@@ -13,6 +13,10 @@ pub mod onnx_func;
 use crate::catalog::FunctionDef;
 use crate::expr::func::EvalError;
 use datatypes::{ConcreteDatatype, Value};
+#[cfg(feature = "onnx")]
+use std::collections::HashMap;
+#[cfg(feature = "onnx")]
+use std::sync::Arc;
 
 pub use registry::{CustomFuncBindings, CustomFuncRegistry, CustomFuncRegistryOptions};
 
@@ -39,6 +43,15 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
     /// Create a processor-bound implementation for this function.
     fn bind_runtime(&self) -> Result<Option<std::sync::Arc<dyn CustomFunc>>, String> {
         Ok(None)
+    }
+
+    /// Create a processor-bound implementation with prepared ONNX models available.
+    #[cfg(feature = "onnx")]
+    fn bind_runtime_with_prepared_models(
+        &self,
+        _prepared_models: &HashMap<String, Arc<model_runtime::PreparedOnnxModel>>,
+    ) -> Result<Option<Arc<dyn CustomFunc>>, String> {
+        self.bind_runtime()
     }
 
     /// Validate a scalar function call with access to the planner's source schemas.

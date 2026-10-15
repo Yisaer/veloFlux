@@ -3,11 +3,13 @@ use crate::expr::func::EvalError;
 use crate::expr::ScalarExpr;
 use datatypes::{ConcreteDatatype, Value};
 use model_runtime::ModelRegistry;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Planner-visible and row-based runtime implementation of the ONNX function.
 pub struct OnnxFunc {
     model_registry: Arc<ModelRegistry>,
+    prepared_models: Arc<HashMap<String, Arc<model_runtime::PreparedOnnxModel>>>,
 }
 
 fn type_error(error: impl Into<String>) -> EvalError {
@@ -25,7 +27,10 @@ impl std::fmt::Debug for OnnxFunc {
 
 impl OnnxFunc {
     pub fn new(model_registry: Arc<ModelRegistry>) -> Self {
-        Self { model_registry }
+        Self {
+            model_registry,
+            prepared_models: Arc::new(HashMap::new()),
+        }
     }
 
     fn validate_call(&self, args: &[ScalarExpr]) -> Result<(), String> {
@@ -53,6 +58,17 @@ impl CustomFunc for OnnxFunc {
     fn bind_runtime(&self) -> Result<Option<Arc<dyn CustomFunc>>, String> {
         Ok(Some(Arc::new(Self {
             model_registry: Arc::clone(&self.model_registry),
+            prepared_models: Arc::clone(&self.prepared_models),
+        })))
+    }
+
+    fn bind_runtime_with_prepared_models(
+        &self,
+        prepared_models: &HashMap<String, Arc<model_runtime::PreparedOnnxModel>>,
+    ) -> Result<Option<Arc<dyn CustomFunc>>, String> {
+        Ok(Some(Arc::new(Self {
+            model_registry: Arc::clone(&self.model_registry),
+            prepared_models: Arc::new(prepared_models.clone()),
         })))
     }
 
@@ -122,7 +138,14 @@ impl CustomFunc for OnnxFunc {
         let Value::String(model_name) = &args[0] else {
             return Err(type_error("onnx model_name must be a string constant"));
         };
-        let model = self.model_registry.load(model_name).map_err(type_error)?;
+        let model = self
+            .prepared_models
+            .get(model_name.as_str())
+            .ok_or_else(|| {
+                type_error(format!(
+                    "prepared ONNX model '{model_name}' is unavailable in the pipeline runtime"
+                ))
+            })?;
         model
             .run_values(&args[1..])
             .map_err(|error| type_error(format!("model '{model_name}': {error}")))

@@ -7039,6 +7039,7 @@ dependencies = [
  "veloflux-model-runtime",
  "veloflux-sdv",
  "veloflux_metrics",
+ "wat",
  "zip 8.6.0",
 ]
 

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use datatypes::{
     BooleanType, ConcreteDatatype, Float32Type, Float64Type, Int16Type, Int32Type, Int64Type,
@@ -99,7 +99,15 @@ struct ModelCacheKey {
     sha256: String,
 }
 
-/// A parsed and optimized model kept alive for the process lifetime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRuntimeStatus {
+    pub revision: u64,
+    pub model_sha256: String,
+    pub prepared: bool,
+    pub prepare_count: u64,
+}
+
+/// A parsed and optimized model shared by active pipeline runtimes.
 #[derive(Debug)]
 pub struct PreparedOnnxModel {
     metadata: Arc<ModelMetadata>,
@@ -703,11 +711,13 @@ fn list_nesting_depth(schema: &ModelSchemaColumn) -> usize {
     }
 }
 
-/// Process-wide model metadata registry and lazy prepared-model cache.
+/// Process-wide model metadata registry and shared prepared-model cache.
 pub struct ModelRegistry {
     models_dir: PathBuf,
     metadata: RwLock<HashMap<String, Arc<ModelMetadata>>>,
-    prepared: Mutex<HashMap<ModelCacheKey, Arc<PreparedOnnxModel>>>,
+    prepared: Mutex<HashMap<ModelCacheKey, Weak<PreparedOnnxModel>>>,
+    in_flight: Mutex<HashMap<ModelCacheKey, Arc<OnceLock<Result<Arc<PreparedOnnxModel>, String>>>>>,
+    prepare_counts: Mutex<HashMap<ModelCacheKey, u64>>,
 }
 
 impl ModelRegistry {
@@ -716,6 +726,8 @@ impl ModelRegistry {
             models_dir: models_dir.into(),
             metadata: RwLock::new(HashMap::new()),
             prepared: Mutex::new(HashMap::new()),
+            in_flight: Mutex::new(HashMap::new()),
+            prepare_counts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -732,6 +744,10 @@ impl ModelRegistry {
             let name = model.name.clone();
             metadata.insert(name, Arc::new(self.metadata_for(model)));
         }
+        self.prepare_counts
+            .lock()
+            .map_err(|_| "model prepare counter lock poisoned".to_string())?
+            .clear();
         Ok(())
     }
 
@@ -741,7 +757,11 @@ impl ModelRegistry {
             .metadata
             .write()
             .map_err(|_| "model metadata registry lock poisoned".to_string())?;
-        metadata.insert(name, Arc::new(self.metadata_for(model)));
+        metadata.insert(name.clone(), Arc::new(self.metadata_for(model)));
+        self.prepare_counts
+            .lock()
+            .map_err(|_| "model prepare counter lock poisoned".to_string())?
+            .retain(|key, _| key.name != name);
         Ok(())
     }
 
@@ -751,6 +771,10 @@ impl ModelRegistry {
             .write()
             .map_err(|_| "model metadata registry lock poisoned".to_string())?;
         metadata.remove(name);
+        self.prepare_counts
+            .lock()
+            .map_err(|_| "model prepare counter lock poisoned".to_string())?
+            .retain(|key, _| key.name != name);
         Ok(())
     }
 
@@ -762,11 +786,75 @@ impl ModelRegistry {
         Ok(metadata.get(name).cloned())
     }
 
-    /// Load and cache a model on demand. Prepared models are not evicted.
-    pub fn load(&self, name: &str) -> Result<Arc<PreparedOnnxModel>, String> {
+    /// Acquire a prepared model for a pipeline runtime.
+    ///
+    /// Prepared models are weakly cached while active pipeline runtimes own the strong references.
+    /// Preparation is deduplicated per model key without holding the cache lock while parsing and
+    /// optimizing the ONNX graph.
+    pub fn acquire(&self, name: &str) -> Result<Arc<PreparedOnnxModel>, String> {
         let metadata = self
             .metadata(name)?
             .ok_or_else(|| format!("model '{name}' is not registered"))?;
+        let key = ModelCacheKey {
+            name: metadata.model.name.clone(),
+            revision: metadata.model.revision,
+            sha256: metadata.model.model_sha256.clone(),
+        };
+
+        if let Some(model) = self
+            .prepared
+            .lock()
+            .map_err(|_| "prepared model cache lock poisoned".to_string())?
+            .get(&key)
+            .and_then(Weak::upgrade)
+        {
+            return Ok(model);
+        }
+
+        let loading = {
+            let mut in_flight = self
+                .in_flight
+                .lock()
+                .map_err(|_| "in-flight model cache lock poisoned".to_string())?;
+            in_flight
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(OnceLock::new()))
+                .clone()
+        };
+
+        let result = loading
+            .get_or_init(|| {
+                let model = Arc::new(self.prepare(metadata)?);
+                self.prepared
+                    .lock()
+                    .map_err(|_| "prepared model cache lock poisoned".to_string())?
+                    .insert(key.clone(), Arc::downgrade(&model));
+                let mut prepare_counts = self
+                    .prepare_counts
+                    .lock()
+                    .map_err(|_| "model prepare counter lock poisoned".to_string())?;
+                *prepare_counts.entry(key.clone()).or_default() += 1;
+                Ok(model)
+            })
+            .clone();
+
+        let mut in_flight = self
+            .in_flight
+            .lock()
+            .map_err(|_| "in-flight model cache lock poisoned".to_string())?;
+        if in_flight
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, &loading))
+        {
+            in_flight.remove(&key);
+        }
+        result
+    }
+
+    pub fn status(&self, name: &str) -> Result<Option<ModelRuntimeStatus>, String> {
+        let Some(metadata) = self.metadata(name)? else {
+            return Ok(None);
+        };
         let key = ModelCacheKey {
             name: metadata.model.name.clone(),
             revision: metadata.model.revision,
@@ -776,12 +864,26 @@ impl ModelRegistry {
             .prepared
             .lock()
             .map_err(|_| "prepared model cache lock poisoned".to_string())?;
-        if let Some(model) = prepared.get(&key) {
-            return Ok(Arc::clone(model));
-        }
-        let model = Arc::new(self.prepare(metadata)?);
-        prepared.insert(key, Arc::clone(&model));
-        Ok(model)
+        let is_prepared = prepared.get(&key).and_then(Weak::upgrade).is_some();
+        prepared.retain(|_, cached| cached.strong_count() > 0);
+        let prepare_count = self
+            .prepare_counts
+            .lock()
+            .map_err(|_| "model prepare counter lock poisoned".to_string())?
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
+        Ok(Some(ModelRuntimeStatus {
+            revision: key.revision,
+            model_sha256: key.sha256,
+            prepared: is_prepared,
+            prepare_count,
+        }))
+    }
+
+    /// Backward-compatible alias for callers that still use the old name.
+    pub fn load(&self, name: &str) -> Result<Arc<PreparedOnnxModel>, String> {
+        self.acquire(name)
     }
 
     fn metadata_for(&self, model: StoredModel) -> ModelMetadata {
@@ -822,6 +924,8 @@ impl ModelRegistry {
 #[cfg(all(test, feature = "onnx"))]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use tract_onnx::prelude::{DatumType, IntoTValue, Tensor};
 
     fn column(name: &str, data_type: &str) -> ModelSchemaColumn {
@@ -832,6 +936,167 @@ mod tests {
             fields: None,
             element: None,
         }
+    }
+
+    fn identity_pairs_column(name: &str) -> ModelSchemaColumn {
+        let mut pair = column("pair", "struct");
+        pair.fields = Some(vec![column("left", "float32"), column("right", "float32")]);
+        let mut pairs = column(name, "list");
+        pairs.cardinality = Some(2);
+        pairs.element = Some(Box::new(pair));
+        pairs
+    }
+
+    fn identity_input(seed: f32) -> datatypes::Value {
+        let pair_type = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![])));
+        let pair = |offset| {
+            datatypes::Value::Struct(datatypes::StructValue::new(
+                vec![
+                    datatypes::Value::Float32(seed + offset),
+                    datatypes::Value::Float32(seed + offset + 0.5),
+                ],
+                StructType::new(Arc::new(vec![])),
+            ))
+        };
+        datatypes::Value::List(datatypes::ListValue::new(
+            vec![pair(0.0), pair(1.0)],
+            Arc::new(pair_type),
+        ))
+    }
+
+    fn test_registry() -> (Arc<ModelRegistry>, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "veloflux-model-runtime-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let model_dir = root.join("identity");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(
+            model_dir.join("model.onnx"),
+            include_bytes!("../../manager/src/model_testdata/identity-4.onnx"),
+        )
+        .unwrap();
+
+        let registry = Arc::new(ModelRegistry::new(&root));
+        registry
+            .upsert(StoredModel {
+                name: "identity".to_string(),
+                revision: 1,
+                model_sha256: "identity-test".to_string(),
+                model_size_bytes: 0,
+                model_card_yaml: String::new(),
+                inputs: vec![identity_pairs_column("pairs")],
+                outputs: vec![identity_pairs_column("pairs")],
+                test_vector_count: 0,
+            })
+            .unwrap();
+        (registry, root)
+    }
+
+    #[test]
+    fn prepared_model_is_reused_across_acquires() {
+        let (registry, root) = test_registry();
+        let first = registry.acquire("identity").unwrap();
+        let second = registry.acquire("identity").unwrap();
+        assert_eq!(Arc::strong_count(&second), 2);
+        assert_eq!(
+            registry.status("identity").unwrap().unwrap().prepare_count,
+            1
+        );
+        assert!(registry.status("identity").unwrap().unwrap().prepared);
+        drop(first);
+        drop(second);
+        assert!(!registry.status("identity").unwrap().unwrap().prepared);
+        let third = registry.acquire("identity").unwrap();
+        assert_eq!(
+            registry.status("identity").unwrap().unwrap().prepare_count,
+            2
+        );
+        drop(third);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_acquires_prepare_a_model_once() {
+        let (registry, root) = test_registry();
+        let barrier = Arc::new(Barrier::new(8));
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            threads.push(thread::spawn(move || {
+                barrier.wait();
+                registry.acquire("identity").unwrap()
+            }));
+        }
+        let models = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        for model in &models[1..] {
+            assert!(Arc::ptr_eq(&models[0], model));
+        }
+        assert_eq!(
+            registry.status("identity").unwrap().unwrap().prepare_count,
+            1
+        );
+        drop(models);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_runs_share_one_prepared_identity_model() {
+        const THREAD_COUNT: usize = 8;
+
+        let (registry, root) = test_registry();
+        let barrier = Arc::new(Barrier::new(THREAD_COUNT));
+        let mut threads = Vec::with_capacity(THREAD_COUNT);
+        for index in 0..THREAD_COUNT {
+            let registry = Arc::clone(&registry);
+            let barrier = Arc::clone(&barrier);
+            threads.push(thread::spawn(move || {
+                barrier.wait();
+                let model = registry.acquire("identity").unwrap();
+                let input = identity_input(index as f32);
+                let output = model.run_values(std::slice::from_ref(&input)).unwrap();
+                (input, output)
+            }));
+        }
+
+        let results = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        for (input, output) in results {
+            let datatypes::Value::List(input_pairs) = input else {
+                panic!("test input must be a list");
+            };
+            let datatypes::Value::Struct(output_record) = output else {
+                panic!("identity output must be a struct");
+            };
+            let datatypes::Value::List(output_pairs) = &output_record.items()[0] else {
+                panic!("identity output field must be a list");
+            };
+            assert_eq!(output_pairs.len(), input_pairs.len());
+            for (input_pair, output_pair) in input_pairs.items().iter().zip(output_pairs.items()) {
+                let datatypes::Value::Struct(input_pair) = input_pair else {
+                    panic!("test input pair must be a struct");
+                };
+                let datatypes::Value::Struct(output_pair) = output_pair else {
+                    panic!("identity output pair must be a struct");
+                };
+                assert_eq!(output_pair.items(), input_pair.items());
+            }
+        }
+        assert_eq!(
+            registry.status("identity").unwrap().unwrap().prepare_count,
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

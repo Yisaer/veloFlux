@@ -241,6 +241,10 @@ fn add_direct_udf_routes(app: Router<AppState>) -> Router<AppState> {
 #[cfg(feature = "onnx")]
 fn add_model_routes(app: Router<AppState>) -> Router<AppState> {
     app.route("/models", get(model_handler::list_models_handler))
+        .route(
+            "/models/:name/status",
+            get(model_handler::get_model_status_handler),
+        )
         .route("/models/:name", get(model_handler::get_model_handler))
 }
 

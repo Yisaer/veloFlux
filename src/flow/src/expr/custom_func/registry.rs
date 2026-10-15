@@ -58,6 +58,32 @@ impl CustomFuncBindings {
     }
 
     pub fn from_registry(registry: &CustomFuncRegistry) -> Result<Self, String> {
+        #[cfg(feature = "onnx")]
+        {
+            return Self::from_registry_with_prepared_models(registry, &HashMap::new());
+        }
+
+        #[cfg(not(feature = "onnx"))]
+        {
+            Self::from_registry_internal(registry, None)
+        }
+    }
+
+    #[cfg(feature = "onnx")]
+    pub fn from_registry_with_prepared_models(
+        registry: &CustomFuncRegistry,
+        prepared_models: &HashMap<String, Arc<model_runtime::PreparedOnnxModel>>,
+    ) -> Result<Self, String> {
+        Self::from_registry_internal(registry, Some(prepared_models))
+    }
+
+    fn from_registry_internal(
+        registry: &CustomFuncRegistry,
+        #[cfg(feature = "onnx")] prepared_models: Option<
+            &HashMap<String, Arc<model_runtime::PreparedOnnxModel>>,
+        >,
+        #[cfg(not(feature = "onnx"))] _prepared_models: Option<()>,
+    ) -> Result<Self, String> {
         let mut functions = HashMap::new();
         let mut created = HashSet::new();
         for func in registry.functions.values() {
@@ -65,7 +91,13 @@ impl CustomFuncBindings {
             if !created.insert(name.clone()) {
                 continue;
             }
-            if let Some(bound) = func.bind_runtime()? {
+            #[cfg(feature = "onnx")]
+            let bound = func.bind_runtime_with_prepared_models(
+                prepared_models.expect("prepared model bindings must be provided"),
+            )?;
+            #[cfg(not(feature = "onnx"))]
+            let bound = func.bind_runtime()?;
+            if let Some(bound) = bound {
                 functions.insert(name, bound);
             }
         }
@@ -86,6 +118,8 @@ impl Default for CustomFuncBindings {
 /// Registry for scalar custom functions referenced in SQL (e.g. `concat(a, b)`).
 pub struct CustomFuncRegistry {
     functions: HashMap<String, Arc<dyn CustomFunc>>,
+    #[cfg(feature = "onnx")]
+    model_registry: Option<Arc<model_runtime::ModelRegistry>>,
 }
 
 /// Inputs used to construct a custom-function registry.
@@ -103,21 +137,36 @@ pub struct CustomFuncRegistryOptions {
 
 impl CustomFuncRegistry {
     pub fn new(options: CustomFuncRegistryOptions) -> Result<Arc<Self>, String> {
+        #[cfg(feature = "onnx")]
+        let explicit_model_registry = options.model_registry.is_some();
         let mut registry = options
             .base_registry
             .map(|registry| Self {
                 functions: registry.functions.clone(),
+                #[cfg(feature = "onnx")]
+                model_registry: registry.model_registry.clone(),
             })
             .unwrap_or_else(Self::builtins);
 
         #[cfg(feature = "onnx")]
-        if let Some(model_registry) = options.model_registry {
-            if !registry.functions.contains_key("onnx") {
+        let model_registry = options
+            .model_registry
+            .clone()
+            .or_else(|| registry.model_registry.clone());
+
+        #[cfg(feature = "onnx")]
+        if let Some(model_registry) = model_registry.as_ref() {
+            if explicit_model_registry || !registry.functions.contains_key("onnx") {
                 register(
                     &mut registry.functions,
-                    Arc::new(OnnxFunc::new(model_registry)),
+                    Arc::new(OnnxFunc::new(Arc::clone(model_registry))),
                 );
             }
+        }
+
+        #[cfg(feature = "onnx")]
+        {
+            registry.model_registry = model_registry;
         }
 
         for udf in options.wasm_udfs {
@@ -130,6 +179,11 @@ impl CustomFuncRegistry {
             register(&mut registry.functions, udf);
         }
         Ok(Arc::new(registry))
+    }
+
+    #[cfg(feature = "onnx")]
+    pub fn model_registry(&self) -> Option<Arc<model_runtime::ModelRegistry>> {
+        self.model_registry.clone()
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn CustomFunc>> {
@@ -160,6 +214,8 @@ impl CustomFuncRegistry {
         register(&mut new_functions, udf);
         Ok(Arc::new(Self {
             functions: new_functions,
+            #[cfg(feature = "onnx")]
+            model_registry: self.model_registry.clone(),
         }))
     }
 
@@ -178,6 +234,8 @@ impl CustomFuncRegistry {
         new_functions.remove(&key);
         Ok(Arc::new(Self {
             functions: new_functions,
+            #[cfg(feature = "onnx")]
+            model_registry: self.model_registry.clone(),
         }))
     }
 
@@ -192,7 +250,11 @@ impl CustomFuncRegistry {
         register_object_functions(&mut functions);
         register_misc_functions(&mut functions);
 
-        Self { functions }
+        Self {
+            functions,
+            #[cfg(feature = "onnx")]
+            model_registry: None,
+        }
     }
 }
 
@@ -370,6 +432,17 @@ impl Default for CustomFuncRegistry {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "onnx")]
+    #[derive(Debug)]
+    struct TestWasmFunc;
+
+    #[cfg(feature = "onnx")]
+    impl CustomFunc for TestWasmFunc {
+        fn name(&self) -> &str {
+            "test_wasm_udf"
+        }
+    }
+
     #[test]
     fn builtins_include_concat() {
         let registry = CustomFuncRegistry::default();
@@ -524,6 +597,63 @@ mod tests {
         assert!(!registry.is_registered("dummy"));
         assert!(registry.get("dummy").is_none());
         assert!(registry.get("missing").is_none());
+    }
+
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn rebuilding_registry_with_udf_preserves_model_registry() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let model_registry = Arc::new(model_runtime::ModelRegistry::new(tempdir.path()));
+        let base = CustomFuncRegistry::new(CustomFuncRegistryOptions {
+            model_registry: Some(Arc::clone(&model_registry)),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let rebuilt = CustomFuncRegistry::new(CustomFuncRegistryOptions {
+            base_registry: Some(base),
+            wasm_udfs: vec![Arc::new(TestWasmFunc)],
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert!(Arc::ptr_eq(
+            &model_registry,
+            &rebuilt
+                .model_registry()
+                .expect("model registry should be inherited")
+        ));
+        assert!(rebuilt.is_registered("onnx"));
+        assert!(rebuilt.is_registered("test_wasm_udf"));
+    }
+
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn rebuilding_registry_with_explicit_model_registry_rebinds_onnx() {
+        let old_tempdir = tempfile::tempdir().unwrap();
+        let new_tempdir = tempfile::tempdir().unwrap();
+        let old_model_registry = Arc::new(model_runtime::ModelRegistry::new(old_tempdir.path()));
+        let new_model_registry = Arc::new(model_runtime::ModelRegistry::new(new_tempdir.path()));
+        let base = CustomFuncRegistry::new(CustomFuncRegistryOptions {
+            model_registry: Some(Arc::clone(&old_model_registry)),
+            ..Default::default()
+        })
+        .unwrap();
+
+        let rebuilt = CustomFuncRegistry::new(CustomFuncRegistryOptions {
+            base_registry: Some(base),
+            model_registry: Some(Arc::clone(&new_model_registry)),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert!(Arc::ptr_eq(
+            &new_model_registry,
+            &rebuilt
+                .model_registry()
+                .expect("explicit model registry should be retained")
+        ));
+        assert!(rebuilt.is_registered("onnx"));
     }
 
     #[test]

@@ -33,6 +33,15 @@ pub struct ModelInfo {
     pub test_vector_count: u32,
 }
 
+#[derive(Serialize)]
+pub struct ModelRuntimeStatusInfo {
+    pub name: String,
+    pub revision: u64,
+    pub model_sha256: String,
+    pub prepared: bool,
+    pub prepare_count: u64,
+}
+
 #[derive(Deserialize)]
 struct ModelCard {
     name: String,
@@ -220,6 +229,28 @@ pub async fn get_model_handler(
         Ok(Some(model)) => Json(model_info(model)).into_response(),
         Ok(None) => (StatusCode::NOT_FOUND, format!("model '{name}' not found")).into_response(),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// GET /models/:name/status
+pub async fn get_model_status_handler(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    if let Err(error) = validate_model_name(&name) {
+        return (StatusCode::BAD_REQUEST, error).into_response();
+    }
+    match state.model_registry.status(&name) {
+        Ok(Some(status)) => Json(ModelRuntimeStatusInfo {
+            name,
+            revision: status.revision,
+            model_sha256: status.model_sha256,
+            prepared: status.prepared,
+            prepare_count: status.prepare_count,
+        })
+        .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, format!("model '{name}' not found")).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
     }
 }
 

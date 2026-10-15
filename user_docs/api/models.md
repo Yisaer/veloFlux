@@ -74,6 +74,12 @@ prepared graph and model weights through the runtime cache. Each pipeline keeps 
 row execution context, so errors from one pipeline do not affect another. The cache is keyed by
 model name, revision, and SHA-256.
 
+The runtime registry keeps only a weak cache entry for a prepared graph. Running pipelines own the
+strong references, so a graph remains in memory while at least one pipeline runtime uses it and is
+released after the last such runtime stops. Stopped pipelines retain their stored definitions but
+do not retain prepared model graphs. Concurrent pipelines requesting the same model preparation
+share one preparation attempt; preparation of different models is independent.
+
 Runtime conversion supports bool, signed/unsigned integer, floating-point, and string scalar values.
 List and struct values are recursively flattened into tensor leaves for inputs and decoded back into
 the declared recursive schema for outputs. All model outputs are returned as one struct value.
