@@ -275,6 +275,19 @@ pub(crate) fn referenced_streams_from_pipeline_sql(
         .collect())
 }
 
+#[cfg(feature = "onnx")]
+pub(crate) fn referenced_models_from_pipeline_sql(
+    req: &CreatePipelineRequest,
+    instance: &flow::FlowInstance,
+) -> Result<BTreeSet<String>, String> {
+    let select_stmt = parse_pipeline_select_stmt(req, instance)?;
+    Ok(
+        parser::referenced_function_string_arguments(&select_stmt, "onnx")
+            .into_iter()
+            .collect(),
+    )
+}
+
 fn build_source_definitions(
     req: &CreatePipelineRequest,
     instance: &flow::FlowInstance,

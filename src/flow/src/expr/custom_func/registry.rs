@@ -36,6 +36,9 @@ use super::misc_func::{
 
 use super::CustomFunc;
 
+#[cfg(feature = "onnx")]
+use super::onnx_func::OnnxFunc;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -85,9 +88,48 @@ pub struct CustomFuncRegistry {
     functions: HashMap<String, Arc<dyn CustomFunc>>,
 }
 
+/// Inputs used to construct a custom-function registry.
+#[derive(Default)]
+pub struct CustomFuncRegistryOptions {
+    /// Existing definitions to preserve when rebuilding the registry, for example when loading
+    /// additional WASM UDFs at runtime.
+    pub base_registry: Option<Arc<CustomFuncRegistry>>,
+    /// Optional process-wide model registry used to register the ONNX function.
+    #[cfg(feature = "onnx")]
+    pub model_registry: Option<Arc<model_runtime::ModelRegistry>>,
+    /// Processor-independent WASM UDF definitions to add after built-ins and model functions.
+    pub wasm_udfs: Vec<Arc<dyn CustomFunc>>,
+}
+
 impl CustomFuncRegistry {
-    pub fn with_builtins() -> Arc<Self> {
-        Arc::new(Self::builtins())
+    pub fn new(options: CustomFuncRegistryOptions) -> Result<Arc<Self>, String> {
+        let mut registry = options
+            .base_registry
+            .map(|registry| Self {
+                functions: registry.functions.clone(),
+            })
+            .unwrap_or_else(Self::builtins);
+
+        #[cfg(feature = "onnx")]
+        if let Some(model_registry) = options.model_registry {
+            if !registry.functions.contains_key("onnx") {
+                register(
+                    &mut registry.functions,
+                    Arc::new(OnnxFunc::new(model_registry)),
+                );
+            }
+        }
+
+        for udf in options.wasm_udfs {
+            let name = udf.name().to_lowercase();
+            if registry.functions.contains_key(&name) {
+                return Err(format!(
+                    "custom function '{name}' conflicts with an existing function"
+                ));
+            }
+            register(&mut registry.functions, udf);
+        }
+        Ok(Arc::new(registry))
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn CustomFunc>> {
@@ -102,24 +144,6 @@ impl CustomFuncRegistry {
         let mut names: Vec<_> = self.functions.keys().cloned().collect();
         names.sort();
         names
-    }
-
-    /// Build a registry containing all built-in functions plus the given
-    /// WASM UDFs. Returns an error if any UDF name collides with a built-in.
-    pub fn with_builtins_and_wasm(
-        wasm_udfs: Vec<Arc<dyn CustomFunc>>,
-    ) -> Result<Arc<Self>, String> {
-        let mut registry = Self::builtins();
-        for udf in wasm_udfs {
-            let name = udf.name().to_lowercase();
-            if registry.functions.contains_key(&name) {
-                return Err(format!(
-                    "WASM UDF '{name}' conflicts with an existing built-in function"
-                ));
-            }
-            register(&mut registry.functions, udf);
-        }
-        Ok(Arc::new(registry))
     }
 
     /// Clone this registry and add a single UDF.

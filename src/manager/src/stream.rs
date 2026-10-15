@@ -2478,7 +2478,7 @@ fn column_schema_from_request(
     parse_datatype(column).map(|datatype| ColumnSchema::new(source, column.name.clone(), datatype))
 }
 
-fn parse_datatype(column: &StreamColumnRequest) -> Result<ConcreteDatatype, String> {
+pub(crate) fn parse_datatype(column: &StreamColumnRequest) -> Result<ConcreteDatatype, String> {
     match column.data_type.to_ascii_lowercase().as_str() {
         "null" => Ok(ConcreteDatatype::Null),
         "bool" | "boolean" => Ok(ConcreteDatatype::Bool(BooleanType)),

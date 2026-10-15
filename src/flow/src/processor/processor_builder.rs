@@ -3166,7 +3166,8 @@ pub(crate) fn create_processor_pipeline_for_shared_stream(
             decoder_registry: None,
             aggregate_registry: None,
             stateful_registry: None,
-            custom_func_registry: CustomFuncRegistry::with_builtins(),
+            custom_func_registry: CustomFuncRegistry::new(Default::default())
+                .expect("default custom registry"),
             shared_stream_registry: None,
             eventtime: None,
             merger_registry: Some(Arc::clone(&options.merger_registry)),
@@ -3553,7 +3554,8 @@ mod tests {
             decoder_registry: Some(decoder_registry),
             aggregate_registry: Some(aggregate_registry),
             stateful_registry: Some(stateful_registry),
-            custom_func_registry: CustomFuncRegistry::with_builtins(),
+            custom_func_registry: CustomFuncRegistry::new(Default::default())
+                .expect("default custom registry"),
             shared_stream_registry: None,
             eventtime: None,
             merger_registry: None,

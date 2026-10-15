@@ -224,7 +224,8 @@ impl FlowInstance {
             decoder_registry: DecoderRegistry::with_builtin_decoders(),
             aggregate_registry: AggregateFunctionRegistry::with_builtins(),
             stateful_registry: StatefulFunctionRegistry::with_builtins(),
-            custom_func_registry: CustomFuncRegistry::with_builtins(),
+            custom_func_registry: CustomFuncRegistry::new(Default::default())
+                .expect("default custom registry"),
             eventtime_type_registry: EventtimeTypeRegistry::with_builtin_types(),
             merger_registry: Arc::new(MergerRegistry::new()),
         });

@@ -1,9 +1,9 @@
 use super::{logical::LogicalPlan, physical::PhysicalPlan};
 use crate::expr::internal_columns::is_internal_derived;
-use crate::planner::decode_projection::{DecodeProjection, ListIndexSelection, ProjectionNode};
+use crate::planner::decode_projection::DecodeProjection;
 use crate::planner::logical::{DataSinkPlan, LogicalWindowSpec};
 use crate::planner::physical::WatermarkConfig;
-use datatypes::{ConcreteDatatype, ListType, Schema, StructField, StructType};
+use datatypes::Schema;
 use parser::StatefulCallSpec;
 use serde::Serialize;
 use sqlparser::ast::{BinaryOperator, Expr};
@@ -627,223 +627,13 @@ fn format_schema(schema: &Schema) -> String {
 
 fn format_schema_with_decode_projection(
     schema: &Schema,
-    decode_projection: Option<&DecodeProjection>,
+    _decode_projection: Option<&DecodeProjection>,
 ) -> String {
-    let Some(decode_projection) = decode_projection else {
-        return format_schema(schema);
-    };
-
-    format!(
-        "schema=[{}]",
-        format_items(schema.column_schemas(), EXPLAIN_MAX_SCHEMA_ITEMS, |col| {
-            format_column_projection_with_decode_projection(col, decode_projection)
-        })
-    )
+    format_schema(schema)
 }
 
 fn format_column_projection(column: &datatypes::ColumnSchema) -> String {
-    match &column.data_type {
-        ConcreteDatatype::Struct(struct_type) => format!(
-            "{}{{{}}}",
-            column.name,
-            format_struct_fields_projection(struct_type)
-        ),
-        ConcreteDatatype::List(list_type) => {
-            format!(
-                "{}[{}]",
-                column.name,
-                format_list_item_projection(list_type)
-            )
-        }
-        _ => column.name.clone(),
-    }
-}
-
-fn format_column_projection_with_decode_projection(
-    column: &datatypes::ColumnSchema,
-    decode_projection: &DecodeProjection,
-) -> String {
-    let projection = decode_projection.column(column.name.as_str());
-    match &column.data_type {
-        ConcreteDatatype::Struct(struct_type) => {
-            let projection_fields = match projection {
-                Some(ProjectionNode::Struct(fields)) => Some(fields),
-                _ => None,
-            };
-            format!(
-                "{}{{{}}}",
-                column.name,
-                format_struct_fields_projection_with_decode_projection(
-                    struct_type,
-                    projection_fields,
-                )
-            )
-        }
-        ConcreteDatatype::List(list_type) => {
-            let list_proj = match projection {
-                Some(ProjectionNode::List { indexes, element }) => {
-                    Some((indexes, element.as_ref()))
-                }
-                _ => None,
-            };
-            format!(
-                "{}{}[{}]",
-                column.name,
-                format_list_index_selection(list_proj.map(|(indexes, _)| indexes)),
-                format_list_item_projection_with_decode_projection(
-                    list_type,
-                    list_proj.map(|(_, element)| element),
-                )
-            )
-        }
-        _ => column.name.clone(),
-    }
-}
-
-fn format_list_item_projection(list_type: &ListType) -> String {
-    match list_type.item_type() {
-        ConcreteDatatype::Struct(struct_type) => {
-            format!("struct{{{}}}", format_struct_fields_projection(struct_type))
-        }
-        ConcreteDatatype::List(inner) => format!("list[{}]", format_list_item_projection(inner)),
-        other => format!("{:?}", other),
-    }
-}
-
-fn format_list_item_projection_with_decode_projection(
-    list_type: &ListType,
-    projection: Option<&ProjectionNode>,
-) -> String {
-    match list_type.item_type() {
-        ConcreteDatatype::Struct(struct_type) => {
-            let projection_fields = match projection {
-                Some(ProjectionNode::Struct(fields)) => Some(fields),
-                _ => None,
-            };
-            format!(
-                "struct{{{}}}",
-                format_struct_fields_projection_with_decode_projection(
-                    struct_type,
-                    projection_fields,
-                )
-            )
-        }
-        ConcreteDatatype::List(inner) => {
-            let list_proj = match projection {
-                Some(ProjectionNode::List { indexes, element }) => {
-                    Some((indexes, element.as_ref()))
-                }
-                _ => None,
-            };
-            format!(
-                "list{}[{}]",
-                format_list_index_selection(list_proj.map(|(indexes, _)| indexes)),
-                format_list_item_projection_with_decode_projection(
-                    inner,
-                    list_proj.map(|(_, element)| element),
-                )
-            )
-        }
-        other => format!("{:?}", other),
-    }
-}
-
-fn format_list_index_selection(indexes: Option<&ListIndexSelection>) -> String {
-    let Some(indexes) = indexes else {
-        return String::new();
-    };
-
-    match indexes {
-        ListIndexSelection::All => "[*]".to_string(),
-        ListIndexSelection::Indexes(values) => {
-            let joined = values
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("[{joined}]")
-        }
-    }
-}
-
-fn format_struct_fields_projection(struct_type: &StructType) -> String {
-    format_items(
-        struct_type.fields().as_ref(),
-        EXPLAIN_MAX_SCHEMA_ITEMS,
-        format_struct_field_projection,
-    )
-}
-
-fn format_struct_fields_projection_with_decode_projection(
-    struct_type: &StructType,
-    projection_fields: Option<&std::collections::BTreeMap<String, ProjectionNode>>,
-) -> String {
-    format_items(
-        struct_type.fields().as_ref(),
-        EXPLAIN_MAX_SCHEMA_ITEMS,
-        |field| {
-            let projection = projection_fields.and_then(|fields| fields.get(field.name()));
-            format_struct_field_projection_with_decode_projection(field, projection)
-        },
-    )
-}
-
-fn format_struct_field_projection(field: &StructField) -> String {
-    match field.data_type() {
-        ConcreteDatatype::Struct(struct_type) => format!(
-            "{}{{{}}}",
-            field.name(),
-            format_struct_fields_projection(struct_type)
-        ),
-        ConcreteDatatype::List(list_type) => {
-            format!(
-                "{}[{}]",
-                field.name(),
-                format_list_item_projection(list_type)
-            )
-        }
-        _ => field.name().to_string(),
-    }
-}
-
-fn format_struct_field_projection_with_decode_projection(
-    field: &StructField,
-    projection: Option<&ProjectionNode>,
-) -> String {
-    match field.data_type() {
-        ConcreteDatatype::Struct(struct_type) => {
-            let projection_fields = match projection {
-                Some(ProjectionNode::Struct(fields)) => Some(fields),
-                _ => None,
-            };
-            format!(
-                "{}{{{}}}",
-                field.name(),
-                format_struct_fields_projection_with_decode_projection(
-                    struct_type,
-                    projection_fields,
-                )
-            )
-        }
-        ConcreteDatatype::List(list_type) => {
-            let list_proj = match projection {
-                Some(ProjectionNode::List { indexes, element }) => {
-                    Some((indexes, element.as_ref()))
-                }
-                _ => None,
-            };
-            format!(
-                "{}{}[{}]",
-                field.name(),
-                format_list_index_selection(list_proj.map(|(indexes, _)| indexes)),
-                format_list_item_projection_with_decode_projection(
-                    list_type,
-                    list_proj.map(|(_, element)| element),
-                )
-            )
-        }
-        _ => field.name().to_string(),
-    }
+    column.name.clone()
 }
 
 fn format_project_field(expr: &Expr, field_name: &str) -> String {

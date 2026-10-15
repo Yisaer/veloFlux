@@ -7,7 +7,9 @@ use flow::connector::SharedMqttClientConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
-use storage::{StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState};
+use storage::{
+    ModelSchemaColumn, StorageManager, StoredMemoryTopicKind, StoredPipelineDesiredState,
+};
 use tokio::sync::TryAcquireError;
 use zip::write::SimpleFileOptions;
 
@@ -293,6 +295,10 @@ pub struct ExportModel {
     pub model_sha256: String,
     pub model_size_bytes: u64,
     pub model_card_yaml: String,
+    #[serde(default)]
+    pub inputs: Vec<ModelSchemaColumn>,
+    #[serde(default)]
+    pub outputs: Vec<ModelSchemaColumn>,
     pub test_vector_count: u32,
 }
 
@@ -612,6 +618,8 @@ pub(crate) fn build_export_resources(storage: &StorageManager) -> Result<ExportR
             model_sha256: model.model_sha256,
             model_size_bytes: model.model_size_bytes,
             model_card_yaml: model.model_card_yaml,
+            inputs: model.inputs,
+            outputs: model.outputs,
             test_vector_count: model.test_vector_count,
         })
         .collect::<Vec<_>>();

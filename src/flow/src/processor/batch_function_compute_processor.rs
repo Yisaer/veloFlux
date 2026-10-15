@@ -1,7 +1,7 @@
 //! Collection-level processor for batch-function evaluations.
 use crate::expr::custom_func::BatchFunc;
 use crate::expr::EvalRowContext;
-use crate::model::{Collection, RecordBatch};
+use crate::model::{Collection, RecordBatch, Tuple};
 use crate::planner::physical::{
     PhysicalBatchFunctionCompute, PhysicalBatchFunctionEvaluation, PhysicalPlan,
 };
@@ -21,6 +21,16 @@ struct BoundBatchEvaluation {
     definition: Arc<dyn crate::expr::custom_func::CustomFunc>,
     runtime: Arc<dyn BatchFunc>,
     args: Vec<crate::expr::ScalarExpr>,
+}
+
+/// A row that survived all preceding batch-function evaluations.
+///
+/// Batch evaluations compact the active row set after row-level failures. The original index is
+/// retained so diagnostics continue to identify the row in the input collection rather than its
+/// position in the compacted set.
+struct ActiveRow {
+    original_index: usize,
+    tuple: Tuple,
 }
 pub struct BatchFunctionComputeProcessor {
     id: String,
@@ -123,16 +133,24 @@ fn apply_compute(
     evaluations: &[BoundBatchEvaluation],
 ) -> Result<(Box<dyn Collection>, Vec<String>), ProcessorError> {
     let metadata = input.metadata().clone();
-    let mut rows = input.into_rows().map_err(|error| {
+    let input_rows = input.into_rows().map_err(|error| {
         ProcessorError::ProcessingError(format!("failed to extract rows: {error}"))
     })?;
+    let mut rows: Vec<ActiveRow> = input_rows
+        .into_iter()
+        .enumerate()
+        .map(|(original_index, tuple)| ActiveRow {
+            original_index,
+            tuple,
+        })
+        .collect();
     let mut errors = Vec::new();
     for evaluation in evaluations {
         let mut columns = vec![Vec::with_capacity(rows.len()); evaluation.args.len()];
         let mut argument_errors = vec![None; rows.len()];
-        for (row_index, tuple) in rows.iter().enumerate() {
+        for (row_index, row) in rows.iter().enumerate() {
             let context = EvalRowContext {
-                tuple,
+                tuple: &row.tuple,
                 collection_metadata: &metadata,
             };
             for (index, arg) in evaluation.args.iter().enumerate() {
@@ -161,22 +179,24 @@ fn apply_compute(
             )));
         }
         let mut next_rows = Vec::with_capacity(rows.len());
-        for (row_index, (mut tuple, value)) in rows.into_iter().zip(values).enumerate() {
+        for (row_index, (mut row, value)) in rows.into_iter().zip(values).enumerate() {
             let result = match argument_errors[row_index].take() {
                 Some(error) => Err(error),
                 None => value.map_err(|error| error.to_string()),
             };
             match result {
                 Ok(value) => {
-                    tuple.add_affiliate_column(Arc::clone(&evaluation.output_name), value);
-                    next_rows.push(tuple);
+                    row.tuple
+                        .add_affiliate_column(Arc::clone(&evaluation.output_name), value);
+                    next_rows.push(row);
                 }
-                Err(error) => errors.push(format!("row {row_index}: {error}")),
+                Err(error) => errors.push(format!("row {}: {error}", row.original_index)),
             }
         }
         rows = next_rows;
     }
-    let output = RecordBatch::new_with_metadata(rows, metadata).map_err(|error| {
+    let output_rows = rows.into_iter().map(|row| row.tuple).collect();
+    let output = RecordBatch::new_with_metadata(output_rows, metadata).map_err(|error| {
         ProcessorError::ProcessingError(format!("failed to build batch function output: {error}"))
     })?;
     Ok((Box::new(output), errors))
@@ -361,8 +381,38 @@ mod tests {
                 .collect())
         }
     }
+    #[derive(Debug)]
+    struct ErrorOnValueBatchFunc {
+        rejected_value: i64,
+    }
+    impl BatchFunc for ErrorOnValueBatchFunc {
+        fn eval_batch(
+            &self,
+            args: &[Vec<Value>],
+            _row_count: usize,
+        ) -> Result<Vec<Result<Value, crate::expr::func::EvalError>>, crate::expr::func::EvalError>
+        {
+            Ok(args[0]
+                .iter()
+                .map(|value| match value {
+                    Value::Int64(value) if *value == self.rejected_value => {
+                        Err(crate::expr::func::EvalError::TypeMismatch {
+                            expected: "accepted test row".to_string(),
+                            actual: format!("rejected value {value}"),
+                        })
+                    }
+                    _ => Ok(value.clone()),
+                })
+                .collect())
+        }
+    }
     fn input_batch() -> RecordBatch {
-        let rows = [1_i64, 2]
+        input_batch_values(&[1, 2])
+    }
+    fn input_batch_values(values: &[i64]) -> RecordBatch {
+        let rows = values
+            .iter()
+            .copied()
             .into_iter()
             .map(|value| {
                 Tuple::new(vec![Arc::new(Message::new(
@@ -489,6 +539,41 @@ mod tests {
         assert!(errors[0].contains("row 1"));
         assert_eq!(
             output.rows()[0].affiliate().unwrap().value("__vf_batch_1"),
+            Some(&Value::Int64(1))
+        );
+    }
+
+    #[test]
+    fn batch_compute_reports_original_row_indexes_after_compaction() {
+        let evaluations = vec![
+            BoundBatchEvaluation {
+                output_name: Arc::new("__vf_batch_1".to_string()),
+                definition: Arc::new(TestDefinition),
+                runtime: Arc::new(ErrorOnValueBatchFunc { rejected_value: 2 }),
+                args: vec![source_column(0)],
+            },
+            BoundBatchEvaluation {
+                output_name: Arc::new("__vf_batch_2".to_string()),
+                definition: Arc::new(TestDefinition),
+                runtime: Arc::new(ErrorOnValueBatchFunc { rejected_value: 3 }),
+                args: vec![affiliate_column("__vf_batch_1")],
+            },
+        ];
+
+        let (output, errors) =
+            apply_compute(Box::new(input_batch_values(&[1, 2, 3])), &evaluations)
+                .expect("batch compute");
+
+        assert_eq!(output.rows().len(), 1);
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("row 1"));
+        assert!(errors[1].contains("row 2"));
+        assert_eq!(
+            output.rows()[0].affiliate().unwrap().value("__vf_batch_1"),
+            Some(&Value::Int64(1))
+        );
+        assert_eq!(
+            output.rows()[0].affiliate().unwrap().value("__vf_batch_2"),
             Some(&Value::Int64(1))
         );
     }

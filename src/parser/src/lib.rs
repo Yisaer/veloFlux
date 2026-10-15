@@ -33,7 +33,7 @@ pub use col_placeholder_allocator::ColPlaceholderAllocator;
 pub use dialect::StreamDialect;
 pub use expression_extractor::{
     ExpressionAnalysis, analyze_sql_expressions, extract_expressions_from_sql,
-    extract_select_expressions_simple,
+    extract_select_expressions_simple, referenced_function_string_arguments,
 };
 pub use parser::{StreamSqlParser, parse_sql, parse_sql_with_registries};
 pub use select_stmt::{JoinConstraint, JoinSpec, JoinType, SelectField, SelectStmt};

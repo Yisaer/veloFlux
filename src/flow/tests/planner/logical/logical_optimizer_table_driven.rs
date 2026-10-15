@@ -474,19 +474,19 @@ fn logical_optimizer_table_driven() {
             name: "logical_optimizer_prunes_struct_fields_and_explain_renders_projection",
             sql: "SELECT stream_struct.a, stream_struct.b->c FROM stream_struct",
             covers: &["planner.logical.struct_field_pruning"],
-            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_struct","decoder=json","schema=[a, b{c}]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_struct.a; stream_struct.b -> c]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_struct","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_struct.a; stream_struct.b -> c]"],"operator":"Project"}"##,
         },
         LogicalOptimizerCase {
             name: "logical_optimizer_keeps_dynamic_list_index_and_prunes_element_struct_fields",
             sql: "SELECT stream_3.items[a]->c FROM stream_3",
             covers: &["planner.logical.list_element_pruning"],
-            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[*][struct{c}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[\"a\"] -> c]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[\"a\"] -> c]"],"operator":"Project"}"##,
         },
         LogicalOptimizerCase {
             name: "logical_optimizer_keeps_dynamic_list_index_and_keeps_full_element_struct",
             sql: "SELECT stream_3.items[a] FROM stream_3",
             covers: &["planner.logical.list_element_pruning"],
-            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[*][struct{c, d}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[\"a\"]]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[\"a\"]]"],"operator":"Project"}"##,
         },
         LogicalOptimizerCase {
             name: "logical_optimizer_inserts_compute_for_repeated_named_expression_in_project_and_filter",
@@ -522,7 +522,7 @@ fn logical_optimizer_table_driven() {
             name: "logical_optimizer_selecting_whole_list_element_keeps_full_element_struct",
             sql: "SELECT stream_3.items[0] FROM stream_3",
             covers: &["planner.logical.list_element_pruning"],
-            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items[0][struct{c, d}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[0]]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[items]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.items[0]]"],"operator":"Project"}"##,
         },
         LogicalOptimizerCase {
             name: "logical_optimizer_cse_keeps_stateful_dependency_boundary",

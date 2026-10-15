@@ -5,6 +5,8 @@ use crate::instances::{
     find_default_flow_instance_spec,
 };
 use crate::startup::StartupPhase;
+#[cfg(feature = "onnx")]
+use model_runtime::ModelRegistry;
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +24,8 @@ pub struct AppState {
     pub instances: FlowInstances,
     pub storage: Arc<StorageManager>,
     pub declared_instances: Arc<HashMap<String, ()>>,
+    #[cfg(feature = "onnx")]
+    pub model_registry: Arc<ModelRegistry>,
     init_dir: Option<Arc<PathBuf>>,
     storage_operation_lock: Arc<Semaphore>,
     metadata_operation_lock: Arc<Semaphore>,
@@ -55,13 +59,29 @@ impl AppState {
         patrol_interval_secs: u64,
         init_dir: Option<PathBuf>,
     ) -> Result<Self, String> {
-        let instances = FlowInstances::new(instance);
         let storage = Arc::new(storage);
+        #[cfg(feature = "onnx")]
+        let model_registry = Arc::new(ModelRegistry::new(storage.models_dir()));
+        #[cfg(feature = "onnx")]
+        let instance = {
+            let custom_func_registry =
+                flow::CustomFuncRegistry::new(flow::CustomFuncRegistryOptions {
+                    base_registry: Some(instance.custom_func_registry()),
+                    model_registry: Some(Arc::clone(&model_registry)),
+                    wasm_udfs: Vec::new(),
+                })
+                .map_err(|error| format!("register ONNX function: {error}"))?;
+            instance.set_custom_func_registry(custom_func_registry);
+            instance
+        };
+        let instances = FlowInstances::new(instance);
         let mut declared_instances = HashMap::new();
         let state = Self {
             instances,
             storage,
             declared_instances: Arc::new(HashMap::new()),
+            #[cfg(feature = "onnx")]
+            model_registry,
             init_dir: init_dir.map(Arc::new),
             storage_operation_lock: Arc::new(Semaphore::new(1)),
             metadata_operation_lock: Arc::new(Semaphore::new(1024)),
@@ -149,6 +169,9 @@ impl AppState {
             self.init_dir.as_deref().map(AsRef::as_ref),
             &|id| self.is_declared_instance(id),
         )?;
+        #[cfg(feature = "onnx")]
+        self.model_registry
+            .sync_from_storage(self.storage.as_ref())?;
         let phase = StartupPhase::new("manager", DEFAULT_FLOW_INSTANCE_ID, "storage_hydrate");
         if let Err(err) = crate::storage_bridge::hydrate_runtime_from_storage(
             self.storage.as_ref(),

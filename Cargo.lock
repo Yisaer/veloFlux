@@ -1921,6 +1921,7 @@ dependencies = [
  "sha1",
  "sha2",
  "sqlparser",
+ "storage",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
@@ -7052,7 +7053,10 @@ dependencies = [
 name = "veloflux-model-runtime"
 version = "0.0.1"
 dependencies = [
+ "datatypes",
+ "storage",
  "tract",
+ "tract-onnx",
 ]
 
 [[package]]

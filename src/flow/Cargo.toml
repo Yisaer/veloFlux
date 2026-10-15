@@ -71,6 +71,7 @@ prost-build = "0.14"
 [dev-dependencies]
 axum = { version = "0.7", features = ["multipart"] }
 rumqttd = "0.20.0"
+storage = { path = "../storage" }
 tempfile = "3"
 tokio = { version = "1", default-features = false, features = ["macros", "net", "rt", "sync", "time", "test-util"] }
 

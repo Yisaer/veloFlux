@@ -4,17 +4,17 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use serde::Serialize;
-use serde_yaml::Value as YamlValue;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path as FsPath, PathBuf};
-use storage::StoredModel;
+use storage::{ModelSchemaColumn, StoredModel};
 use tokio::sync::TryAcquireError;
 
 use crate::audit::ResourceMutationLog;
 use crate::pipeline::AppState;
+use crate::stream::StreamColumnRequest;
 use crate::streaming_upload::{TemporaryUpload, is_zip_filename};
 
 const MODEL_FILE: &str = "model.onnx";
@@ -28,7 +28,28 @@ pub struct ModelInfo {
     pub revision: u64,
     pub model_sha256: String,
     pub model_size_bytes: u64,
+    pub inputs: Vec<ModelSchemaColumn>,
+    pub outputs: Vec<ModelSchemaColumn>,
     pub test_vector_count: u32,
+}
+
+#[derive(Deserialize)]
+struct ModelCard {
+    name: String,
+    inputs: Option<Vec<ModelSchemaColumnRequest>>,
+    outputs: Option<Vec<ModelSchemaColumnRequest>>,
+}
+
+#[derive(Deserialize)]
+struct ModelSchemaColumnRequest {
+    name: String,
+    data_type: String,
+    #[serde(default)]
+    cardinality: Option<usize>,
+    #[serde(default)]
+    fields: Option<Vec<ModelSchemaColumnRequest>>,
+    #[serde(default)]
+    element: Option<Box<ModelSchemaColumnRequest>>,
 }
 
 /// POST /models
@@ -108,7 +129,7 @@ pub async fn upload_model_handler(
         Ok(path) => path,
         Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
     };
-    let (name, model_card_yaml, model_bytes, test_vector_count) =
+    let (name, model_card_yaml, model_bytes, inputs, outputs, test_vector_count) =
         match validate_bundle(&bundle_root) {
             Ok(value) => value,
             Err(error) => return (StatusCode::BAD_REQUEST, error).into_response(),
@@ -149,12 +170,18 @@ pub async fn upload_model_handler(
         model_sha256: model_sha256.clone(),
         model_size_bytes: model_bytes.len() as u64,
         model_card_yaml,
+        inputs: inputs.clone(),
+        outputs: outputs.clone(),
         test_vector_count: test_vector_count as u32,
     };
     if let Err(error) =
-        crate::attachments::publish_model_upload(&state.storage, stored, &bundle_root)
+        crate::attachments::publish_model_upload(&state.storage, stored.clone(), &bundle_root)
     {
         audit.log_failure(&error.to_string());
+        return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response();
+    }
+    if let Err(error) = state.model_registry.upsert(stored) {
+        audit.log_failure(&error);
         return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response();
     }
     audit.log_success();
@@ -165,6 +192,8 @@ pub async fn upload_model_handler(
             revision,
             model_sha256,
             model_size_bytes: model_bytes.len() as u64,
+            inputs,
+            outputs,
             test_vector_count: test_vector_count as u32,
         }),
     )
@@ -232,8 +261,54 @@ pub async fn delete_model_handler(
             return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
         }
     };
+    let pipelines = match state.storage.list_pipelines() {
+        Ok(pipelines) => pipelines,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
+    for pipeline in pipelines {
+        let request = match crate::storage_bridge::pipeline_request_from_stored(&pipeline) {
+            Ok(request) => request,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to decode pipeline '{}': {error}", pipeline.id),
+                )
+                    .into_response();
+            }
+        };
+        let instance = request
+            .flow_instance_id
+            .as_deref()
+            .and_then(|id| state.instances.get(id))
+            .unwrap_or_else(|| state.instances.default_instance());
+        let referenced_models =
+            match crate::pipeline::referenced_models_from_pipeline_sql(&request, instance.as_ref())
+            {
+                Ok(models) => models,
+                Err(error) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to inspect pipeline '{}': {error}", pipeline.id),
+                    )
+                        .into_response();
+                }
+            };
+        if referenced_models.contains(&name) {
+            return (
+                StatusCode::CONFLICT,
+                format!("model '{name}' is referenced by pipeline '{}'", pipeline.id),
+            )
+                .into_response();
+        }
+    }
     let audit = ResourceMutationLog::new("model", "delete", &name, Some(model.revision));
     if let Err(error) = crate::attachments::delete_model(&state.storage, &name) {
+        audit.log_failure(&error);
+        return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response();
+    }
+    if let Err(error) = state.model_registry.remove(&name) {
         audit.log_failure(&error);
         return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response();
     }
@@ -247,11 +322,25 @@ fn model_info(model: StoredModel) -> ModelInfo {
         revision: model.revision,
         model_sha256: model.model_sha256,
         model_size_bytes: model.model_size_bytes,
+        inputs: model.inputs,
+        outputs: model.outputs,
         test_vector_count: model.test_vector_count,
     }
 }
 
-fn validate_bundle(root: &FsPath) -> Result<(String, String, Vec<u8>, usize), String> {
+fn validate_bundle(
+    root: &FsPath,
+) -> Result<
+    (
+        String,
+        String,
+        Vec<u8>,
+        Vec<ModelSchemaColumn>,
+        Vec<ModelSchemaColumn>,
+        usize,
+    ),
+    String,
+> {
     let model_path = root.join(MODEL_FILE);
     let card_path = root.join(MODEL_CARD_FILE);
     let model_bytes = fs::read(&model_path).map_err(|error| format!("read model.onnx: {error}"))?;
@@ -260,20 +349,155 @@ fn validate_bundle(root: &FsPath) -> Result<(String, String, Vec<u8>, usize), St
     }
     let model_card_yaml =
         fs::read_to_string(&card_path).map_err(|error| format!("read model.yaml: {error}"))?;
-    let card: YamlValue = serde_yaml::from_str(&model_card_yaml)
+    let card: ModelCard = serde_yaml::from_str(&model_card_yaml)
         .map_err(|error| format!("parse model.yaml: {error}"))?;
-    let mapping = card
-        .as_mapping()
-        .ok_or_else(|| "model.yaml must contain a mapping".to_string())?;
-    let name = yaml_string(mapping, "name")?;
+    let name = card.name;
     validate_model_name(&name)?;
-    if !mapping.contains_key(&YamlValue::String("inputs".to_string()))
-        || !mapping.contains_key(&YamlValue::String("outputs".to_string()))
-    {
-        return Err("model.yaml must define inputs and outputs".to_string());
-    }
+    let inputs = convert_model_schema(
+        card.inputs
+            .ok_or_else(|| "model.yaml must define inputs".to_string())?,
+        "inputs",
+    )?;
+    let outputs = convert_model_schema(
+        card.outputs
+            .ok_or_else(|| "model.yaml must define outputs".to_string())?,
+        "outputs",
+    )?;
     let test_vector_count = validate_test_vectors(&root.join(TEST_VECTOR_DIR))?;
-    Ok((name, model_card_yaml, model_bytes, test_vector_count))
+    Ok((
+        name,
+        model_card_yaml,
+        model_bytes,
+        inputs,
+        outputs,
+        test_vector_count,
+    ))
+}
+
+fn convert_model_schema(
+    columns: Vec<ModelSchemaColumnRequest>,
+    direction: &str,
+) -> Result<Vec<ModelSchemaColumn>, String> {
+    let mut names = BTreeSet::new();
+    columns
+        .into_iter()
+        .map(|column| {
+            if !names.insert(column.name.clone()) {
+                return Err(format!(
+                    "model {direction} contains duplicate column '{}'",
+                    column.name
+                ));
+            }
+            convert_model_column(column)
+                .map_err(|error| format!("invalid model {direction}: {error}"))
+        })
+        .collect()
+}
+
+fn convert_model_column(column: ModelSchemaColumnRequest) -> Result<ModelSchemaColumn, String> {
+    validate_model_schema_contract(&column, &column.name)?;
+    if column.cardinality == Some(0) {
+        return Err(format!(
+            "column '{}' cardinality must be greater than zero",
+            column.name
+        ));
+    }
+    if column.cardinality.is_some() && !column.data_type.eq_ignore_ascii_case("list") {
+        return Err(format!(
+            "column '{}' cardinality is only valid for list columns",
+            column.name
+        ));
+    }
+    crate::stream::parse_datatype(&stream_column_request(&column))?;
+    let fields = match column.fields {
+        Some(fields) => {
+            let mut names = BTreeSet::new();
+            Some(
+                fields
+                    .into_iter()
+                    .map(|field| {
+                        if !names.insert(field.name.clone()) {
+                            return Err(format!("duplicate struct field '{}'", field.name));
+                        }
+                        convert_model_column(field)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+        None => None,
+    };
+    let element = column
+        .element
+        .map(|element| convert_model_column(*element).map(Box::new))
+        .transpose()?;
+    Ok(ModelSchemaColumn {
+        name: column.name,
+        data_type: column.data_type,
+        cardinality: column.cardinality,
+        fields,
+        element,
+    })
+}
+
+fn validate_model_schema_contract(
+    column: &ModelSchemaColumnRequest,
+    path: &str,
+) -> Result<(), String> {
+    let data_type = column.data_type.to_ascii_lowercase();
+    match data_type.as_str() {
+        "list" => {
+            let element = column
+                .element
+                .as_deref()
+                .ok_or_else(|| format!("list column '{path}' must define an element"))?;
+            let element_type = element.data_type.to_ascii_lowercase();
+            if matches!(element_type.as_str(), "list" | "struct") && column.cardinality.is_none() {
+                return Err(format!(
+                    "list column '{path}' with a composite element must define cardinality"
+                ));
+            }
+            validate_model_schema_contract(element, &format!("{path}[]"))?;
+        }
+        "struct" => {
+            let fields = column
+                .fields
+                .as_ref()
+                .ok_or_else(|| format!("struct column '{path}' must define fields"))?;
+            for field in fields {
+                let field_path = format!("{path}.{}", field.name);
+                if field.data_type.eq_ignore_ascii_case("list") && field.cardinality.is_none() {
+                    return Err(format!(
+                        "list field '{field_path}' inside a struct must define cardinality"
+                    ));
+                }
+                validate_model_schema_contract(field, &field_path)?;
+            }
+        }
+        _ => {
+            if column.fields.is_some() || column.element.is_some() {
+                return Err(format!(
+                    "scalar column '{path}' must not define fields or element"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn stream_column_request(column: &ModelSchemaColumnRequest) -> StreamColumnRequest {
+    StreamColumnRequest {
+        name: column.name.clone(),
+        data_type: column.data_type.clone(),
+        fields: column
+            .fields
+            .as_ref()
+            .map(|fields| fields.iter().map(stream_column_request).collect()),
+        element: column
+            .element
+            .as_deref()
+            .map(stream_column_request)
+            .map(Box::new),
+    }
 }
 
 fn validate_test_vectors(path: &FsPath) -> Result<usize, String> {
@@ -336,12 +560,15 @@ fn single_bundle_root(work: &FsPath) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{ModelSchemaColumnRequest, convert_model_column};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header::CONTENT_TYPE};
     use std::io::{Cursor, Write};
     use tempfile::tempdir;
     use tower::ServiceExt;
     use zip::ZipWriter;
+
+    const MNIST_MODEL: &[u8] = include_bytes!("model_testdata/mnist-8.onnx");
 
     fn sample_default_instance_spec() -> crate::FlowInstanceSpec {
         crate::FlowInstanceSpec {
@@ -353,25 +580,26 @@ mod tests {
     fn model_bundle() -> Vec<u8> {
         let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
         let options = zip::write::SimpleFileOptions::default();
+        archive.start_file("mnist_8/model.onnx", options).unwrap();
+        archive.write_all(MNIST_MODEL).unwrap();
         let entries = [
-            ("http_model/model.onnx", b"not-a-real-model".as_slice()),
             (
-                "http_model/model.yaml",
-                b"name: http_model\ninputs: []\noutputs: []\n".as_slice(),
+                "mnist_8/model.yaml",
+                b"name: mnist_8\ninputs:\n  - name: image\n    data_type: list\n    element:\n      name: element\n      data_type: float32\noutputs:\n  - name: probabilities\n    data_type: list\n    element:\n      name: element\n      data_type: float32\n".as_slice(),
             ),
-            ("http_model/test_vectors/input-1.json", b"{}".as_slice()),
+            ("mnist_8/test_vectors/input-1.json", b"{}".as_slice()),
             (
-                "http_model/test_vectors/expected_output-1.json",
+                "mnist_8/test_vectors/expected_output-1.json",
                 b"{}".as_slice(),
             ),
-            ("http_model/test_vectors/input-2.json", b"{}".as_slice()),
+            ("mnist_8/test_vectors/input-2.json", b"{}".as_slice()),
             (
-                "http_model/test_vectors/expected_output-2.json",
+                "mnist_8/test_vectors/expected_output-2.json",
                 b"{}".as_slice(),
             ),
-            ("http_model/test_vectors/input-3.json", b"{}".as_slice()),
+            ("mnist_8/test_vectors/input-3.json", b"{}".as_slice()),
             (
-                "http_model/test_vectors/expected_output-3.json",
+                "mnist_8/test_vectors/expected_output-3.json",
                 b"{}".as_slice(),
             ),
         ];
@@ -403,8 +631,18 @@ mod tests {
             .unwrap()
     }
 
+    fn model_column_request(name: &str, data_type: &str) -> ModelSchemaColumnRequest {
+        ModelSchemaColumnRequest {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            cardinality: None,
+            fields: None,
+            element: None,
+        }
+    }
+
     #[tokio::test]
-    async fn model_upload_and_delete_work_through_application_router() {
+    async fn mnist_model_upload_succeeds_through_application_router() {
         let dir = tempdir().unwrap();
         let storage = storage::StorageManager::new(dir.path()).unwrap();
         let state = crate::pipeline::AppState::new(
@@ -422,27 +660,109 @@ mod tests {
         let status = response.status();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+        let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["name"], "mnist_8");
+        assert_eq!(response["test_vector_count"], 3);
+        assert_eq!(response["inputs"][0]["data_type"], "list");
+        assert_eq!(response["outputs"][0]["data_type"], "list");
+        let stored = state.storage.get_model("mnist_8").unwrap().unwrap();
+        assert_eq!(stored.model_size_bytes, MNIST_MODEL.len() as u64);
+        assert_eq!(stored.inputs[0].name, "image");
+        assert_eq!(stored.outputs[0].name, "probabilities");
+        let prepared = state.model_registry.load("mnist_8").unwrap();
+        assert_eq!(prepared.metadata().model.name, "mnist_8");
+        assert_eq!(
+            prepared.metadata().model.model_sha256,
+            "2f06e72de813a8635c9bc0397ac447a601bdbfa7df4bebc278723b958831c9bf"
+        );
+    }
 
-        let response = crate::build_app(state)
+    #[tokio::test]
+    async fn deleting_model_referenced_by_stored_pipeline_returns_conflict() {
+        let dir = tempdir().unwrap();
+        let storage = storage::StorageManager::new(dir.path()).unwrap();
+        let state = crate::pipeline::AppState::new(
+            crate::new_default_flow_instance(),
+            storage,
+            vec![sample_default_instance_spec()],
+            0,
+        )
+        .unwrap();
+
+        let upload = crate::build_app(state.clone())
+            .oneshot(upload_request(model_bundle()))
+            .await
+            .unwrap();
+        assert_eq!(upload.status(), StatusCode::OK);
+
+        state
+            .storage
+            .create_pipeline(storage::StoredPipeline {
+                id: "pipeline_using_mnist".to_string(),
+                revision: 1,
+                raw_json: serde_json::json!({
+                    "id": "pipeline_using_mnist",
+                    "sql": "SELECT onnx('mnist_8', image) FROM telemetry"
+                })
+                .to_string(),
+            })
+            .unwrap();
+
+        let response = crate::build_app(state.clone())
             .oneshot(
                 Request::builder()
                     .method("DELETE")
-                    .uri("/models/http_model")
+                    .uri("/models/mnist_8")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(state.storage.get_model("mnist_8").unwrap().is_some());
     }
-}
 
-fn yaml_string(mapping: &serde_yaml::Mapping, key: &str) -> Result<String, String> {
-    mapping
-        .get(&YamlValue::String(key.to_string()))
-        .and_then(YamlValue::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| format!("model.yaml field '{key}' must be a string"))
+    #[test]
+    fn model_schema_accepts_composite_list_with_cardinality() {
+        let mut element = model_column_request("detection", "struct");
+        element.fields = Some(vec![
+            model_column_request("class_id", "int32"),
+            model_column_request("score", "float32"),
+        ]);
+        let mut column = model_column_request("detections", "list");
+        column.cardinality = Some(2);
+        column.element = Some(Box::new(element));
+
+        let converted = convert_model_column(column).unwrap();
+        assert_eq!(converted.cardinality, Some(2));
+        assert_eq!(
+            serde_json::to_value(converted).unwrap()["cardinality"],
+            serde_json::json!(2)
+        );
+    }
+
+    #[test]
+    fn model_schema_rejects_composite_list_without_cardinality() {
+        let mut element = model_column_request("detection", "struct");
+        element.fields = Some(vec![model_column_request("class_id", "int32")]);
+        let mut column = model_column_request("detections", "list");
+        column.element = Some(Box::new(element));
+
+        let error = convert_model_column(column).unwrap_err();
+        assert!(error.contains("must define cardinality"), "{error}");
+    }
+
+    #[test]
+    fn model_schema_rejects_struct_list_field_without_cardinality() {
+        let mut column = model_column_request("record", "struct");
+        column.fields = Some(vec![model_column_request("values", "list")]);
+
+        let error = convert_model_column(column).unwrap_err();
+        assert!(
+            error.contains("inside a struct must define cardinality"),
+            "{error}"
+        );
+    }
 }
 
 fn validate_model_name(name: &str) -> Result<(), String> {

@@ -104,28 +104,19 @@ Hot-unregister is deferred to future work.
    For example:
 
    ```sql
-   onnx(
-     wasm_udf1(a),
-     wasm_udf1(a),
-     wasm_udf2(a)
-   )
+   wasm_udf1(a)
    ```
 
-   creates four evaluations but only three runtime instances: `wasm_udf1`, `wasm_udf2`, and the
-   ONNX runtime bound to the referenced model. The two `wasm_udf1` evaluations reuse the same
-   instance.
+   creates one batch evaluation and one processor-owned runtime instance. ONNX functions are
+   scalar custom functions and are not part of this batch-function path.
 
 6. **Nested batch functions are ordered by dependency.** The planner extracts inner batch calls
    first and replaces them with temporary affiliate columns. Therefore:
 
    ```text
-   wasm_udf(onnx(a))
-       -> onnx(a) -> __vf_batch_1
-       -> wasm_udf(__vf_batch_1)
-
-   onnx(wasm_udf(a))
-       -> wasm_udf(a) -> __vf_batch_1
-       -> onnx(__vf_batch_1)
+   wasm_udf1(wasm_udf2(a))
+       -> wasm_udf2(a) -> __vf_batch_1
+       -> wasm_udf1(__vf_batch_1)
    ```
 
    The processor creation order is not the execution order. The ordered evaluations and their

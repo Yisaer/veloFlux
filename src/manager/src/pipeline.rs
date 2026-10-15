@@ -14,6 +14,8 @@ pub use handlers::{
 pub use state::AppState;
 pub use types::CreatePipelineRequest;
 
+#[cfg(feature = "onnx")]
+pub(crate) use spec::referenced_models_from_pipeline_sql;
 pub(crate) use spec::{
     PipelineBuildOptions, build_pipeline_definition, referenced_streams_from_pipeline_sql,
     status_label, validate_create_request,

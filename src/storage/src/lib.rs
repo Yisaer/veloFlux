@@ -181,6 +181,19 @@ pub struct StoredUdf {
     pub raw_json: String,
 }
 
+/// VeloFlux-native input/output column schema stored with a model resource.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelSchemaColumn {
+    pub name: String,
+    pub data_type: String,
+    #[serde(default)]
+    pub cardinality: Option<usize>,
+    #[serde(default)]
+    pub fields: Option<Vec<ModelSchemaColumn>>,
+    #[serde(default)]
+    pub element: Option<Box<ModelSchemaColumn>>,
+}
+
 /// Persisted metadata for an immutable ONNX model bundle.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredModel {
@@ -189,6 +202,10 @@ pub struct StoredModel {
     pub model_sha256: String,
     pub model_size_bytes: u64,
     pub model_card_yaml: String,
+    #[serde(default)]
+    pub inputs: Vec<ModelSchemaColumn>,
+    #[serde(default)]
+    pub outputs: Vec<ModelSchemaColumn>,
     pub test_vector_count: u32,
 }
 

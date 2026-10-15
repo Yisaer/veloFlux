@@ -1,7 +1,7 @@
 //! Extract all expressions from SQL statements
 //! This module provides functionality to extract and analyze SQL expressions
 
-use sqlparser::ast::{Expr, Visit, Visitor};
+use sqlparser::ast::{Expr, FunctionArg, FunctionArgExpr, Value, Visit, Visitor};
 use sqlparser::parser::Parser;
 
 use crate::dialect::StreamDialect;
@@ -49,6 +49,88 @@ pub fn referenced_functions(statement: &crate::SelectStmt) -> Vec<String> {
     visitor.0.sort();
     visitor.0.dedup();
     visitor.0
+}
+
+/// Collect string literal arguments from calls to a named function in a
+/// resolved SELECT statement.
+pub fn referenced_function_string_arguments(
+    statement: &crate::SelectStmt,
+    function_name: &str,
+) -> Vec<String> {
+    struct FunctionArguments<'a> {
+        function_name: &'a str,
+        values: Vec<String>,
+    }
+
+    impl Visitor for FunctionArguments<'_> {
+        type Break = ();
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> std::ops::ControlFlow<Self::Break> {
+            let Expr::Function(function) = expr else {
+                return std::ops::ControlFlow::Continue(());
+            };
+            if !function
+                .name
+                .to_string()
+                .eq_ignore_ascii_case(self.function_name)
+            {
+                return std::ops::ControlFlow::Continue(());
+            }
+            let Some(FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value)))) =
+                function.args.first()
+            else {
+                return std::ops::ControlFlow::Continue(());
+            };
+            match value {
+                Value::SingleQuotedString(value) | Value::DoubleQuotedString(value) => {
+                    self.values.push(value.clone());
+                }
+                _ => {}
+            }
+            std::ops::ControlFlow::Continue(())
+        }
+    }
+
+    let mut visitor = FunctionArguments {
+        function_name,
+        values: Vec::new(),
+    };
+    for expression in statement
+        .select_fields
+        .iter()
+        .map(|field| &field.expr)
+        .chain(statement.where_condition.iter())
+        .chain(statement.having.iter())
+        .chain(statement.group_by_exprs.iter())
+        .chain(statement.order_by.iter().map(|item| &item.expr))
+        .chain(statement.aggregate_mappings.values())
+        .chain(
+            statement
+                .stateful_mappings
+                .iter()
+                .map(|mapping| &mapping.spec.original_expr),
+        )
+        .chain(
+            statement
+                .acc_mappings
+                .iter()
+                .map(|mapping| &mapping.spec.original_expr),
+        )
+        .chain(
+            statement
+                .joins
+                .iter()
+                .filter_map(|join| match &join.constraint {
+                    crate::select_stmt::JoinConstraint::On(expr) => Some(expr),
+                    crate::select_stmt::JoinConstraint::None => None,
+                }),
+        )
+    {
+        let _ = expression.visit(&mut visitor);
+    }
+    visitor.values.sort();
+    visitor.values.dedup();
+    visitor.values
 }
 
 /// Extract all expressions from SQL statements

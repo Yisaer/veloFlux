@@ -1136,6 +1136,19 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_onnx_function_as_generic_function_call() {
+        let parser = StreamSqlParser::new();
+        let result = parser.parse("SELECT onnx('mnist_8', image) FROM stream");
+
+        assert!(result.is_ok());
+        let select_stmt = result.unwrap();
+        assert_eq!(
+            select_stmt.select_fields[0].expr.to_string(),
+            "onnx('mnist_8', image)"
+        );
+    }
+
+    #[test]
     fn test_extract_named_expressions_basic() {
         let parser = StreamSqlParser::new();
         let (query_sql, expressions) = parser

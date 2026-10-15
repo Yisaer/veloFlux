@@ -801,8 +801,13 @@ fn load_udfs(
         ));
     }
     instance.set_custom_func_registry(
-        flow::CustomFuncRegistry::with_builtins_and_wasm(functions)
-            .map_err(|err| err.to_string())?,
+        flow::CustomFuncRegistry::new(flow::CustomFuncRegistryOptions {
+            base_registry: Some(instance.custom_func_registry()),
+            #[cfg(feature = "onnx")]
+            model_registry: None,
+            wasm_udfs: functions,
+        })
+        .map_err(|err| err.to_string())?,
     );
     Ok(())
 }

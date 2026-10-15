@@ -283,7 +283,9 @@ fn origin_row_marker(expr: Expr) -> Expr {
 
 fn default_custom_func_registry() -> &'static Arc<CustomFuncRegistry> {
     static REGISTRY: OnceLock<Arc<CustomFuncRegistry>> = OnceLock::new();
-    REGISTRY.get_or_init(CustomFuncRegistry::with_builtins)
+    REGISTRY.get_or_init(|| {
+        CustomFuncRegistry::new(Default::default()).expect("default custom registry")
+    })
 }
 
 fn convert_expr_to_scalar_internal(
@@ -799,6 +801,13 @@ fn convert_function_call(
     let custom_func = maybe_specialize_literal_regex_func(custom_func.name(), &scalar_args)
         .map_err(|err| ConversionError::TypeConversionError(err.to_string()))?
         .unwrap_or(custom_func);
+
+    custom_func
+        .validate_call_with_schema(&scalar_args, bindings)
+        .map_err(ConversionError::TypeConversionError)?;
+    custom_func
+        .return_type(&scalar_args)
+        .map_err(ConversionError::TypeConversionError)?;
 
     Ok(ScalarExpr::CallFunc {
         func: custom_func,

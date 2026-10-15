@@ -2,9 +2,9 @@
 
 ## Status
 
-This document records the design for ONNX model inference in veloFlux. The Cargo feature gate and
-the first model upload/storage slice are implemented. SQL inference, tract graph validation, and
-runtime execution are not implemented yet. The first runtime target is CPU inference through tract
+This document records the design for ONNX model inference in veloFlux. The Cargo feature gate,
+model upload/storage slice, shared lazy model registry, SQL registration, planner binding, and
+row-based custom-function execution are implemented. The first runtime target is CPU inference through tract
 and does not include TFLite or NCNN execution.
 
 The product requirements are recorded in
@@ -26,21 +26,52 @@ WHERE speed IS NOT NULL
   AND rel_speed IS NOT NULL
 ```
 
+The result has the struct schema declared by the model card. Individual outputs are accessed with
+the existing struct field operator:
+
+```sql
+SELECT
+  onnx('acme.collision_v2.1', speed, distance, rel_speed) -> probability AS probability
+FROM vehicle_stream
+```
+
 The initial model contract is deliberately narrow:
 
 - one `.onnx` artifact per model version;
-- `float32` inputs and outputs;
-- static shapes with `batch=1`;
+- veloFlux-native input and output column schemas;
 - no external data files or custom operators;
 - no `Loop`, `If`, or `Scan` control-flow operators;
 - opset 11 through 18;
-- a `model.yaml` model card;
+- a `model.yaml` model card with input and output schemas using the stream-column format;
 - at least three input/output test-vector pairs;
 - model versions are immutable and are identified by the model name used in SQL.
 
 The engine must not infer units, ranges, normalization, or input ordering beyond the model card.
 The rule author provides arguments in the model-card order and filters `NULL` values before model
 execution.
+
+The model card uses the same recursive schema as a veloFlux stream column. A list is declared with
+`data_type: list` and an `element` column; a struct is declared with `data_type: struct` and a
+`fields` list. For example:
+
+```yaml
+inputs:
+  - name: speed
+    data_type: float32
+  - name: samples
+    data_type: list
+    element:
+      name: element
+      data_type: float32
+outputs:
+  - name: probability
+    data_type: float32
+```
+
+This is the public model contract. ONNX tensor dimensions and rank are runtime details and are not
+duplicated in the model metadata. An ONNX graph may have multiple outputs. The SQL function returns
+one struct value containing all declared outputs rather than expanding one invocation into multiple
+SQL columns.
 
 ## Terminology and scope
 
@@ -72,69 +103,72 @@ rollback infrastructure where appropriate.
 The parser should parse `onnx(...)` as an ordinary function expression. It must not know whether
 ONNX support is compiled into the binary.
 
-The planner decides whether the function is available and whether the pipeline is valid. It should
-perform static checks such as:
+The planner decides whether the function is available and whether the pipeline is valid. A model
+name must be a string literal. Once the literal is resolved, the planner specializes the generic
+SQL call into a model-specific invocation with a fixed input and output schema. It should perform
+static checks such as:
 
 - the `onnx` function is enabled in the build;
 - the first argument is a model-name string literal;
 - the referenced model exists and is usable;
 - the number and types of arguments match the model card;
-- the function result has the declared list-of-`float32` shape.
+- the function result has the declared `StructType` output schema;
+- every referenced output field exists when struct field access is used.
 
 The first implementation should reject a dynamic model expression such as
 `onnx(model_column, speed)`. A literal model name allows the planner to bind the model before
-runtime and makes model dependencies explicit.
+runtime, construct the fixed output `StructType`, and make model dependencies explicit.
 
-### Shared batch-function execution
+### Row-based custom-function execution
 
-ONNX execution follows the same collection-level batch-function mechanism as WASM UDF execution.
-The SQL function is represented as a custom function, but it is not evaluated through the ordinary
-row-level `ScalarExpr::CallFunc` path. Physical planning lowers batch functions into one generic
-batch-function compute node, whose processor owns the execution instances for all batch functions
-in that expression group.
+ONNX is an ordinary row-based `CustomFunc`, not a `BatchFunctionCompute` implementation. Each row
+is evaluated through the normal scalar expression path and produces one row-aligned `Value::Struct`
+containing all declared model outputs. An inference failure therefore affects the current row
+without compacting or reindexing the surrounding collection.
 
-The distinction between a function call and a runtime instance is important:
+The planner specializes the generic SQL call using the literal model name and model metadata. It
+validates the argument count and veloFlux-native input schema, and fixes the return type to the
+metadata-declared output struct. Nested expressions use the normal scalar dependency order.
 
-- every function occurrence is a separate evaluation with its own argument expressions and output
-  column;
-- evaluations with the same function type and runtime binding configuration share one runtime
-  instance;
-- different model references or runtime configurations create different instances even when the
-  SQL function name is the same.
+Row-based execution does not imply loading the model for every row. The process-wide
+`ModelRegistry` caches an immutable `Arc<PreparedOnnxModel>` by model name, revision, and content
+hash. A processor-bound ONNX custom-function instance reuses that prepared model for every row.
+Model loading and model inference are separate concerns: the first implementation invokes the
+prepared model once per row, while a future optimization may use tensor-level batching for models
+whose ONNX input graph supports a batch dimension.
 
-For example:
+### Model and pipeline ownership
 
-```sql
-onnx(
-  wasm_udf1(a),
-  wasm_udf1(a),
-  wasm_udf2(a)
-)
-```
+Model metadata is a storage resource, while a prepared ONNX graph is a runtime resource. Startup
+loads model metadata and schemas so planning can resolve literal model names without loading every
+graph into memory. When a pipeline containing `onnx(...)` starts, its processor binds the ONNX
+custom function and loads the prepared model on demand.
 
-is evaluated as four ordered evaluations:
+The runtime cache shares the immutable prepared graph and weights across pipelines. Each pipeline
+still owns its row execution context and any runtime state that is not safe to share. The
+relationship is:
 
 ```text
-wasm_udf1(a)       -> __vf_batch_1
-wasm_udf1(a)       -> __vf_batch_2
-wasm_udf2(a)       -> __vf_batch_3
-onnx(__vf_batch_1, __vf_batch_2, __vf_batch_3)
+StoredModel
+  └── model name, revision, schema, bundle path
+
+ModelRuntimeCache
+  └── (model name, revision, SHA-256)
+        └── Arc<PreparedOnnxModel>
+              ├── Pipeline A / scalar ONNX custom function
+              └── Pipeline B / scalar ONNX custom function
 ```
 
-The processor owns three runtime instances: one for `wasm_udf1`, one for `wasm_udf2`, and one for
-the ONNX model. The two `wasm_udf1` evaluations reuse the same instance. Runtime instances are
-bound once during processor initialization and are reused for all input collections.
+`PreparedOnnxModel` must be immutable. A model's mutable execution state must remain local to its
+processor-bound scalar function or to a narrower invocation scope. This prevents one pipeline's
+row-level errors from affecting another pipeline. If the selected ONNX runtime cannot execute one
+session concurrently, pipelines use separate execution sessions that still reference the shared
+model metadata and cache entry.
 
-For each evaluation, the processor:
-
-1. evaluates ordinary argument expressions, such as `a + 1`, row by row;
-2. collects the aligned argument columns for the current collection;
-3. invokes the bound batch runtime instance;
-4. appends the row-aligned result to the planned affiliate output column.
-
-Nested calls are executed in dependency order. `wasm_udf(onnx(a))` evaluates ONNX first and then
-WASM; `onnx(wasm_udf(a))` evaluates WASM first and then ONNX. The processor creation order does
-not define this semantic order; the planner-generated evaluation order does.
+The cache key includes the model revision and content hash. Because model versions are immutable,
+loading a new model version cannot reuse a prepared graph for an older version. A model referenced
+by a running or persisted pipeline should not be deleted until the dependency is removed or the
+pipeline is stopped and recreated without that model.
 
 ## Cargo feature design
 
@@ -211,11 +245,22 @@ The manager layer owns ONNX-specific validation and lifecycle orchestration:
 3. calculate content hashes;
 4. publish the bundle and persist model metadata atomically;
 5. load the model through the enabled runtime;
-6. validate dtype, static shape, batch, opset, and operator restrictions;
+6. validate the model's veloFlux input/output schema against the ONNX graph's tensor types,
+   dimensions, batch behavior, opset, and operator restrictions;
 7. run all supplied test vectors.
 
-The first four steps are implemented for upload and full storage import. The final three runtime
-validation steps are deferred.
+The first four steps are implemented for upload and full storage import. Upload-time graph
+validation and test-vector execution are deferred. Runtime binding loads and prepares the graph on
+demand; the planner consumes the persisted veloFlux schema rather than infer a signature
+dynamically. Processor execution supports bool, signed/unsigned integer, floating-point, and string
+scalar values. List and struct values are recursively flattened into tensor leaves for inputs and
+decoded back into the declared recursive schema for outputs. All model outputs are returned as one
+struct value.
+Composite list elements and list fields inside structs require an explicit cardinality in the model
+card. Upload validation rejects recursive schemas whose boundaries cannot be determined.
+Numeric conversion at the runtime boundary is strict. Fractional integer inputs, out-of-range
+values, non-finite values, and conversions that lose integer or floating-point precision are
+rejected rather than silently cast.
 
 If ONNX support is disabled, model storage metadata may remain available for persistence and
 import/export, but ONNX validation, execution, and ONNX-specific upload handling are unavailable.
@@ -246,8 +291,10 @@ model-runtime
 ```
 
 The model runtime must expose a small application-facing abstraction instead of leaking tract
-types into planner and storage code. The abstraction should provide model metadata and inference
-operations; the tract implementation owns model loading, optimization, and tensor conversion.
+types into planner and storage code. The abstraction should provide model metadata, prepared-model
+loading, and inference operations; the tract implementation owns model loading, optimization, and
+tensor conversion. Prepared-model loading should be lazy and shared through a runtime cache, while
+execution contexts remain pipeline-local.
 
 Models are immutable. Replacing the graph, input order, or input meaning requires a new versioned
 model name. A pipeline that references a model creates a model dependency. Deleting a referenced
@@ -267,20 +314,21 @@ implementations should not be introduced until there is a concrete model and per
 
 ## Implementation phases
 
-### Phase 1: ONNX batch function
+### Phase 1: ONNX custom function
 
 - Add the optional runtime crate and the top-level `onnx` feature. **Implemented.**
 - Add model metadata, model upload/storage, and full import/export integration. **Implemented.**
 - Register `onnx(...)` only when the feature is enabled.
 - Validate literal model names and input contracts during planning.
-- Lower `onnx(...)` into the shared batch-function compute path.
-- Load and optimize ONNX models with tract when the ONNX runtime instance is bound.
-- Return `List<Float32>` values.
+- Evaluate `onnx(...)` through the ordinary scalar custom-function path.
+- Load and optimize ONNX models with tract through the shared lazy runtime registry. **Implemented.**
+- Convert recursive veloFlux input values to ONNX tensor leaves and decode tensor outputs into the
+  declared recursive veloFlux schema.
 - Validate the supplied test vectors during upload.
 
 ### Phase 2: operational hardening
 
-- Add model dependency tracking to pipeline lifecycle operations.
+- Extend model dependency tracking to pipeline update/delete lifecycle operations.
 - Add inference counters, failures, and latency metrics.
 - Add model load and execution resource limits.
 - Add feature-on and feature-off CI coverage.

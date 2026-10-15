@@ -40,6 +40,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(feature = "onnx")]
+use datatypes::Float32Type;
+#[cfg(feature = "onnx")]
+use storage::{ModelSchemaColumn, StoredModel};
+
 use flow::pipeline::{
     EventtimeOptions, HttpBodyConfig, HttpMultipartConfig, PipelineOptions, SourceInputConfig,
 };
@@ -1521,26 +1526,26 @@ fn plan_explain_table_driven() {
             name: "physical_explain_reflects_pruned_struct_schema",
             sql: "SELECT stream_2.a, stream_2.b->c FROM stream_2",
             options: PipelineOptions::default(),
-            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_2","decoder=json","schema=[a, b{c}]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_2.a; stream_2.b -> c]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_2","schema=[a, b{c}]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b{c}]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[stream_2.a; stream_2.b -> c]"],"operator":"PhysicalProject"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_2","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_2.a; stream_2.b -> c]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_2","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[stream_2.a; stream_2.b -> c]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "explain_reflects_pruned_list_struct_schema",
             sql: "SELECT stream_3.a, stream_3.items[0]->c FROM stream_3",
             options: PipelineOptions::default(),
-            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[a, items[0][struct{c}]]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.a; stream_3.items[0] -> c]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_3","schema=[a, items[0][struct{c}]]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, items[0][struct{c}]]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[stream_3.a; stream_3.items[0] -> c]"],"operator":"PhysicalProject"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_3","decoder=json","schema=[a, items]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_3.a; stream_3.items[0] -> c]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_3","schema=[a, items]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, items]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[stream_3.a; stream_3.items[0] -> c]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "physical_plan_supports_parenthesized_struct_field_list_index",
             sql: "SELECT a, (b->items)[0] FROM stream_4",
             options: PipelineOptions::default(),
-            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_4","decoder=json","schema=[a, b{items[struct{x, y}]}]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; (b -> items)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_4","schema=[a, b{items[struct{x, y}]}]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b{items[struct{x, y}]}]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; (b -> items)]"],"operator":"PhysicalProject"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_4","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[a; (b -> items)]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_4","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[a; (b -> items)]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "explain_renders_list_index_projection_compact",
             sql:
                 "SELECT stream_4.a, stream_4.b->items[0]->x, stream_4.b->items[3]->x FROM stream_4",
             options: PipelineOptions::default(),
-            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_4","decoder=json","schema=[a, b{items[0,3][struct{x}]}]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_4.a; stream_4.b -> items[0] -> x; stream_4.b -> items[3] -> x]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_4","schema=[a, b{items[0,3][struct{x}]}]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b{items[0,3][struct{x}]}]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[stream_4.a; stream_4.b -> items[0] -> x; stream_4.b -> items[3] -> x]"],"operator":"PhysicalProject"}}"##,
+            expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=stream_4","decoder=json","schema=[a, b]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[stream_4.a; stream_4.b -> items[0] -> x; stream_4.b -> items[3] -> x]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=stream_4","schema=[a, b]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[a, b]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[stream_4.a; stream_4.b -> items[0] -> x; stream_4.b -> items[3] -> x]"],"operator":"PhysicalProject"}}"##,
         },
         Case {
             name: "window_filter_before_streaming_aggregation",
@@ -2641,9 +2646,11 @@ impl CustomFunc for DoubleUdf {
 
 #[test]
 fn plan_explain_custom_udf_call() {
-    let custom_registry =
-        flow::CustomFuncRegistry::with_builtins_and_wasm(vec![Arc::new(DoubleUdf)])
-            .expect("register test UDF");
+    let custom_registry = flow::CustomFuncRegistry::new(flow::CustomFuncRegistryOptions {
+        wasm_udfs: vec![Arc::new(DoubleUdf)],
+        ..Default::default()
+    })
+    .expect("register test UDF");
     let registries = PipelineRegistries::new(
         flow::connector::ConnectorRegistry::with_builtin_sinks(
             flow::connector::MemoryPubSubRegistry::new(),
@@ -2736,9 +2743,11 @@ struct WasmUdfBatchPlanExplainCase {
 /// Verify physical lowering of batch WASM UDFs with JSON EXPLAIN output.
 #[test]
 fn plan_explain_wasm_udf_batch_table_driven() {
-    let custom_registry =
-        flow::CustomFuncRegistry::with_builtins_and_wasm(vec![Arc::new(BatchDoubleUdf)])
-            .expect("register test batch UDF");
+    let custom_registry = flow::CustomFuncRegistry::new(flow::CustomFuncRegistryOptions {
+        wasm_udfs: vec![Arc::new(BatchDoubleUdf)],
+        ..Default::default()
+    })
+    .expect("register test batch UDF");
     let registries = PipelineRegistries::new(
         flow::connector::ConnectorRegistry::with_builtin_sinks(
             flow::connector::MemoryPubSubRegistry::new(),
@@ -2816,6 +2825,130 @@ fn plan_explain_wasm_udf_batch_table_driven() {
     }
 }
 
+#[cfg(feature = "onnx")]
+struct OnnxPlanExplainCase {
+    name: &'static str,
+    sql: &'static str,
+    expected: &'static str,
+}
+
+#[cfg(feature = "onnx")]
+fn setup_onnx_streams() -> HashMap<String, Arc<StreamDefinition>> {
+    let image_type = ConcreteDatatype::List(ListType::new(Arc::new(ConcreteDatatype::Float32(
+        Float32Type,
+    ))));
+    let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "onnx_stream".to_string(),
+        "image".to_string(),
+        image_type,
+    )]));
+    let definition = StreamDefinition::new(
+        "onnx_stream",
+        schema,
+        StreamProps::Mqtt(MqttStreamProps::default()),
+        StreamDecoderConfig::json(),
+    );
+    HashMap::from([("onnx_stream".to_string(), Arc::new(definition))])
+}
+
+#[cfg(feature = "onnx")]
+fn onnx_list_column(name: &str) -> ModelSchemaColumn {
+    ModelSchemaColumn {
+        name: name.to_string(),
+        data_type: "list".to_string(),
+        cardinality: None,
+        fields: None,
+        element: Some(Box::new(ModelSchemaColumn {
+            name: "element".to_string(),
+            data_type: "float32".to_string(),
+            cardinality: None,
+            fields: None,
+            element: None,
+        })),
+    }
+}
+
+/// Verify ONNX model-name extraction, metadata-backed typing, and scalar physical lowering.
+#[cfg(feature = "onnx")]
+#[test]
+fn plan_explain_onnx_function_table_driven() {
+    let model_dir = tempfile::tempdir().expect("model directory");
+    let model_registry = Arc::new(model_runtime::ModelRegistry::new(model_dir.path()));
+    model_registry
+        .upsert(StoredModel {
+            name: "mnist_8".to_string(),
+            revision: 1,
+            model_sha256: "test-sha256".to_string(),
+            model_size_bytes: 0,
+            model_card_yaml: "name: mnist_8".to_string(),
+            inputs: vec![onnx_list_column("image")],
+            outputs: vec![onnx_list_column("probabilities")],
+            test_vector_count: 0,
+        })
+        .expect("register model metadata");
+    let custom_registry = flow::CustomFuncRegistry::new(flow::CustomFuncRegistryOptions {
+        model_registry: Some(Arc::clone(&model_registry)),
+        ..Default::default()
+    })
+    .expect("register ONNX function");
+    let registries = PipelineRegistries::new(
+        flow::connector::ConnectorRegistry::with_builtin_sinks(
+            flow::connector::MemoryPubSubRegistry::new(),
+        ),
+        flow::EncoderRegistry::with_builtin_encoders(),
+        flow::DecoderRegistry::with_builtin_decoders(),
+        flow::AggregateFunctionRegistry::with_builtins(),
+        flow::StatefulFunctionRegistry::with_builtins(),
+        custom_registry,
+        flow::EventtimeTypeRegistry::with_builtin_types(),
+        Arc::new(flow::MergerRegistry::new()),
+    );
+    let cases = [OnnxPlanExplainCase {
+        name: "projection",
+        sql: "SELECT onnx('mnist_8', image) AS result FROM onnx_stream",
+        expected: r##"{"logical":{"children":[{"children":[],"id":"DataSource_0","info":["source=onnx_stream","decoder=json","schema=[image]"],"operator":"DataSource"}],"id":"Project_1","info":["fields=[onnx('mnist_8', image) as result]"],"operator":"Project"},"options":null,"physical":{"children":[{"children":[{"children":[],"id":"PhysicalDataSource_0","info":["source=onnx_stream","schema=[image]"],"operator":"PhysicalDataSource"}],"id":"PhysicalDecoder_1","info":["decoder=json","schema=[image]"],"operator":"PhysicalDecoder"}],"id":"PhysicalProject_2","info":["fields=[onnx('mnist_8', image) as result]"],"operator":"PhysicalProject"}}"##,
+    }];
+
+    for case in cases {
+        let stream_defs = setup_onnx_streams();
+        let select_stmt = parse_sql(case.sql).expect("parse sql");
+        let bindings = bindings_for_select(&select_stmt, &stream_defs);
+        let logical_plan =
+            create_logical_plan(select_stmt, vec![], &stream_defs).expect("logical plan");
+        let (logical_plan, bindings) = flow::optimize_logical_plan(logical_plan, &bindings);
+        let physical_plan =
+            flow::create_physical_plan(Arc::clone(&logical_plan), &bindings, &registries)
+                .expect("physical plan");
+        let physical_plan = flow::optimize_physical_plan(
+            physical_plan,
+            registries.encoder_registry().as_ref(),
+            registries.aggregate_registry(),
+        );
+
+        let flow::planner::physical::PhysicalPlan::Project(project) = physical_plan.as_ref() else {
+            panic!("expected physical projection");
+        };
+        assert!(matches!(
+            project.base.children()[0].as_ref(),
+            flow::planner::physical::PhysicalPlan::Decoder(_)
+        ));
+
+        let explain = PipelineExplain::new(
+            logical_plan,
+            physical_plan,
+            PipelineExplainConfig::default(),
+        );
+        println!("case={}: {}", case.name, case.sql);
+        println!("{}", explain.to_pretty_string());
+        assert_eq!(
+            explain.to_json().to_string(),
+            case.expected,
+            "unexpected EXPLAIN JSON for {}",
+            case.name
+        );
+    }
+}
+
 /// Verify that EXPLAIN output shows `decoder=protobuf` for a stream using protobuf decoder.
 #[test]
 fn plan_explain_shows_protobuf_decoder() {
@@ -2830,7 +2963,7 @@ fn plan_explain_shows_protobuf_decoder() {
         flow::DecoderRegistry::with_builtin_decoders(),
         flow::AggregateFunctionRegistry::with_builtins(),
         flow::StatefulFunctionRegistry::with_builtins(),
-        flow::CustomFuncRegistry::with_builtins_and_wasm(vec![]).expect("registry"),
+        flow::CustomFuncRegistry::new(Default::default()).expect("registry"),
         flow::EventtimeTypeRegistry::with_builtin_types(),
         Arc::new(flow::MergerRegistry::new()),
     );
@@ -2995,7 +3128,7 @@ fn plan_explain_batch_table_driven() {
         flow::DecoderRegistry::with_builtin_decoders(),
         flow::AggregateFunctionRegistry::with_builtins(),
         flow::StatefulFunctionRegistry::with_builtins(),
-        flow::CustomFuncRegistry::with_builtins_and_wasm(vec![]).expect("custom func registry"),
+        flow::CustomFuncRegistry::new(Default::default()).expect("custom func registry"),
         flow::EventtimeTypeRegistry::with_builtin_types(),
         Arc::new(flow::MergerRegistry::new()),
     );

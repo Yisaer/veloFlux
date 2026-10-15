@@ -266,6 +266,15 @@ pub async fn import_storage_handler(
         tracing::warn!(error = %err, "failed to clean unreferenced imported WASM files");
     }
 
+    #[cfg(feature = "onnx")]
+    if let Err(err) = state
+        .model_registry
+        .sync_from_storage(state.storage.as_ref())
+    {
+        audit.log_failure(&err);
+        return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
+    }
+
     // Re-hydrate NamedSchemaStore from the newly imported storage
     reload_schemas_from_storage(state.storage.as_ref());
 
@@ -713,6 +722,8 @@ fn validate_import_models(models: &[ExportModel]) -> Result<Vec<StoredModel>, St
             model_sha256: model.model_sha256.clone(),
             model_size_bytes: model.model_size_bytes,
             model_card_yaml: model.model_card_yaml.clone(),
+            inputs: model.inputs.clone(),
+            outputs: model.outputs.clone(),
             test_vector_count: model.test_vector_count,
         });
     }

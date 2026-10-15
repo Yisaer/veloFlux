@@ -43,6 +43,6 @@ path = "src/lib.rs"
 
 [features]
 default = ["wasm_udf"]
-onnx = ["dep:model-runtime", "model-runtime/onnx"]
+onnx = ["dep:model-runtime", "model-runtime/onnx", "flow/onnx"]
 deadlock_detection = ["flow/deadlock_detection", "parking_lot/deadlock_detection"]
 wasm_udf = ["dep:udf"]

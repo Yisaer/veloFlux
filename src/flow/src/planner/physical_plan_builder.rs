@@ -139,6 +139,9 @@ impl VisitorMut for BatchFunctionExprRewriter<'_, '_> {
             Ok(args) => args,
             Err(error) => return ControlFlow::Break(error),
         };
+        if let Err(error) = batch_func.validate_batch_call(&args) {
+            return ControlFlow::Break(format!("invalid batch function '{name}': {error}"));
+        }
         self.lowerer
             .evaluations
             .push(PhysicalBatchFunctionEvaluation {

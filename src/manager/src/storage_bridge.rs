@@ -497,8 +497,13 @@ fn load_wasm_udfs(
         loaded.push(Arc::new(wasm_udf));
     }
 
-    let registry = CustomFuncRegistry::with_builtins_and_wasm(loaded)
-        .map_err(|e| format!("failed to build registry with WASM UDFs: {e}"))?;
+    let registry = CustomFuncRegistry::new(flow::CustomFuncRegistryOptions {
+        base_registry: Some(instance.custom_func_registry()),
+        #[cfg(feature = "onnx")]
+        model_registry: None,
+        wasm_udfs: loaded,
+    })
+    .map_err(|e| format!("failed to build registry with WASM UDFs: {e}"))?;
     instance.set_custom_func_registry(registry);
 
     Ok(udfs.len())

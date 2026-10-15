@@ -7,11 +7,14 @@ pub mod obj_func;
 pub mod registry;
 pub mod string_func;
 pub mod time_func;
+
+#[cfg(feature = "onnx")]
+pub mod onnx_func;
 use crate::catalog::FunctionDef;
 use crate::expr::func::EvalError;
-use datatypes::Value;
+use datatypes::{ConcreteDatatype, Value};
 
-pub use registry::{CustomFuncBindings, CustomFuncRegistry};
+pub use registry::{CustomFuncBindings, CustomFuncRegistry, CustomFuncRegistryOptions};
 
 /// Processor-owned implementation for collection-level custom functions.
 pub trait BatchFunc: Send + Sync + std::fmt::Debug {
@@ -35,6 +38,24 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
     }
     /// Create a processor-bound implementation for this function.
     fn bind_runtime(&self) -> Result<Option<std::sync::Arc<dyn CustomFunc>>, String> {
+        Ok(None)
+    }
+
+    /// Validate a scalar function call with access to the planner's source schemas.
+    fn validate_call_with_schema(
+        &self,
+        args: &[crate::expr::ScalarExpr],
+        _bindings: &crate::expr::sql_conversion::SchemaBinding,
+    ) -> Result<(), String> {
+        let _ = args;
+        Ok(())
+    }
+
+    /// Return the statically declared result type of a scalar function call, if available.
+    fn return_type(
+        &self,
+        _args: &[crate::expr::ScalarExpr],
+    ) -> Result<Option<ConcreteDatatype>, String> {
         Ok(None)
     }
 
@@ -79,6 +100,12 @@ pub trait CustomFunc: Send + Sync + std::fmt::Debug {
     /// Additional SQL-visible aliases for this function.
     fn aliases(&self) -> &'static [&'static str] {
         &[]
+    }
+
+    /// Validate a collection-level call after its arguments have been converted to scalar
+    /// expressions. Planner-visible batch functions may use this to validate static arguments.
+    fn validate_batch_call(&self, _args: &[crate::expr::ScalarExpr]) -> Result<(), String> {
+        Ok(())
     }
 }
 
