@@ -60,7 +60,7 @@ impl CustomFuncBindings {
     pub fn from_registry(registry: &CustomFuncRegistry) -> Result<Self, String> {
         #[cfg(feature = "onnx")]
         {
-            return Self::from_registry_with_prepared_models(registry, &HashMap::new());
+            Self::from_registry_with_prepared_models(registry, &HashMap::new())
         }
 
         #[cfg(not(feature = "onnx"))]

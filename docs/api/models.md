@@ -7,9 +7,16 @@ binary built without that feature does not expose model management routes.
 
 The current implementation manages immutable ONNX model bundles, registers the `onnx(...)` SQL
 function, binds it through the scalar custom-function planner path, and executes row-based tensor
-inference through the shared tract-backed runtime. Runtime conversion supports the primitive
-schema types and recursively flattens list/struct input values; model outputs are decoded back into
-the declared recursive schema.
+inference through the shared tract-backed runtime.
+
+The model API treats every ONNX input and output tensor as one veloFlux parameter whose
+public value is either a scalar or a flat one-dimensional list of scalars. Tensor rank, dimensions,
+batch/feature interpretation, and tensor layout remain ONNX runtime metadata. They are used to build
+and decode the actual tensor, but are not exposed as nested veloFlux model schema.
+
+Multiple ONNX outputs continue to be returned as one veloFlux `struct`. Each struct field represents
+one ONNX output and has either a scalar type or a flat list type. The model loader extracts these
+signatures from the ONNX graph before the model is registered.
 
 Numeric conversion is strict at the runtime boundary: floating-point values used for integer
 tensors must be finite, integral, and within range; integer-to-floating-point and `float64` to
@@ -36,50 +43,33 @@ acme.collision_v2.1/
 The upload validator currently requires:
 
 - a non-empty `model.onnx` file;
-- a YAML mapping in `model.yaml` with string `name`, plus `inputs` and `outputs` fields;
+- a YAML mapping in `model.yaml` with a string `name`; `inputs` and `outputs` declarations are not
+  required;
 - a model name beginning with an ASCII letter and containing only letters, digits, `_`, and `.`;
 - at least three matching `input-*.json` and `expected_output-*.json` pairs.
 
-The model-card contract is expressed in veloFlux's stream-column schema. Each input and output must
-declare a unique column name and a supported `data_type`. Composite values use the same recursive
-schema as stream columns: a `list` declares its element column in `element`, and a `struct` declares
-its child columns in `fields`. Model schemas additionally support an optional `cardinality` on list
-columns to preserve boundaries for nested or composite tensor values. Input arguments in SQL are
-positional and follow the order declared by `inputs`.
-
-For a composite list element, or for a list field inside a struct, `cardinality` is required so
-the runtime can preserve element boundaries. Model upload rejects recursive schemas whose boundaries
-cannot be determined from the tensor values and schema.
-
-For example, a model that accepts a scalar speed and a list of float samples can declare:
+The model contract is derived from the ONNX graph when the model is loaded. Each ONNX input
+and output contributes one tensor signature containing its name, scalar element type, and runtime
+shape. The veloFlux-facing type is a scalar for a single scalar value or a flat one-dimensional list
+for tensor values. Input arguments in SQL remain positional and follow the ONNX input order.
 
 ```yaml
 name: acme.collision_v2.1
-inputs:
-  - name: speed
-    data_type: float32
-  - name: samples
-    data_type: list
-    cardinality: 10
-    element:
-      name: element
-      data_type: float32
-outputs:
-  - name: probability
-    data_type: float32
-  - name: labels
-    data_type: struct
-    fields:
-      - name: safe
-        data_type: bool
 ```
 
-The model card describes values from veloFlux's perspective. ONNX tensor rank, dimensions, and
-runtime tensor layout are implementation details and are not fields in this API. The ONNX runtime
-validates the declared input values against the prepared graph when inference is executed.
+For example, a graph input such as `float32[1,1,28,28]` is exposed as a
+`list<float32>`. The runtime flattens the veloFlux value and uses the ONNX shape to construct the
+actual tensor; exposing the value as one-dimensional does not change the model's multidimensional
+computation.
 
-A model may declare multiple outputs; all outputs are returned as one struct value whose fields
-follow the declared output names and order.
+A model may have multiple outputs. All outputs are returned as one struct value whose fields follow
+the ONNX output names and order. Each field is independently a scalar or flat list.
+
+For input tensors, at most one dimension may remain symbolic. The flat veloFlux list carries only
+the total element count, so `[?, 3]` with six elements can be resolved to `[2, 3]`, while `[?, ?]`
+or `[?, ?, 3]` cannot be resolved uniquely. Models with ambiguous symbolic input dimensions are
+rejected during upload because silently choosing a shape could change the model computation. This
+is a veloFlux boundary limitation, not a general ONNX limitation.
 
 The model name is immutable. Uploading another bundle with the same name returns `409 Conflict`;
 publishers must use a new versioned name for a new graph or input/output contract.
@@ -94,8 +84,8 @@ publishers must use a new versioned name for a new graph or input/output contrac
 | `GET` | `/models/:name/status` | Read whether the current model revision has a prepared runtime graph. |
 | `DELETE` | `/models/:name` | Delete model metadata and its bundle when no stored pipeline references it. |
 
-The response metadata includes the model name, revision, ONNX SHA-256, model size, input schema,
-output schema, and test-vector count. Model files are stored below the storage base directory's `models/` directory; upload names
+The response metadata includes the model name, revision, ONNX SHA-256, model size, generated input
+and output signatures, and test-vector count. Model files are stored below the storage base directory's `models/` directory; upload names
 are validated before they are used in filesystem paths. Upload and delete operations acquire the
 exclusive metadata and storage-operation guards and use a crash-recoverable publication journal.
 
@@ -142,14 +132,17 @@ runtime.
 
 ## Validation boundary
 
-The manager performs bundle structure and model-card validation. The storage layer persists model
-metadata in its own table and publishes the extracted bundle directory. The storage layer does
+The manager performs bundle structure validation and ONNX signature extraction. The storage layer persists
+model metadata in its own table and publishes the extracted bundle directory. The storage layer does
 not depend on tract or parse ONNX graphs.
 
-The following checks are intentionally deferred:
+Model loading inspects the ONNX graph and adds the generated input/output tensor signatures to
+`ModelMetadata`. The planner and the `onnx` function consume this same metadata. Signature extraction
+happens before planning; it is not deferred to the first input row.
 
-- upload-time ONNX graph validation and operator/dtype/shape/opset validation through tract;
-- executing test vectors against the loaded model;
+The manager parses and optimizes the ONNX graph during upload to extract the signature and reject
+unsupported or malformed graph metadata. Execution of test vectors is still intentionally deferred;
+the files are currently validated only as matching input/expected-output pairs.
 
 When an ONNX pipeline runtime is built, the registry loads and prepares the graph before processor
 creation. The persisted metadata remains the planner contract; the planner must not infer a model's
@@ -166,7 +159,7 @@ or be used to release a model that an in-flight runtime still owns.
 
 Models are included in the full storage import/export bundle. Exported archives contain the model
 metadata in `manifest.json` and the complete bundle below `models/<name>/`. Import validates the
-model name, metadata, model SHA-256, model size, model card, and test-vector pair count before
+model name, metadata, model SHA-256, model size, model bundle metadata, and test-vector pair count before
 publishing the model directory and metadata together.
 
 The incremental `POST /storage/apply` endpoint does not accept model changes yet. Model bundles

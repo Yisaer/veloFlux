@@ -14,13 +14,21 @@ use tokio::sync::TryAcquireError;
 
 use crate::audit::ResourceMutationLog;
 use crate::pipeline::AppState;
-use crate::stream::StreamColumnRequest;
 use crate::streaming_upload::{TemporaryUpload, is_zip_filename};
 
 const MODEL_FILE: &str = "model.onnx";
 const MODEL_CARD_FILE: &str = "model.yaml";
 const TEST_VECTOR_DIR: &str = "test_vectors";
 const MIN_TEST_VECTOR_COUNT: usize = 3;
+
+type ValidatedModelBundle = (
+    String,
+    String,
+    Vec<u8>,
+    Vec<ModelSchemaColumn>,
+    Vec<ModelSchemaColumn>,
+    usize,
+);
 
 #[derive(Serialize)]
 pub struct ModelInfo {
@@ -45,20 +53,6 @@ pub struct ModelRuntimeStatusInfo {
 #[derive(Deserialize)]
 struct ModelCard {
     name: String,
-    inputs: Option<Vec<ModelSchemaColumnRequest>>,
-    outputs: Option<Vec<ModelSchemaColumnRequest>>,
-}
-
-#[derive(Deserialize)]
-struct ModelSchemaColumnRequest {
-    name: String,
-    data_type: String,
-    #[serde(default)]
-    cardinality: Option<usize>,
-    #[serde(default)]
-    fields: Option<Vec<ModelSchemaColumnRequest>>,
-    #[serde(default)]
-    element: Option<Box<ModelSchemaColumnRequest>>,
 }
 
 /// POST /models
@@ -359,19 +353,7 @@ fn model_info(model: StoredModel) -> ModelInfo {
     }
 }
 
-fn validate_bundle(
-    root: &FsPath,
-) -> Result<
-    (
-        String,
-        String,
-        Vec<u8>,
-        Vec<ModelSchemaColumn>,
-        Vec<ModelSchemaColumn>,
-        usize,
-    ),
-    String,
-> {
+fn validate_bundle(root: &FsPath) -> Result<ValidatedModelBundle, String> {
     let model_path = root.join(MODEL_FILE);
     let card_path = root.join(MODEL_CARD_FILE);
     let model_bytes = fs::read(&model_path).map_err(|error| format!("read model.onnx: {error}"))?;
@@ -384,16 +366,9 @@ fn validate_bundle(
         .map_err(|error| format!("parse model.yaml: {error}"))?;
     let name = card.name;
     validate_model_name(&name)?;
-    let inputs = convert_model_schema(
-        card.inputs
-            .ok_or_else(|| "model.yaml must define inputs".to_string())?,
-        "inputs",
-    )?;
-    let outputs = convert_model_schema(
-        card.outputs
-            .ok_or_else(|| "model.yaml must define outputs".to_string())?,
-        "outputs",
-    )?;
+    let signatures = model_runtime::inspect_model(&model_path)?;
+    let inputs = model_runtime::flat_schema_columns(&signatures.inputs)?;
+    let outputs = model_runtime::flat_schema_columns(&signatures.outputs)?;
     let test_vector_count = validate_test_vectors(&root.join(TEST_VECTOR_DIR))?;
     Ok((
         name,
@@ -403,132 +378,6 @@ fn validate_bundle(
         outputs,
         test_vector_count,
     ))
-}
-
-fn convert_model_schema(
-    columns: Vec<ModelSchemaColumnRequest>,
-    direction: &str,
-) -> Result<Vec<ModelSchemaColumn>, String> {
-    let mut names = BTreeSet::new();
-    columns
-        .into_iter()
-        .map(|column| {
-            if !names.insert(column.name.clone()) {
-                return Err(format!(
-                    "model {direction} contains duplicate column '{}'",
-                    column.name
-                ));
-            }
-            convert_model_column(column)
-                .map_err(|error| format!("invalid model {direction}: {error}"))
-        })
-        .collect()
-}
-
-fn convert_model_column(column: ModelSchemaColumnRequest) -> Result<ModelSchemaColumn, String> {
-    validate_model_schema_contract(&column, &column.name)?;
-    if column.cardinality == Some(0) {
-        return Err(format!(
-            "column '{}' cardinality must be greater than zero",
-            column.name
-        ));
-    }
-    if column.cardinality.is_some() && !column.data_type.eq_ignore_ascii_case("list") {
-        return Err(format!(
-            "column '{}' cardinality is only valid for list columns",
-            column.name
-        ));
-    }
-    crate::stream::parse_datatype(&stream_column_request(&column))?;
-    let fields = match column.fields {
-        Some(fields) => {
-            let mut names = BTreeSet::new();
-            Some(
-                fields
-                    .into_iter()
-                    .map(|field| {
-                        if !names.insert(field.name.clone()) {
-                            return Err(format!("duplicate struct field '{}'", field.name));
-                        }
-                        convert_model_column(field)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            )
-        }
-        None => None,
-    };
-    let element = column
-        .element
-        .map(|element| convert_model_column(*element).map(Box::new))
-        .transpose()?;
-    Ok(ModelSchemaColumn {
-        name: column.name,
-        data_type: column.data_type,
-        cardinality: column.cardinality,
-        fields,
-        element,
-    })
-}
-
-fn validate_model_schema_contract(
-    column: &ModelSchemaColumnRequest,
-    path: &str,
-) -> Result<(), String> {
-    let data_type = column.data_type.to_ascii_lowercase();
-    match data_type.as_str() {
-        "list" => {
-            let element = column
-                .element
-                .as_deref()
-                .ok_or_else(|| format!("list column '{path}' must define an element"))?;
-            let element_type = element.data_type.to_ascii_lowercase();
-            if matches!(element_type.as_str(), "list" | "struct") && column.cardinality.is_none() {
-                return Err(format!(
-                    "list column '{path}' with a composite element must define cardinality"
-                ));
-            }
-            validate_model_schema_contract(element, &format!("{path}[]"))?;
-        }
-        "struct" => {
-            let fields = column
-                .fields
-                .as_ref()
-                .ok_or_else(|| format!("struct column '{path}' must define fields"))?;
-            for field in fields {
-                let field_path = format!("{path}.{}", field.name);
-                if field.data_type.eq_ignore_ascii_case("list") && field.cardinality.is_none() {
-                    return Err(format!(
-                        "list field '{field_path}' inside a struct must define cardinality"
-                    ));
-                }
-                validate_model_schema_contract(field, &field_path)?;
-            }
-        }
-        _ => {
-            if column.fields.is_some() || column.element.is_some() {
-                return Err(format!(
-                    "scalar column '{path}' must not define fields or element"
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn stream_column_request(column: &ModelSchemaColumnRequest) -> StreamColumnRequest {
-    StreamColumnRequest {
-        name: column.name.clone(),
-        data_type: column.data_type.clone(),
-        fields: column
-            .fields
-            .as_ref()
-            .map(|fields| fields.iter().map(stream_column_request).collect()),
-        element: column
-            .element
-            .as_deref()
-            .map(stream_column_request)
-            .map(Box::new),
-    }
 }
 
 fn validate_test_vectors(path: &FsPath) -> Result<usize, String> {
@@ -591,7 +440,6 @@ fn single_bundle_root(work: &FsPath) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelSchemaColumnRequest, convert_model_column};
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode, header::CONTENT_TYPE};
     use std::io::{Cursor, Write};
@@ -614,10 +462,7 @@ mod tests {
         archive.start_file("mnist_8/model.onnx", options).unwrap();
         archive.write_all(MNIST_MODEL).unwrap();
         let entries = [
-            (
-                "mnist_8/model.yaml",
-                b"name: mnist_8\ninputs:\n  - name: image\n    data_type: list\n    element:\n      name: element\n      data_type: float32\noutputs:\n  - name: probabilities\n    data_type: list\n    element:\n      name: element\n      data_type: float32\n".as_slice(),
-            ),
+            ("mnist_8/model.yaml", b"name: mnist_8\n".as_slice()),
             ("mnist_8/test_vectors/input-1.json", b"{}".as_slice()),
             (
                 "mnist_8/test_vectors/expected_output-1.json",
@@ -662,16 +507,6 @@ mod tests {
             .unwrap()
     }
 
-    fn model_column_request(name: &str, data_type: &str) -> ModelSchemaColumnRequest {
-        ModelSchemaColumnRequest {
-            name: name.to_string(),
-            data_type: data_type.to_string(),
-            cardinality: None,
-            fields: None,
-            element: None,
-        }
-    }
-
     #[tokio::test]
     async fn mnist_model_upload_succeeds_through_application_router() {
         let dir = tempdir().unwrap();
@@ -698,8 +533,10 @@ mod tests {
         assert_eq!(response["outputs"][0]["data_type"], "list");
         let stored = state.storage.get_model("mnist_8").unwrap().unwrap();
         assert_eq!(stored.model_size_bytes, MNIST_MODEL.len() as u64);
-        assert_eq!(stored.inputs[0].name, "image");
-        assert_eq!(stored.outputs[0].name, "probabilities");
+        assert_eq!(stored.inputs.len(), 1);
+        assert_eq!(stored.outputs.len(), 1);
+        assert_eq!(stored.inputs[0].data_type, "list");
+        assert_eq!(stored.outputs[0].data_type, "list");
         let prepared = state.model_registry.load("mnist_8").unwrap();
         assert_eq!(prepared.metadata().model.name, "mnist_8");
         assert_eq!(
@@ -751,48 +588,6 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
         assert!(state.storage.get_model("mnist_8").unwrap().is_some());
-    }
-
-    #[test]
-    fn model_schema_accepts_composite_list_with_cardinality() {
-        let mut element = model_column_request("detection", "struct");
-        element.fields = Some(vec![
-            model_column_request("class_id", "int32"),
-            model_column_request("score", "float32"),
-        ]);
-        let mut column = model_column_request("detections", "list");
-        column.cardinality = Some(2);
-        column.element = Some(Box::new(element));
-
-        let converted = convert_model_column(column).unwrap();
-        assert_eq!(converted.cardinality, Some(2));
-        assert_eq!(
-            serde_json::to_value(converted).unwrap()["cardinality"],
-            serde_json::json!(2)
-        );
-    }
-
-    #[test]
-    fn model_schema_rejects_composite_list_without_cardinality() {
-        let mut element = model_column_request("detection", "struct");
-        element.fields = Some(vec![model_column_request("class_id", "int32")]);
-        let mut column = model_column_request("detections", "list");
-        column.element = Some(Box::new(element));
-
-        let error = convert_model_column(column).unwrap_err();
-        assert!(error.contains("must define cardinality"), "{error}");
-    }
-
-    #[test]
-    fn model_schema_rejects_struct_list_field_without_cardinality() {
-        let mut column = model_column_request("record", "struct");
-        column.fields = Some(vec![model_column_request("values", "list")]);
-
-        let error = convert_model_column(column).unwrap_err();
-        assert!(
-            error.contains("inside a struct must define cardinality"),
-            "{error}"
-        );
     }
 }
 

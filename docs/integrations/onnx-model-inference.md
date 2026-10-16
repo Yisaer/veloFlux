@@ -26,52 +26,41 @@ WHERE speed IS NOT NULL
   AND rel_speed IS NOT NULL
 ```
 
-The result has the struct schema declared by the model card. Individual outputs are accessed with
-the existing struct field operator:
+The result has one struct field per ONNX graph output. Individual outputs are accessed with the
+existing struct field operator:
 
 ```sql
 SELECT
-  onnx('acme.collision_v2.1', speed, distance, rel_speed) -> probability AS probability
+  onnx('acme.collision_v2.1', speed, distance, rel_speed) -> output_0 AS probability
 FROM vehicle_stream
 ```
 
 The initial model contract is deliberately narrow:
 
 - one `.onnx` artifact per model version;
-- veloFlux-native input and output column schemas;
+- graph-derived input and output signatures exposed through veloFlux scalar/list values;
 - no external data files or custom operators;
 - no `Loop`, `If`, or `Scan` control-flow operators;
 - opset 11 through 18;
-- a `model.yaml` model card with input and output schemas using the stream-column format;
+- a `model.yaml` file containing the model name; input and output signatures are extracted from the
+  ONNX graph;
 - at least three input/output test-vector pairs;
 - model versions are immutable and are identified by the model name used in SQL.
 
-The engine must not infer units, ranges, normalization, or input ordering beyond the model card.
-The rule author provides arguments in the model-card order and filters `NULL` values before model
-execution.
+The engine must not infer units, ranges, or normalization. The rule author provides arguments in
+the ONNX graph input order and filters `NULL` values before model execution.
 
-The model card uses the same recursive schema as a veloFlux stream column. A list is declared with
-`data_type: list` and an `element` column; a struct is declared with `data_type: struct` and a
-`fields` list. For example:
+The model file does not repeat the tensor schema. For example:
 
 ```yaml
-inputs:
-  - name: speed
-    data_type: float32
-  - name: samples
-    data_type: list
-    element:
-      name: element
-      data_type: float32
-outputs:
-  - name: probability
-    data_type: float32
+name: acme.collision_v2.1
 ```
 
-This is the public model contract. ONNX tensor dimensions and rank are runtime details and are not
-duplicated in the model metadata. An ONNX graph may have multiple outputs. The SQL function returns
-one struct value containing all declared outputs rather than expanding one invocation into multiple
-SQL columns.
+Each graph input/output is exposed to veloFlux as a scalar for a rank-0 tensor or a flat
+`list<scalar>` for every other tensor. Tensor rank, fixed dimensions, symbolic dimensions, and layout
+remain internal ONNX metadata used to construct and decode tensors. An ONNX graph may have multiple
+outputs; the SQL function returns one struct value containing all graph outputs rather than expanding
+one invocation into multiple SQL columns.
 
 ## Terminology and scope
 
@@ -111,8 +100,8 @@ static checks such as:
 - the `onnx` function is enabled in the build;
 - the first argument is a model-name string literal;
 - the referenced model exists and is usable;
-- the number and types of arguments match the model card;
-- the function result has the declared `StructType` output schema;
+- the number and types of arguments match the graph-derived input signatures;
+- the function result has the graph-derived `StructType` output schema;
 - every referenced output field exists when struct field access is used.
 
 The first implementation should reject a dynamic model expression such as
@@ -141,8 +130,8 @@ ONNX input graph supports a batch dimension.
 ### Model and pipeline ownership
 
 Model metadata is a storage resource, while a prepared ONNX graph is a runtime resource. Startup
-loads model metadata and schemas so planning can resolve literal model names without loading every
-graph into memory. When a pipeline runtime is built, after planning and before processor creation,
+loads model metadata and graph-derived signatures so planning can resolve literal model names without
+preparing every executable graph in memory. When a pipeline runtime is built, after planning and before processor creation,
 it acquires the prepared models referenced by that pipeline.
 
 The runtime cache shares immutable prepared graphs and weights across pipelines. Two pipelines
@@ -266,26 +255,32 @@ storage does not depend on tract.
 The manager layer owns ONNX-specific validation and lifecycle orchestration:
 
 1. stage the upload in a temporary directory;
-2. validate the bundle layout and model-card schema;
+2. validate the bundle layout and extract the graph-derived input/output signatures;
 3. calculate content hashes;
 4. publish the bundle and persist model metadata atomically;
 5. prepare the model through the enabled runtime when the pipeline runtime is created, after
    planning and before processor creation;
-6. validate the model's veloFlux input/output schema against the ONNX graph's tensor types,
-   dimensions, batch behavior, opset, and operator restrictions;
+6. validate the ONNX graph's tensor types, dimensions, batch behavior, opset, and operator
+   restrictions;
 7. run all supplied test vectors.
 
-The first four steps are implemented for upload and full storage import. Upload-time graph
-validation and test-vector execution are deferred. Runtime binding loads and prepares the graph
+The first four steps are implemented for upload and full storage import. The manager parses and
+optimizes the ONNX graph during upload to extract the signatures and reject malformed or unsupported
+graph metadata. Test-vector execution remains deferred. Runtime binding prepares the executable graph
 during pipeline runtime creation, after planning and before processor creation; it does not defer
-preparation until the first input row. The planner consumes the persisted veloFlux schema rather
-than infer a signature dynamically. Processor execution supports bool, signed/unsigned integer,
-floating-point, and string scalar values. List and struct values are recursively flattened into
-tensor leaves for inputs and
-decoded back into the declared recursive schema for outputs. All model outputs are returned as one
-struct value.
-Composite list elements and list fields inside structs require an explicit cardinality in the model
-card. Upload validation rejects recursive schemas whose boundaries cannot be determined.
+preparation until the first input row. The planner consumes the persisted graph-derived signatures.
+Processor execution supports bool, signed/unsigned integer, floating-point, and string scalar values.
+Non-scalar tensor values are supplied as flat lists and reconstructed using the graph rank and fixed
+dimensions. A single symbolic input dimension can be derived from the flat value length; ambiguous
+multiple-symbolic-dimension inputs are rejected. Tensor elements are returned as flat lists. All
+model outputs are returned as one struct value.
+
+This restriction is caused by the veloFlux boundary rather than by ONNX. A flat list provides only
+the total number of tensor elements. For `[?, 3]`, six elements uniquely determine `[2, 3]` because
+the second dimension is fixed. For `[?, ?]` or `[?, ?, 3]`, the same flat length has multiple valid
+rank-preserving shapes, so veloFlux cannot reconstruct the tensor without an additional shape input
+or a nested value representation. Such input signatures are rejected during upload instead of being
+silently reshaped incorrectly.
 Numeric conversion at the runtime boundary is strict. Fractional integer inputs, out-of-range
 values, non-finite values, and conversions that lose integer or floating-point precision are
 rejected rather than silently cast.
@@ -352,8 +347,8 @@ implementations should not be introduced until there is a concrete model and per
 - Evaluate `onnx(...)` through the ordinary scalar custom-function path.
 - Acquire and optimize only referenced ONNX models with tract before processor creation, sharing
   immutable prepared graphs across active pipeline runtimes. **Implemented.**
-- Convert recursive veloFlux input values to ONNX tensor leaves and decode tensor outputs into the
-  declared recursive veloFlux schema.
+- Convert flat veloFlux list values to ONNX tensors using graph rank and dimensions, and decode
+  tensor outputs into flat veloFlux lists.
 - Validate the supplied test vectors during upload.
 
 ### Phase 2: operational hardening

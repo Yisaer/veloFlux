@@ -41,7 +41,7 @@ impl OnnxFunc {
             .model_registry
             .metadata(model_name)?
             .ok_or_else(|| format!("onnx model '{model_name}' is not registered"))?;
-        let expected = metadata.model.inputs.len();
+        let expected = metadata.inputs.len();
         if args.len().saturating_sub(1) != expected {
             return Err(format!(
                 "onnx model '{model_name}' expects {expected} input arguments, got {}",
@@ -123,7 +123,7 @@ impl CustomFunc for OnnxFunc {
             .metadata(model_name)
             .map_err(type_error)?
             .ok_or_else(|| type_error(format!("onnx model '{model_name}' is not registered")))?;
-        let expected = metadata.model.inputs.len();
+        let expected = metadata.inputs.len();
         if args.len().saturating_sub(1) != expected {
             return Err(type_error(format!(
                 "onnx model '{model_name}' expects {expected} input arguments, got {}",

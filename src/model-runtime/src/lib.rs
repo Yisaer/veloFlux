@@ -13,36 +13,115 @@ use datatypes::{
 };
 use storage::{ModelSchemaColumn, StorageManager, StoredModel};
 
+/// ONNX tensor metadata used by planning and row-based execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TensorSignature {
+    pub name: String,
+    pub element_type: ConcreteDatatype,
+    /// `None` means that no tensor shape metadata is available. `Some` preserves the graph rank;
+    /// an inner `None` represents a symbolic dimension.
+    pub shape: Option<Vec<Option<usize>>>,
+}
+
+/// Input/output signatures extracted from an ONNX graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSignatures {
+    pub inputs: Vec<TensorSignature>,
+    pub outputs: Vec<TensorSignature>,
+}
+
+/// Convert tensor signatures to the flat compatibility representation used by storage and API
+/// responses. This representation intentionally does not encode tensor rank or dimensions.
+pub fn flat_schema_columns(
+    signatures: &[TensorSignature],
+) -> Result<Vec<ModelSchemaColumn>, String> {
+    signatures
+        .iter()
+        .map(|signature| {
+            let data_type = scalar_data_type_name(&signature.element_type)?;
+            let column = if signature.shape.as_ref().is_some_and(Vec::is_empty) {
+                ModelSchemaColumn {
+                    name: signature.name.clone(),
+                    data_type: data_type.to_string(),
+                    cardinality: None,
+                    fields: None,
+                    element: None,
+                }
+            } else {
+                ModelSchemaColumn {
+                    name: signature.name.clone(),
+                    data_type: "list".to_string(),
+                    cardinality: None,
+                    fields: None,
+                    element: Some(Box::new(ModelSchemaColumn {
+                        name: "element".to_string(),
+                        data_type: data_type.to_string(),
+                        cardinality: None,
+                        fields: None,
+                        element: None,
+                    })),
+                }
+            };
+            Ok(column)
+        })
+        .collect()
+}
+
+fn scalar_data_type_name(data_type: &ConcreteDatatype) -> Result<&'static str, String> {
+    match data_type {
+        ConcreteDatatype::Bool(_) => Ok("bool"),
+        ConcreteDatatype::Float32(_) => Ok("float32"),
+        ConcreteDatatype::Float64(_) => Ok("float64"),
+        ConcreteDatatype::Int8(_) => Ok("int8"),
+        ConcreteDatatype::Int16(_) => Ok("int16"),
+        ConcreteDatatype::Int32(_) => Ok("int32"),
+        ConcreteDatatype::Int64(_) => Ok("int64"),
+        ConcreteDatatype::Uint8(_) => Ok("uint8"),
+        ConcreteDatatype::Uint16(_) => Ok("uint16"),
+        ConcreteDatatype::Uint32(_) => Ok("uint32"),
+        ConcreteDatatype::Uint64(_) => Ok("uint64"),
+        ConcreteDatatype::String(_) => Ok("string"),
+        other => Err(format!("non-scalar ONNX signature type: {other:?}")),
+    }
+}
+
 /// Immutable model metadata used by planning and runtime binding.
 #[derive(Debug, Clone)]
 pub struct ModelMetadata {
     pub model: Arc<StoredModel>,
     pub model_path: PathBuf,
+    pub inputs: Vec<TensorSignature>,
+    pub outputs: Vec<TensorSignature>,
 }
 
 impl ModelMetadata {
     pub fn input_types(&self) -> Result<Vec<ConcreteDatatype>, String> {
-        self.model
-            .inputs
-            .iter()
-            .map(model_schema_column_type)
-            .collect()
+        self.inputs.iter().map(signature_value_type).collect()
     }
 
     pub fn output_type(&self) -> Result<ConcreteDatatype, String> {
         let fields = self
-            .model
             .outputs
             .iter()
-            .map(|column| {
+            .map(|signature| {
                 Ok(StructField::new(
-                    column.name.clone(),
-                    model_schema_column_type(column)?,
+                    signature.name.clone(),
+                    signature_value_type(signature)?,
                     true,
                 ))
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(ConcreteDatatype::Struct(StructType::new(Arc::new(fields))))
+    }
+}
+
+fn signature_value_type(signature: &TensorSignature) -> Result<ConcreteDatatype, String> {
+    if signature.shape.as_ref().is_some_and(Vec::is_empty) {
+        Ok(signature.element_type.clone())
+    } else {
+        Ok(ConcreteDatatype::List(ListType::new(Arc::new(
+            signature.element_type.clone(),
+        ))))
     }
 }
 
@@ -99,6 +178,8 @@ struct ModelCacheKey {
     sha256: String,
 }
 
+type InFlightPreparation = Arc<OnceLock<Result<Arc<PreparedOnnxModel>, String>>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRuntimeStatus {
     pub revision: u64,
@@ -142,21 +223,17 @@ impl PreparedOnnxModel {
             .iter()
             .enumerate()
             .map(|(index, value)| {
-                let schema = self
+                let signature = self
                     .metadata
-                    .model
                     .inputs
                     .get(index)
-                    .ok_or_else(|| format!("model input {index} has no metadata schema"))?;
-                validate_input_value(value, schema, &schema.name)?;
+                    .ok_or_else(|| format!("model input {index} has no metadata signature"))?;
+                validate_flat_input_value(value, signature, &signature.name)?;
                 let input_fact = self
                     .runnable
                     .input_fact(index)
                     .map_err(|error| format!("read input {index} fact: {error}"))?;
-                let shape = match input_fact.shape.as_concrete() {
-                    Some(shape) => shape.to_vec(),
-                    None => vec![flatten_value(value)?.len()],
-                };
+                let shape = resolve_input_shape(value, signature.shape.as_ref())?;
                 build_input_tensor(value, input_fact.datum_type, &shape)
                     .map(IntoTValue::into_tvalue)
             })
@@ -166,19 +243,19 @@ impl PreparedOnnxModel {
             .runnable
             .run(tensors.into())
             .map_err(|error| format!("run model '{}': {error}", self.metadata.model.name))?;
-        if outputs.len() != self.metadata.model.outputs.len() {
+        if outputs.len() != self.metadata.outputs.len() {
             return Err(format!(
                 "model '{}' returned {} outputs, metadata declares {}",
                 self.metadata.model.name,
                 outputs.len(),
-                self.metadata.model.outputs.len()
+                self.metadata.outputs.len()
             ));
         }
 
         let values = outputs
             .iter()
-            .zip(self.metadata.model.outputs.iter())
-            .map(|(tensor, schema)| tensor_to_value(tensor, schema))
+            .zip(self.metadata.outputs.iter())
+            .map(|(tensor, signature)| tensor_to_flat_value(tensor, signature))
             .collect::<Result<Vec<_>, String>>()?;
         let output_type = self.metadata.output_type()?;
         let datatypes::ConcreteDatatype::Struct(output_type) = output_type else {
@@ -192,6 +269,36 @@ impl PreparedOnnxModel {
 }
 
 #[cfg(feature = "onnx")]
+fn validate_flat_input_value(
+    value: &datatypes::Value,
+    signature: &TensorSignature,
+    path: &str,
+) -> Result<(), String> {
+    let is_scalar = signature.shape.as_ref().is_some_and(Vec::is_empty);
+    if is_scalar {
+        if matches!(
+            value,
+            datatypes::Value::List(_) | datatypes::Value::Struct(_)
+        ) {
+            return Err(format!("input '{path}' must be a scalar value"));
+        }
+    } else {
+        let datatypes::Value::List(values) = value else {
+            return Err(format!("input '{path}' must be a flat list"));
+        };
+        if values.items().iter().any(|item| {
+            matches!(
+                item,
+                datatypes::Value::List(_) | datatypes::Value::Struct(_)
+            )
+        }) {
+            return Err(format!("input '{path}' must be a flat list"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "onnx")]
 #[derive(Debug, Clone, PartialEq)]
 enum ScalarValue {
     Bool(bool),
@@ -199,65 +306,6 @@ enum ScalarValue {
     Uint(u128),
     Float(f64),
     String(String),
-}
-
-#[cfg(feature = "onnx")]
-fn validate_input_value(
-    value: &datatypes::Value,
-    schema: &ModelSchemaColumn,
-    path: &str,
-) -> Result<(), String> {
-    match schema.data_type.to_ascii_lowercase().as_str() {
-        "list" => {
-            let datatypes::Value::List(values) = value else {
-                return Err(format!("input '{path}' must be a list"));
-            };
-            if let Some(cardinality) = schema.cardinality {
-                if values.len() != cardinality {
-                    return Err(format!(
-                        "input '{path}' expects list cardinality {cardinality}, got {}",
-                        values.len()
-                    ));
-                }
-            }
-            let element = schema
-                .element
-                .as_deref()
-                .ok_or_else(|| format!("input '{path}' list is missing element schema"))?;
-            for (index, item) in values.items().iter().enumerate() {
-                validate_input_value(item, element, &format!("{path}[{index}]"))?;
-            }
-            Ok(())
-        }
-        "struct" => {
-            let datatypes::Value::Struct(values) = value else {
-                return Err(format!("input '{path}' must be a struct"));
-            };
-            let fields = schema
-                .fields
-                .as_ref()
-                .ok_or_else(|| format!("input '{path}' struct is missing fields schema"))?;
-            if values.items().len() != fields.len() {
-                return Err(format!(
-                    "input '{path}' expects {} struct fields, got {}",
-                    fields.len(),
-                    values.items().len()
-                ));
-            }
-            for (field, item) in fields.iter().zip(values.items()) {
-                validate_input_value(item, field, &format!("{path}.{}", field.name))?;
-            }
-            Ok(())
-        }
-        _ if matches!(
-            value,
-            datatypes::Value::List(_) | datatypes::Value::Struct(_)
-        ) =>
-        {
-            Err(format!("input '{path}' must be a scalar value"))
-        }
-        _ => Ok(()),
-    }
 }
 
 #[cfg(feature = "onnx")]
@@ -296,6 +344,57 @@ fn flatten_value(value: &datatypes::Value) -> Result<Vec<ScalarValue>, String> {
         datatypes::Value::Null => Err("null cannot be converted to an ONNX tensor".to_string()),
         other => Err(format!("unsupported ONNX tensor value: {other:?}")),
     }
+}
+
+#[cfg(feature = "onnx")]
+fn resolve_input_shape(
+    value: &datatypes::Value,
+    shape: Option<&Vec<Option<usize>>>,
+) -> Result<Vec<usize>, String> {
+    let value_len = flatten_value(value)?.len();
+    let Some(shape) = shape else {
+        return Ok(vec![value_len]);
+    };
+    if shape.is_empty() {
+        if value_len != 1 {
+            return Err(format!(
+                "model input expects one scalar value, got {value_len} values"
+            ));
+        }
+        return Ok(Vec::new());
+    }
+
+    let symbolic = shape
+        .iter()
+        .enumerate()
+        .filter_map(|(index, dimension)| dimension.is_none().then_some(index))
+        .collect::<Vec<_>>();
+    if symbolic.len() > 1 {
+        return Err(format!(
+            "model input shape {shape:?} has multiple symbolic dimensions and cannot be inferred from a flat value"
+        ));
+    }
+
+    let fixed_product = shape
+        .iter()
+        .flatten()
+        .try_fold(1usize, |product, dimension| product.checked_mul(*dimension))
+        .ok_or_else(|| format!("model input shape {shape:?} is too large"))?;
+    let mut resolved = shape.iter().flatten().copied().collect::<Vec<_>>();
+    if let Some(&symbolic_index) = symbolic.first() {
+        if fixed_product == 0 || value_len % fixed_product != 0 {
+            return Err(format!(
+                "model input shape {shape:?} cannot resolve from {} values",
+                value_len
+            ));
+        }
+        resolved.insert(symbolic_index, value_len / fixed_product);
+    } else if fixed_product != value_len {
+        return Err(format!(
+            "model input expects {fixed_product} values with shape {shape:?}, got {value_len}"
+        ));
+    }
+    Ok(resolved)
 }
 
 #[cfg(feature = "onnx")]
@@ -542,24 +641,6 @@ fn scalar_to_value(
 }
 
 #[cfg(feature = "onnx")]
-fn tensor_to_value(
-    tensor: &tract_onnx::prelude::TValue,
-    schema: &ModelSchemaColumn,
-) -> Result<datatypes::Value, String> {
-    let scalar_values = read_tensor_scalars(tensor)?;
-    let mut offset = 0;
-    let value = decode_schema_value(schema, &scalar_values, &mut offset, tensor.shape())?;
-    if offset != scalar_values.len() {
-        return Err(format!(
-            "output schema '{}' consumed {offset} of {} tensor values",
-            schema.name,
-            scalar_values.len()
-        ));
-    }
-    Ok(value)
-}
-
-#[cfg(feature = "onnx")]
 fn read_tensor_scalars(tensor: &tract_onnx::prelude::TValue) -> Result<Vec<ScalarValue>, String> {
     use tract_onnx::prelude::DatumType;
     let plain = tensor
@@ -599,116 +680,162 @@ fn read_tensor_scalars(tensor: &tract_onnx::prelude::TValue) -> Result<Vec<Scala
 }
 
 #[cfg(feature = "onnx")]
-fn decode_schema_value(
-    schema: &ModelSchemaColumn,
-    values: &[ScalarValue],
-    offset: &mut usize,
-    shape: &[usize],
+fn tensor_to_flat_value(
+    tensor: &tract_onnx::prelude::TValue,
+    signature: &TensorSignature,
 ) -> Result<datatypes::Value, String> {
-    let list_depth = list_nesting_depth(schema);
-    decode_schema_value_with_depth(schema, values, offset, shape, list_depth, list_depth)
+    let values = read_tensor_scalars(tensor)?;
+    let scalar_schema = scalar_schema_column(signature)?;
+    if signature.shape.as_ref().is_some_and(Vec::is_empty) {
+        let value = values
+            .first()
+            .ok_or_else(|| format!("output '{}' tensor is empty", signature.name))?;
+        return scalar_to_value(value, &scalar_schema);
+    }
+
+    let element_type = signature.element_type.clone();
+    let items = values
+        .iter()
+        .map(|value| scalar_to_value(value, &scalar_schema))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(datatypes::Value::List(datatypes::ListValue::new(
+        items,
+        Arc::new(element_type),
+    )))
 }
 
 #[cfg(feature = "onnx")]
-fn decode_schema_value_with_depth(
-    schema: &ModelSchemaColumn,
-    values: &[ScalarValue],
-    offset: &mut usize,
-    shape: &[usize],
-    list_depth: usize,
-    root_list_depth: usize,
-) -> Result<datatypes::Value, String> {
-    match schema.data_type.to_ascii_lowercase().as_str() {
-        "list" => {
-            let element = schema
-                .element
-                .as_deref()
-                .ok_or_else(|| format!("list output '{}' is missing element", schema.name))?;
-            let length = if let Some(cardinality) = schema.cardinality {
-                cardinality
-            } else if root_list_depth <= 1 {
-                values.len().saturating_sub(*offset)
-            } else {
-                let dimension = shape
-                    .len()
-                    .checked_sub(list_depth)
-                    .and_then(|index| shape.get(index).copied())
-                    .ok_or_else(|| {
-                        format!(
-                            "output '{}' shape {shape:?} cannot describe nested list depth {list_depth}",
-                            schema.name
-                        )
-                    })?;
-                dimension
-            };
-            let mut items = Vec::with_capacity(length);
-            for _ in 0..length {
-                items.push(decode_schema_value_with_depth(
-                    element,
-                    values,
-                    offset,
-                    shape,
-                    list_depth.saturating_sub(1),
-                    root_list_depth,
-                )?);
-            }
-            let item_type = model_schema_column_type(element)?;
-            Ok(datatypes::Value::List(datatypes::ListValue::new(
-                items,
-                Arc::new(item_type),
-            )))
-        }
-        "struct" => {
-            let fields = schema
-                .fields
-                .as_ref()
-                .ok_or_else(|| format!("struct output '{}' is missing fields", schema.name))?;
-            let mut items = Vec::with_capacity(fields.len());
-            for field in fields {
-                items.push(decode_schema_value_with_depth(
-                    field,
-                    values,
-                    offset,
-                    shape,
-                    list_nesting_depth(field),
-                    root_list_depth,
-                )?);
-            }
-            let struct_type = model_schema_column_type(schema)?;
-            let ConcreteDatatype::Struct(struct_type) = struct_type else {
-                return Err(format!("output '{}' is not a struct", schema.name));
-            };
-            Ok(datatypes::Value::Struct(datatypes::StructValue::new(
-                items,
-                struct_type,
-            )))
-        }
-        _ => {
-            let value = values
-                .get(*offset)
-                .ok_or_else(|| format!("output '{}' tensor is missing a scalar", schema.name))?;
-            *offset += 1;
-            scalar_to_value(value, schema)
-        }
-    }
+fn scalar_schema_column(signature: &TensorSignature) -> Result<ModelSchemaColumn, String> {
+    let data_type = match &signature.element_type {
+        ConcreteDatatype::Bool(_) => "bool",
+        ConcreteDatatype::Float32(_) => "float32",
+        ConcreteDatatype::Float64(_) => "float64",
+        ConcreteDatatype::Int8(_) => "int8",
+        ConcreteDatatype::Int16(_) => "int16",
+        ConcreteDatatype::Int32(_) => "int32",
+        ConcreteDatatype::Int64(_) => "int64",
+        ConcreteDatatype::Uint8(_) => "uint8",
+        ConcreteDatatype::Uint16(_) => "uint16",
+        ConcreteDatatype::Uint32(_) => "uint32",
+        ConcreteDatatype::Uint64(_) => "uint64",
+        ConcreteDatatype::String(_) => "string",
+        other => return Err(format!("unsupported ONNX scalar type {other:?}")),
+    };
+    Ok(ModelSchemaColumn {
+        name: signature.name.clone(),
+        data_type: data_type.to_string(),
+        cardinality: None,
+        fields: None,
+        element: None,
+    })
 }
 
 #[cfg(feature = "onnx")]
-fn list_nesting_depth(schema: &ModelSchemaColumn) -> usize {
-    if schema.data_type.eq_ignore_ascii_case("list") {
-        schema
-            .element
-            .as_deref()
-            .map(list_nesting_depth)
-            .unwrap_or(0)
-            .saturating_add(1)
-    } else {
-        schema
-            .fields
-            .as_deref()
-            .map(|fields| fields.iter().map(list_nesting_depth).max().unwrap_or(0))
-            .unwrap_or(0)
+pub fn inspect_model(path: &std::path::Path) -> Result<ModelSignatures, String> {
+    use tract_onnx::prelude::{Framework, InferenceModelExt};
+
+    let model = tract_onnx::onnx()
+        .model_for_path(path)
+        .map_err(|error| format!("load ONNX model {}: {error}", path.display()))?
+        .into_optimized()
+        .map_err(|error| format!("inspect ONNX model {}: {error}", path.display()))?;
+    let inputs = model
+        .input_outlets()
+        .map_err(|error| format!("read ONNX input outlets: {error}"))?
+        .iter()
+        .map(|outlet| tensor_signature(&model, *outlet))
+        .collect::<Result<Vec<_>, _>>()?;
+    for signature in &inputs {
+        if let Some(shape) = &signature.shape {
+            if shape.iter().filter(|dimension| dimension.is_none()).count() > 1 {
+                return Err(format!(
+                    "ONNX input '{}' has multiple symbolic dimensions in shape {shape:?}; flat input shape inference is ambiguous",
+                    signature.name
+                ));
+            }
+        }
     }
+    let outputs = model
+        .output_outlets()
+        .map_err(|error| format!("read ONNX output outlets: {error}"))?
+        .iter()
+        .map(|outlet| tensor_signature(&model, *outlet))
+        .collect::<Result<Vec<_>, _>>()?;
+    if inputs.is_empty() {
+        return Err("ONNX model must declare at least one input".to_string());
+    }
+    if outputs.is_empty() {
+        return Err("ONNX model must declare at least one output".to_string());
+    }
+    Ok(ModelSignatures { inputs, outputs })
+}
+
+#[cfg(feature = "onnx")]
+fn tensor_signature(
+    model: &tract_onnx::prelude::TypedModel,
+    outlet: tract_onnx::prelude::OutletId,
+) -> Result<TensorSignature, String> {
+    let fact = model
+        .outlet_fact(outlet)
+        .map_err(|error| format!("read ONNX tensor fact: {error}"))?;
+    let element_type = datum_type_to_datatype(fact.datum_type)?;
+    let name = model
+        .outlet_label(outlet)
+        .map(str::to_string)
+        .unwrap_or_else(|| model.node(outlet.node).name.to_string());
+    Ok(TensorSignature {
+        name,
+        element_type,
+        shape: Some(
+            fact.shape
+                .dims()
+                .iter()
+                .map(|dimension| {
+                    dimension
+                        .as_i64()
+                        .map(|value| usize::try_from(value).map_err(|_| value))
+                        .transpose()
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|value| format!("invalid ONNX dimension {value}"))?,
+        ),
+    })
+}
+
+#[cfg(feature = "onnx")]
+fn datum_type_to_datatype(
+    datum_type: tract_onnx::prelude::DatumType,
+) -> Result<ConcreteDatatype, String> {
+    use tract_onnx::prelude::DatumType;
+
+    match datum_type {
+        DatumType::Bool => Ok(ConcreteDatatype::Bool(BooleanType)),
+        DatumType::F32 => Ok(ConcreteDatatype::Float32(Float32Type)),
+        DatumType::F64 => Ok(ConcreteDatatype::Float64(Float64Type)),
+        DatumType::I8 => Ok(ConcreteDatatype::Int8(Int8Type)),
+        DatumType::I16 => Ok(ConcreteDatatype::Int16(Int16Type)),
+        DatumType::I32 => Ok(ConcreteDatatype::Int32(Int32Type)),
+        DatumType::I64 => Ok(ConcreteDatatype::Int64(Int64Type)),
+        DatumType::U8 => Ok(ConcreteDatatype::Uint8(Uint8Type)),
+        DatumType::U16 => Ok(ConcreteDatatype::Uint16(Uint16Type)),
+        DatumType::U32 => Ok(ConcreteDatatype::Uint32(Uint32Type)),
+        DatumType::U64 => Ok(ConcreteDatatype::Uint64(Uint64Type)),
+        DatumType::String => Ok(ConcreteDatatype::String(StringType)),
+        other => Err(format!("unsupported ONNX tensor type {other:?}")),
+    }
+}
+
+fn legacy_signature(column: &ModelSchemaColumn) -> Result<TensorSignature, String> {
+    let data_type = model_schema_column_type(column)?;
+    let (element_type, shape) = match data_type {
+        ConcreteDatatype::List(list) => (list.item_type().clone(), None),
+        scalar => (scalar, Some(Vec::new())),
+    };
+    Ok(TensorSignature {
+        name: column.name.clone(),
+        element_type,
+        shape,
+    })
 }
 
 /// Process-wide model metadata registry and shared prepared-model cache.
@@ -716,7 +843,7 @@ pub struct ModelRegistry {
     models_dir: PathBuf,
     metadata: RwLock<HashMap<String, Arc<ModelMetadata>>>,
     prepared: Mutex<HashMap<ModelCacheKey, Weak<PreparedOnnxModel>>>,
-    in_flight: Mutex<HashMap<ModelCacheKey, Arc<OnceLock<Result<Arc<PreparedOnnxModel>, String>>>>>,
+    in_flight: Mutex<HashMap<ModelCacheKey, InFlightPreparation>>,
     prepare_counts: Mutex<HashMap<ModelCacheKey, u64>>,
 }
 
@@ -742,7 +869,7 @@ impl ModelRegistry {
         metadata.clear();
         for model in models {
             let name = model.name.clone();
-            metadata.insert(name, Arc::new(self.metadata_for(model)));
+            metadata.insert(name, Arc::new(self.metadata_for(model)?));
         }
         self.prepare_counts
             .lock()
@@ -757,7 +884,7 @@ impl ModelRegistry {
             .metadata
             .write()
             .map_err(|_| "model metadata registry lock poisoned".to_string())?;
-        metadata.insert(name.clone(), Arc::new(self.metadata_for(model)));
+        metadata.insert(name.clone(), Arc::new(self.metadata_for(model)?));
         self.prepare_counts
             .lock()
             .map_err(|_| "model prepare counter lock poisoned".to_string())?
@@ -886,11 +1013,37 @@ impl ModelRegistry {
         self.acquire(name)
     }
 
-    fn metadata_for(&self, model: StoredModel) -> ModelMetadata {
-        ModelMetadata {
+    fn metadata_for(&self, model: StoredModel) -> Result<ModelMetadata, String> {
+        let model_path = self.models_dir.join(&model.name).join("model.onnx");
+        let signatures = if model_path.exists() {
+            #[cfg(feature = "onnx")]
+            {
+                inspect_model(&model_path)?
+            }
+            #[cfg(not(feature = "onnx"))]
+            {
+                return Err("ONNX model runtime is disabled".to_string());
+            }
+        } else {
+            ModelSignatures {
+                inputs: model
+                    .inputs
+                    .iter()
+                    .map(legacy_signature)
+                    .collect::<Result<Vec<_>, _>>()?,
+                outputs: model
+                    .outputs
+                    .iter()
+                    .map(legacy_signature)
+                    .collect::<Result<Vec<_>, _>>()?,
+            }
+        };
+        Ok(ModelMetadata {
             model: Arc::new(model.clone()),
-            model_path: self.models_dir.join(model.name).join("model.onnx"),
-        }
+            model_path,
+            inputs: signatures.inputs,
+            outputs: signatures.outputs,
+        })
     }
 
     fn prepare(&self, metadata: Arc<ModelMetadata>) -> Result<PreparedOnnxModel, String> {
@@ -910,7 +1063,7 @@ impl ModelRegistry {
                 .map_err(|error| format!("optimize model '{}': {error}", metadata.model.name))?
                 .into_runnable()
                 .map_err(|error| format!("prepare model '{}': {error}", metadata.model.name))?;
-            return Ok(PreparedOnnxModel { metadata, runnable });
+            Ok(PreparedOnnxModel { metadata, runnable })
         }
 
         #[cfg(not(feature = "onnx"))]
@@ -938,29 +1091,15 @@ mod tests {
         }
     }
 
-    fn identity_pairs_column(name: &str) -> ModelSchemaColumn {
-        let mut pair = column("pair", "struct");
-        pair.fields = Some(vec![column("left", "float32"), column("right", "float32")]);
-        let mut pairs = column(name, "list");
-        pairs.cardinality = Some(2);
-        pairs.element = Some(Box::new(pair));
-        pairs
-    }
-
     fn identity_input(seed: f32) -> datatypes::Value {
-        let pair_type = ConcreteDatatype::Struct(StructType::new(Arc::new(vec![])));
-        let pair = |offset| {
-            datatypes::Value::Struct(datatypes::StructValue::new(
-                vec![
-                    datatypes::Value::Float32(seed + offset),
-                    datatypes::Value::Float32(seed + offset + 0.5),
-                ],
-                StructType::new(Arc::new(vec![])),
-            ))
-        };
         datatypes::Value::List(datatypes::ListValue::new(
-            vec![pair(0.0), pair(1.0)],
-            Arc::new(pair_type),
+            vec![
+                datatypes::Value::Float32(seed),
+                datatypes::Value::Float32(seed + 0.5),
+                datatypes::Value::Float32(seed + 1.0),
+                datatypes::Value::Float32(seed + 1.5),
+            ],
+            Arc::new(ConcreteDatatype::Float32(Float32Type)),
         ))
     }
 
@@ -989,8 +1128,8 @@ mod tests {
                 model_sha256: "identity-test".to_string(),
                 model_size_bytes: 0,
                 model_card_yaml: String::new(),
-                inputs: vec![identity_pairs_column("pairs")],
-                outputs: vec![identity_pairs_column("pairs")],
+                inputs: vec![column("input", "list")],
+                outputs: vec![column("output", "list")],
                 test_vector_count: 0,
             })
             .unwrap();
@@ -1072,25 +1211,16 @@ mod tests {
             .map(|thread| thread.join().unwrap())
             .collect::<Vec<_>>();
         for (input, output) in results {
-            let datatypes::Value::List(input_pairs) = input else {
+            let datatypes::Value::List(input_values) = input else {
                 panic!("test input must be a list");
             };
             let datatypes::Value::Struct(output_record) = output else {
                 panic!("identity output must be a struct");
             };
-            let datatypes::Value::List(output_pairs) = &output_record.items()[0] else {
+            let datatypes::Value::List(output_values) = &output_record.items()[0] else {
                 panic!("identity output field must be a list");
             };
-            assert_eq!(output_pairs.len(), input_pairs.len());
-            for (input_pair, output_pair) in input_pairs.items().iter().zip(output_pairs.items()) {
-                let datatypes::Value::Struct(input_pair) = input_pair else {
-                    panic!("test input pair must be a struct");
-                };
-                let datatypes::Value::Struct(output_pair) = output_pair else {
-                    panic!("identity output pair must be a struct");
-                };
-                assert_eq!(output_pair.items(), input_pair.items());
-            }
+            assert_eq!(output_values.items(), input_values.items());
         }
         assert_eq!(
             registry.status("identity").unwrap().unwrap().prepare_count,
@@ -1131,114 +1261,52 @@ mod tests {
     }
 
     #[test]
-    fn input_validation_rejects_mismatched_composite_cardinality() {
-        let mut item = column("item", "struct");
-        item.fields = Some(vec![column("a", "int32"), column("b", "int32")]);
-        let mut pairs = column("pairs", "list");
-        pairs.cardinality = Some(2);
-        pairs.element = Some(Box::new(item));
-
-        let struct_value = || {
-            datatypes::Value::Struct(datatypes::StructValue::new(
-                vec![datatypes::Value::Int32(1), datatypes::Value::Int32(2)],
-                datatypes::StructType::new(Arc::new(vec![])),
-            ))
+    fn flat_input_and_output_signatures_preserve_tensor_values() {
+        let input_signature = TensorSignature {
+            name: "input".to_string(),
+            element_type: ConcreteDatatype::Float32(Float32Type),
+            shape: Some(vec![Some(2), Some(2)]),
         };
-        let value = datatypes::Value::List(datatypes::ListValue::new(
-            vec![struct_value(), struct_value(), struct_value()],
-            Arc::new(ConcreteDatatype::Struct(StructType::new(Arc::new(vec![])))),
-        ));
-        let error = validate_input_value(&value, &pairs, "pairs").unwrap_err();
-        assert!(
-            error.contains("expects list cardinality 2, got 3"),
-            "{error}"
-        );
-
-        let mut values = column("values", "list");
-        values.cardinality = Some(2);
-        values.element = Some(Box::new(column("value", "int32")));
-        let mut record = column("record", "struct");
-        record.fields = Some(vec![values]);
-        let value = datatypes::Value::Struct(datatypes::StructValue::new(
-            vec![datatypes::Value::List(datatypes::ListValue::new(
-                vec![datatypes::Value::Int32(1)],
-                Arc::new(ConcreteDatatype::Int32(Int32Type)),
-            ))],
+        let input = identity_input(1.0);
+        assert!(validate_flat_input_value(&input, &input_signature, "input").is_ok());
+        let struct_input = datatypes::Value::Struct(datatypes::StructValue::new(
+            vec![],
             StructType::new(Arc::new(vec![])),
         ));
-        let error = validate_input_value(&value, &record, "record").unwrap_err();
-        assert!(error.contains("record.values"), "{error}");
+        assert!(validate_flat_input_value(&struct_input, &input_signature, "input").is_err());
+
+        let output_signature = TensorSignature {
+            name: "output".to_string(),
+            element_type: ConcreteDatatype::Int32(Int32Type),
+            shape: Some(vec![Some(2), Some(2)]),
+        };
+        let tensor = Tensor::from_shape(&[2, 2], &[1i32, 2, 3, 4])
+            .unwrap()
+            .into_tvalue();
+        let datatypes::Value::List(values) =
+            tensor_to_flat_value(&tensor, &output_signature).unwrap()
+        else {
+            panic!("expected flat list output");
+        };
+        assert_eq!(values.len(), 4);
+        assert_eq!(values.items()[0], datatypes::Value::Int32(1));
+        assert_eq!(values.items()[3], datatypes::Value::Int32(4));
     }
 
     #[test]
-    fn output_decode_supports_bool_integer_string_and_nested_lists() {
-        let bool_schema = column("enabled", "bool");
-        let bool_tensor = Tensor::from_shape(&[1], &[true]).unwrap().into_tvalue();
+    fn dynamic_input_shape_preserves_rank_and_infers_batch_dimension() {
+        let input = datatypes::Value::List(datatypes::ListValue::new(
+            (1..=6)
+                .map(|value| datatypes::Value::Float32(value as f32))
+                .collect(),
+            Arc::new(ConcreteDatatype::Float32(Float32Type)),
+        ));
         assert_eq!(
-            tensor_to_value(&bool_tensor, &bool_schema).unwrap(),
-            datatypes::Value::Bool(true)
+            resolve_input_shape(&input, Some(&vec![None, Some(3)])).unwrap(),
+            vec![2, 3]
         );
-
-        let mut nested_schema = column("values", "list");
-        nested_schema.cardinality = Some(2);
-        let mut inner = column("inner", "list");
-        inner.cardinality = Some(2);
-        inner.element = Some(Box::new(column("item", "int32")));
-        nested_schema.element = Some(Box::new(inner));
-        let nested_tensor = Tensor::from_shape(&[2, 2], &[1i32, 2, 3, 4])
-            .unwrap()
-            .into_tvalue();
-        let decoded = tensor_to_value(&nested_tensor, &nested_schema).unwrap();
-        let datatypes::Value::List(outer) = decoded else {
-            panic!("expected outer list");
-        };
-        assert_eq!(outer.len(), 2);
-        assert_eq!(
-            outer.get(0).unwrap().datatype(),
-            ConcreteDatatype::List(ListType::new(Arc::new(ConcreteDatatype::Int32(Int32Type))))
-        );
-    }
-
-    #[test]
-    fn output_decode_preserves_composite_boundaries_with_cardinality() {
-        let mut item = column("item", "struct");
-        item.fields = Some(vec![
-            column("class_id", "int32"),
-            column("score", "float32"),
-        ]);
-        let mut items = column("items", "list");
-        items.cardinality = Some(2);
-        items.element = Some(Box::new(item));
-        let tensor = Tensor::from_shape(&[4], &[1i32, 10, 2, 20])
-            .unwrap()
-            .into_tvalue();
-        let decoded = tensor_to_value(&tensor, &items).unwrap();
-        let datatypes::Value::List(decoded) = decoded else {
-            panic!("expected list output");
-        };
-        assert_eq!(decoded.len(), 2);
-        let datatypes::Value::Struct(first) = decoded.get(0).unwrap() else {
-            panic!("expected struct list element");
-        };
-        assert_eq!(first.items()[0], datatypes::Value::Int32(1));
-        assert_eq!(first.items()[1], datatypes::Value::Float32(10.0));
-
-        let mut values = column("values", "list");
-        values.cardinality = Some(2);
-        values.element = Some(Box::new(column("value", "int32")));
-        let mut record = column("record", "struct");
-        record.fields = Some(vec![column("id", "int32"), values]);
-        let tensor = Tensor::from_shape(&[3], &[7i32, 8, 9])
-            .unwrap()
-            .into_tvalue();
-        let decoded = tensor_to_value(&tensor, &record).unwrap();
-        let datatypes::Value::Struct(decoded) = decoded else {
-            panic!("expected struct output");
-        };
-        let datatypes::Value::List(values) = &decoded.items()[1] else {
-            panic!("expected list struct field");
-        };
-        assert_eq!(values.len(), 2);
+        assert!(resolve_input_shape(&input, Some(&vec![None, Some(4)])).is_err());
+        assert!(resolve_input_shape(&input, Some(&vec![None, None])).is_err());
     }
 
     #[test]

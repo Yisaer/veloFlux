@@ -18,40 +18,30 @@ model_name/
     └── expected_output-001.json
 ```
 
-The `model.yaml` schema uses the same column definition as a stream schema. Scalar columns specify
-`name` and `data_type`. A list uses `element`, an optional `cardinality` defines its fixed length,
-and a struct uses `fields`:
+The `model.yaml` file only declares the model name. Input and output schemas are extracted from the
+ONNX graph during upload and are not declared by the caller:
 
 ```yaml
 name: acme.collision_v2.1
-inputs:
-  - name: speed
-    data_type: float32
-  - name: samples
-    data_type: list
-    cardinality: 10
-    element:
-      name: element
-      data_type: float32
-outputs:
-  - name: probability
-    data_type: float32
-  - name: status
-    data_type: struct
-    fields:
-      - name: safe
-        data_type: bool
 ```
 
-Composite list elements and list fields inside structs must declare `cardinality`; this lets the
-runtime preserve boundaries when decoding tensor values. Ambiguous recursive schemas are rejected
-when the model is uploaded.
+Each ONNX input and output is exposed to veloFlux as one positional parameter. A scalar tensor is
+exposed as a scalar value; every other tensor is exposed as a flat one-dimensional list of scalar
+values. The ONNX element type and tensor shape remain model metadata used to construct and decode
+the actual tensor. Flattening does not change the model's multidimensional computation.
 
-`inputs` and `outputs` are ordered. SQL arguments follow the input order. Multiple outputs are
-returned by the `onnx(...)` SQL function as one struct value.
+SQL arguments follow the ONNX input order. Multiple outputs are returned by the `onnx(...)` SQL
+function as one struct value, with one field per ONNX output in output order.
 
-The schema is defined from veloFlux's data perspective. ONNX tensor shape and rank are not model
-API fields; the runtime validates the input values against the prepared graph when inference runs.
+The generated model metadata includes each input/output name, scalar element type, and tensor shape.
+The persisted API representation uses scalar columns or `list<scalar>` columns and does not expose
+nested tensor rank or dimensions as veloFlux schema.
+
+An input tensor may contain at most one symbolic dimension. Because veloFlux receives a non-scalar
+input as a flat list, it knows the total number of elements but not the individual dynamic
+dimensions. Therefore `[?, 3]` with six values can be reconstructed as `[2, 3]`, but `[?, ?]` or
+`[?, ?, 3]` is ambiguous. Such models are rejected during upload rather than being reshaped
+silently. This restriction comes from the flat veloFlux model boundary, not from ONNX itself.
 
 ## Read and delete models
 
@@ -64,15 +54,16 @@ Deleting a model referenced by a stored pipeline returns `409 Conflict`.
 Model names are immutable. Uploading another bundle with the same name returns `409 Conflict`; use
 a new name for a new model version or contract.
 
-Model metadata includes the name, revision, ONNX SHA-256, model size, `inputs`, `outputs`, and the
-test-vector count. The manager validates the bundle structure and schema, maintains the model
-metadata registry, and exposes lazy model preparation and row-based inference through `onnx(...)`.
+Model metadata includes the name, revision, ONNX SHA-256, model size, generated `inputs`, `outputs`,
+and the test-vector count. The manager validates the bundle structure and extracts the ONNX
+signature during upload, maintains the model metadata registry, and exposes lazy graph preparation
+and row-based inference through `onnx(...)`.
 
-When inference is enabled, model metadata is loaded during startup, while ONNX graphs are loaded
-on demand when a pipeline using the model starts. Multiple pipelines can share the same immutable
-prepared graph and model weights through the runtime cache. Each pipeline keeps its own inference
-row execution context, so errors from one pipeline do not affect another. The cache is keyed by
-model name, revision, and SHA-256.
+When inference is enabled, model metadata and the ONNX signature are loaded during startup, while
+the optimized executable graph is prepared on demand when a pipeline using the model starts.
+Multiple pipelines can share the same immutable prepared graph and model weights through the runtime
+cache. Each pipeline keeps its own inference row execution context, so errors from one pipeline do
+not affect another. The cache is keyed by model name, revision, and SHA-256.
 
 The runtime registry keeps only a weak cache entry for a prepared graph. Running pipelines own the
 strong references, so a graph remains in memory while at least one pipeline runtime uses it and is
@@ -81,7 +72,8 @@ do not retain prepared model graphs. Concurrent pipelines requesting the same mo
 share one preparation attempt; preparation of different models is independent.
 
 Runtime conversion supports bool, signed/unsigned integer, floating-point, and string scalar values.
-List and struct values are recursively flattened into tensor leaves for inputs and decoded back into
-the declared recursive schema for outputs. All model outputs are returned as one struct value.
+Flat list values are converted to tensor elements for inputs and tensor elements are returned as flat
+lists for outputs. Scalar tensors remain scalar values. All model outputs are returned as one struct
+value.
 Numeric conversions are strict: fractional, out-of-range, non-finite, or precision-losing values
 are rejected instead of being silently cast.

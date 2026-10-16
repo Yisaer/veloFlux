@@ -7,8 +7,6 @@ use tokio::time::timeout;
 use zip::ZipWriter;
 
 const MNIST_MODEL: &[u8] = include_bytes!("../../src/manager/src/model_testdata/mnist-8.onnx");
-const IDENTITY_MODEL: &[u8] =
-    include_bytes!("../../src/manager/src/model_testdata/identity-4.onnx");
 const EXPECTED_PROBABILITIES: [f32; 10] = [
     -1.0895445346832275,
     0.023687202483415604,
@@ -28,24 +26,7 @@ fn model_bundle() -> Vec<u8> {
     archive.start_file("mnist_8/model.onnx", options).unwrap();
     archive.write_all(MNIST_MODEL).unwrap();
     archive.start_file("mnist_8/model.yaml", options).unwrap();
-    archive
-        .write_all(
-            b"name: mnist_8
-inputs:
-  - name: image
-    data_type: list
-    element:
-      name: element
-      data_type: float32
-outputs:
-  - name: probabilities
-    data_type: list
-    element:
-      name: element
-      data_type: float32
-",
-        )
-        .unwrap();
+    archive.write_all(b"name: mnist_8\n").unwrap();
     for index in 1..=3 {
         archive
             .start_file(format!("mnist_8/test_vectors/input-{index}.json"), options)
@@ -60,6 +41,71 @@ outputs:
         archive.write_all(b"{}").unwrap();
     }
     archive.finish().unwrap().into_inner()
+}
+
+fn protobuf_varint(mut value: u64) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    while value >= 0x80 {
+        encoded.push((value as u8 & 0x7f) | 0x80);
+        value >>= 7;
+    }
+    encoded.push(value as u8);
+    encoded
+}
+
+fn protobuf_field(tag: u32, value: &[u8]) -> Vec<u8> {
+    let mut encoded = protobuf_varint((tag << 3 | 2) as u64);
+    encoded.extend(protobuf_varint(value.len() as u64));
+    encoded.extend(value);
+    encoded
+}
+
+fn protobuf_varint_field(tag: u32, value: u64) -> Vec<u8> {
+    let mut encoded = protobuf_varint((tag << 3) as u64);
+    encoded.extend(protobuf_varint(value));
+    encoded
+}
+
+fn identity_model(first_dimension: Vec<u8>, graph_name: &str) -> Vec<u8> {
+    fn string_field(tag: u32, value: &str) -> Vec<u8> {
+        protobuf_field(tag, value.as_bytes())
+    }
+
+    let fixed_dimension = protobuf_varint_field(1, 3);
+    let mut shape = protobuf_field(1, &first_dimension);
+    shape.extend(protobuf_field(1, &fixed_dimension));
+
+    let mut tensor_type = protobuf_varint_field(1, 1);
+    tensor_type.extend(protobuf_field(2, &shape));
+    let type_proto = protobuf_field(1, &tensor_type);
+    let mut input_info = string_field(1, "input");
+    input_info.extend(protobuf_field(2, &type_proto));
+    let mut output_info = string_field(1, "output");
+    output_info.extend(protobuf_field(2, &type_proto));
+
+    let mut node = string_field(1, "input");
+    node.extend(string_field(2, "output"));
+    node.extend(string_field(3, graph_name));
+    node.extend(string_field(4, "Identity"));
+
+    let mut graph = protobuf_field(1, &node);
+    graph.extend(string_field(2, graph_name));
+    graph.extend(protobuf_field(11, &input_info));
+    graph.extend(protobuf_field(12, &output_info));
+
+    let opset = protobuf_varint_field(2, 13);
+    let mut model = protobuf_varint_field(1, 8);
+    model.extend(protobuf_field(7, &graph));
+    model.extend(protobuf_field(8, &opset));
+    model
+}
+
+fn static_2x3_identity_model() -> Vec<u8> {
+    identity_model(protobuf_varint_field(1, 2), "static_2x3_identity")
+}
+
+fn dynamic_2x3_identity_model() -> Vec<u8> {
+    identity_model(protobuf_field(2, b"batch"), "dynamic_2x3_identity")
 }
 
 fn mnist_input() -> Vec<f32> {
@@ -90,57 +136,30 @@ async fn wait_for_model_prepared(
     panic!("model '{model_name}' did not reach prepared={expected}");
 }
 
-fn identity_model_bundle() -> Vec<u8> {
+fn identity_model_bundle(model_name: &str, model: &[u8]) -> Vec<u8> {
     let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
     let options = zip::write::SimpleFileOptions::default();
     archive
-        .start_file("identity_4/model.onnx", options)
+        .start_file(format!("{model_name}/model.onnx"), options)
         .unwrap();
-    archive.write_all(IDENTITY_MODEL).unwrap();
+    archive.write_all(model).unwrap();
     archive
-        .start_file("identity_4/model.yaml", options)
+        .start_file(format!("{model_name}/model.yaml"), options)
         .unwrap();
     archive
-        .write_all(
-            br#"name: identity_4
-inputs:
-  - name: pairs
-    data_type: list
-    cardinality: 2
-    element:
-      name: pair
-      data_type: struct
-      fields:
-        - name: left
-          data_type: float32
-        - name: right
-          data_type: float32
-outputs:
-  - name: pairs
-    data_type: list
-    cardinality: 2
-    element:
-      name: pair
-      data_type: struct
-      fields:
-        - name: left
-          data_type: float32
-        - name: right
-          data_type: float32
-"#,
-        )
+        .write_all(format!("name: {model_name}\n").as_bytes())
         .unwrap();
     for index in 1..=3 {
         archive
             .start_file(
-                format!("identity_4/test_vectors/input-{index}.json"),
+                format!("{model_name}/test_vectors/input-{index}.json"),
                 options,
             )
             .unwrap();
         archive.write_all(b"{}").unwrap();
         archive
             .start_file(
-                format!("identity_4/test_vectors/expected_output-{index}.json"),
+                format!("{model_name}/test_vectors/expected_output-{index}.json"),
                 options,
             )
             .unwrap();
@@ -346,9 +365,11 @@ async fn onnx_model_stream_pipeline_fvt() {
     .await
     .expect("timeout waiting for ONNX output");
     let actual: serde_json::Value = serde_json::from_slice(&payload).expect("decode output JSON");
-    let probabilities = actual[0]["result"]["probabilities"]
-        .as_array()
-        .expect("result.probabilities should be an array");
+    let probabilities = actual[0]["result"]
+        .as_object()
+        .and_then(|fields| fields.values().next())
+        .and_then(serde_json::Value::as_array)
+        .expect("result should contain one array output");
     assert_eq!(probabilities.len(), EXPECTED_PROBABILITIES.len());
     for (actual, expected) in probabilities.iter().zip(EXPECTED_PROBABILITIES) {
         let actual = actual.as_f64().expect("probability should be numeric") as f32;
@@ -445,8 +466,12 @@ async fn onnx_model_stream_pipeline_fvt() {
     server.abort();
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn onnx_composite_input_cardinality_fvt() {
+async fn run_flat_array_input_fvt(
+    model_name: &str,
+    model: Vec<u8>,
+    valid_values: &[f32],
+    invalid_values: &[f32],
+) {
     let temp_dir = tempfile::tempdir().expect("create temp dir");
     let storage = storage::StorageManager::new(temp_dir.path()).expect("create storage manager");
     let instance = manager::new_default_flow_instance();
@@ -465,8 +490,8 @@ async fn onnx_composite_input_cardinality_fvt() {
     let manager_base = format!("http://{addr}");
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let upload = reqwest::multipart::Part::bytes(identity_model_bundle())
-        .file_name("identity_4.zip")
+    let upload = reqwest::multipart::Part::bytes(identity_model_bundle(model_name, &model))
+        .file_name(format!("{model_name}.zip"))
         .mime_str("application/zip")
         .unwrap();
     let model_response = http
@@ -480,17 +505,12 @@ async fn onnx_composite_input_cardinality_fvt() {
     let stream_name = format!("onnx_identity_stream_{}", random_suffix());
     let output_topic = format!("onnx_identity_output_{}", random_suffix());
     let pipeline_id = format!("onnx_identity_pipeline_{}", random_suffix());
-    let composite_schema = serde_json::json!({
+    let array_schema = serde_json::json!({
         "name": "pairs",
         "data_type": "list",
-        "cardinality": 2,
         "element": {
-            "name": "pair",
-            "data_type": "struct",
-            "fields": [
-                {"name": "left", "data_type": "float32"},
-                {"name": "right", "data_type": "float32"}
-            ]
+            "name": "element",
+            "data_type": "float32"
         }
     });
     let stream_response = http
@@ -501,7 +521,7 @@ async fn onnx_composite_input_cardinality_fvt() {
             "type": "mock",
             "schema": {
                 "type": "json",
-                "props": {"columns": [composite_schema]}
+                "props": {"columns": [array_schema]}
             },
             "props": {},
             "shared": true,
@@ -509,7 +529,7 @@ async fn onnx_composite_input_cardinality_fvt() {
         }))
         .send()
         .await
-        .expect("create composite stream");
+        .expect("create flat array stream");
     assert_eq!(stream_response.status(), StatusCode::CREATED);
 
     let topic_response = http
@@ -532,7 +552,9 @@ async fn onnx_composite_input_cardinality_fvt() {
         .json(&serde_json::json!({
             "id": pipeline_id,
             "revision": 1,
-            "sql": format!("SELECT onnx('identity_4', pairs) AS result FROM {stream_name}"),
+            "sql": format!(
+                "SELECT onnx('{model_name}', pairs) AS result FROM {stream_name}"
+            ),
             "sinks": [{
                 "id": "identity_output",
                 "type": "memory",
@@ -553,7 +575,7 @@ async fn onnx_composite_input_cardinality_fvt() {
         .expect("start identity pipeline");
     assert_eq!(start_response.status(), StatusCode::OK);
 
-    let model_status = wait_for_model_prepared(&http, &manager_base, "identity_4", true).await;
+    let model_status = wait_for_model_prepared(&http, &manager_base, model_name, true).await;
     assert_eq!(model_status["prepare_count"], 1);
 
     // Send multiple independent rows through one runtime. A regression that prepares the
@@ -563,10 +585,7 @@ async fn onnx_composite_input_cardinality_fvt() {
             .send_shared_mock_stream_payload(
                 &stream_name,
                 serde_json::to_vec(&serde_json::json!({
-                    "pairs": [
-                        {"left": 1.0, "right": 2.0},
-                        {"left": 3.0, "right": 4.0}
-                    ]
+                    "pairs": valid_values
                 }))
                 .unwrap(),
             )
@@ -594,31 +613,25 @@ async fn onnx_composite_input_cardinality_fvt() {
     .expect("timeout waiting for repeated identity outputs");
     assert_eq!(repeated_outputs.len(), 16);
     for row in &repeated_outputs {
-        assert_eq!(
-            row["result"]["pairs"],
-            serde_json::json!([
-                {"left": 1.0, "right": 2.0},
-                {"left": 3.0, "right": 4.0}
-            ])
-        );
+        let result = row["result"]
+            .as_object()
+            .and_then(|fields| fields.values().next())
+            .expect("result should contain one ONNX output");
+        assert_eq!(result, &serde_json::json!(valid_values));
     }
-    let model_status = wait_for_model_prepared(&http, &manager_base, "identity_4", true).await;
+    let model_status = wait_for_model_prepared(&http, &manager_base, model_name, true).await;
     assert_eq!(model_status["prepare_count"], 1);
 
     injector
         .send_shared_mock_stream_payload(
             &stream_name,
             serde_json::to_vec(&serde_json::json!({
-                "pairs": [
-                    {"left": 1.0, "right": 2.0},
-                    {"left": 3.0, "right": 4.0},
-                    {"left": 5.0, "right": 6.0}
-                ]
+                "pairs": invalid_values
             }))
             .unwrap(),
         )
         .await
-        .expect("send invalid cardinality input");
+        .expect("send invalid flat array input");
     match timeout(Duration::from_millis(500), output.recv()).await {
         Err(_) => {}
         Ok(Ok(MemoryData::Bytes(payload))) => {
@@ -627,7 +640,7 @@ async fn onnx_composite_input_cardinality_fvt() {
             assert_eq!(actual, serde_json::json!([]));
         }
         Ok(Ok(MemoryData::Collection(_))) => {
-            panic!("invalid cardinality input produced a collection output")
+            panic!("invalid flat array input produced a collection output")
         }
         Ok(Err(error)) => panic!("output subscription failed: {error}"),
     }
@@ -636,15 +649,12 @@ async fn onnx_composite_input_cardinality_fvt() {
         .send_shared_mock_stream_payload(
             &stream_name,
             serde_json::to_vec(&serde_json::json!({
-                "pairs": [
-                    {"left": 1.0, "right": 2.0},
-                    {"left": 3.0, "right": 4.0}
-                ]
+                "pairs": valid_values
             }))
             .unwrap(),
         )
         .await
-        .expect("send valid cardinality input");
+        .expect("send valid flat array input");
     let payload = timeout(Duration::from_secs(10), async {
         loop {
             match output.recv().await.expect("receive output") {
@@ -656,13 +666,11 @@ async fn onnx_composite_input_cardinality_fvt() {
     .await
     .expect("timeout waiting for identity output");
     let actual: serde_json::Value = serde_json::from_slice(&payload).expect("decode output JSON");
-    assert_eq!(
-        actual[0]["result"]["pairs"],
-        serde_json::json!([
-            {"left": 1.0, "right": 2.0},
-            {"left": 3.0, "right": 4.0}
-        ])
-    );
+    let result = actual[0]["result"]
+        .as_object()
+        .and_then(|fields| fields.values().next())
+        .expect("result should contain one ONNX output");
+    assert_eq!(result, &serde_json::json!(valid_values));
 
     let stop_response = http
         .post(format!(
@@ -672,12 +680,12 @@ async fn onnx_composite_input_cardinality_fvt() {
         .await
         .expect("stop identity pipeline");
     assert_eq!(stop_response.status(), StatusCode::OK);
-    let model_status = wait_for_model_prepared(&http, &manager_base, "identity_4", false).await;
+    let model_status = wait_for_model_prepared(&http, &manager_base, model_name, false).await;
     assert_eq!(model_status["prepare_count"], 1);
     for (resource, path) in [
         ("pipeline", format!("/pipelines/{pipeline_id}")),
         ("stream", format!("/streams/{stream_name}")),
-        ("model", "/models/identity_4".to_string()),
+        ("model", format!("/models/{model_name}")),
     ] {
         let response = http
             .delete(format!("{manager_base}{path}"))
@@ -687,4 +695,26 @@ async fn onnx_composite_input_cardinality_fvt() {
         assert_eq!(response.status(), StatusCode::OK);
     }
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn onnx_static_2x3_flat_array_input_fvt() {
+    run_flat_array_input_fvt(
+        "identity_static_2x3",
+        static_2x3_identity_model(),
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        &[1.0, 2.0, 3.0, 4.0],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn onnx_dynamic_2x3_flat_array_input_fvt() {
+    run_flat_array_input_fvt(
+        "identity_dynamic_2x3",
+        dynamic_2x3_identity_model(),
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        &[1.0, 2.0, 3.0, 4.0],
+    )
+    .await;
 }
