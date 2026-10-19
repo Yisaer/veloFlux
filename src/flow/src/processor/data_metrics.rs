@@ -32,17 +32,6 @@ impl EncoderMetrics {
         )
     }
 
-    pub(crate) fn region(stats: &ProcessorStats) -> Self {
-        Self::register(
-            stats,
-            [
-                counter_spec!("region", "messages_out"),
-                counter_spec!("region", "messages_aborted"),
-                counter_spec!("region", "bytes_out"),
-            ],
-        )
-    }
-
     fn register(
         stats: &ProcessorStats,
         [messages_out, messages_aborted, bytes_out]: [MetricSpec; 3],
@@ -159,7 +148,6 @@ macro_rules! transform_specs {
 
 pub(crate) const SINK_COMPRESS_METRICS: TransformMetricSpecs = transform_specs!("sink_compress");
 pub(crate) const SINK_ENCRYPT_METRICS: TransformMetricSpecs = transform_specs!("sink_encrypt");
-pub(crate) const REGION_TRANSFORM_METRICS: TransformMetricSpecs = transform_specs!("region");
 
 impl TransformMetrics {
     pub(crate) fn new(stats: &ProcessorStats, specs: TransformMetricSpecs) -> Self {
@@ -262,7 +250,7 @@ macro_rules! data_specs {
 }
 
 pub(crate) const DATASOURCE_METRICS: DataMetricSpecs = data_specs!("datasource");
-pub(crate) const REGION_METRICS: DataMetricSpecs = data_specs!("region");
+pub(crate) const STAGE_METRICS: DataMetricSpecs = data_specs!("stage");
 pub(crate) const DECODER_METRICS: DataMetricSpecs = data_specs!("decoder");
 pub(crate) const SAMPLER_METRICS: DataMetricSpecs = data_specs!("sampler");
 pub(crate) const BARRIER_METRICS: DataMetricSpecs = data_specs!("barrier");

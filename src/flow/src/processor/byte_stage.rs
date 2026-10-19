@@ -88,6 +88,13 @@ impl ByteTransformStage {
         }
     }
 
+    pub(crate) fn metric_specs(&self) -> super::data_metrics::TransformMetricSpecs {
+        match self {
+            Self::Compress { .. } => super::data_metrics::SINK_COMPRESS_METRICS,
+            Self::Encrypt { .. } => super::data_metrics::SINK_ENCRYPT_METRICS,
+        }
+    }
+
     pub(crate) fn process(
         &mut self,
         flags: super::EncodedDeliveryFlags,

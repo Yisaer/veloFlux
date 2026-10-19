@@ -124,6 +124,8 @@ pub struct ServerOptions {
     pub cpu_profile_freq_hz: Option<i32>,
     /// Metrics polling interval in seconds (feature-gated); if None, uses default.
     pub metrics_poll_interval_secs: Option<u64>,
+    /// Enable synchronous stage handling-time histograms; defaults to false.
+    pub stage_handling_time_enabled: bool,
     /// Pipeline patrol scheduler interval in seconds. 0 disables.
     pub pipeline_patrol_interval_secs: Option<u64>,
     /// Declared flow instances loaded from config.
@@ -171,6 +173,7 @@ pub async fn init(
 ) -> Result<ServerContext, Box<dyn std::error::Error + Send + Sync>> {
     let init_phase = StartupPhase::new("manager", "default", "server_init", None);
     flow::init_process_once();
+    flow::processor::set_stage_handling_time_enabled(opts.stage_handling_time_enabled);
     instance.set_property_registry(opts.property_registry.clone());
     veloflux_metrics::set_default_flow_instance_id("default");
     log_allocator();

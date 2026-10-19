@@ -7,6 +7,15 @@ use std::time::Duration;
 use parking_lot::RwLock;
 use veloflux_metrics::{ChildCounter, ChildGauge, ChildHistogram};
 
+// Startup default only; each stage snapshots it before execution begins.
+static STAGE_HANDLING_TIME_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Configure handling-time collection for subsequently created stages.
+/// Call during process startup; existing stages retain their captured setting.
+pub fn set_stage_handling_time_enabled(enabled: bool) {
+    STAGE_HANDLING_TIME_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricKind {
@@ -33,7 +42,6 @@ struct MetricEntry {
     flat_name: &'static str,
     kind: MetricKind,
     value: AtomicU64,
-    enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -48,9 +56,6 @@ pub struct GaugeHandle {
 
 impl GaugeHandle {
     pub fn set(&self, value: u64) {
-        if !self.entry.enabled {
-            return;
-        }
         self.entry.value.store(value, Ordering::Relaxed);
         let prom_value = i64::try_from(value).unwrap_or(i64::MAX);
         let Some(gauge) = self.resolved_gauge() else {
@@ -86,11 +91,11 @@ impl GaugeHandle {
 
 /// Bundle of cached prometheus child handles for the standard processor metrics.
 /// Resolved once when `pipeline_id` is first known; after that the per-batch
-/// record path does a plain atomic add / histogram observe with no label-map lookup.
+/// record path does a plain atomic add with no label-map lookup.
+/// Duration histograms are bound independently, only when timing is recorded.
 #[derive(Debug)]
 struct BoundMetrics {
     error_counter: ChildCounter,
-    handle_duration: ChildHistogram,
     backpressure_counter: ChildCounter,
 }
 
@@ -104,10 +109,6 @@ impl BoundMetrics {
                         veloflux_metrics::processor_errors_total(),
                         &labels,
                     ),
-                    handle_duration: ChildHistogram::bind(
-                        veloflux_metrics::processor_handle_duration_seconds(),
-                        &labels,
-                    ),
                     backpressure_counter: ChildCounter::bind(
                         veloflux_metrics::processor_send_backpressure_waits_total(),
                         &labels,
@@ -119,10 +120,6 @@ impl BoundMetrics {
                 Self {
                     error_counter: ChildCounter::bind(
                         veloflux_metrics::shared_stream_processor_errors_total(),
-                        &labels,
-                    ),
-                    handle_duration: ChildHistogram::bind(
-                        veloflux_metrics::shared_stream_processor_handle_duration_seconds(),
                         &labels,
                     ),
                     backpressure_counter: ChildCounter::bind(
@@ -147,9 +144,6 @@ pub struct CounterHandle {
 
 impl CounterHandle {
     pub fn inc_by(&self, delta: u64) {
-        if !self.entry.enabled {
-            return;
-        }
         self.entry.value.fetch_add(delta, Ordering::Relaxed);
         let Some(counter) = self.resolved_counter() else {
             return;
@@ -184,7 +178,6 @@ impl CounterHandle {
 
 #[derive(Debug)]
 pub struct ProcessorStats {
-    error_parent: Option<Arc<ProcessorStats>>,
     flow_instance_id: Arc<str>,
     processor_id: Arc<str>,
     kind: Arc<str>,
@@ -205,6 +198,8 @@ pub struct ProcessorStats {
     /// Resolved lazily on the first record call that observes a set `pipeline_id`;
     /// the labels are fixed for the lifetime of this processor.
     bound_metrics: OnceLock<BoundMetrics>,
+    handle_duration: OnceLock<ChildHistogram>,
+    handling_time_enabled: bool,
     /// Row counters are bound independently from the generic processor metrics so processors
     /// without a collection boundary never create zero-valued Prometheus row series.
     records_in_counter: OnceLock<ChildCounter>,
@@ -224,7 +219,6 @@ impl ProcessorStats {
         kind: impl Into<Arc<str>>,
     ) -> Self {
         Self {
-            error_parent: None,
             flow_instance_id: flow_instance_id.into(),
             processor_id: processor_id.into(),
             kind: kind.into(),
@@ -242,19 +236,19 @@ impl ProcessorStats {
             last_error: RwLock::new(None),
             metrics: RwLock::new(BTreeMap::new()),
             bound_metrics: OnceLock::new(),
+            handle_duration: OnceLock::new(),
+            handling_time_enabled: true,
             records_in_counter: OnceLock::new(),
             records_out_counter: OnceLock::new(),
         }
     }
 
-    /// Error context for shared engines, without stage performance metrics.
-    pub(crate) fn stage_diagnostics(parent: Arc<Self>, stage_id: &str) -> Self {
-        let mut stats = Self::new(Arc::clone(&parent.flow_instance_id), stage_id, "stage");
-        stats.pipeline_id = Arc::clone(&parent.pipeline_id);
-        stats.stream_name = Arc::clone(&parent.stream_name);
-        stats.revision = Arc::clone(&parent.revision);
-        stats.error_parent = Some(parent);
-        stats
+    pub(crate) fn configure_stage_handling_time(&mut self) {
+        self.handling_time_enabled = STAGE_HANDLING_TIME_ENABLED.load(Ordering::Relaxed);
+    }
+
+    pub(crate) fn handling_time_enabled(&self) -> bool {
+        self.handling_time_enabled
     }
 
     fn bound_metrics(&self) -> Option<&BoundMetrics> {
@@ -433,7 +427,6 @@ impl ProcessorStats {
                 flat_name: spec.flat_name,
                 kind: spec.kind,
                 value: AtomicU64::new(0),
-                enabled: self.error_parent.is_none(),
             })
         });
 
@@ -519,10 +512,6 @@ impl ProcessorStats {
 
     pub fn record_error_count(&self, count: u64, message: impl Into<String>) {
         let message: String = message.into();
-        if let Some(parent) = &self.error_parent {
-            parent.record_error_count(count, format!("{}: {}", self.processor_id, message));
-            return;
-        }
         self.error_count.fetch_add(count, Ordering::Relaxed);
         if let Some(bound) = self.bound_metrics() {
             bound.error_counter.inc_by(count);
@@ -532,14 +521,23 @@ impl ProcessorStats {
     }
 
     pub fn record_handle_duration(&self, duration: Duration) {
-        // Note: The semantic boundary of "handle duration" is defined by each processor.
-        // - For processors that send outputs inline (awaiting downstream backpressure), the
-        //   recommended definition is end-to-end wall time including the send wait.
-        // - For processors that enqueue/update local state and emit asynchronously, the recommended
-        //   definition is local work time only, excluding any later flush/send work.
-        if let Some(bound) = self.bound_metrics() {
-            bound.handle_duration.observe(duration.as_secs_f64());
+        if !self.handling_time_enabled {
+            return;
         }
+        let Some(scope) = self.metric_scope.get() else {
+            return;
+        };
+        let histogram = self.handle_duration.get_or_init(|| match scope {
+            ProcessorMetricScope::Pipeline { pipeline_id } => ChildHistogram::bind(
+                veloflux_metrics::processor_handle_duration_seconds(),
+                &[&self.flow_instance_id, pipeline_id, &self.processor_id],
+            ),
+            ProcessorMetricScope::SharedStream { stream_name } => ChildHistogram::bind(
+                veloflux_metrics::shared_stream_processor_handle_duration_seconds(),
+                &[&self.flow_instance_id, stream_name, &self.processor_id],
+            ),
+        });
+        histogram.observe(duration.as_secs_f64());
     }
 
     pub fn record_send_backpressure_wait_tick(&self) {

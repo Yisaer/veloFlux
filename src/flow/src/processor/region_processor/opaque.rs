@@ -48,8 +48,6 @@ pub(super) struct OpaqueDriver {
     pub(super) output: LinkOutput<StreamData>,
     pub(super) control_output: LinkOutput<ControlSignal>,
     pub(super) capacities: ProcessorChannelCapacities,
-    pub(super) stats: Arc<ProcessorStats>,
-    pub(super) metrics: Arc<RegionMetrics>,
     pub(super) spawner: TaskSpawner,
     pub(super) id: String,
 }
@@ -63,8 +61,6 @@ impl OpaqueDriver {
             output,
             control_output,
             capacities,
-            stats,
-            metrics,
             spawner,
             id,
         } = self;
@@ -89,7 +85,7 @@ impl OpaqueDriver {
                             // Encoder control termination flushes before control;
                             // samplers and native batching flush after forwarding.
                             if terminal && matches!(stage.engine, CollectionStage::Encoder(_)) {
-                                stage = run_event(stage, EventWork::Finish, &spawner, &stats, &metrics, &output, capacities.data).await?;
+                                stage = run_event(stage, EventWork::Finish, &spawner, &output, capacities.data).await?;
                             }
                             send_control_with_backpressure(&control_output, capacities.control, signal).await?;
                             if terminal { (Event::Finish, true) } else { continue; }
@@ -100,7 +96,7 @@ impl OpaqueDriver {
                             continue;
                         }
                         None => {
-                            if stage.strict_input_closure { return Err(stage.channel_closed(&stats, "control")); }
+                            if stage.strict_input_closure { return Err(stage.channel_closed("control")); }
                             control_active = false;
                             continue;
                         }
@@ -117,12 +113,12 @@ impl OpaqueDriver {
                             (Event::Data(item), terminal)
                         }
                         Some(Ok(IndexedInput::Closed)) => {
-                            if stage.strict_input_closure { return Err(stage.channel_closed(&stats, "data")); }
+                            if stage.strict_input_closure { return Err(stage.channel_closed("data")); }
                             continue;
                         }
                         Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
                             if stage.fatal_data_lag {
-                                stage.stats.as_deref().unwrap_or(&stats).record_error_logged("region data input lag", format!("data input skipped {skipped} items"));
+                                stage.input_lagged(skipped);
                                 return Err(ProcessorError::ChannelClosed);
                             }
                             log_broadcast_lagged(&id, skipped, "opaque region data input");
@@ -138,16 +134,7 @@ impl OpaqueDriver {
                 Event::Finish => EventWork::Finish,
                 Event::Closed => EventWork::Closed,
             };
-            stage = run_event(
-                stage,
-                work,
-                &spawner,
-                &stats,
-                &metrics,
-                &output,
-                capacities.data,
-            )
-            .await?;
+            stage = run_event(stage, work, &spawner, &output, capacities.data).await?;
             if terminal {
                 return Ok(());
             }
@@ -166,51 +153,30 @@ async fn run_event(
     stage: Stage,
     work: EventWork,
     spawner: &TaskSpawner,
-    stats: &Arc<ProcessorStats>,
-    metrics: &Arc<RegionMetrics>,
     output: &LinkOutput<StreamData>,
     capacity: usize,
 ) -> Result<Stage, ProcessorError> {
-    let worker_stats = Arc::clone(stats);
-    let worker_metrics = Arc::clone(metrics);
     let (mut stage, mut pending) = blocking(spawner, worker_slots(), move || {
         let mut stage = stage;
-        let started = std::time::Instant::now();
         let result = match work {
-            EventWork::Data(data) => worker_metrics
-                .record_input(&worker_stats, &data)
-                .and_then(|()| stage.process(data, &worker_stats))
-                .map(Some),
-            EventWork::Timer(event) => stage.on_timer(event, &worker_stats).map(Some),
-            EventWork::Finish => Ok(stage.finish_input(&worker_stats)),
-            EventWork::Closed => stage.input_closed(&worker_stats),
+            EventWork::Data(data) => stage.process(data).map(Some),
+            EventWork::Timer(event) => stage.on_timer(event).map(Some),
+            EventWork::Finish => Ok(stage.finish_input()),
+            EventWork::Closed => stage.input_closed(),
         };
-        worker_stats.record_handle_duration(started.elapsed());
         result.map(|pending| (stage, pending))
     })
     .await??;
     while let Some(mut emission) = pending.take() {
-        let worker_stats = Arc::clone(stats);
-        let worker_metrics = Arc::clone(metrics);
         let (returned_stage, returned_emission, next) =
             blocking(spawner, worker_slots(), move || {
                 let mut stage = stage;
-                let started = std::time::Instant::now();
-                let result = stage
-                    .next_output(&mut emission, &worker_stats, &worker_metrics)
-                    .and_then(|data| {
-                        data.map(|data| {
-                            let measurement = worker_metrics.measure(&data)?;
-                            Ok((data, measurement))
-                        })
-                        .transpose()
-                    });
-                worker_stats.record_handle_duration(started.elapsed());
+                let result = stage.next_output(&mut emission);
                 result.map(|next| (stage, emission, next))
             })
             .await??;
         stage = returned_stage;
-        let Some((data, measurement)) = next else {
+        let Some(data) = next else {
             break;
         };
         let flags = match &data {
@@ -218,25 +184,22 @@ async fn run_event(
             _ => None,
         };
         pending = Some(returned_emission);
-        if let Err(error) = send_with_backpressure(output, capacity, data, Some(stats)).await {
-            if let (
-                CollectionStage::Encoder(engine),
-                Some(flags),
-                Some(StageOutput::Encoder(emission)),
-            ) = (&mut stage.engine, flags, &mut pending)
-            {
-                engine.output_failed(flags);
-                emission.output_failed();
-                stage
-                    .stats
-                    .as_deref()
-                    .unwrap_or(stats)
-                    .record_error_logged("region encoder send error", error.to_string());
+        if let Err(error) = send_with_backpressure(output, capacity, data, None).await {
+            let (returned_stage, returned_pending, recovered) =
+                blocking(spawner, worker_slots(), move || {
+                    let mut stage = stage;
+                    let mut pending = pending;
+                    let recovered = stage.output_failed(flags, pending.as_mut());
+                    (stage, pending, recovered)
+                })
+                .await?;
+            stage = returned_stage;
+            pending = returned_pending;
+            if recovered {
                 continue;
             }
             return Err(error);
         }
-        metrics.record_output(stats, measurement)?;
     }
     Ok(stage)
 }

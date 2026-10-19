@@ -50,6 +50,7 @@ The following fixed environment variables are recognized:
 | `profiling.enabled` | `VELOFLUX_PROFILING__ENABLED` |
 | `profiling.addr` | `VELOFLUX_PROFILING__ADDR` |
 | `profiling.cpu_profile_freq_hz` | `VELOFLUX_PROFILING__CPU_PROFILE_FREQ_HZ` |
+| `metrics.stage_handling_time_enabled` | `VELOFLUX_METRICS__STAGE_HANDLING_TIME_ENABLED` |
 | `metrics.poll_interval_secs` | `VELOFLUX_METRICS__POLL_INTERVAL_SECS` |
 | `server.manager_addr` | `VELOFLUX_SERVER__MANAGER_ADDR` |
 

@@ -23,29 +23,22 @@ pub(crate) struct EncryptDelivery {
 pub(crate) struct DeliveryStep {
     pub(crate) output: Option<StreamData>,
     pub(crate) error: Option<ProcessorError>,
-    pub(crate) aborted: bool,
 }
 impl DeliveryStep {
     fn output(output: Option<StreamData>) -> Self {
         Self {
             output,
             error: None,
-            aborted: false,
         }
     }
     fn error(output: Option<StreamData>, error: ProcessorError) -> Self {
         Self {
             output,
             error: Some(error),
-            aborted: false,
         }
     }
     fn aborted(output: Option<StreamData>, error: Option<ProcessorError>) -> Self {
-        Self {
-            output,
-            error,
-            aborted: true,
-        }
+        Self { output, error }
     }
 }
 

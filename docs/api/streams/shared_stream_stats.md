@@ -11,14 +11,14 @@ pipeline. A simple ingest runtime has this task graph:
 
 ```text
 shared:<stream>/PhysicalDataSource_0
-  -> shared:<stream>/Region_1
+  -> shared:<stream>/PhysicalDecoder_1
   -> shared:<stream>/PhysicalResultCollect_2
 ```
 
-The semantic decoder is executed by `Region_1` in this simple example. Larger shared ingest
-plans can fuse more stages into a region; its ID uses the output stage index. Stage metrics are
-not exported separately. Region counters describe external input/output domains, while independent
-sources and result collection retain their own counters.
+The decoder stage may share a region task with other eligible stages. Metrics remain
+attached to each semantic stage; region tasks expose no stats entry. Retained channel
+waits and send errors are exposed through separate transport entries, and pipeline link
+gauges appear under `pipeline_transport`.
 
 These processors are the true runtime boundary for:
 
@@ -35,7 +35,7 @@ This becomes a real observability gap once one shared stream is consumed by many
 - pipeline stats are duplicated per consumer pipeline
 - pipeline stats do not describe the shared ingest runtime as a first-class object
 - operators cannot independently inspect shared processors such as
-  `shared:<stream>/PhysicalDataSource_*` or `shared:<stream>/Region_*`
+  `shared:<stream>/PhysicalDataSource_*` or `shared:<stream>/PhysicalDecoder_*`
 
 ## Problem Statement
 
@@ -46,7 +46,7 @@ The missing observability target is not the per-pipeline `PhysicalSharedStream_*
 Instead, it is the internal shared ingest processors:
 
 - `shared:<stream>/PhysicalDataSource_*`
-- `shared:<stream>/Region_*`
+- `shared:<stream>/PhysicalDecoder_*`
 - `shared:<stream>/PhysicalResultCollect_*`
 
 ## Why Stream-Level Stats Only Make Sense For Shared Streams
@@ -147,7 +147,7 @@ Suggested response:
       }
     },
     {
-      "processor_id": "shared:shared_demo/Region_1",
+      "processor_id": "shared:shared_demo/PhysicalDecoder_1",
       "stats": {
         "messages_in": 100,
         "bytes_in": 2400,

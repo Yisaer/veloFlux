@@ -256,7 +256,7 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
     let sampler_handle = pipeline
         .processor_stats()
         .into_iter()
-        .find(|handle| handle.processor_id.starts_with("Region_"))
+        .find(|handle| handle.processor_id.contains("PhysicalSampler"))
         .expect("sampler stats should exist");
     for _ in 0..20 {
         if sampler_handle.snapshot().stats.custom["messages_in"] == 5 {
@@ -680,7 +680,7 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
     let sampler_handle = pipeline
         .processor_stats()
         .iter()
-        .find(|handle| handle.processor_id.starts_with("Region_"))
+        .find(|handle| handle.processor_id.contains("PhysicalSampler"))
         .cloned()
         .expect("sampler stats should exist");
 

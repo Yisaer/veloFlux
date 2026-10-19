@@ -237,13 +237,13 @@ fn wait_for_buffered_sampler_input(client: &ApiClient, pipeline_id: &str) {
         if let Some(stats) = client.get_pipeline_stats(pipeline_id) {
             let matched = stats.as_array().is_some_and(|processors| {
                 processors.iter().any(|processor| {
-                    let is_region = processor
+                    let is_sampler = processor
                         .get("processor_id")
                         .and_then(Value::as_str)
                         .is_some_and(|id| {
                             id.rsplit('/')
                                 .next()
-                                .is_some_and(|id| id.starts_with("Region_"))
+                                .is_some_and(|id| id.contains("PhysicalSampler"))
                         });
                     let messages_in = processor
                         .pointer("/stats/messages_in")
@@ -259,7 +259,7 @@ fn wait_for_buffered_sampler_input(client: &ApiClient, pipeline_id: &str) {
                     ]
                     .iter()
                     .all(|field| processor["stats"][*field].as_u64().unwrap_or(0) == 0);
-                    is_region
+                    is_sampler
                         && messages_in == Some(11)
                         && bytes_in.is_some_and(|value| value > 0)
                         && no_output
@@ -378,7 +378,7 @@ fn decodes_and_packs_busmirror_end_to_end() {
     for frame in frames {
         publisher.publish(&packer_input, frame);
     }
-    // Use the ingest region input count as a delivery barrier before a graceful
+    // Use the sampler input count as a delivery barrier before a graceful
     // stop. The long interval prevents a wall-clock tick from splitting the
     // MQTT burst, while messages_in=11 proves that all separate messages have
     // reached the same packer window. Graceful stop then exercises the

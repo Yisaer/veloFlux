@@ -35,6 +35,7 @@ impl Default for AppConfig {
                 cpu_profile_freq_hz: None,
             },
             metrics: MetricsConfig {
+                stage_handling_time_enabled: false,
                 poll_interval_secs: None,
             },
             server: ServerConfig::default(),
@@ -207,12 +208,14 @@ pub struct ProfilingConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct MetricsConfig {
+    pub stage_handling_time_enabled: bool,
     pub poll_interval_secs: Option<u64>,
 }
 
 impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
+            stage_handling_time_enabled: false,
             poll_interval_secs: Some(15),
         }
     }
@@ -298,6 +301,7 @@ impl AppConfig {
         if let Some(secs) = self.metrics.poll_interval_secs {
             opts.metrics_poll_interval_secs = Some(secs);
         }
+        opts.stage_handling_time_enabled = self.metrics.stage_handling_time_enabled;
         opts.pipeline_patrol_interval_secs = Some(self.server.pipeline_patrol_interval_secs);
         if let Some(addr) = self.server.manager_addr.as_ref() {
             opts.manager_addr = Some(addr.clone());
@@ -416,6 +420,7 @@ server:
         assert_eq!(opts.manager_addr.as_deref(), Some("127.0.0.1:9999"));
         assert!(opts.profile_addr.is_none());
         assert!(opts.metrics_poll_interval_secs.is_none());
+        assert!(!opts.stage_handling_time_enabled);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -433,6 +438,7 @@ server:
         env.set(ENV_LOGGING_SYSLOG_ADDRESS, "/var/run/syslog");
         env.set(ENV_PROFILING_ADDR, "127.0.0.1:16060");
         env.set(ENV_METRICS_POLL_INTERVAL_SECS, "30");
+        env.set("VELOFLUX_METRICS__STAGE_HANDLING_TIME_ENABLED", "true");
         env.set(ENV_SERVER_MANAGER_ADDR, "127.0.0.1:18080");
 
         let cfg = AppConfig::load_default_with_env().unwrap();
@@ -447,6 +453,7 @@ server:
         assert_eq!(cfg.logging.syslog.address, "/var/run/syslog");
         assert_eq!(cfg.profiling.addr.as_deref(), Some("127.0.0.1:16060"));
         assert_eq!(cfg.metrics.poll_interval_secs, Some(30));
+        assert!(cfg.to_server_options().stage_handling_time_enabled);
         assert_eq!(cfg.server.manager_addr.as_deref(), Some("127.0.0.1:18080"));
     }
 
@@ -458,6 +465,7 @@ profiling:
   addr: "127.0.0.1:6060"
 metrics:
   poll_interval_secs: 2
+  stage_handling_time_enabled: true
 "#;
         let path = unique_temp_path("addr");
         std::fs::write(&path, yaml).unwrap();
@@ -466,6 +474,7 @@ metrics:
         let opts = cfg.to_server_options();
         assert_eq!(opts.profile_addr.as_deref(), Some("127.0.0.1:6060"));
         assert_eq!(opts.metrics_poll_interval_secs, Some(2));
+        assert!(opts.stage_handling_time_enabled);
 
         let _ = std::fs::remove_file(&path);
     }

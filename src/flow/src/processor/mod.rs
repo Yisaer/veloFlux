@@ -42,7 +42,6 @@ pub(crate) mod pipeline_state_runtime;
 pub mod processor_builder;
 pub mod processor_state;
 pub mod project_processor;
-mod region_metrics;
 pub(crate) mod region_processor;
 #[cfg(test)]
 mod region_reference_tests;
@@ -59,6 +58,7 @@ pub(crate) mod sliding_window_runtime;
 pub(crate) mod sliding_window_stage;
 pub mod source_change_gate_processor;
 pub(crate) mod stage_clock;
+mod stage_metrics;
 pub mod state_window_processor;
 pub mod stateful_function_processor;
 pub mod stats;
@@ -109,8 +109,8 @@ pub use source_change_gate_processor::SourceChangeGateProcessor;
 pub use state_window_processor::StateWindowProcessor;
 pub use stateful_function_processor::StatefulFunctionProcessor;
 pub use stats::{
-    CounterHandle, GaugeHandle, MetricKind, MetricSpec, ProcessorStats, ProcessorStatsEntry,
-    ProcessorStatsHandle, ProcessorStatsSnapshot,
+    set_stage_handling_time_enabled, CounterHandle, GaugeHandle, MetricKind, MetricSpec,
+    ProcessorStats, ProcessorStatsEntry, ProcessorStatsHandle, ProcessorStatsSnapshot,
 };
 pub use stream_data::{
     BarrierControlSignal, BarrierControlSignalKind, ControlSignal, EncodedDeliveryFlags,

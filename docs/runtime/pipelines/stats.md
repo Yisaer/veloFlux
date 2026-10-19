@@ -72,32 +72,45 @@ first observed data variant. Receiving data outside the planned domain is a pipe
 Conversion boundaries deliberately expose different units by direction. A decoder declares
 message/byte input and collection/row output. An encoder declares collection/row input and
 message/byte output; it does not expose `records_out` because rows are not its output domain.
-Encoded regions count `messages_aborted` once per delivery even when several constituent
-stages fail. Stage errors contribute to the region error count, and the last error retains
-the physical stage name. Encoder output is an internal handoff when compression/encryption
-follows it; those bytes do not inflate the region's final output counters.
+Stages, including those sharing a region task, expose individual `ProcessorStats` entries
+using their physical stage identities (`PhysicalFilter_<index>`, `PhysicalDecoder_<index>`,
+and so on). Shared-stream stages retain the `shared:<stream>/` prefix. Region tasks
+(`Region_<output-plan-index>`) are execution containers and expose no metric entry,
+traffic counters, duration histogram, or error aggregate.
 
-Supported stages, including singletons, run in tasks with kind `region` and ID
-`Region_<output-plan-index>`. Region counters measure actual input and successfully
-forwarded output in the corresponding message/byte or collection/row domain; eliminated
-internal handoffs do not count as region traffic. Constituent stages do not expose stats
-entries, traffic counters, duration histograms, or buffer gauges. Shared engines retain a
-stage error context that logs the physical stage identity and forwards errors to the
-region. Their optional internal metric handles are disabled inside regions. Independent
-source and sink processors retain their own metrics; an eligible stage running alone uses
-the same region metrics as a multi-stage region.
+Each stage owns its input/output counters, error count and last error, applicable buffer
+gauges, and optional handling-duration histogram. Stage handling time is disabled
+by default. Set `metrics.stage_handling_time_enabled: true` in the server configuration
+(or `VELOFLUX_METRICS__STAGE_HANDLING_TIME_ENABLED=true`) before startup to enable it.
+The process-wide default is captured when each stage is built; active stages do not
+change settings. When disabled, stage callbacks skip clock reads and histogram updates,
+and no handling-time series is bound for that stage. Counters, errors, and gauges remain
+enabled. Existing standalone source/sink adapter timing is unaffected.
 
-Region handling durations include synchronous engine and executor work, including Barrier
-alignment on both data and control lanes, timer, control pre-flush, terminal and EOF callbacks. Callbacks that produce no output or return
-an error still contribute their synchronous time. External output waits and cooperative
-yields are excluded. Output counters advance only after
-successful external sends. Pipeline link gauges count retained external connections.
-The historical `fused_transform` production kind has been removed; sink connectors retain
-kind `sink`.
+Shared synchronous engines receive that stage's stats handle in both standalone and fused execution. Handling durations include process,
+incremental extraction, timer, control flush, terminal, EOF, and Barrier alignment work.
+They exclude downstream stages, output-channel waits, and cooperative executor yields.
+Callbacks returning no output or an error still contribute handling time. No per-stage
+tracing span is entered for each invocation; errors carry the stage identity.
+
+Stage output counts describe results produced for the next stage, including an extracted
+result waiting at a full external channel. They do not imply channel acceptance or sink
+delivery. Encoder and each byte transform count their own bytes and delivery outcomes;
+abort counts are local to each stage, not deduplicated across an entire region. Sink
+connector metrics remain the authority for successful external delivery.
+
+Transport instrumentation belongs to `LinkOutput`. `Transport_<region-id>_data` and
+`Transport_<region-id>_control` entries expose `send_backpressure_waits` and send errors.
+For mpsc, a wait counts an attempted send to a full queue; for broadcast it counts each
+cooperative backoff tick. A failed send is counted per failed attempt, including a later
+terminal forwarding attempt. Inline edges have no channel and no transport metrics.
+`pipeline_transport` exposes the build-time `mpsc_links` and `broadcast_links` gauges.
+Standalone adapters retain their existing send-helper instrumentation; region drivers
+pass no processor stats to transport helpers and never update stage counters themselves.
+
 See [Fixed Execution Regions](../../planner/optimize/physical/execution_regions.md).
 A [planned semantic-metrics follow-up](../../planner/optimize/physical/execution_regions.md#planned-follow-up-selective-semantic-stage-metrics)
-describes selective filter/drop/window effects without restoring generic per-stage
-performance monitoring; these semantic counters are not implemented yet.
+describes additional effect/reason counters beyond the restored stage input/output metrics.
 
 Every sink declares message output. A collection-native sink declares collection/row input and
 message output; retaining a collection as the payload representation does not turn the sink output
@@ -172,9 +185,9 @@ Manager filters out some internal processors before returning pipeline stats:
 - `PhysicalResultCollect_*`
 
 The goal is to keep the payload focused on user-meaningful runtime work instead of framework
-bookends. Tests should assert external traffic on runtime regions and independent source/sink
-processors. Use the execution plan to identify the region owning a semantic stage; do not expect
-separate decoder, project, watermark, or sampler stats entries.
+bookends. Tests should assert processing on semantic stages and delivery on independent sink
+processors. Stage entries use semantic physical identities independently of region placement.
+Transport entries describe retained channels.
 
 ## Error Reporting
 

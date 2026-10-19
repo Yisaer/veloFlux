@@ -27,7 +27,7 @@ Nodes still missing an adapter retain their standalone processor during migratio
 
 Fan-out output edges and fan-in input edges remain external. Shared stages are counted
 by physical plan index and execute once. Repeated graph traversal does not create a
-second region for a shared stage. Collection input/output metrics measure actual region
+second region for a shared stage. Collection input/output metrics measure semantic stage
 boundaries; eliminated internal links do not contribute to pipeline link counts.
 
 `RegionProcessor` drives synchronous engines and awaits only its external input/output
@@ -68,10 +68,9 @@ For tumbling windows, data-lane graceful end drains all buffered windows before 
 the terminal event. Data-lane quick end and control-lane terminal events discard pending
 window state.
 Control-lane terminal events retain their own lane. Incremental aggregation row errors
-remain recoverable; finalization errors remain fatal. Collection output metrics are
-published after successful sends, including standalone tumbling/count aggregation. Region
-handle duration excludes time awaiting external sends; backpressure is recorded by
-the shared transport helper.
+remain recoverable; finalization errors remain fatal. In region execution, the producing
+stage records each extracted collection before transport waits. Stage handling duration
+excludes external sends; backpressure is recorded by the shared transport helper.
 
 CountWindow and count-only BatchProcessor share `CountWindowStage`. It moves owned rows
 into per-partition deques, preserving partition insertion order across the whole input,
@@ -205,67 +204,44 @@ explicitly register an inline contract. Replacing a builtin name with an ordinar
 registration removes that contract. Event-time parsers likewise default to isolation and
 builtin parsers opt in; the decoder stage inherits the parser's contract.
 
-The region records traffic only at external boundaries, in their declared data domains.
-Only the region exposes performance stats. Constituent stages do not record traffic or
-handling-duration metrics. Shared engine metric handles are disabled inside regions;
-standalone processor adapters retain their normal instrumentation. Stage error contexts
-preserve physical identities in logs and the region's last error, while contributing to
-the region error count. Final output counters advance after a successful external send.
+Each semantic stage owns its `ProcessorStats`, declared input/output domains, handling
+duration, errors, and engine-specific counters/gauges. These handles are exported under
+physical stage IDs, including stages inside a multi-stage region. A stage records its
+output when it produces/extracts a result; downstream backpressure cannot advance the
+remaining cursor, but the extracted result is already reflected in its output counter.
+
+Regions own scheduling and transport progression only. They do not create, aggregate,
+or update metrics. The opaque worker transport calls the same instrumented stage methods
+without timing its worker acquisition, queue wait, output wait, or downstream execution.
+The final sink accounts successful external delivery. `LinkOutput` owns instrumentation
+for retained output channels, and the builder exposes their transport stats separately.
+Pipeline connection gauges are exposed under `pipeline_transport`.
+
+Stage timing includes synchronous process, extraction, timer, control flush, lifecycle,
+and Barrier alignment callbacks, including callbacks returning no result or an error.
+Clock scheduling, executor bookkeeping, channel waits, and cooperative yields are outside
+stage handling time. Ordinary immediate outputs have no extra extraction timing sample.
+There are no per-invocation stage tracing spans.
+
+Stage handling-time histograms are opt-in through
+`metrics.stage_handling_time_enabled` (default `false`). Counters, errors, and gauges
+remain enabled. Stages capture the process-wide setting at construction; disabled
+callbacks perform no metric clock reads or histogram observations. Histogram handles
+are bound only when a duration is actually recorded.
 
 ### Planned follow-up: selective semantic stage metrics
 
-This is follow-up design, not functionality implemented by the current PR. Keep CPU/handle
-duration, transport traffic and backpressure at region boundaries. Add stage metrics only
-when they explain a semantic effect that those boundaries cannot reveal. Do not restore
-full input/output counters or histograms for every stage.
+Normal stage input/output, errors, buffer gauges and handling durations are implemented.
+Further semantic counters remain follow-up work: distinguish predicate rejection from
+error drops, sampler replacement from merging, and aggregation reduction from loss.
+Publish these effects through the existing stage stats rather than adding region metrics
+or another snapshot hierarchy. Define row/message/window/byte units explicitly.
 
-| Stage behavior | Proposed semantic observation | Avoid |
-| --- | --- | --- |
-| Ordinary successful passthrough, Project, Compute, Order | No normal-flow stage counters; an applicable error-drop counter may update only on failure | Repeating identical input/output row counts |
-| Filter | Rows examined, rejected by predicate, and dropped by evaluation/type error; derive rows kept and selectivity | Treating all missing output as predicate rejection |
-| EmptySuppress / change gate | Suppressed collections or rows in the stage's actual unit | Assuming an empty field set means zero rows |
-| Latest sampler / packer | Superseded inputs or merged inputs and emitted samples, with distinct semantics | Calling every merged or still-buffered input a drop |
-| Window / aggregation | Consumed rows, completed windows/groups/results and, if operationally needed, buffered state | Calling grouping reduction or overlapping-window duplication a filter |
-| Decoder / encoder / byte transform | Only selected conversion/error/size effects with explicit units | Subtracting bytes, rows and messages as if interchangeable |
-
-For a Filter that examines 100 rows, rejects 20 predicates and drops 3 rows because
-expression evaluation fails, expose `examined=100`, `predicate_rejected=20` and
-`error_dropped=3`; derive `kept=77`. Error events and dropped rows are different units.
-A completely filtered collection still publishes its effect even though it has no output.
-Stage production/selection counts describe local decisions, not successful sink delivery;
-region and sink counters retain their external success boundaries.
-
-The stage engine declares and produces these effects where the decision already occurs.
-A region-level input/output difference cannot attribute loss among multiple filters,
-errors, suppression, sampling and buffering. Do not reevaluate predicates/UDFs, scan rows
-again, clone collections or infer effects from function names. Count-window and other
-incremental engines count work when consumed/extracted, without advancing unprocessed
-rows or draining more results merely for metrics.
-
-Accumulate deltas in the existing processing loop and publish cached, applicable counters
-once per collection or actual output step, rather than one atomic update per row. Ordinary
-passthrough stages have no effect-metric object or hot-path updates. Metrics registration
-and label binding happen once; no per-input label maps, new clocks or per-stage spans.
-The current stats API reads shared snapshots synchronously: a purely task-local counter
-cannot remain unpublished until a later input or hypothetical stats-request callback.
-Start with batch-boundary publication; further coalescing requires an explicit freshness
-contract and a reliable publication path for idle, blocked and terminating regions.
-
-Snapshots should attach semantic effects to their owning region, grouped by stable
-physical stage ID, while distinguishing them from task metrics. Do not recreate synthetic
-stage processor entries. Prometheus identity uses pipeline/revision and semantic stage
-identity, not region placement, partition values, payloads or SQL text. Shared DAG owners
-publish once. These are runtime observations; restart/replay behavior follows existing
-metric reset semantics and adds no checkpoint/exactly-once counter guarantee. The concrete
-snapshot schema and public metric names must be reviewed in the implementing follow-up.
-
-Deliver Filter first, then add other effects only for explicit operational questions.
-Acceptance must cover multiple filters separated by an error-dropping or buffering stage,
-all-filtered input, error/false distinction, partitioned and overlapping windows, sampler
-replacement versus merging, shared fan-out, idle/terminal freshness, and region placement
-changes. Measure CPU at equal offered throughput with semantic metrics enabled/disabled;
-retain the region-only implementation as the comparison and avoid declaring a CPU win
-from task/link reduction alone.
+Derive effects at the existing decision point without reevaluating predicates/UDFs,
+rescanning rows, copying collections, or advancing incremental cursors for observation.
+Batch updates at collection or actual output boundaries using cached handles. Shared DAG
+owners publish once. Stats remain synchronous snapshots with existing reset/replay
+semantics; adding counters introduces no checkpoint/exactly-once guarantee.
 
 ## Fan-in alignment
 
@@ -318,8 +294,8 @@ an unfinished delivery and forwards ABORT only when a START was emitted. EOF als
 forwards a parked terminal after abort processing. Preserve natural empty compression
 drains, encryption headers/final frames, and recovery after malformed delivery input.
 
-Region counters measure external bytes and completed deliveries; aborts across constituent transforms
-are deduplicated per delivery. Internal byte traffic does not inflate region counters.
+Each encoder and byte transform measures its own generated bytes and delivery outcomes.
+Abort counts are local to the stage's delivery lifecycle; regions do not aggregate them.
 Writer ownership moves into the task once; the ownership mutex adds no per-frame locks.
 
 SinkEncoder and IncSinkEncoder share the synchronous EncoderStage with standalone
@@ -340,9 +316,10 @@ their data through the suffix before forwarding control. Data terminal and EOF a
 flush the encoder. Encoder errors abort current delivery and skip remaining rows of the
 failed input; following inputs can recover. Begin failure aborts partially initialized
 encoder resources even before START. Abort accounting remains once per delivery at the
-region boundary; stage errors retain physical identities in the region diagnostics. Encoder-only output failures
+owning stage; errors retain their physical stage identities. Encoder-only output failures
 retain standalone recovery, including timer/control flush handling; regions containing
-byte transforms stop on ChannelClosed. Output metrics advance only on successful sends.
+byte transforms stop on ChannelClosed. Stage output metrics count production, while
+transport counts send failures and sinks count successful external delivery.
 
 ## Retained adapters and recovery boundaries
 
@@ -413,7 +390,7 @@ failed input, and recovery on following inputs. Closed-output cases distinguish 
 recovery from fatal byte-transform transport failure across feed, timer, control, data end,
 and EOF. Count backpressure prevents encoding further segments. SQL placement cases cover
 ordinary and incremental builtin encoder replacements defaulting to isolation. Stats cases
-verify external region domains, stage-attributed errors, omitted stage stats, and link
+verify stage domains, stage-owned errors, exported stage stats, and link
 reduction across runtime rebuilds.
 
 Opaque runtime cases verify a blocking scalar callback on a current-thread runtime leaves

@@ -744,7 +744,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.set_stats(stats),
             PlanProcessor::EosWindow(p) => p.set_stats(stats),
             PlanProcessor::Sink(p) => p.set_stats(stats),
-            PlanProcessor::Region(p) => p.set_stats(stats),
+            PlanProcessor::Region(_) => {} // Stage and transport handles are configured by the builder.
             PlanProcessor::ResultCollect(p) => p.set_stats(stats),
             PlanProcessor::Barrier(p) => p.set_stats(stats),
             PlanProcessor::Sampler(p) => p.set_stats(stats),
@@ -2646,7 +2646,28 @@ fn build_processors_recursive(
             let mut encoders = std::collections::BTreeMap::new();
             let mut decoders = std::collections::BTreeMap::new();
             let mut samplers = std::collections::BTreeMap::new();
+            let mut stage_domains = std::collections::BTreeMap::new();
+            let mut stage_stats = std::collections::BTreeMap::new();
             for node in &plans {
+                let stage_id = id
+                    .rsplit_once('/')
+                    .map(|(prefix, _)| format!("{prefix}/{}", node.get_plan_name()))
+                    .unwrap_or_else(|| node.get_plan_name());
+                let mut stats =
+                    ProcessorStats::new(context.flow_instance_id(), stage_id.as_str(), "stage");
+                stats.configure_stage_handling_time();
+                let stats = Arc::new(stats);
+                context.configure_stats(&stats);
+                stage_stats.insert(node.get_plan_index(), stats);
+                stage_domains.insert(
+                    node.get_plan_index(),
+                    DataMetricDomains::NONE
+                        .with_input(plan_input_domain(node, context.merger_registry.as_deref())?)
+                        .with_output(plan_output_domain(
+                            node,
+                            context.merger_registry.as_deref(),
+                        )?),
+                );
                 if matches!(
                     node,
                     PhysicalPlan::SinkEncoder(_) | PhysicalPlan::IncSinkEncoder(_)
@@ -2682,12 +2703,6 @@ fn build_processors_recursive(
                 }
             }
             let input_domain = plan_input_domain(&plans[0], context.merger_registry.as_deref())?;
-            let metric_domains = DataMetricDomains::NONE
-                .with_input(input_domain)
-                .with_output(plan_output_domain(
-                    &plan,
-                    context.merger_registry.as_deref(),
-                )?);
             let processor = RegionProcessor::new(
                 id,
                 &plans,
@@ -2696,7 +2711,9 @@ fn build_processors_recursive(
                     encoders,
                     decoders,
                     samplers,
-                    metric_domains,
+                    stage_domains,
+                    stage_stats,
+                    stage_default_domains: DataMetricDomains::NONE,
                     input_domain,
                     aggregate_registry: context.aggregate_registry.clone(),
                     stateful_registry: context.stateful_registry.clone(),
@@ -3071,15 +3088,68 @@ fn create_processor_pipeline_with_context(
         "control_source",
     ));
     context.configure_stats(&stats);
-    record_pipeline_link_kind_counts(stats.as_ref(), link_kind_counts);
     control_source.set_stats(Arc::clone(&stats));
     processor_stats.push(ProcessorStatsHandle {
         processor_id: control_id,
         stats,
     });
 
+    let transport_stats = Arc::new(ProcessorStats::new(
+        context.flow_instance_id(),
+        "pipeline_transport",
+        "transport",
+    ));
+    context.configure_stats(&transport_stats);
+    record_pipeline_link_kind_counts(&transport_stats, link_kind_counts);
+    seen_ids.insert("pipeline_transport".to_string());
+    processor_stats.push(ProcessorStatsHandle {
+        processor_id: "pipeline_transport".into(),
+        stats: transport_stats,
+    });
+
     for processor in &mut middle_processors {
         let id = processor.id().to_string();
+        if let PlanProcessor::Region(region) = processor {
+            for handle in region.stage_stats() {
+                if !seen_ids.insert(handle.processor_id.clone()) {
+                    return Err(ProcessorError::InvalidConfiguration(format!(
+                        "duplicate stage stats id: {}",
+                        handle.processor_id
+                    )));
+                }
+                processor_stats.push(handle);
+            }
+            {
+                let output = &mut region.output;
+                let transport_id = format!("Transport_{id}_data");
+                let stats = Arc::new(ProcessorStats::new(
+                    context.flow_instance_id(),
+                    transport_id.as_str(),
+                    "transport",
+                ));
+                context.configure_stats(&stats);
+                output.set_stats(Arc::clone(&stats));
+                seen_ids.insert(transport_id.clone());
+                processor_stats.push(ProcessorStatsHandle {
+                    processor_id: transport_id,
+                    stats,
+                });
+            }
+            let transport_id = format!("Transport_{id}_control");
+            let stats = Arc::new(ProcessorStats::new(
+                context.flow_instance_id(),
+                transport_id.as_str(),
+                "transport",
+            ));
+            context.configure_stats(&stats);
+            region.control_output.set_stats(Arc::clone(&stats));
+            seen_ids.insert(transport_id.clone());
+            processor_stats.push(ProcessorStatsHandle {
+                processor_id: transport_id,
+                stats,
+            });
+            continue;
+        }
         if !seen_ids.insert(id.clone()) {
             return Err(ProcessorError::InvalidConfiguration(format!(
                 "duplicate processor id: {id}"

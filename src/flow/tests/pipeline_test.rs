@@ -296,10 +296,10 @@ async fn shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutd
     let stats = pipeline.processor_stats();
     assert!(stats
         .iter()
-        .any(|entry| entry.processor_id.starts_with("Region_")));
+        .any(|entry| entry.processor_id.contains("PhysicalBarrier")));
     assert!(!stats
         .iter()
-        .any(|entry| entry.processor_id.contains("PhysicalBarrier")));
+        .any(|entry| entry.processor_id.starts_with("Region_")));
     let stats = stats
         .iter()
         .find(|entry| entry.processor_id.contains("PhysicalResultCollect"))

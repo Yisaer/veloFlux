@@ -24,7 +24,7 @@ impl EnvBinding {
     }
 }
 
-const ENV_BINDINGS: [EnvBinding; 16] = [
+const ENV_BINDINGS: [EnvBinding; 17] = [
     EnvBinding::new(
         "VELOFLUX_LOGGING__OUTPUT",
         "logging.output",
@@ -89,6 +89,11 @@ const ENV_BINDINGS: [EnvBinding; 16] = [
         "VELOFLUX_PROFILING__CPU_PROFILE_FREQ_HZ",
         "profiling.cpu_profile_freq_hz",
         set_profiling_cpu_profile_freq_hz,
+    ),
+    EnvBinding::new(
+        "VELOFLUX_METRICS__STAGE_HANDLING_TIME_ENABLED",
+        "metrics.stage_handling_time_enabled",
+        set_stage_handling_time_enabled,
     ),
     EnvBinding::new(
         "VELOFLUX_METRICS__POLL_INTERVAL_SECS",
@@ -303,6 +308,15 @@ fn set_profiling_cpu_profile_freq_hz(
     raw: &str,
 ) -> ConfigResult<()> {
     config.profiling.cpu_profile_freq_hz = Some(parse_env::<i32>(binding, raw)?);
+    Ok(())
+}
+
+fn set_stage_handling_time_enabled(
+    config: &mut AppConfig,
+    binding: &EnvBinding,
+    raw: &str,
+) -> ConfigResult<()> {
+    config.metrics.stage_handling_time_enabled = parse_env::<bool>(binding, raw)?;
     Ok(())
 }
 

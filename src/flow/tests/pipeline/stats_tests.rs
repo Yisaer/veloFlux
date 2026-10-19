@@ -113,20 +113,22 @@ async fn collect_pipeline_stats_declares_applicable_row_fields() {
             .all(|entry| entry.stats.error_count == 0 && entry.stats.last_error.is_none()),
         "fresh running pipeline should not report processor errors"
     );
+    let encoder = find_processor_stats(&stats, "PhysicalSinkEncoder");
+    assert_eq!(encoder.stats.records_in, Some(0));
+    assert_eq!(encoder.stats.records_out, None);
+    assert_eq!(encoder.stats.custom.get("collections_in"), Some(&0));
+    assert_eq!(encoder.stats.custom.get("collections_out"), None);
+    // The semantic encoder exposes collection input and encoded output.
+    assert!(!encoder.stats.custom.contains_key("messages_in"));
+    assert_eq!(encoder.stats.custom.get("messages_out"), Some(&0));
+    assert_eq!(encoder.stats.custom.get("bytes_out"), Some(&0));
+    assert!(!encoder.stats.custom.contains_key("messages_dropped"));
+    assert!(!encoder.stats.custom.contains_key("bytes_in"));
+    assert!(!encoder.stats.custom.contains_key("bytes_delivered"));
+
     assert!(!stats
         .iter()
-        .any(|entry| entry.processor_id.contains("PhysicalSinkEncoder")
-            || entry.processor_id.contains("PhysicalDecoder")));
-
-    let region = find_processor_stats(&stats, "Region_");
-    assert_eq!(region.stats.records_in, None);
-    assert_eq!(region.stats.records_out, None);
-    assert_eq!(region.stats.custom.get("messages_in"), Some(&0));
-    assert_eq!(region.stats.custom.get("messages_out"), Some(&0));
-    assert_eq!(region.stats.custom.get("bytes_in"), Some(&0));
-    assert_eq!(region.stats.custom.get("bytes_out"), Some(&0));
-    assert!(!region.stats.custom.contains_key("collections_in"));
-    assert!(!region.stats.custom.contains_key("collections_out"));
+        .any(|entry| entry.processor_id.starts_with("Region_")));
 
     let sink = find_processor_stats(&stats, "PhysicalSinkConnector");
     assert_eq!(sink.stats.records_in, None);
@@ -147,6 +149,16 @@ async fn collect_pipeline_stats_declares_applicable_row_fields() {
     assert!(!datasource.stats.custom.contains_key("collections_in"));
     assert!(!datasource.stats.custom.contains_key("collections_out"));
 
+    let decoder = find_processor_stats(&stats, "PhysicalDecoder");
+    assert_eq!(decoder.stats.records_in, None);
+    assert_eq!(decoder.stats.records_out, Some(0));
+    assert_eq!(decoder.stats.custom.get("messages_in"), Some(&0));
+    assert_eq!(decoder.stats.custom.get("bytes_in"), Some(&0));
+    assert_eq!(decoder.stats.custom.get("collections_out"), Some(&0));
+    assert!(!decoder.stats.custom.contains_key("collections_in"));
+    assert!(!decoder.stats.custom.contains_key("messages_out"));
+    assert!(!decoder.stats.custom.contains_key("bytes_out"));
+
     let result_collect = find_processor_stats(&stats, "PhysicalResultCollect");
     assert_eq!(result_collect.stats.records_in, None);
     assert_eq!(result_collect.stats.records_out, None);
@@ -154,7 +166,21 @@ async fn collect_pipeline_stats_declares_applicable_row_fields() {
     assert_eq!(result_collect.stats.custom.get("messages_out"), Some(&0));
     assert!(!result_collect.stats.custom.contains_key("bytes_in"));
     assert!(!result_collect.stats.custom.contains_key("bytes_out"));
-    let control_source = find_processor_stats(&stats, "control_source");
+    let serialized = serde_json::to_value(&stats).expect("serialize pipeline stats");
+    assert!(
+        serialized
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| {
+                entry
+                    .get("processor_id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| id.contains("PhysicalSinkEncoder"))
+                    && entry.pointer("/stats/records_in") == Some(&json!(0))
+                    && entry.pointer("/stats/records_out").is_none()
+            })),
+        "applicable row counters should be serialized from zero: {serialized}"
+    );
+    let control_source = find_processor_stats(&stats, "pipeline_transport");
     assert_eq!(
         control_source.stats.custom.get("broadcast_links"),
         Some(&1),
@@ -289,10 +315,13 @@ async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
         }),
         "processed pipeline should expose non-zero counters before rebuild: {stats_before:#?}"
     );
-    let region = find_processor_stats(&stats_before, "Region_");
-    assert_eq!(region.stats.records_in, Some(3));
-    assert_eq!(region.stats.records_out, None);
+    assert!(!stats_before
+        .iter()
+        .any(|entry| entry.processor_id.starts_with("Region_")));
 
+    let encoder = find_processor_stats(&stats_before, "PhysicalSinkEncoder");
+    assert_eq!(encoder.stats.records_in, Some(3));
+    assert_eq!(encoder.stats.custom.get("messages_out"), Some(&1));
     // Delivery counters live on the standalone sink task.
     let sink = find_processor_stats(&stats_before, "PhysicalSinkConnector");
     assert_eq!(sink.stats.custom.get("messages_in"), Some(&1));
@@ -324,11 +353,14 @@ async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
         }),
         "runtime rebuild should reset applicable counters to zero: {stats_after:#?}"
     );
-    let region = find_processor_stats(&stats_after, "Region_");
-    assert_eq!(region.stats.records_in, Some(0));
-    assert_eq!(region.stats.records_out, None);
+    assert!(!stats_after
+        .iter()
+        .any(|entry| entry.processor_id.starts_with("Region_")));
 
-    let control_source = find_processor_stats(&stats_after, "control_source");
+    let encoder = find_processor_stats(&stats_after, "PhysicalSinkEncoder");
+    assert_eq!(encoder.stats.records_in, Some(0));
+    assert_eq!(encoder.stats.custom.get("messages_out"), Some(&0));
+    let control_source = find_processor_stats(&stats_after, "pipeline_transport");
     assert_eq!(
         control_source.stats.custom.get("broadcast_links"),
         Some(&1),
@@ -352,14 +384,14 @@ async fn collect_pipeline_stats_reset_after_runtime_rebuild() {
 
 // coverage-covers: pipeline.runtime.stats
 #[tokio::test]
-async fn collect_pipeline_stats_counts_only_region_boundaries_with_empty_suppression() {
+async fn collect_pipeline_stats_exposes_empty_suppress_custom_metrics() {
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
     ))
     .expect("create flow instance");
     let (input_topic, output_topic) = make_memory_topics(
         "pipeline_stats",
-        "collect_pipeline_stats_counts_only_region_boundaries_with_empty_suppression",
+        "collect_pipeline_stats_exposes_empty_suppress_custom_metrics",
     );
     declare_memory_input_output_topics(&instance, &input_topic, &output_topic);
 
@@ -425,13 +457,22 @@ async fn collect_pipeline_stats_counts_only_region_boundaries_with_empty_suppres
         .collect_pipeline_stats(pipeline_id, Duration::from_secs(1))
         .await
         .expect("collect stats for omit_if_empty pipeline");
-    assert!(!stats
-        .iter()
-        .any(|entry| entry.processor_id.contains("PhysicalEmptySuppress")));
-    let region = find_processor_stats(&stats, "Region_");
-    assert_eq!(region.stats.custom.get("collections_in"), Some(&2));
-    assert_eq!(region.stats.custom.get("messages_out"), Some(&1));
-    assert!(!region.stats.custom.contains_key("collections_suppressed"));
+    let empty_suppress = find_processor_stats(&stats, "PhysicalEmptySuppress");
+    assert_eq!(
+        empty_suppress.stats.custom.get("collections_in"),
+        Some(&2),
+        "empty suppress should count both input collections: {empty_suppress:#?}"
+    );
+    assert_eq!(
+        empty_suppress.stats.custom.get("collections_forwarded"),
+        Some(&1),
+        "empty suppress should forward only the first collection: {empty_suppress:#?}"
+    );
+    assert_eq!(
+        empty_suppress.stats.custom.get("collections_suppressed"),
+        Some(&1),
+        "empty suppress should report one suppressed collection: {empty_suppress:#?}"
+    );
 
     instance
         .stop_pipeline(pipeline_id, PipelineStopMode::Quick, Duration::from_secs(5))
@@ -524,7 +565,7 @@ async fn collect_pipeline_stats_reports_decoder_errors_without_failing_collectio
             .collect_pipeline_stats(pipeline_id, Duration::from_secs(1))
             .await
             .expect("collect stats after decoder error");
-        let decoder = find_processor_stats(&stats, "Region_");
+        let decoder = find_processor_stats(&stats, "PhysicalDecoder");
         if decoder.stats.error_count > 0 {
             break stats;
         }
@@ -535,17 +576,17 @@ async fn collect_pipeline_stats_reports_decoder_errors_without_failing_collectio
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
 
-    let decoder = find_processor_stats(&stats, "Region_");
+    let decoder = find_processor_stats(&stats, "PhysicalDecoder");
     assert!(
         decoder.stats.error_count > 0,
-        "region stats should expose decoder errors: {decoder:#?}"
+        "decoder stats should expose processor-local errors: {decoder:#?}"
     );
     assert!(
         decoder
             .stats
             .last_error
             .as_deref()
-            .is_some_and(|message| message.contains("PhysicalDecoder")),
+            .is_some_and(|message| !message.is_empty()),
         "decoder stats should preserve the last error message: {decoder:#?}"
     );
 

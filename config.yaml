@@ -5,6 +5,8 @@ profiling:
   addr: "0.0.0.0:6060"
 
 metrics:
+  # Enable stage handling-time histograms for diagnostics (adds per-callback overhead).
+  stage_handling_time_enabled: false
   poll_interval_secs: 5
 
 server:

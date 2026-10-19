@@ -34,6 +34,8 @@ profiling:
   cpu_profile_freq_hz: 100
 
 metrics:
+  # Enable stage handling-time histograms for diagnostics (adds per-callback overhead).
+  stage_handling_time_enabled: false
   poll_interval_secs: 5
 
 server:

@@ -492,21 +492,21 @@ fn run_gbf_packer_integration(layout: CanIdentityLayout, case_name: &str) {
 
     // 7. Verify external runtime boundaries, without expecting stage metrics.
     let stats = client.verify_pipeline_stats(&pipeline_id);
-    let region = stats
+    let sampler = stats
         .as_array()
         .expect("processor stats array")
         .iter()
         .find(|stat| {
             stat["processor_id"]
                 .as_str()
-                .is_some_and(|id| id.starts_with("Region_"))
+                .is_some_and(|id| id.contains("PhysicalSampler"))
                 && stat["stats"]["messages_in"].as_u64() == Some(3)
                 && stat["stats"]["bytes_in"]
                     .as_u64()
                     .is_some_and(|bytes| bytes > 0)
         })
-        .expect("ingest region should receive all three GBF packets");
-    assert_eq!(region["stats"]["error_count"], 0);
+        .expect("sampler should receive all three GBF packets");
+    assert_eq!(sampler["stats"]["error_count"], 0);
 
     // Cleanup
     let _ = client.delete(&format!("/pipelines/{}", pipeline_id));

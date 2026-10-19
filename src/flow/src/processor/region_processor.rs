@@ -22,7 +22,7 @@ use crate::processor::byte_stage::{ByteTransformStage, CompressDriver, EncryptDr
 use crate::processor::collection_layout_normalize_processor::normalize_collection;
 use crate::processor::compute_processor::{apply_compute, compute_fields, ComputeExpr};
 use crate::processor::count_window_stage::{CountWindowOutput, CountWindowStage};
-use crate::processor::data_metrics::{DataMetricDomains, REGION_TRANSFORM_METRICS};
+use crate::processor::data_metrics::DataMetricDomains;
 use crate::processor::decoder_processor::DecoderStage;
 use crate::processor::delivery_transform::DeliveryStep;
 use crate::processor::empty_suppress_processor::collection_is_effectively_empty;
@@ -33,12 +33,12 @@ use crate::processor::memory_collection_materialize_processor::materialize_colle
 use crate::processor::order_processor::{apply_order, OrderStage};
 use crate::processor::output_row_accessor::OutputRowAccessor;
 use crate::processor::project_processor::{apply_project, ProjectStage};
-use crate::processor::region_metrics::RegionMetrics;
 use crate::processor::row_diff_processor::{apply_row_diff, row_diff_fields, RowDiffState};
 use crate::processor::sampler_processor::SamplerStage;
 use crate::processor::sliding_window_stage::{SlidingWindowOutput, SlidingWindowStage};
 use crate::processor::source_change_gate_processor::{gate_collection, SourceChangeGateState};
 use crate::processor::stage_clock::{ClockDeadline, ClockEvent, StageClock};
+use crate::processor::stage_metrics::StageMetrics;
 use crate::processor::state_window_processor::{StateWindowOutput, StateWindowStage};
 use crate::processor::stateful_function_processor::StatefulStage;
 use crate::processor::streaming_aggregation_processor::{
@@ -49,7 +49,8 @@ use crate::processor::timed_batch_stage::{TimedBatchOutput, TimedBatchStage};
 use crate::processor::tumbling_window_processor::{TumblingWindowOutput, TumblingWindowStage};
 use crate::processor::watermark_processor::WatermarkStage;
 use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
+    ControlSignal, CounterHandle, MetricKind, MetricSpec, Processor, ProcessorError,
+    ProcessorStart, ProcessorStats, ProcessorStatsHandle, StreamData,
 };
 use crate::runtime::TaskSpawner;
 use crate::stateful::StatefulFunctionRegistry;
@@ -154,7 +155,7 @@ impl EncoderEmission {
         &mut self,
         stage: &mut EncoderStage,
         stats: &ProcessorStats,
-        boundary: &RegionMetrics,
+        metrics: Option<&crate::processor::data_metrics::EncoderMetrics>,
     ) -> Option<StreamData> {
         loop {
             if let Some(error) = self.error.take() {
@@ -173,11 +174,10 @@ impl EncoderEmission {
                 }
                 return self.trailing.take().map(|data| *data);
             };
-            if step.began {
-                boundary.begin_delivery();
-            }
             if step.aborted {
-                boundary.record_delivery_abort();
+                if let Some(metrics) = metrics {
+                    metrics.record_message_aborted();
+                }
             }
             if step.error.is_some() && !due_flush {
                 self.finishing = true;
@@ -211,7 +211,9 @@ pub(crate) struct RegionResources {
     pub(crate) encoders: BTreeMap<i64, EncoderStage>,
     pub(crate) decoders: BTreeMap<i64, DecoderStage>,
     pub(crate) samplers: BTreeMap<i64, SamplerStage>,
-    pub(crate) metric_domains: DataMetricDomains,
+    pub(crate) stage_default_domains: DataMetricDomains,
+    pub(crate) stage_domains: BTreeMap<i64, DataMetricDomains>,
+    pub(crate) stage_stats: BTreeMap<i64, Arc<ProcessorStats>>,
     pub(crate) input_domain: DataDomain,
     pub(crate) aggregate_registry: Option<Arc<AggregateFunctionRegistry>>,
     pub(crate) stateful_registry: Option<Arc<StatefulFunctionRegistry>>,
@@ -224,7 +226,9 @@ impl Default for RegionResources {
             encoders: BTreeMap::new(),
             decoders: BTreeMap::new(),
             samplers: BTreeMap::new(),
-            metric_domains: DataMetricDomains::NONE.passthrough(DataDomain::Collection),
+            stage_domains: BTreeMap::new(),
+            stage_stats: BTreeMap::new(),
+            stage_default_domains: DataMetricDomains::NONE.passthrough(DataDomain::Collection),
             input_domain: DataDomain::Collection,
             aggregate_registry: Some(AggregateFunctionRegistry::with_builtins()),
             stateful_registry: Some(StatefulFunctionRegistry::with_builtins()),
@@ -249,8 +253,33 @@ impl RegionResources {
     }
 }
 
+/// Stage callbacks are synchronous; this guard can never include channel waits.
+struct StageTimer<'a> {
+    stats: &'a ProcessorStats,
+    started: Option<std::time::Instant>,
+}
+impl<'a> StageTimer<'a> {
+    fn new(stats: &'a ProcessorStats) -> Self {
+        Self {
+            stats,
+            started: stats.handling_time_enabled().then(std::time::Instant::now),
+        }
+    }
+}
+impl Drop for StageTimer<'_> {
+    fn drop(&mut self) {
+        if let Some(started) = self.started {
+            self.stats.record_handle_duration(started.elapsed());
+        }
+    }
+}
+
 struct Stage {
-    stats: Option<Arc<ProcessorStats>>,
+    stats: Arc<ProcessorStats>,
+    metrics: StageMetrics,
+    metric_domains: DataMetricDomains,
+    passthrough_domain: Option<DataDomain>,
+    suppression_counters: Option<(CounterHandle, CounterHandle)>,
     name: String,
     engine: CollectionStage,
     single_output: bool,
@@ -469,9 +498,39 @@ impl Stage {
                 )))
             }
         };
-        Ok(Self {
-            stats: None,
-            name: plan.get_plan_name(),
+        let name = plan.get_plan_name();
+        let stats = resources
+            .stage_stats
+            .remove(&plan.get_plan_index())
+            .unwrap_or_else(|| {
+                let mut stats = ProcessorStats::new("default", name.as_str(), "stage");
+                stats.configure_stage_handling_time();
+                Arc::new(stats)
+            });
+        let domains = resources
+            .stage_domains
+            .get(&plan.get_plan_index())
+            .copied()
+            .unwrap_or_else(|| {
+                if matches!(
+                    plan,
+                    PhysicalPlan::Decoder(_) | PhysicalPlan::Barrier(_) | PhysicalPlan::Sampler(_)
+                ) {
+                    resources.stage_default_domains
+                } else {
+                    DataMetricDomains::NONE.passthrough(DataDomain::Collection)
+                }
+            });
+        let passthrough =
+            matches!(plan, PhysicalPlan::Barrier(_)).then_some(resources.input_domain);
+        let metrics = Self::metrics_for(&engine, &stats, domains, passthrough);
+        let mut stage = Self {
+            stats: Arc::clone(&stats),
+            metrics,
+            metric_domains: domains,
+            passthrough_domain: passthrough,
+            suppression_counters: None,
+            name,
             single_output: matches!(
                 engine,
                 CollectionStage::Decoder(_)
@@ -497,32 +556,101 @@ impl Stage {
                     | PhysicalPlan::CollectionLayoutNormalize(_)
                     | PhysicalPlan::MemoryCollectionMaterialize(_)
             ),
-        })
+        };
+        stage.set_stats(stats);
+        Ok(stage)
+    }
+
+    fn metrics_for(
+        engine: &CollectionStage,
+        stats: &ProcessorStats,
+        domains: DataMetricDomains,
+        passthrough: Option<DataDomain>,
+    ) -> StageMetrics {
+        match engine {
+            CollectionStage::Encoder(_) => StageMetrics::encoding(stats),
+            CollectionStage::ByteTransform(engine) => {
+                StageMetrics::encoded(stats, engine.metric_specs())
+            }
+            _ => StageMetrics::new(stats, domains, passthrough),
+        }
+    }
+    fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.metrics = Self::metrics_for(
+            &self.engine,
+            &stats,
+            self.metric_domains,
+            self.passthrough_domain,
+        );
+        match &mut self.engine {
+            CollectionStage::EosWindow(engine) => engine.set_stats(Arc::clone(&stats)),
+            CollectionStage::TumblingWindow(engine) => engine.set_stats(Arc::clone(&stats)),
+            CollectionStage::StreamingTumbling(engine) => engine.set_stats(Arc::clone(&stats)),
+            _ => {}
+        }
+        if matches!(self.engine, CollectionStage::EmptySuppress(_)) {
+            self.suppression_counters = Some((
+                stats.register_counter(MetricSpec {
+                    id: "empty_suppress.collections_forwarded",
+                    flat_name: "collections_forwarded",
+                    kind: MetricKind::Counter,
+                }),
+                stats.register_counter(MetricSpec {
+                    id: "empty_suppress.collections_suppressed",
+                    flat_name: "collections_suppressed",
+                    kind: MetricKind::Counter,
+                }),
+            ));
+        }
+        self.stats = stats;
+    }
+    fn record_immediate(&self, output: &StageOutput) -> Result<(), ProcessorError> {
+        match output {
+            StageOutput::Single(Some(data)) => self.metrics.record_output(&self.stats, data)?,
+            StageOutput::Pair(pair) => {
+                for data in pair.iter().flatten() {
+                    self.metrics.record_output(&self.stats, data)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Direct handoff for engines that produce at most one immediate result.
     #[inline]
-    fn process_single(
-        &mut self,
-        data: StreamData,
-        stats: &ProcessorStats,
-    ) -> Result<Option<StreamData>, ProcessorError> {
-        let stats = self.stats.as_deref().unwrap_or(stats);
+    fn process_single(&mut self, data: StreamData) -> Result<Option<StreamData>, ProcessorError> {
+        let stats = self.stats.as_ref();
+        let _timer =
+            (!matches!(self.engine, CollectionStage::Barrier(_))).then(|| StageTimer::new(stats));
+        self.metrics
+            .record_input(stats, &data)
+            .inspect_err(|error| {
+                stats.record_error_logged("stage input domain error", error.to_string());
+            })?;
         let result = match &mut self.engine {
             CollectionStage::Decoder(stage) => Ok(stage.process(data, stats)),
             CollectionStage::Barrier(_) => Ok(Some(data)),
             engine => match data {
-                StreamData::Collection(collection) => {
-                    Self::apply(engine, &self.name, collection, stats)
-                        .map(|data| data.map(StreamData::collection))
-                }
+                StreamData::Collection(collection) => Self::apply(
+                    engine,
+                    &self.name,
+                    collection,
+                    stats,
+                    &self.suppression_counters,
+                )
+                .map(|data| data.map(StreamData::collection)),
                 data => Ok(Some(data)),
             },
         };
-        result.or_else(|error| {
+        let result = result.or_else(|error| {
             self.process_error(error, stats)?;
             Ok(None)
-        })
+        });
+        if let Ok(Some(data)) = &result {
+            self.metrics.record_output(stats, data)?;
+        }
+        result
     }
 
     #[cold]
@@ -556,15 +684,17 @@ impl Stage {
     }
 
     #[inline(never)]
-    fn process(
-        &mut self,
-        data: StreamData,
-        stats: &ProcessorStats,
-    ) -> Result<StageOutput, ProcessorError> {
+    fn process(&mut self, data: StreamData) -> Result<StageOutput, ProcessorError> {
         if self.single_output {
-            return self.process_single(data, stats).map(StageOutput::Single);
+            return self.process_single(data).map(StageOutput::Single);
         }
-        let stats = self.stats.as_deref().unwrap_or(stats);
+        let stats = self.stats.as_ref();
+        let _timer = StageTimer::new(stats);
+        self.metrics
+            .record_input(stats, &data)
+            .inspect_err(|error| {
+                stats.record_error_logged("stage input domain error", error.to_string());
+            })?;
         let result = match &mut self.engine {
             CollectionStage::Encoder(stage) => match data {
                 StreamData::Collection(collection) => {
@@ -580,7 +710,7 @@ impl Stage {
                 }
             },
             CollectionStage::ByteTransform(stage) => {
-                let metrics = None;
+                let metrics = self.metrics.transform();
                 match data {
                     StreamData::EncodedDelivery { flags, bytes } => {
                         Ok(StageOutput::Delivery(stage.process(flags, bytes, metrics)))
@@ -634,25 +764,31 @@ impl Stage {
                 Ok(StageOutput::StreamingCount(window.process(data)))
             }
             _ => match data {
-                StreamData::Collection(collection) => {
-                    Self::apply(&mut self.engine, &self.name, collection, stats)
-                        .map(|data| StageOutput::Single(data.map(StreamData::collection)))
-                }
+                StreamData::Collection(collection) => Self::apply(
+                    &mut self.engine,
+                    &self.name,
+                    collection,
+                    stats,
+                    &self.suppression_counters,
+                )
+                .map(|data| StageOutput::Single(data.map(StreamData::collection))),
                 other => Ok(StageOutput::Single(Some(other))),
             },
         };
-        result.or_else(|error| {
+        let result = result.or_else(|error| {
             self.process_error(error, stats)?;
             Ok(StageOutput::Single(None))
-        })
+        });
+        if let Ok(output) = &result {
+            self.record_immediate(output)?;
+        }
+        result
     }
 
     #[inline(never)]
     fn next_output(
         &mut self,
         output: &mut StageOutput,
-        stats: &ProcessorStats,
-        boundary: &RegionMetrics,
     ) -> Result<Option<StreamData>, ProcessorError> {
         // Immediate outputs need no engine dispatch or computation.
         match output {
@@ -660,10 +796,13 @@ impl Stage {
             StageOutput::Pair(data) => return Ok(data.iter_mut().find_map(Option::take)),
             _ => {}
         }
-        let stats = self.stats.as_deref().unwrap_or(stats);
+        let stats = self.stats.as_ref();
+        let _timer = StageTimer::new(stats);
         let result = match output {
             StageOutput::Encoder(output) => match &mut self.engine {
-                CollectionStage::Encoder(stage) => Ok(output.next(stage, stats, boundary)),
+                CollectionStage::Encoder(stage) => {
+                    Ok(output.next(stage, stats, self.metrics.encoder()))
+                }
                 _ => Err(ProcessorError::ProcessingError(
                     "encoder output without owning stage".into(),
                 )),
@@ -720,6 +859,9 @@ impl Stage {
                 )),
             },
         };
+        if let Ok(Some(data)) = &result {
+            self.metrics.record_output(stats, data)?;
+        }
         if let Err(error) = &result {
             stats.record_error_logged("region stage output error", error.to_string());
         }
@@ -756,12 +898,9 @@ impl Stage {
             _ => Ok(None),
         }
     }
-    fn on_timer(
-        &mut self,
-        event: ClockEvent,
-        stats: &ProcessorStats,
-    ) -> Result<StageOutput, ProcessorError> {
-        let stats = self.stats.as_deref().unwrap_or(stats);
+    fn on_timer(&mut self, event: ClockEvent) -> Result<StageOutput, ProcessorError> {
+        let stats = self.stats.as_ref();
+        let _timer = StageTimer::new(stats);
         let result = match &mut self.engine {
             CollectionStage::Encoder(stage) => {
                 stage.clear_deadline();
@@ -776,41 +915,43 @@ impl Stage {
                 "clock without timed stage".into(),
             )),
         };
+        if let Ok(output) = &result {
+            self.record_immediate(output)?;
+        }
         if let Err(error) = &result {
             stats.record_error_logged("region timer error", error.to_string());
         }
         result
     }
 
-    fn channel_closed(&self, stats: &ProcessorStats, lane: &str) -> ProcessorError {
-        self.stats.as_deref().unwrap_or(stats).record_error_logged(
+    fn channel_closed(&self, lane: &str) -> ProcessorError {
+        let _timer = StageTimer::new(&self.stats);
+        self.stats.record_error_logged(
             "region input closed",
             format!("unexpected {lane} input closure"),
         );
         ProcessorError::ChannelClosed
     }
 
-    fn input_closed(
-        &mut self,
-        stats: &ProcessorStats,
-    ) -> Result<Option<StageOutput>, ProcessorError> {
+    fn input_closed(&mut self) -> Result<Option<StageOutput>, ProcessorError> {
         if self.strict_input_closure {
-            return Err(self.channel_closed(stats, "data"));
+            return Err(self.channel_closed("data"));
         }
-        Ok(self.finish_input(stats))
+        Ok(self.finish_input())
     }
 
     /// Synchronous lifecycle work; the region sends any buffered data on its data lane.
-    fn finish_input(&mut self, stats: &ProcessorStats) -> Option<StageOutput> {
-        let stats = self.stats.as_deref().unwrap_or(stats);
-        match &mut self.engine {
+    fn finish_input(&mut self) -> Option<StageOutput> {
+        let stats = self.stats.as_ref();
+        let _timer = StageTimer::new(stats);
+        let result = match &mut self.engine {
             CollectionStage::Encoder(stage) => {
                 stage.clear_deadline();
                 Some(StageOutput::Encoder(EncoderEmission::finish(None)))
             }
-            CollectionStage::ByteTransform(stage) => {
-                Some(StageOutput::Single(stage.finish(stats, None)))
-            }
+            CollectionStage::ByteTransform(stage) => Some(StageOutput::Single(
+                stage.finish(stats, self.metrics.transform()),
+            )),
             CollectionStage::Sampler(stage) => Some(StageOutput::Single(stage.finish())),
             CollectionStage::TimedBatch(stage) => Some(StageOutput::TimedBatch(stage.finish(None))),
             CollectionStage::Watermark(stage) => {
@@ -859,7 +1000,13 @@ impl Stage {
                 None
             }
             _ => None,
+        };
+        if let Some(output) = &result {
+            if let Err(error) = self.record_immediate(output) {
+                stats.record_error_logged("stage finish output error", error.to_string());
+            }
         }
+        result
     }
 
     fn apply(
@@ -867,6 +1014,7 @@ impl Stage {
         name: &str,
         input: Box<dyn Collection>,
         stats: &ProcessorStats,
+        suppression_counters: &Option<(CounterHandle, CounterHandle)>,
     ) -> Result<Option<Box<dyn Collection>>, ProcessorError> {
         match engine {
             CollectionStage::Normalize { source, keys } => {
@@ -913,7 +1061,13 @@ impl Stage {
             CollectionStage::Order(stage) => apply_order(input, stage, Some(stats)).map(Some),
             CollectionStage::EmptySuppress(omit) => {
                 let suppressed = *omit && collection_is_effectively_empty(input.as_ref());
-
+                if let Some((forwarded, dropped)) = suppression_counters {
+                    if suppressed {
+                        dropped.inc_by(1);
+                    } else {
+                        forwarded.inc_by(1);
+                    }
+                }
                 Ok((!suppressed).then_some(input))
             }
             CollectionStage::Aggregation(plan, registry) => {
@@ -953,76 +1107,109 @@ impl Stage {
     }
 }
 
-/// Account for synchronous event preparation before the transport drain begins.
-/// The caller publishes successful elapsed time through its drain or directly
-/// when alignment emits nothing. Fatal callback errors publish here.
-fn timed_stage_event<T>(
-    stage: &mut Stage,
-    stats: &ProcessorStats,
-    started: std::time::Instant,
-    event: impl FnOnce(&mut Stage) -> Result<T, ProcessorError>,
-) -> Result<(T, std::time::Duration), ProcessorError> {
-    let pending = event(stage).inspect_err(|_| {
-        stats.record_handle_duration(started.elapsed());
-    })?;
-    Ok((pending, started.elapsed()))
+impl Stage {
+    fn control_preflush(
+        &mut self,
+        signal: &ControlSignal,
+    ) -> Result<Option<StageOutput>, ProcessorError> {
+        if matches!(self.engine, CollectionStage::Encoder(_)) {
+            return Ok(self.finish_input());
+        }
+        let _timer = StageTimer::new(&self.stats);
+        let result = match &mut self.engine {
+            CollectionStage::Watermark(engine) => engine
+                .control(signal, &self.stats)
+                .map(|data| Some(StageOutput::immediate(data))),
+            _ => Ok(None),
+        };
+        if let Ok(Some(output)) = &result {
+            self.record_immediate(output)?;
+        }
+        result
+    }
+    fn align_data(
+        &mut self,
+        upstream: usize,
+        data: StreamData,
+    ) -> Result<BarrierAction, ProcessorError> {
+        let _timer = StageTimer::new(&self.stats);
+        let result = match &mut self.engine {
+            CollectionStage::Barrier(engine) => engine.process(upstream, data),
+            _ => Ok(BarrierAction::Forward(Some(data))),
+        };
+        if let Err(error) = &result {
+            self.stats
+                .record_error_logged("stage alignment error", error.to_string());
+        }
+        result
+    }
+    fn align_control(
+        &mut self,
+        signal: ControlSignal,
+    ) -> Result<Option<ControlSignal>, ProcessorError> {
+        let _timer = StageTimer::new(&self.stats);
+        let result = match &mut self.engine {
+            CollectionStage::Barrier(engine) => engine.control(signal),
+            _ => Ok(Some(signal)),
+        };
+        if let Err(error) = &result {
+            self.stats
+                .record_error_logged("stage alignment error", error.to_string());
+        }
+        result
+    }
+    fn input_lagged(&self, skipped: u64) {
+        self.stats.record_error_logged(
+            "stage data input lag",
+            format!("data input skipped {skipped} items"),
+        );
+    }
+    fn output_failed(
+        &mut self,
+        flags: Option<crate::processor::EncodedDeliveryFlags>,
+        pending: Option<&mut StageOutput>,
+    ) -> bool {
+        if let (
+            CollectionStage::Encoder(engine),
+            Some(flags),
+            Some(StageOutput::Encoder(pending)),
+        ) = (&mut self.engine, flags, pending)
+        {
+            let _timer = StageTimer::new(&self.stats);
+            engine.output_failed(flags);
+            pending.output_failed();
+            true
+        } else {
+            false
+        }
+    }
 }
 
-/// Region-owned transport loop. Stage computation and output extraction remain synchronous.
+/// Region-owned transport loop; stage callbacks own all processing metrics.
 async fn drain_outputs(
     stages: &mut [Stage],
     emissions: &mut Vec<(usize, StageOutput)>,
     output: &LinkOutput<StreamData>,
     capacity: usize,
-    stats: &ProcessorStats,
-    metrics: &RegionMetrics,
-    mut handle_duration: std::time::Duration,
 ) -> Result<(), ProcessorError> {
-    let mut started = std::time::Instant::now();
     let mut steps = 0;
-    // Both cursor extraction and direct stage calls consume the same budget.
-    // Keep the yield in this task rather than introducing a per-stage Future.
     macro_rules! work_step {
         () => {
             steps += 1;
             if steps == 64 {
-                handle_duration += started.elapsed();
                 tokio::task::yield_now().await;
-                started = std::time::Instant::now();
                 steps = 0;
-            }
-        };
-    }
-    // Publish time on every fatal exit, including engine/extraction errors.
-    macro_rules! timed_try {
-        ($result:expr) => {
-            match $result {
-                Ok(value) => value,
-                Err(error) => {
-                    stats.record_handle_duration(handle_duration + started.elapsed());
-                    return Err(error);
-                }
             }
         };
     }
     'drain: while !emissions.is_empty() {
         work_step!();
-        let (mut index, data, mut byte_input, consumed) = {
-            let (index, output_state) = emissions.last_mut().expect("pending region output");
-            if let StageOutput::Single(data) = output_state {
-                // An immediate result has no continuation to retain or poll again.
-                (*index, data.take(), false, true)
+        let (mut index, data, consumed) = {
+            let (index, pending) = emissions.last_mut().expect("pending stage output");
+            if let StageOutput::Single(data) = pending {
+                (*index, data.take(), true)
             } else {
-                let byte_input = matches!(output_state, StageOutput::Delivery(_));
-                if let StageOutput::Delivery(step) = output_state {
-                    if std::mem::take(&mut step.aborted) {
-                        metrics.record_delivery_abort();
-                    }
-                }
-                let data = timed_try!(stages[*index].next_output(output_state, stats, metrics).inspect_err(|error| {
-                    tracing::error!(stage_id = %stages[*index].name, %error, "region stage output failed");
-                }));
-                (*index, data, byte_input, false)
+                (*index, stages[*index].next_output(pending)?, false)
             }
         };
         if consumed || data.is_none() {
@@ -1035,69 +1222,39 @@ async fn drain_outputs(
             work_step!();
             index += 1;
             if stages[index].single_output {
-                let Some(next) = timed_try!(stages[index].process_single(data, stats)) else {
+                let Some(next) = stages[index].process_single(data)? else {
                     continue 'drain;
                 };
                 data = next;
-                byte_input = false;
                 continue;
             }
-            match timed_try!(stages[index].process(data, stats)) {
-                StageOutput::Single(Some(next)) => {
-                    data = next;
-                    byte_input = false;
-                }
+            match stages[index].process(data)? {
+                StageOutput::Single(Some(next)) => data = next,
                 StageOutput::Single(None) => continue 'drain,
                 pending => {
-                    // Only incremental/multiple-output stages retain a cursor.
-                    // Its next result cannot be extracted until this suffix drains.
                     emissions.push((index, pending));
                     continue 'drain;
                 }
             }
         }
-        let frame_flags = match &data {
+        let flags = match &data {
             StreamData::EncodedDelivery { flags, .. } => Some(*flags),
             _ => None,
         };
-        let measurement = timed_try!(metrics.measure(&data));
-        handle_duration += started.elapsed();
-        let sent = send_with_backpressure(output, capacity, data, Some(stats)).await;
-        started = std::time::Instant::now();
-        if let Err(error) = sent {
-            if let (Some(flags), Some((owner, StageOutput::Encoder(pending)))) =
-                (frame_flags, emissions.last_mut())
-            {
+        if let Err(error) = send_with_backpressure(output, capacity, data, None).await {
+            if let Some((owner, pending)) = emissions.last_mut() {
                 if *owner == index
                     && !stages
                         .iter()
                         .any(|stage| matches!(stage.engine, CollectionStage::ByteTransform(_)))
+                    && stages[index].output_failed(flags, Some(pending))
                 {
-                    if let CollectionStage::Encoder(engine) = &mut stages[index].engine {
-                        engine.output_failed(flags);
-                    }
-                    pending.output_failed();
-                    stages[index]
-                        .stats
-                        .as_deref()
-                        .unwrap_or(stats)
-                        .record_error_logged("region encoder send error", error.to_string());
                     continue;
                 }
             }
-            if byte_input {
-                stages[index]
-                    .stats
-                    .as_deref()
-                    .unwrap_or(stats)
-                    .record_error_logged("region byte transform send error", error.to_string());
-            }
-            stats.record_handle_duration(handle_duration + started.elapsed());
             return Err(error);
         }
-        timed_try!(metrics.record_output(stats, measurement));
     }
-    stats.record_handle_duration(handle_duration + started.elapsed());
     Ok(())
 }
 
@@ -1136,14 +1293,9 @@ pub(crate) struct RegionProcessor {
     stages: std::sync::Mutex<Vec<Stage>>,
     inputs: Vec<LinkReceiver<StreamData>>,
     control_inputs: Vec<LinkReceiver<ControlSignal>>,
-    output: LinkOutput<StreamData>,
-    control_output: LinkOutput<ControlSignal>,
+    pub(crate) output: LinkOutput<StreamData>,
+    pub(crate) control_output: LinkOutput<ControlSignal>,
     capacities: ProcessorChannelCapacities,
-    stats: Arc<ProcessorStats>,
-    metric_domains: DataMetricDomains,
-    passthrough_domain: Option<DataDomain>,
-    encoded_boundary: bool,
-    encoding_boundary: Option<DataDomain>,
 }
 
 impl RegionProcessor {
@@ -1167,24 +1319,6 @@ impl RegionProcessor {
         Ok(Self {
             isolate_opaque: resources.isolate_opaque,
             id,
-            encoding_boundary: plans
-                .iter()
-                .any(|plan| {
-                    matches!(
-                        plan,
-                        PhysicalPlan::SinkEncoder(_) | PhysicalPlan::IncSinkEncoder(_)
-                    )
-                })
-                .then_some(resources.input_domain),
-            encoded_boundary: plans.iter().any(|plan| {
-                matches!(
-                    plan,
-                    PhysicalPlan::SinkCompress(_) | PhysicalPlan::SinkEncrypt(_)
-                )
-            }),
-            metric_domains: resources.metric_domains,
-            passthrough_domain: (plans.len() == 1 && matches!(plans[0], PhysicalPlan::Barrier(_)))
-                .then_some(resources.input_domain),
             stages: std::sync::Mutex::new(
                 plans
                     .iter()
@@ -1196,22 +1330,23 @@ impl RegionProcessor {
             output: LinkOutput::new(capacities.data_link_kind, capacities.data),
             control_output: LinkOutput::new(capacities.control_link_kind, capacities.control),
             capacities,
-            stats: Arc::new(ProcessorStats::collection_in_out()),
         })
     }
 
-    pub(crate) fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-        for stage in self
-            .stages
-            .get_mut()
-            .expect("region stage ownership mutex poisoned")
-        {
-            stage.stats = Some(Arc::new(ProcessorStats::stage_diagnostics(
-                Arc::clone(&stats),
-                &stage.name,
-            )));
-        }
-        self.stats = stats;
+    pub(crate) fn stage_stats(&self) -> Vec<ProcessorStatsHandle> {
+        self.stages
+            .lock()
+            .expect("stage ownership mutex poisoned")
+            .iter()
+            .map(|stage| ProcessorStatsHandle {
+                processor_id: self
+                    .id
+                    .rsplit_once('/')
+                    .map(|(prefix, _)| format!("{prefix}/{}", stage.name))
+                    .unwrap_or_else(|| stage.name.clone()),
+                stats: Arc::clone(&stage.stats),
+            })
+            .collect()
     }
 }
 
@@ -1238,24 +1373,6 @@ impl Processor for RegionProcessor {
             .first()
             .is_some_and(|stage| stage.strict_input_closure);
         let fatal_data_lag = stages.first().is_some_and(|stage| stage.fatal_data_lag);
-        for stage in &mut stages {
-            if stage.stats.is_none() {
-                stage.stats = Some(Arc::new(ProcessorStats::stage_diagnostics(
-                    Arc::clone(&self.stats),
-                    &stage.name,
-                )));
-            }
-            let stage_stats = stage.stats.as_ref().unwrap_or(&self.stats);
-            if let CollectionStage::EosWindow(window) = &mut stage.engine {
-                window.set_stats(Arc::clone(stage_stats));
-            }
-            if let CollectionStage::TumblingWindow(window) = &mut stage.engine {
-                window.set_stats(Arc::clone(stage_stats));
-            }
-            if let CollectionStage::StreamingTumbling(window) = &mut stage.engine {
-                window.set_stats(Arc::clone(stage_stats));
-            }
-        }
         let mut emissions = Vec::with_capacity(stages.len());
         if let Some(Stage {
             engine: CollectionStage::Barrier(stage),
@@ -1286,16 +1403,8 @@ impl Processor for RegionProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let capacities = self.capacities;
-        let stats = Arc::clone(&self.stats);
         let id = self.id.clone();
-        let metrics = if let Some(input) = self.encoding_boundary {
-            RegionMetrics::encoding(&stats, input, true)
-        } else if self.encoded_boundary {
-            RegionMetrics::encoded(&stats, REGION_TRANSFORM_METRICS, true)
-        } else {
-            RegionMetrics::new(&stats, self.metric_domains, self.passthrough_domain)
-        };
-        let span = stats.processor_span();
+        let span = tracing::info_span!("execution_region", region_id = %id);
         if self.isolate_opaque {
             let stage = stages.pop().expect("opaque region has one stage");
             let driver = opaque::OpaqueDriver {
@@ -1305,8 +1414,6 @@ impl Processor for RegionProcessor {
                 output,
                 control_output,
                 capacities,
-                stats,
-                metrics: Arc::new(metrics),
                 spawner: spawner.clone(),
                 id,
             };
@@ -1330,15 +1437,7 @@ impl Processor for RegionProcessor {
                         match item {
                             Some(Ok(signal)) => {
                                 let signal = if matches!(stages[0].engine, CollectionStage::Barrier(_)) {
-                                    let (signal, elapsed) = timed_stage_event(&mut stages[0], &stats, std::time::Instant::now(), |stage| {
-                                        match &mut stage.engine {
-                                            CollectionStage::Barrier(engine) => engine.control(signal),
-                                            _ => Ok(Some(signal)),
-                                        }
-                                    })?;
-                                    // Control alignment has no data drain of its own.
-                                    stats.record_handle_duration(elapsed);
-                                    let Some(signal) = signal else { continue; };
+                                    let Some(signal) = stages[0].align_control(signal)? else { continue; };
                                     signal
                                 } else { signal };
                                 let terminal = signal.is_terminal();
@@ -1347,17 +1446,11 @@ impl Processor for RegionProcessor {
                                         || terminal && matches!(stages[index].engine, CollectionStage::Encoder(_))) {
                                         continue;
                                     }
-                                    let (pending, elapsed) = timed_stage_event(&mut stages[index], &stats, std::time::Instant::now(), |stage| {
-                                        match &mut stage.engine {
-                                            CollectionStage::Watermark(engine) => engine.control(&signal, stage.stats.as_deref().unwrap_or(&stats)).map(|data| Some(StageOutput::immediate(data))),
-                                            CollectionStage::Encoder(_) => Ok(stage.finish_input(&stats)),
-                                            _ => Ok(None),
-                                        }
-                                    })?;
+                                    let pending = stages[index].control_preflush(&signal)?;
                                     if let Some(pending) = pending {
                                         emissions.push((index, pending));
                                     }
-                                    drain_outputs(&mut stages, &mut emissions, &output, capacities.data, &stats, &metrics, elapsed).await?;
+                                    drain_outputs(&mut stages, &mut emissions, &output, capacities.data).await?;
                                 }
                                 if terminal && stages.iter().any(|stage| matches!(&stage.engine, CollectionStage::ByteTransform(engine) if engine.active())) {
                                     pending_terminal = Some(signal);
@@ -1367,11 +1460,11 @@ impl Processor for RegionProcessor {
                                 send_control_with_backpressure(&control_output, capacities.control, signal).await?;
                                 if terminal {
                                     for index in 0..stages.len() {
-                                        let (pending, elapsed) = timed_stage_event(&mut stages[index], &stats, std::time::Instant::now(), |stage| Ok(stage.finish_input(&stats)))?;
+                                        let pending = stages[index].finish_input();
                                         if let Some(pending) = pending {
                                             emissions.push((index, pending));
                                         }
-                                        drain_outputs(&mut stages, &mut emissions, &output, capacities.data, &stats, &metrics, elapsed).await?;
+                                        drain_outputs(&mut stages, &mut emissions, &output, capacities.data).await?;
                                     }
                                     return Ok(());
                                 }
@@ -1383,7 +1476,7 @@ impl Processor for RegionProcessor {
                                 }
                             }
                             None => {
-                                if strict_input_closure { return Err(stages[0].channel_closed(&stats, "control")); }
+                                if strict_input_closure { return Err(stages[0].channel_closed("control")); }
                                 control_active = false;
                             }
                         }
@@ -1400,44 +1493,32 @@ impl Processor for RegionProcessor {
                         }
                         std::task::Poll::Pending
                     }), if !clocks.is_empty() => {
-                        let (pending, elapsed) = timed_stage_event(&mut stages[index], &stats, std::time::Instant::now(), |stage| stage.on_timer(event, &stats).map(Some))?;
+                        let pending = Some(stages[index].on_timer(event)?);
                         if let Some(pending) = pending {
                             emissions.push((index, pending));
                         }
-                        drain_outputs(&mut stages, &mut emissions, &output, capacities.data, &stats, &metrics, elapsed).await?;
+                        drain_outputs(&mut stages, &mut emissions, &output, capacities.data).await?;
                     }
                     item = input.next() => {
-                        // One region event starts before alignment and includes its suffix.
-                        let started = std::time::Instant::now();
                         let mut resume = false;
                         let data = match item {
                             Some(Ok(IndexedInput::Item { upstream, item: data })) => {
-                                if let CollectionStage::Barrier(engine) = &mut stages[0].engine {
-                                    let action = engine.process(upstream, data).inspect_err(|_| {
-                                        stats.record_handle_duration(started.elapsed());
-                                    })?;
-                                    match action {
-                                        BarrierAction::Pause => {
-                                            stats.record_handle_duration(started.elapsed());
-                                            input.pause(upstream);
-                                            continue;
-                                        }
-                                        BarrierAction::Forward(None) => {
-                                            stats.record_handle_duration(started.elapsed());
-                                            continue;
-                                        }
+                                if matches!(stages[0].engine, CollectionStage::Barrier(_)) {
+                                    match stages[0].align_data(upstream, data)? {
+                                        BarrierAction::Pause => { input.pause(upstream); continue; }
+                                        BarrierAction::Forward(None) => continue,
                                         BarrierAction::Forward(Some(data)) => data,
                                         BarrierAction::Resume(data) => { resume = true; data }
                                     }
                                 } else { data }
                             },
                             Some(Ok(IndexedInput::Closed)) => {
-                                if strict_input_closure { return Err(stages[0].channel_closed(&stats, "data")); }
+                                if strict_input_closure { return Err(stages[0].channel_closed("data")); }
                                 continue;
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
                                 if fatal_data_lag {
-                                    stages[0].stats.as_deref().unwrap_or(&stats).record_error_logged("region data input lag", format!("data input skipped {skipped} items"));
+                                    stages[0].input_lagged(skipped);
                                     return Err(ProcessorError::ChannelClosed);
                                 }
                                 log_broadcast_lagged(&id, skipped, "region data input");
@@ -1445,11 +1526,11 @@ impl Processor for RegionProcessor {
                             }
                             None => {
                                 for index in 0..stages.len() {
-                                    let (pending, elapsed) = timed_stage_event(&mut stages[index], &stats, std::time::Instant::now(), |stage| stage.input_closed(&stats))?;
+                                    let pending = stages[index].input_closed()?;
                                     if let Some(pending) = pending {
                                         emissions.push((index, pending));
                                     }
-                                    drain_outputs(&mut stages, &mut emissions, &output, capacities.data, &stats, &metrics, elapsed).await?;
+                                    drain_outputs(&mut stages, &mut emissions, &output, capacities.data).await?;
                                 }
                                 if let Some(terminal) = pending_terminal.take() {
                                     send_control_with_backpressure(&control_output, capacities.control, terminal).await?;
@@ -1458,14 +1539,8 @@ impl Processor for RegionProcessor {
                             }
                         };
                         let terminal = data.is_terminal();
-                        let (first, elapsed) = timed_stage_event(&mut stages[0], &stats, started, |stage| {
-                            metrics.record_input(&stats, &data)?;
-                            stage.process(data, &stats).map(Some)
-                        })?;
-                        if let Some(first) = first {
-                            emissions.push((0usize, first));
-                        }
-                        drain_outputs(&mut stages, &mut emissions, &output, capacities.data, &stats, &metrics, elapsed).await?;
+                        emissions.push((0usize, stages[0].process(data)?));
+                        drain_outputs(&mut stages, &mut emissions, &output, capacities.data).await?;
                         if terminal { return Ok(()); }
                         if let Some(terminal) = pending_terminal.take_if(|_| !stages.iter().any(|stage| matches!(&stage.engine, CollectionStage::ByteTransform(engine) if engine.active()))) {
                             send_control_with_backpressure(&control_output, capacities.control, terminal).await?;
@@ -1642,7 +1717,21 @@ mod tests {
                             )
                             .unwrap();
 
-                            region.set_stats(Arc::clone(&boundary));
+                            region
+                                .stages
+                                .get_mut()
+                                .unwrap()
+                                .iter_mut()
+                                .find(|stage| matches!(stage.engine, CollectionStage::Encoder(_)))
+                                .unwrap()
+                                .set_stats(Arc::clone(&own));
+                            region
+                                .stages
+                                .get_mut()
+                                .unwrap()
+                                .last_mut()
+                                .unwrap()
+                                .set_stats(Arc::clone(&boundary));
                             vec![PlanProcessor::Region(Box::new(region))]
                         } else {
                             let mut processors = vec![PlanProcessor::SinkEncoder(standalone)];
@@ -1755,7 +1844,7 @@ mod tests {
                         }
                         if fused {
                             let stats = boundary.snapshot();
-                            assert_eq!(stats.records_in, Some(3));
+                            assert_eq!(stats.records_in, if compress { None } else { Some(3) });
                             assert_eq!(stats.records_out, None);
                             assert_eq!(
                                 stats.custom["messages_out"],
@@ -1874,7 +1963,14 @@ mod tests {
                     RegionProcessor::new("fault".into(), &specs, resources, capacities).unwrap();
                 let boundary = Arc::new(ProcessorStats::default());
 
-                region.set_stats(Arc::clone(&boundary));
+                region
+                    .stages
+                    .get_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|stage| matches!(stage.engine, CollectionStage::Encoder(_)))
+                    .unwrap()
+                    .set_stats(Arc::clone(&boundary));
                 let (tx, rx) = mpsc::channel(1);
                 region.add_input(rx);
                 let mut output = region.subscribe_output().unwrap();
@@ -1990,7 +2086,7 @@ mod tests {
             }
         }
         for mode in 0..5 {
-            for compress in [false, true] {
+            for (compress, isolated) in [(false, false), (true, false), (false, true)] {
                 let common = match mode {
                     0 => CommonSinkProps::default(),
                     1 => CommonSinkProps {
@@ -2019,7 +2115,10 @@ mod tests {
                         ),
                     ));
                 }
-                let mut resources = RegionResources::default();
+                let mut resources = RegionResources {
+                    isolate_opaque: isolated,
+                    ..Default::default()
+                };
                 resources.encoders.insert(
                     2,
                     EncoderStage::new(
@@ -2032,8 +2131,17 @@ mod tests {
                 let mut region =
                     RegionProcessor::new("closed".into(), &specs, resources, capacities).unwrap();
                 let boundary = Arc::new(ProcessorStats::default());
+                let transport = Arc::new(ProcessorStats::default());
+                region.output.set_stats(Arc::clone(&transport));
 
-                region.set_stats(Arc::clone(&boundary));
+                region
+                    .stages
+                    .get_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|stage| matches!(stage.engine, CollectionStage::Encoder(_)))
+                    .unwrap()
+                    .set_stats(Arc::clone(&boundary));
                 let (tx, rx) = mpsc::channel(1);
                 let (control_tx, control_rx) = mpsc::channel(1);
                 region.add_input(rx);
@@ -2051,6 +2159,15 @@ mod tests {
                 })
                 .await
                 .unwrap();
+                if isolated {
+                    // Input counters can become visible before a worker has finished
+                    // lazy encoding. A control acknowledgement is handled only after
+                    // the current data event has fully drained.
+                    let fence =
+                        ControlSignal::Barrier(BarrierControlSignalKind::SyncTest.with_id(99));
+                    control_tx.send(fence.clone()).await.unwrap();
+                    assert_eq!(control_output.recv().await.unwrap(), fence);
+                }
                 if mode == 1 {
                     tokio::time::advance(Duration::from_millis(10)).await;
                 }
@@ -2059,7 +2176,7 @@ mod tests {
                 );
                 if !compress && mode < 2 {
                     timeout(Duration::from_secs(2), async {
-                        while boundary.snapshot().error_count != 1 {
+                        while transport.snapshot().error_count != 1 {
                             tokio::task::yield_now().await;
                         }
                     })
@@ -2079,13 +2196,9 @@ mod tests {
                     .unwrap();
                 if compress {
                     assert!(matches!(result, Err(ProcessorError::ChannelClosed)));
-                    let snapshot = boundary.snapshot();
+                    let snapshot = transport.snapshot();
                     assert_eq!(snapshot.error_count, 1);
-                    assert!(snapshot
-                        .last_error
-                        .as_deref()
-                        .unwrap()
-                        .contains("PhysicalSinkCompress_3"));
+                    assert!(snapshot.last_error.is_some());
                 } else {
                     if mode == 3 {
                         assert!(matches!(result, Err(ProcessorError::ChannelClosed)));
@@ -2095,9 +2208,13 @@ mod tests {
                     if mode < 3 {
                         assert_eq!(control_output.recv().await.unwrap(), terminal);
                     }
-                    assert_eq!(boundary.snapshot().error_count, 1);
+                    assert_eq!(
+                        transport.snapshot().error_count,
+                        if mode == 3 { 2 } else { 1 }
+                    );
                 }
-                assert_eq!(boundary.snapshot().custom["messages_out"], 0);
+                assert_eq!(boundary.snapshot().custom["messages_out"], 1);
+                assert_eq!(boundary.snapshot().error_count, 0);
             }
         }
     }
@@ -2152,7 +2269,13 @@ mod tests {
         let mut region =
             RegionProcessor::new("backpressure".into(), &[plan], resources, capacities).unwrap();
         let stats = Arc::new(ProcessorStats::default());
-        region.set_stats(Arc::clone(&stats));
+        region
+            .stages
+            .get_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap()
+            .set_stats(Arc::clone(&stats));
         let (tx, rx) = mpsc::channel(1);
         region.add_input(rx);
         let mut output = region.subscribe_output().unwrap();
@@ -2178,7 +2301,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(appends.load(Ordering::Relaxed), 2);
-        assert_eq!(stats.snapshot().custom["messages_out"], 1);
+        assert_eq!(stats.snapshot().custom["messages_out"], 2);
         for value in 1..=5 {
             let StreamData::EncodedDelivery { bytes, .. } =
                 timeout(Duration::from_secs(2), output.recv())
@@ -2237,7 +2360,7 @@ mod tests {
                     let (tx, rx) = mpsc::channel(1);
                     let (control_tx, control_rx) = mpsc::channel(1);
                     let spawner = TaskSpawner::from_handle(tokio::runtime::Handle::current());
-                    let boundary_stats = Arc::new(ProcessorStats::default());
+                    let mut stage_stats = Vec::new();
                     let mut processors = if fused {
                         let mut region = RegionProcessor::new(
                             "bytes".into(),
@@ -2246,8 +2369,11 @@ mod tests {
                             capacities,
                         )
                         .unwrap();
-                        region.set_stats(Arc::clone(&boundary_stats));
-
+                        for stage in region.stages.get_mut().unwrap().iter_mut() {
+                            let stats = Arc::new(ProcessorStats::default());
+                            stage_stats.push(Arc::clone(&stats));
+                            stage.set_stats(stats);
+                        }
                         vec![PlanProcessor::Region(Box::new(region))]
                     } else {
                         specs
@@ -2283,6 +2409,7 @@ mod tests {
                                 };
                                 let stats = Arc::new(ProcessorStats::default());
                                 processor.set_stats(Arc::clone(&stats));
+                                stage_stats.push(stats);
                                 processor
                             })
                             .collect::<Vec<_>>()
@@ -2435,30 +2562,14 @@ mod tests {
                             .unwrap();
                         assert_eq!(decoded, b"hello world");
                     }
-                    if fused {
-                        let metrics = boundary_stats.snapshot().custom;
-                        assert_eq!(metrics["messages_in"], u64::from(complete));
-                        assert_eq!(metrics["messages_out"], u64::from(complete));
-                        assert_eq!(
-                            metrics["messages_aborted"],
-                            u64::from(!complete || mode == 7)
-                        );
-                        assert_eq!(
-                            metrics["bytes_in"],
-                            if mode == 7 {
-                                24
-                            } else if complete {
-                                11
-                            } else {
-                                6
-                            }
-                        );
-                        assert_eq!(
-                            metrics["bytes_out"],
-                            frames.iter().map(|(_, bytes)| *bytes as u64).sum::<u64>()
-                        );
-                    }
-                    let actual = frames;
+                    let counters: Vec<_> = stage_stats
+                        .iter()
+                        .map(|stats| {
+                            let snapshot = stats.snapshot();
+                            (snapshot.error_count, snapshot.custom)
+                        })
+                        .collect();
+                    let actual = (frames, counters);
                     if let Some(expected) = &expected {
                         assert_eq!(&actual, expected, "encrypt={encrypt}, mode={mode}");
                     } else {
@@ -2470,7 +2581,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn region_timer_and_lifecycle_metrics_include_synchronous_callbacks() {
+    async fn stage_timer_and_lifecycle_metrics_include_synchronous_callbacks() {
         use crate::codec::{CodecError, Merger, MergerOutputKind, MergerRegistry};
         use crate::processor::sampler_processor::{MergerConfig, PackerProps};
         use crate::processor::{SamplerConfig, SamplerProcessor, SamplingStrategy};
@@ -2499,7 +2610,7 @@ mod tests {
         for event in ["timer", "control", "eof"] {
             for outcome in 0..3 {
                 let id = format!("timing_{event}_{outcome}");
-                let stats = Arc::new(ProcessorStats::new("timing_test", &*id, "region"));
+                let stats = Arc::new(ProcessorStats::new("timing_test", &*id, "stage"));
                 stats.set_pipeline_id("region_callback_timing");
                 let histogram = veloflux_metrics::processor_handle_duration_seconds()
                     .with_label_values(&["timing_test", "region_callback_timing", &id]);
@@ -2526,7 +2637,7 @@ mod tests {
                 sampler.set_merger_schema(Arc::new(datatypes::Schema::new(vec![])));
                 let mut resources = RegionResources {
                     input_domain: DataDomain::Message,
-                    metric_domains: DataMetricDomains::NONE.passthrough(DataDomain::Message),
+                    stage_default_domains: DataMetricDomains::NONE.passthrough(DataDomain::Message),
                     ..Default::default()
                 };
                 resources.samplers.insert(1, sampler.into_stage().unwrap());
@@ -2540,7 +2651,13 @@ mod tests {
                 let capacities =
                     ProcessorChannelCapacities::new(1, 1).with_link_kind(LinkKind::Mpsc);
                 let mut region = RegionProcessor::new(id, &[plan], resources, capacities).unwrap();
-                region.set_stats(stats);
+                region
+                    .stages
+                    .get_mut()
+                    .unwrap()
+                    .first_mut()
+                    .unwrap()
+                    .set_stats(stats);
                 let (tx, rx) = mpsc::channel(1);
                 let (control_tx, control_rx) = mpsc::channel(1);
                 region.add_input(rx);
@@ -2598,89 +2715,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn region_timing_records_errors_and_excludes_blocked_output_waits() {
-        let stats = ProcessorStats::new("timing_test", "errors_and_waits", "region");
-        stats.set_pipeline_id("region_callback_timing");
+    async fn stage_timing_records_errors_and_excludes_transport_waits() {
+        // The default stage keeps traffic/error metrics without clock reads or
+        // binding a histogram, including when another metric binds its children.
+        let mut disabled =
+            Stage::from_plan(&plans(true)[0], &mut RegionResources::default()).unwrap();
+        disabled.stats.set_pipeline_id("disabled_stage_timing");
+        assert!(!disabled.stats.handling_time_enabled());
+        assert!(StageTimer::new(&disabled.stats).started.is_none());
+        assert!(disabled.on_timer(ClockEvent::Periodic).is_err());
+        let _ = disabled.process(input()).unwrap();
+        let snapshot = disabled.stats.snapshot();
+        assert_eq!(snapshot.error_count, 1);
+        assert_eq!(snapshot.records_in, Some(1));
+        assert_eq!(snapshot.records_out, Some(1));
+        assert!(veloflux_metrics::processor_handle_duration_seconds()
+            .remove_label_values(&["default", "disabled_stage_timing", &disabled.name])
+            .is_err());
+
+        let mut shared_stats = ProcessorStats::new("timing_test", "disabled_shared", "stage");
+        shared_stats.configure_stage_handling_time();
+        shared_stats.set_shared_stream_name("disabled_stage_timing");
+        let shared_stats = Arc::new(shared_stats);
+        disabled.set_stats(Arc::clone(&shared_stats));
+        assert!(disabled.on_timer(ClockEvent::Periodic).is_err());
+        let _ = disabled.process(input()).unwrap();
+        assert_eq!(shared_stats.snapshot().error_count, 1);
+        assert_eq!(shared_stats.snapshot().records_out, Some(1));
+        assert!(
+            veloflux_metrics::shared_stream_processor_handle_duration_seconds()
+                .remove_label_values(&["timing_test", "disabled_stage_timing", "disabled_shared"])
+                .is_err()
+        );
+
+        let stats = Arc::new(ProcessorStats::new(
+            "timing_test",
+            "errors_and_waits",
+            "stage",
+        ));
+        stats.set_pipeline_id("stage_callback_timing");
         let histogram = veloflux_metrics::processor_handle_duration_seconds().with_label_values(&[
             "timing_test",
-            "region_callback_timing",
+            "stage_callback_timing",
             "errors_and_waits",
         ]);
-        let mut region = RegionProcessor::new(
-            "timing".into(),
-            &plans(true)[..1],
-            RegionResources::default(),
-            ProcessorChannelCapacities::new(1, 1).with_link_kind(LinkKind::Mpsc),
-        )
-        .unwrap();
-        let stages = region.stages.get_mut().unwrap();
+        let mut resources = RegionResources::default();
+        let mut stage = Stage::from_plan(&plans(true)[0], &mut resources).unwrap();
+        stage.set_stats(Arc::clone(&stats));
         let before = histogram.get_sample_count();
-        // A timer on a non-timed stage is a fatal preparation error.
-        assert!(
-            timed_stage_event(&mut stages[0], &stats, std::time::Instant::now(), |stage| {
-                stage.on_timer(ClockEvent::Periodic, &stats).map(Some)
-            })
-            .is_err()
-        );
+        assert!(stage.on_timer(ClockEvent::Periodic).is_err());
         assert_eq!(histogram.get_sample_count(), before + 1);
-
-        let output = LinkOutput::new(LinkKind::Mpsc, 1);
-        let mut receiver = output.subscribe().unwrap();
-        let collection_metrics = RegionMetrics::new(
-            &stats,
-            DataMetricDomains::NONE.passthrough(DataDomain::Collection),
-            None,
-        );
-        let mut emissions = vec![(0, StageOutput::Single(Some(StreamData::bytes(vec![1]))))];
-        // Invalid output domains must publish time on a fatal accounting error.
-        assert!(drain_outputs(
-            stages,
-            &mut emissions,
-            &output,
-            1,
-            &stats,
-            &collection_metrics,
-            Duration::ZERO
-        )
-        .await
-        .is_err());
+        assert!(stage.process(StreamData::bytes(vec![1])).is_err());
         assert_eq!(histogram.get_sample_count(), before + 2);
-        receiver.recv().await.unwrap();
-
-        let metrics = RegionMetrics::new(
-            &stats,
-            DataMetricDomains::NONE.passthrough(DataDomain::Message),
-            None,
-        );
-        send_with_backpressure(&output, 1, StreamData::bytes(vec![1]), None)
+        let mut output = LinkOutput::new(LinkKind::Mpsc, 1);
+        let transport = Arc::new(ProcessorStats::new(
+            "timing_test",
+            "blocked_link",
+            "transport",
+        ));
+        output.set_stats(Arc::clone(&transport));
+        let mut receiver = output.subscribe().unwrap();
+        send_with_backpressure(&output, 1, input(), None)
             .await
             .unwrap();
-        let mut emissions = vec![(0, StageOutput::Single(Some(StreamData::bytes(vec![2]))))];
+        let pending = stage.process(input()).unwrap();
         let before_sum = histogram.get_sample_sum();
-        let started = std::time::Instant::now();
-        let mut drain = Box::pin(drain_outputs(
-            stages,
-            &mut emissions,
-            &output,
-            1,
-            &stats,
-            &metrics,
-            Duration::ZERO,
-        ));
+        let mut stages = vec![stage];
+        let mut emissions = vec![(0, pending)];
+        let mut drain = Box::pin(drain_outputs(&mut stages, &mut emissions, &output, 1));
         assert!(timeout(Duration::from_millis(100), &mut drain)
             .await
             .is_err());
+        assert_eq!(histogram.get_sample_sum(), before_sum);
+        assert_eq!(transport.snapshot().custom["send_backpressure_waits"], 1);
         receiver.recv().await.unwrap();
         drain.await.unwrap();
-        assert!(
-            histogram.get_sample_sum() - before_sum < started.elapsed().as_secs_f64() - 0.080,
-            "blocked output wait must not count as region handling time"
-        );
+        assert_eq!(histogram.get_sample_sum(), before_sum);
         receiver.recv().await.unwrap();
     }
 
     #[tokio::test]
-    async fn byte_region_closed_output_records_owning_stage_error_without_output_counts() {
+    async fn byte_region_closed_output_records_transport_error_and_stage_production() {
         let plan = PhysicalPlan::SinkCompress(crate::planner::physical::PhysicalSinkCompress::new(
             Arc::new(plans(true).remove(0)),
             10,
@@ -2695,7 +2810,15 @@ mod tests {
         )
         .unwrap();
         let stats = Arc::new(ProcessorStats::default());
-        region.set_stats(Arc::clone(&stats));
+        let transport = Arc::new(ProcessorStats::default());
+        region.output.set_stats(Arc::clone(&transport));
+        region
+            .stages
+            .get_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap()
+            .set_stats(Arc::clone(&stats));
         let (tx, rx) = mpsc::channel(1);
         region.add_input(rx);
         drop(region.subscribe_output().unwrap());
@@ -2711,11 +2834,12 @@ mod tests {
             .unwrap();
         assert!(matches!(result, Err(ProcessorError::ChannelClosed)));
         let snapshot = stats.snapshot();
-        assert_eq!(snapshot.error_count, 1);
+        assert_eq!(snapshot.error_count, 0);
+        assert_eq!(transport.snapshot().error_count, 1);
         assert_eq!(snapshot.custom["messages_in"], 1);
-        assert_eq!(snapshot.custom["messages_out"], 0);
+        assert_eq!(snapshot.custom["messages_out"], 1);
         assert_eq!(snapshot.custom["bytes_in"], 5);
-        assert_eq!(snapshot.custom["bytes_out"], 0);
+        assert!(snapshot.custom["bytes_out"] > 0);
     }
 
     #[tokio::test]
@@ -3000,7 +3124,13 @@ mod tests {
             "barrier_alignment",
         ]);
         let initial_count = histogram.get_sample_count();
-        region.set_stats(stats);
+        region
+            .stages
+            .get_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap()
+            .set_stats(stats);
         let mut data = Vec::new();
         let mut control = Vec::new();
         for _ in 0..2 {
@@ -3134,7 +3264,13 @@ mod tests {
             capacities,
         )
         .unwrap();
-        error_region.set_stats(error_stats);
+        error_region
+            .stages
+            .get_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap()
+            .set_stats(error_stats);
         let mut error_data = Vec::new();
         let mut error_control = Vec::new();
         for _ in 0..2 {
@@ -3320,14 +3456,24 @@ mod tests {
 
     #[tokio::test]
     async fn region_matches_standalone_output_and_data_barriers() {
-        for accept in [true, false] {
+        for (accept, invalid) in [(true, false), (false, false), (false, true)] {
             for fused in [true, false] {
-                let specs = plans(accept);
+                let mut specs = plans(accept);
+                if invalid {
+                    let PhysicalPlan::Filter(filter) = &mut specs[0] else {
+                        unreachable!()
+                    };
+                    filter.scalar_predicate = ScalarExpr::Literal(
+                        Value::Int64(7),
+                        ConcreteDatatype::Int64(datatypes::Int64Type),
+                    );
+                }
                 let capacities =
                     ProcessorChannelCapacities::new(1, 1).with_link_kind(LinkKind::Mpsc);
                 let spawner = TaskSpawner::from_handle(tokio::runtime::Handle::current());
                 let (tx, rx) = mpsc::channel(1);
                 let mut tasks = Vec::new();
+                let filter_stats;
                 let mut out;
                 let mut control_out;
                 if fused {
@@ -3338,6 +3484,7 @@ mod tests {
                         capacities,
                     )
                     .unwrap();
+                    filter_stats = Arc::clone(&region.stages.get_mut().unwrap()[0].stats);
                     region.add_input(rx);
                     out = region.subscribe_output().unwrap();
                     control_out = region.subscribe_control_output().unwrap();
@@ -3359,6 +3506,8 @@ mod tests {
                         Arc::new(compute.clone()),
                         capacities,
                     );
+                    filter_stats = Arc::new(ProcessorStats::collection_in_out());
+                    filter.set_stats(Arc::clone(&filter_stats));
                     filter.add_input(rx);
                     compute.add_input(filter.subscribe_output().unwrap());
                     compute.add_control_input(filter.subscribe_control_output().unwrap());
@@ -3396,6 +3545,10 @@ mod tests {
                 assert!(timeout(Duration::from_millis(10), control_out.recv())
                     .await
                     .is_err());
+                let snapshot = filter_stats.snapshot();
+                assert_eq!(snapshot.records_in, Some(1));
+                assert_eq!(snapshot.records_out, Some(u64::from(accept)));
+                assert_eq!(snapshot.error_count, u64::from(invalid));
                 drop(tx);
                 let mut saw_channel_closed = false;
                 for task in tasks {
@@ -3428,7 +3581,13 @@ mod tests {
         )
         .unwrap();
         let stats = Arc::new(ProcessorStats::collection_in_out());
-        region.set_stats(Arc::clone(&stats));
+        region
+            .stages
+            .get_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap()
+            .set_stats(Arc::clone(&stats));
         let (tx, rx) = mpsc::channel(1);
         let (ctrl_tx, ctrl_rx) = mpsc::channel(1);
         region.add_input(rx);
@@ -3443,7 +3602,7 @@ mod tests {
         // In/out counters are published after successful sends. With capacity
         // one, the second output must wait for the receiver to make room.
         tokio::task::yield_now().await;
-        assert_eq!(stats.snapshot().records_out, Some(1));
+        assert_eq!(stats.snapshot().records_out, Some(2));
         for _ in 0..3 {
             let item = timeout(Duration::from_secs(2), output.recv())
                 .await
@@ -3821,52 +3980,26 @@ mod tests {
             .iter()
             .map(|plan| Stage::from_plan(plan, &mut resources).unwrap())
             .collect::<Vec<_>>();
-        // Observe the real window buffer while exercising the production drain
-        // loop directly; normal region startup disables stage performance gauges.
-        if let CollectionStage::TumblingWindow(window) = &mut stages[0].engine {
-            window.set_stats(Arc::clone(&stats));
-        }
+        stages[0].set_stats(Arc::clone(&stats));
         let output = LinkOutput::new(LinkKind::Mpsc, capacities.data);
         let mut receiver = output.subscribe().unwrap();
-        let metrics = RegionMetrics::new(
-            &stats,
-            DataMetricDomains::NONE.passthrough(DataDomain::Collection),
-            None,
-        );
-        let initial = stages[0].process(window_input(), &stats).unwrap();
+        let initial = stages[0].process(window_input()).unwrap();
         let mut emissions = vec![(0, initial)];
-        drain_outputs(
-            &mut stages,
-            &mut emissions,
-            &output,
-            capacities.data,
-            &stats,
-            &metrics,
-            std::time::Duration::ZERO,
-        )
-        .await
-        .unwrap();
+        drain_outputs(&mut stages, &mut emissions, &output, capacities.data)
+            .await
+            .unwrap();
         let pending = stages[0]
-            .process(
-                StreamData::Watermark(std::time::UNIX_EPOCH + Duration::from_millis(1400)),
-                &stats,
-            )
+            .process(StreamData::Watermark(
+                std::time::UNIX_EPOCH + Duration::from_millis(1400),
+            ))
             .unwrap();
         emissions.push((0, pending));
-        let drain = drain_outputs(
-            &mut stages,
-            &mut emissions,
-            &output,
-            capacities.data,
-            &stats,
-            &metrics,
-            std::time::Duration::ZERO,
-        );
+        let drain = drain_outputs(&mut stages, &mut emissions, &output, capacities.data);
         tokio::pin!(drain);
         tokio::select! {
             result = &mut drain => panic!("drain completed before backpressure: {result:?}"),
             _ = async {
-                while stats.snapshot().records_out != Some(1) { tokio::task::yield_now().await; }
+                while stats.snapshot().records_out != Some(2) { tokio::task::yield_now().await; }
             } => {}
         }
         // One window is in the channel, one is pending send, two remain buffered.
@@ -4161,7 +4294,13 @@ mod tests {
             capacities,
         )
         .unwrap();
-        region.set_stats(Arc::clone(&stats));
+        region
+            .stages
+            .get_mut()
+            .unwrap()
+            .first_mut()
+            .unwrap()
+            .set_stats(Arc::clone(&stats));
         let (tx, rx) = mpsc::channel(1);
         region.add_input(rx);
         let mut output = region.subscribe_output().unwrap();
@@ -4182,7 +4321,7 @@ mod tests {
         .await
         .unwrap();
         timeout(Duration::from_secs(2), async {
-            while stats.snapshot().records_out != Some(1) {
+            while stats.snapshot().records_out != Some(2) {
                 tokio::task::yield_now().await;
             }
         })
@@ -4816,7 +4955,13 @@ mod tests {
             )
             .unwrap();
             let stats = Arc::new(ProcessorStats::collection_in_out());
-            region.set_stats(Arc::clone(&stats));
+            region
+                .stages
+                .get_mut()
+                .unwrap()
+                .first_mut()
+                .unwrap()
+                .set_stats(Arc::clone(&stats));
             let (tx, rx) = mpsc::channel(1);
             region.add_input(rx);
             let mut output = region.subscribe_output().unwrap();
@@ -4843,7 +4988,7 @@ mod tests {
                     .get("collections_out")
                     .copied()
                     .unwrap_or(0)
-                    != 1
+                    != 2
                 {
                     tokio::task::yield_now().await;
                 }

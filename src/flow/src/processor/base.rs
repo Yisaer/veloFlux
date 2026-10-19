@@ -200,8 +200,25 @@ impl<T> Clone for LinkSender<T> {
     }
 }
 
+struct LinkMetrics {
+    stats: Arc<ProcessorStats>,
+    waits: crate::processor::CounterHandle,
+}
+impl LinkMetrics {
+    fn waited(&self) {
+        self.waits.inc_by(1);
+    }
+    fn completed(&self, result: &Result<(), ProcessorError>) {
+        if let Err(error) = result {
+            self.stats
+                .record_error_logged("transport send failed", error.to_string());
+        }
+    }
+}
+
 pub(crate) struct LinkOutput<T> {
     sender: LinkSender<T>,
+    metrics: Option<Arc<LinkMetrics>>,
     mpsc_receiver: Option<Arc<Mutex<Option<mpsc::Receiver<T>>>>>,
 }
 
@@ -209,6 +226,7 @@ impl<T> Clone for LinkOutput<T> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
+            metrics: self.metrics.clone(),
             mpsc_receiver: self.mpsc_receiver.clone(),
         }
     }
@@ -224,6 +242,7 @@ where
                 let (sender, _) = broadcast::channel(normalize_channel_capacity(capacity));
                 Self {
                     sender: LinkSender::Broadcast(sender),
+                    metrics: None,
                     mpsc_receiver: None,
                 }
             }
@@ -231,6 +250,7 @@ where
                 let (sender, receiver) = mpsc::channel(normalize_channel_capacity(capacity));
                 Self {
                     sender: LinkSender::Mpsc(sender),
+                    metrics: None,
                     mpsc_receiver: Some(Arc::new(Mutex::new(Some(receiver)))),
                 }
             }
@@ -240,6 +260,15 @@ where
     #[cfg(test)]
     pub(crate) fn broadcast(capacity: usize) -> Self {
         Self::new(LinkKind::Broadcast, capacity)
+    }
+
+    pub(crate) fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        let waits = stats.register_counter(crate::processor::MetricSpec {
+            id: "transport.send_backpressure_waits",
+            flat_name: "send_backpressure_waits",
+            kind: crate::processor::MetricKind::Counter,
+        });
+        self.metrics = Some(Arc::new(LinkMetrics { stats, waits }));
     }
 
     pub(crate) fn subscribe(&self) -> Option<LinkReceiver<T>> {
@@ -617,12 +646,40 @@ pub(crate) async fn send_with_backpressure(
     data: StreamData,
     stats: Option<&ProcessorStats>,
 ) -> Result<(), ProcessorError> {
-    const BACKOFF: Duration = Duration::from_millis(1);
-    let capacity = normalize_channel_capacity(capacity);
-    let mut payload = Some(data);
-    match &sender.sender {
-        LinkSender::Broadcast(sender) => loop {
-            if sender.receiver_count() == 0 || sender.len() < capacity {
+    let metrics = sender.metrics.as_deref();
+    let result = async {
+        const BACKOFF: Duration = Duration::from_millis(1);
+        let capacity = normalize_channel_capacity(capacity);
+        let mut payload = Some(data);
+        match &sender.sender {
+            LinkSender::Broadcast(sender) => loop {
+                if sender.receiver_count() == 0 || sender.len() < capacity {
+                    let value = payload.take().ok_or_else(|| {
+                        ProcessorError::ProcessingError(
+                            "send_with_backpressure payload state corrupted".to_string(),
+                        )
+                    })?;
+                    sender
+                        .send(value)
+                        .map(|_| ())
+                        .map_err(|_| ProcessorError::ChannelClosed)?;
+                    return Ok(());
+                }
+                if let Some(metrics) = metrics {
+                    metrics.waited();
+                } else if let Some(stats) = stats {
+                    stats.record_send_backpressure_wait_tick();
+                }
+                sleep(BACKOFF).await;
+            },
+            LinkSender::Mpsc(sender) => {
+                if sender.capacity() == 0 {
+                    if let Some(metrics) = metrics {
+                        metrics.waited();
+                    } else if let Some(stats) = stats {
+                        stats.record_send_backpressure_wait_tick();
+                    }
+                }
                 let value = payload.take().ok_or_else(|| {
                     ProcessorError::ProcessingError(
                         "send_with_backpressure payload state corrupted".to_string(),
@@ -630,33 +687,16 @@ pub(crate) async fn send_with_backpressure(
                 })?;
                 sender
                     .send(value)
-                    .map(|_| ())
-                    .map_err(|_| ProcessorError::ChannelClosed)?;
-                return Ok(());
+                    .await
+                    .map_err(|_| ProcessorError::ChannelClosed)
             }
-            if let Some(stats) = stats {
-                // One tick per cooperative backpressure sleep.
-                stats.record_send_backpressure_wait_tick();
-            }
-            sleep(BACKOFF).await;
-        },
-        LinkSender::Mpsc(sender) => {
-            if sender.capacity() == 0 {
-                if let Some(stats) = stats {
-                    stats.record_send_backpressure_wait_tick();
-                }
-            }
-            let value = payload.take().ok_or_else(|| {
-                ProcessorError::ProcessingError(
-                    "send_with_backpressure payload state corrupted".to_string(),
-                )
-            })?;
-            sender
-                .send(value)
-                .await
-                .map_err(|_| ProcessorError::ChannelClosed)
         }
     }
+    .await;
+    if let Some(metrics) = metrics {
+        metrics.completed(&result);
+    }
+    result
 }
 
 pub(crate) async fn send_control_with_backpressure(
@@ -664,12 +704,36 @@ pub(crate) async fn send_control_with_backpressure(
     capacity: usize,
     signal: ControlSignal,
 ) -> Result<(), ProcessorError> {
-    const BACKOFF: Duration = Duration::from_millis(1);
-    let capacity = normalize_channel_capacity(capacity);
-    let mut payload = Some(signal);
-    match &sender.sender {
-        LinkSender::Broadcast(sender) => loop {
-            if sender.receiver_count() == 0 || sender.len() < capacity {
+    let metrics = sender.metrics.as_deref();
+    let result = async {
+        const BACKOFF: Duration = Duration::from_millis(1);
+        let capacity = normalize_channel_capacity(capacity);
+        let mut payload = Some(signal);
+        match &sender.sender {
+            LinkSender::Broadcast(sender) => loop {
+                if sender.receiver_count() == 0 || sender.len() < capacity {
+                    let value = payload.take().ok_or_else(|| {
+                        ProcessorError::ProcessingError(
+                            "send_control_with_backpressure payload state corrupted".to_string(),
+                        )
+                    })?;
+                    sender
+                        .send(value)
+                        .map(|_| ())
+                        .map_err(|_| ProcessorError::ChannelClosed)?;
+                    return Ok(());
+                }
+                if let Some(metrics) = metrics {
+                    metrics.waited();
+                }
+                sleep(BACKOFF).await;
+            },
+            LinkSender::Mpsc(sender) => {
+                if sender.capacity() == 0 {
+                    if let Some(metrics) = metrics {
+                        metrics.waited();
+                    }
+                }
                 let value = payload.take().ok_or_else(|| {
                     ProcessorError::ProcessingError(
                         "send_control_with_backpressure payload state corrupted".to_string(),
@@ -677,22 +741,14 @@ pub(crate) async fn send_control_with_backpressure(
                 })?;
                 sender
                     .send(value)
-                    .map(|_| ())
-                    .map_err(|_| ProcessorError::ChannelClosed)?;
-                return Ok(());
+                    .await
+                    .map_err(|_| ProcessorError::ChannelClosed)
             }
-            sleep(BACKOFF).await;
-        },
-        LinkSender::Mpsc(sender) => {
-            let value = payload.take().ok_or_else(|| {
-                ProcessorError::ProcessingError(
-                    "send_control_with_backpressure payload state corrupted".to_string(),
-                )
-            })?;
-            sender
-                .send(value)
-                .await
-                .map_err(|_| ProcessorError::ChannelClosed)
         }
     }
+    .await;
+    if let Some(metrics) = metrics {
+        metrics.completed(&result);
+    }
+    result
 }
