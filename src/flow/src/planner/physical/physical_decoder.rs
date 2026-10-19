@@ -16,6 +16,7 @@ pub struct PhysicalDecoderEventtimeSpec {
 #[derive(Debug, Clone)]
 pub struct PhysicalDecoder {
     pub base: BasePhysicalPlan,
+    pub(crate) supports_inline_execution: bool,
     source_name: String,
     decoder: StreamDecoderConfig,
     schema: Arc<Schema>,
@@ -36,6 +37,7 @@ impl PhysicalDecoder {
         let base = BasePhysicalPlan::new(children, index);
         Self {
             base,
+            supports_inline_execution: false,
             source_name: source_name.into(),
             decoder,
             schema,

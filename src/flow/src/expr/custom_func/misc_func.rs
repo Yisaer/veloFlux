@@ -425,6 +425,10 @@ pub fn delay_function_def() -> FunctionDef {
 }
 
 impl CustomFunc for BypassFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])
     }
@@ -440,6 +444,10 @@ impl CustomFunc for BypassFunc {
 }
 
 impl CustomFunc for ChrFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         Ok(())
@@ -475,6 +483,10 @@ impl CustomFunc for ChrFunc {
 }
 
 impl CustomFunc for EncodeFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         nth_string_or_null(args, 0)?;
@@ -509,6 +521,10 @@ impl CustomFunc for EncodeFunc {
 }
 
 impl CustomFunc for DecodeFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         nth_string_or_null(args, 0)?;
@@ -554,6 +570,10 @@ impl CustomFunc for DecodeFunc {
 }
 
 impl CustomFunc for TruncFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         nth_f64_or_null(args, 0)?;
@@ -590,6 +610,10 @@ impl CustomFunc for TruncFunc {
 }
 
 impl CustomFunc for Md5Func {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_string_or_null(args, 0)?;
@@ -612,6 +636,10 @@ impl CustomFunc for Md5Func {
 }
 
 impl CustomFunc for Sha1Func {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_string_or_null(args, 0)?;
@@ -634,6 +662,10 @@ impl CustomFunc for Sha1Func {
 }
 
 impl CustomFunc for Sha256Func {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_string_or_null(args, 0)?;
@@ -656,6 +688,10 @@ impl CustomFunc for Sha256Func {
 }
 
 impl CustomFunc for Sha384Func {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_string_or_null(args, 0)?;
@@ -678,6 +714,10 @@ impl CustomFunc for Sha384Func {
 }
 
 impl CustomFunc for Sha512Func {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_string_or_null(args, 0)?;
@@ -700,6 +740,10 @@ impl CustomFunc for Sha512Func {
 }
 
 impl CustomFunc for Crc32Func {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_string_or_null(args, 0)?;
@@ -722,6 +766,10 @@ impl CustomFunc for Crc32Func {
 }
 
 impl CustomFunc for CoalesceFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         if args.is_empty() {
             return Err(EvalError::TypeMismatch {
@@ -754,6 +802,10 @@ impl CustomFunc for CoalesceFunc {
 }
 
 impl CustomFunc for Hex2DecFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_string_or_null(args, 0)?;
@@ -784,6 +836,10 @@ impl CustomFunc for Hex2DecFunc {
 }
 
 impl CustomFunc for Dec2HexFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_i64_or_null(args, 0)?;
@@ -804,6 +860,10 @@ impl CustomFunc for Dec2HexFunc {
 }
 
 impl CustomFunc for ToJsonFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])
     }
@@ -830,6 +890,10 @@ impl CustomFunc for ToJsonFunc {
 }
 
 impl CustomFunc for ParseJsonFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_string_or_null(args, 0)?;
@@ -862,6 +926,10 @@ impl CustomFunc for ParseJsonFunc {
 }
 
 impl CustomFunc for CardinalityFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])
     }
@@ -882,6 +950,10 @@ impl CustomFunc for CardinalityFunc {
 }
 
 impl CustomFunc for NewUuidFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[0])
     }
@@ -897,6 +969,10 @@ impl CustomFunc for NewUuidFunc {
 }
 
 impl CustomFunc for CastFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         nth_string_or_null(args, 1)?;
@@ -935,6 +1011,10 @@ impl CustomFunc for CastFunc {
 }
 
 impl CustomFunc for TstampFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[0])
     }

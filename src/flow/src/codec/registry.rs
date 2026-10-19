@@ -17,6 +17,7 @@ type EncoderFactory = Arc<
 
 struct EncoderEntry {
     factory: EncoderFactory,
+    supports_inline_execution: bool,
 }
 type DecoderFactory = Arc<
     dyn Fn(&StreamDecoderConfig, Arc<Schema>, &str) -> Result<Arc<dyn RecordDecoder>, CodecError>
@@ -26,7 +27,7 @@ type DecoderFactory = Arc<
 
 /// Registry mapping decoder identifiers to factories.
 pub struct DecoderRegistry {
-    factories: RwLock<HashMap<String, DecoderFactory>>,
+    factories: RwLock<HashMap<String, (DecoderFactory, bool)>>,
 }
 
 impl Default for DecoderRegistry {
@@ -51,7 +52,19 @@ impl DecoderRegistry {
     }
 
     pub fn register_decoder(&self, kind: impl Into<String>, factory: DecoderFactory) {
-        self.factories.write().insert(kind.into(), factory);
+        self.factories.write().insert(kind.into(), (factory, false));
+    }
+
+    /// Register a bounded synchronous decoder which can share a computation region.
+    pub fn register_inline_decoder(&self, kind: impl Into<String>, factory: DecoderFactory) {
+        self.factories.write().insert(kind.into(), (factory, true));
+    }
+
+    pub(crate) fn supports_inline_execution(&self, kind: &str) -> bool {
+        self.factories
+            .read()
+            .get(kind)
+            .is_some_and(|(_, inline)| *inline)
     }
 
     pub fn instantiate(
@@ -64,7 +77,7 @@ impl DecoderRegistry {
         let factory = guard.get(config.kind()).ok_or_else(|| {
             CodecError::Other(format!("decoder kind `{}` not registered", config.kind()))
         })?;
-        factory(config, schema, stream_name)
+        (factory.0)(config, schema, stream_name)
     }
 
     pub fn is_registered(&self, kind: &str) -> bool {
@@ -73,7 +86,7 @@ impl DecoderRegistry {
     }
 
     fn register_builtin_decoders(&self) {
-        self.register_decoder(
+        self.register_inline_decoder(
             "json",
             Arc::new(|config, schema, stream_name| {
                 Ok(Arc::new(JsonDecoder::new(
@@ -83,7 +96,7 @@ impl DecoderRegistry {
                 )) as Arc<_>)
             }),
         );
-        self.register_decoder(
+        self.register_inline_decoder(
             "protobuf",
             Arc::new(|config, schema, stream_name| {
                 let bundle = config.proto_bundle.as_ref().ok_or_else(|| {
@@ -96,7 +109,7 @@ impl DecoderRegistry {
                 )) as Arc<_>)
             }),
         );
-        self.register_decoder(
+        self.register_inline_decoder(
             FILE_LINE_DECODER_KIND,
             Arc::new(|_config, schema, stream_name| {
                 Ok(Arc::new(FileLineDecoder::new(stream_name.to_string(), schema)?) as Arc<_>)
@@ -132,9 +145,31 @@ impl EncoderRegistry {
     }
 
     pub fn register_encoder(&self, kind: impl Into<String>, factory: EncoderFactory) {
+        self.factories.write().insert(
+            kind.into(),
+            EncoderEntry {
+                factory,
+                supports_inline_execution: false,
+            },
+        );
+    }
+
+    /// Register an engine-controlled synchronous encoder suitable for region execution.
+    pub fn register_inline_encoder(&self, kind: impl Into<String>, factory: EncoderFactory) {
+        self.factories.write().insert(
+            kind.into(),
+            EncoderEntry {
+                factory,
+                supports_inline_execution: true,
+            },
+        );
+    }
+
+    pub(crate) fn supports_inline_execution(&self, kind: &str) -> bool {
         self.factories
-            .write()
-            .insert(kind.into(), EncoderEntry { factory });
+            .read()
+            .get(kind)
+            .is_some_and(|entry| entry.supports_inline_execution)
     }
 
     pub fn instantiate(
@@ -155,7 +190,7 @@ impl EncoderRegistry {
     }
 
     fn register_builtin_encoders(&self) {
-        self.register_encoder(
+        self.register_inline_encoder(
             "csv",
             Arc::new(|config| {
                 Ok(Arc::new(
@@ -164,7 +199,7 @@ impl EncoderRegistry {
                 ) as Arc<_>)
             }),
         );
-        self.register_encoder(
+        self.register_inline_encoder(
             "json",
             Arc::new(|config| {
                 Ok(Arc::new(
@@ -173,7 +208,7 @@ impl EncoderRegistry {
                 ) as Arc<_>)
             }),
         );
-        self.register_encoder(
+        self.register_inline_encoder(
             "protobuf",
             Arc::new(|config| {
                 let bundle = config.proto_bundle().ok_or_else(|| {
@@ -185,7 +220,7 @@ impl EncoderRegistry {
                 Ok(Arc::new(ProtobufEncoder::new(Arc::clone(bundle))) as Arc<_>)
             }),
         );
-        self.register_encoder(
+        self.register_inline_encoder(
             "template",
             Arc::new(|config| {
                 Ok(Arc::new(
@@ -212,6 +247,7 @@ type MergerFactory = Arc<
 >;
 
 struct MergerRegistration {
+    supports_inline_execution: bool,
     factory: MergerFactory,
     output_kind: MergerOutputKind,
 }
@@ -235,13 +271,9 @@ impl MergerRegistry {
             + Sync
             + 'static,
     {
-        self.registrations.write().insert(
-            name.into(),
-            MergerRegistration {
-                factory: Arc::new(move |props, schema, _| factory(props, schema)),
-                output_kind,
-            },
-        );
+        self.register_with_schema_artifact(name, output_kind, move |props, schema, _| {
+            factory(props, schema)
+        });
     }
 
     pub fn register_with_schema_artifact<F>(
@@ -259,13 +291,50 @@ impl MergerRegistry {
             + Sync
             + 'static,
     {
+        self.register_factory(name.into(), output_kind, Arc::new(factory), false);
+    }
+
+    /// Register an engine-controlled synchronous merger suitable for region execution.
+    pub fn register_inline_with_schema_artifact<F>(
+        &self,
+        name: impl Into<String>,
+        output_kind: MergerOutputKind,
+        factory: F,
+    ) where
+        F: Fn(
+                &Map<String, Value>,
+                Arc<Schema>,
+                Option<Arc<dyn Any + Send + Sync>>,
+            ) -> Result<Box<dyn Merger>, CodecError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.register_factory(name.into(), output_kind, Arc::new(factory), true);
+    }
+
+    fn register_factory(
+        &self,
+        name: String,
+        output_kind: MergerOutputKind,
+        factory: MergerFactory,
+        supports_inline_execution: bool,
+    ) {
         self.registrations.write().insert(
-            name.into(),
+            name,
             MergerRegistration {
-                factory: Arc::new(factory),
+                factory,
                 output_kind,
+                supports_inline_execution,
             },
         );
+    }
+
+    pub(crate) fn supports_inline_execution(&self, name: &str) -> bool {
+        self.registrations
+            .read()
+            .get(name)
+            .is_some_and(|registration| registration.supports_inline_execution)
     }
 
     pub fn output_kind(&self, name: &str) -> Result<MergerOutputKind, CodecError> {

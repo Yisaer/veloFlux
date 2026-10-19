@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 #[derive(Default)]
-struct RowDiffState {
+pub(crate) struct RowDiffState {
     previous_output_row: Option<Vec<Option<Value>>>,
 }
 
@@ -50,26 +50,7 @@ impl RowDiffProcessor {
         physical_row_diff: Arc<PhysicalRowDiff>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Result<Self, ProcessorError> {
-        if physical_row_diff.base.children().len() != 1 {
-            return Err(ProcessorError::InvalidConfiguration(
-                "row diff processor requires exactly one input child".to_string(),
-            ));
-        }
-
-        let row_accessor =
-            OutputRowAccessor::from_output_layout(physical_row_diff.input_layout.as_ref());
-        let output_width = row_accessor.width();
-        let output_keys = physical_row_diff
-            .output_layout
-            .columns
-            .iter()
-            .map(|column| Arc::clone(&column.name))
-            .collect::<Vec<_>>()
-            .into();
-        let tracked_flags = build_tracked_flags(
-            output_width,
-            physical_row_diff.tracked_column_indexes.as_ref(),
-        )?;
+        let (row_accessor, output_keys, tracked_flags) = row_diff_fields(&physical_row_diff)?;
         let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
         let control_output = LinkOutput::new(
             channel_capacities.control_link_kind,
@@ -93,6 +74,34 @@ impl RowDiffProcessor {
         stats.declare_collection_in_out();
         self.stats = stats;
     }
+}
+
+pub(crate) type RowDiffFields = (OutputRowAccessor, Arc<[Arc<str>]>, Arc<[bool]>);
+
+pub(crate) fn row_diff_fields(
+    physical_row_diff: &PhysicalRowDiff,
+) -> Result<RowDiffFields, ProcessorError> {
+    if physical_row_diff.base.children().len() != 1 {
+        return Err(ProcessorError::InvalidConfiguration(
+            "row diff processor requires exactly one input child".to_string(),
+        ));
+    }
+
+    let row_accessor =
+        OutputRowAccessor::from_output_layout(physical_row_diff.input_layout.as_ref());
+    let output_width = row_accessor.width();
+    let output_keys = physical_row_diff
+        .output_layout
+        .columns
+        .iter()
+        .map(|column| Arc::clone(&column.name))
+        .collect::<Vec<_>>()
+        .into();
+    let tracked_flags = build_tracked_flags(
+        output_width,
+        physical_row_diff.tracked_column_indexes.as_ref(),
+    )?;
+    Ok((row_accessor, output_keys, tracked_flags))
 }
 
 fn build_tracked_flags(
@@ -203,7 +212,7 @@ fn materialize_diff_tuple(
     output_tuple
 }
 
-fn apply_row_diff(
+pub(crate) fn apply_row_diff(
     input_collection: Box<dyn Collection>,
     row_accessor: &OutputRowAccessor,
     output_keys: &Arc<[Arc<str>]>,

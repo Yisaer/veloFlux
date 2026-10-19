@@ -169,6 +169,10 @@ impl StatefulEvalUpdate for HadChangedUpdate {
 }
 
 impl StatefulFunction for HadChangedFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "had_changed"
     }

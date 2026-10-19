@@ -1,5 +1,5 @@
 //! Channel-free byte-transform drivers shared by the standalone sink
-//! transform processors and the fused transform task.
+//! transform processors and general execution regions.
 //!
 //! The writer lifecycle (`begin`/`write`/`finish`/`abort`) and delivery
 //! framing are identical in both topologies. Standalone stages exchange
@@ -7,7 +7,8 @@
 //!
 //! Codec drivers are used by the shared delivery handlers. Framing and
 //! recovery live in `delivery_transform`, and execution connections live
-//! in `delivery_output` and `inline_delivery`.
+//! in `delivery_output` and `region_processor`. Historical `inline_delivery`
+//! is compiled only for the equivalence-test reference executor.
 
 use crate::codec::compress::{CompressError, CompressWriter};
 use crate::codec::encrypt::EncryptError;
@@ -64,5 +65,67 @@ impl EncryptDriver {
 
     pub(crate) fn abort(&mut self) {
         self.writer.abort_delivery();
+    }
+}
+
+/// A synchronous delivery transform; transport belongs to its region driver.
+pub(crate) enum ByteTransformStage {
+    Compress {
+        driver: CompressDriver,
+        delivery: super::delivery_transform::CompressDelivery,
+    },
+    Encrypt {
+        driver: EncryptDriver,
+        delivery: super::delivery_transform::EncryptDelivery,
+    },
+}
+
+impl ByteTransformStage {
+    pub(crate) fn active(&self) -> bool {
+        match self {
+            Self::Compress { delivery, .. } => delivery.active,
+            Self::Encrypt { delivery, .. } => delivery.active,
+        }
+    }
+
+    pub(crate) fn process(
+        &mut self,
+        flags: super::EncodedDeliveryFlags,
+        bytes: bytes::Bytes,
+        metrics: Option<&super::data_metrics::TransformMetrics>,
+    ) -> super::delivery_transform::DeliveryStep {
+        match self {
+            Self::Compress { driver, delivery } => {
+                super::delivery_transform::compress_delivery_step(
+                    driver, delivery, flags, bytes, metrics,
+                )
+            }
+            Self::Encrypt { driver, delivery } => super::delivery_transform::encrypt_delivery_step(
+                driver, delivery, flags, bytes, metrics,
+            ),
+        }
+    }
+
+    pub(crate) fn finish(
+        &mut self,
+        stats: &super::ProcessorStats,
+        metrics: Option<&super::data_metrics::TransformMetrics>,
+    ) -> Option<super::StreamData> {
+        if !self.active() {
+            return None;
+        }
+        let frame = match self {
+            Self::Compress { driver, delivery } => {
+                super::delivery_transform::abort_compress(driver, delivery, metrics)
+            }
+            Self::Encrypt { driver, delivery } => {
+                super::delivery_transform::abort_encrypt(driver, delivery, metrics)
+            }
+        };
+        stats.record_error_logged(
+            "terminal delivery abort",
+            "terminal signal received mid-delivery",
+        );
+        frame
     }
 }

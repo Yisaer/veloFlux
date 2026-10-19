@@ -358,6 +358,10 @@ fn contains_any_relaxed(left: &[Value], right: &[Value]) -> Result<bool, EvalErr
 }
 
 impl CustomFunc for ArrayPositionFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         array_ref_or_null(args, 0)?;
@@ -378,6 +382,10 @@ impl CustomFunc for ArrayPositionFunc {
 }
 
 impl CustomFunc for ArrayLastPositionFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         array_ref_or_null(args, 0)?;
@@ -398,6 +406,10 @@ impl CustomFunc for ArrayLastPositionFunc {
 }
 
 impl CustomFunc for ElementAtFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         array_ref_or_null(args, 0)?;
@@ -428,6 +440,10 @@ impl CustomFunc for ElementAtFunc {
 }
 
 impl CustomFunc for ArrayContainsFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         array_ref_or_null(args, 0)?;
@@ -448,6 +464,10 @@ impl CustomFunc for ArrayContainsFunc {
 }
 
 impl CustomFunc for ArrayContainsAnyFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         array_ref_and_datatype(args, 0)?;
@@ -477,6 +497,10 @@ impl CustomFunc for ArrayContainsAnyFunc {
 }
 
 impl CustomFunc for ArrayCreateFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         ensure_array_output_len(args.len())?;
         infer_list_datatype(args)?;
@@ -495,6 +519,10 @@ impl CustomFunc for ArrayCreateFunc {
 }
 
 impl CustomFunc for ArrayRemoveFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         array_ref_and_datatype(args, 0)?;
@@ -522,6 +550,10 @@ impl CustomFunc for ArrayRemoveFunc {
 }
 
 impl CustomFunc for RepeatFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         let count = value_to_count(&args[1])?;
@@ -551,6 +583,10 @@ impl CustomFunc for RepeatFunc {
 }
 
 impl CustomFunc for SequenceFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2, 3])?;
         let start = value_to_index(&args[0])?;
@@ -607,6 +643,10 @@ impl CustomFunc for SequenceFunc {
 }
 
 impl CustomFunc for ArrayConcatFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         if args.is_empty() {
             return Err(EvalError::TypeMismatch {

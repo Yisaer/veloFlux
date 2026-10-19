@@ -172,6 +172,10 @@ impl StatefulEvalUpdate for ChangeToUpdate {
 }
 
 impl StatefulFunction for ChangeToFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "change_to"
     }

@@ -85,6 +85,10 @@ impl SumFunction {
 }
 
 impl AggregateFunction for SumFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "sum"
     }

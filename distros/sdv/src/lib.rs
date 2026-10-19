@@ -25,7 +25,7 @@ pub fn register(instance: &flow::FlowInstance) {
     schema::register_gbf_schema();
 
     let encoder_registry = instance.encoder_registry();
-    encoder_registry.register_encoder(
+    encoder_registry.register_inline_encoder(
         "yajson",
         Arc::new(|config| {
             Ok(Arc::new(
@@ -34,11 +34,11 @@ pub fn register(instance: &flow::FlowInstance) {
             ) as Arc<_>)
         }),
     );
-    encoder_registry.register_encoder(
+    encoder_registry.register_inline_encoder(
         "columnar_json",
         Arc::new(|_config| Ok(Arc::new(encoder::ColumnarJsonEncoder::new()) as Arc<_>)),
     );
-    encoder_registry.register_encoder(
+    encoder_registry.register_inline_encoder(
         "columnar_csv_json",
         Arc::new(|_config| {
             Ok(Arc::new(encoder::ColumnarCsvJsonEncoder::new("columnar_csv_json")) as Arc<_>)
@@ -50,7 +50,7 @@ pub fn register(instance: &flow::FlowInstance) {
     decoder::register_gbf_decoder(&decoder_registry);
 
     let merger_registry = instance.merger_registry();
-    merger_registry.register_with_schema_artifact(
+    merger_registry.register_inline_with_schema_artifact(
         "busmirror",
         flow::codec::MergerOutputKind::Collection,
         |_props: &Map<String, Value>, schema: Arc<datatypes::Schema>, artifact| {
@@ -68,7 +68,7 @@ pub fn register(instance: &flow::FlowInstance) {
             build_fused_busmirror_merger(schema, &artifact)
         },
     );
-    merger_registry.register_with_schema_artifact(
+    merger_registry.register_inline_with_schema_artifact(
         "gbf",
         flow::codec::MergerOutputKind::Collection,
         |_props: &Map<String, Value>, schema: Arc<datatypes::Schema>, artifact| {

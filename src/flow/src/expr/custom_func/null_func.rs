@@ -27,6 +27,10 @@ pub fn isnull_function_def() -> FunctionDef {
 }
 
 impl CustomFunc for IsNullFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])
     }

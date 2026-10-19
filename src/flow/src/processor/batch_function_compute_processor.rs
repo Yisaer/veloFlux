@@ -16,7 +16,7 @@ use crate::processor::{
 use crate::runtime::TaskSpawner;
 use futures::stream::StreamExt;
 use std::sync::Arc;
-struct BoundBatchEvaluation {
+pub(crate) struct BoundBatchEvaluation {
     output_name: Arc<String>,
     definition: Arc<dyn crate::expr::custom_func::CustomFunc>,
     runtime: Arc<dyn BatchFunc>,
@@ -107,7 +107,7 @@ fn bind_evaluation(
         args: evaluation.args.clone(),
     })
 }
-fn bind_evaluations(
+pub(crate) fn bind_evaluations(
     evaluations: &[PhysicalBatchFunctionEvaluation],
 ) -> Result<Vec<BoundBatchEvaluation>, ProcessorError> {
     let mut bound: Vec<BoundBatchEvaluation> = Vec::with_capacity(evaluations.len());
@@ -128,7 +128,7 @@ fn bind_evaluations(
     }
     Ok(bound)
 }
-fn apply_compute(
+pub(crate) fn apply_compute(
     input: Box<dyn Collection>,
     evaluations: &[BoundBatchEvaluation],
 ) -> Result<(Box<dyn Collection>, Vec<String>), ProcessorError> {

@@ -408,6 +408,10 @@ macro_rules! unary_f64_func {
         pub struct $struct;
 
         impl CustomFunc for $struct {
+            fn supports_inline_execution(&self) -> bool {
+                true
+            }
+
             fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
                 validate_arity(args, &[1])
             }
@@ -429,6 +433,10 @@ macro_rules! binary_f64_func {
         pub struct $struct;
 
         impl CustomFunc for $struct {
+            fn supports_inline_execution(&self) -> bool {
+                true
+            }
+
             fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
                 validate_arity(args, &[2])
             }
@@ -471,6 +479,10 @@ binary_f64_func!(PowFunc, "pow", |a: f64, b: f64| a.powf(b));
 pub struct AbsFunc;
 
 impl CustomFunc for AbsFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])
     }
@@ -502,6 +514,10 @@ pub fn abs_value(v: &Value) -> Result<Value, EvalError> {
 pub struct BitAndFunc;
 
 impl CustomFunc for BitAndFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])
     }
@@ -519,6 +535,10 @@ impl CustomFunc for BitAndFunc {
 pub struct BitOrFunc;
 
 impl CustomFunc for BitOrFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])
     }
@@ -536,6 +556,10 @@ impl CustomFunc for BitOrFunc {
 pub struct BitXorFunc;
 
 impl CustomFunc for BitXorFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])
     }
@@ -553,6 +577,10 @@ impl CustomFunc for BitXorFunc {
 pub struct BitNotFunc;
 
 impl CustomFunc for BitNotFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])
     }
@@ -570,6 +598,10 @@ impl CustomFunc for BitNotFunc {
 pub struct SignFunc;
 
 impl CustomFunc for SignFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])
     }
@@ -587,6 +619,10 @@ impl CustomFunc for SignFunc {
 pub struct PiFunc;
 
 impl CustomFunc for PiFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[0])
     }
@@ -604,6 +640,10 @@ impl CustomFunc for PiFunc {
 pub struct RandFunc;
 
 impl CustomFunc for RandFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[0])
     }
@@ -621,6 +661,10 @@ impl CustomFunc for RandFunc {
 pub struct CotFunc;
 
 impl CustomFunc for CotFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])
     }
@@ -638,6 +682,10 @@ impl CustomFunc for CotFunc {
 pub struct LogFunc;
 
 impl CustomFunc for LogFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1, 2])
     }
@@ -677,6 +725,10 @@ impl CustomFunc for LogFunc {
 pub struct RoundFunc;
 
 impl CustomFunc for RoundFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1, 2])
     }
@@ -715,6 +767,10 @@ impl CustomFunc for RoundFunc {
 pub struct ConvFunc;
 
 impl CustomFunc for ConvFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[3])
     }

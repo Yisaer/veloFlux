@@ -206,6 +206,10 @@ impl StatefulEvalUpdate for ChangeCaptureUpdate {
 }
 
 impl StatefulFunction for ChangeCaptureFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "change_capture"
     }

@@ -164,6 +164,10 @@ impl StatefulEvalUpdate for ChangedColUpdate {
 }
 
 impl StatefulFunction for ChangedColFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "changed_col"
     }

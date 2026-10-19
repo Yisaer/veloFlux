@@ -53,17 +53,18 @@ The fused node carries:
 - `common` (batch params) from `PhysicalBatch`
 - `children` from `PhysicalBatch` (skipping the batch node)
 
-## Processor Mapping
+## Runtime Mapping
 
-| Physical node          | Processor                                                     |
-|------------------------|---------------------------------------------------------------|
-| `PhysicalBatch`        | `BatchProcessor` (standalone)                                 |
-| `PhysicalSinkEncoder`  | `SinkEncoderProcessor` in `BatchPolicy::Immediate`     |
-| `PhysicalIncSinkEncoder` | `SinkEncoderProcessor` in `CountOnly` / `DurationOnly` / `Combined` |
+SinkEncoder and IncSinkEncoder both lower to the shared synchronous EncoderStage.
+Builtin encoder registrations explicitly opt in to region execution; custom registrations
+default to an isolated task. The former retains Immediate policy, and the latter carries
+CountOnly / DurationOnly / Combined policy from the original batch. Eligible encoders,
+computation, and byte transforms share a region without internal channels. PhysicalBatch
+for native output uses the shared count/timed batch engines independently of encoding.
 
-Both modes delegate encoding, count slicing, framing, and recovery to the shared
-`EncoderStage`. The standalone processor connects it to a channel; eligible
-`PhysicalFusedTransform` chains connect it directly to the shared byte stages.
+The standalone SinkEncoderProcessor uses EncoderDriver for transport and timer waits;
+its framing and batching algorithms are the same EncoderStage methods used by regions.
+The fixed PhysicalFusedTransform rewrite has been removed from SQL optimization.
 
 ## Output Layout
 

@@ -490,33 +490,23 @@ fn run_gbf_packer_integration(layout: CanIdentityLayout, case_name: &str) {
     assert_eq!(val, 170, "Expected Mess1_Sig1 = 170 (from 0xAA)");
     println!("✓ Mess1_Sig1 verified (overridden): {}", val);
 
-    // 7. Verify Stats
-    thread::sleep(Duration::from_millis(200));
-    if let Some(stats) = client.get_pipeline_stats(&pipeline_id) {
-        println!("Pipeline Stats: {:?}", stats);
-        for stat in stats.as_array().unwrap_or(&vec![]) {
-            if let Some(id) = stat.get("processor_id").and_then(|v| v.as_str()) {
-                if id.contains("Sampler") {
-                    let messages_in = stat
-                        .get("stats")
-                        .and_then(|s| s.get("messages_in"))
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    let records_out = stat
-                        .get("stats")
-                        .and_then(|s| s.get("records_out"))
-                        .and_then(|v| v.as_i64())
-                        .unwrap_or(0);
-                    assert_eq!(messages_in, 3, "Expected sampler to receive 3 messages");
-                    assert_eq!(records_out, 1, "Expected sampler to emit 1 merged packet");
-                    println!(
-                        "✓ Sampler stats verified: messages_in={}, records_out={}",
-                        messages_in, records_out
-                    );
-                }
-            }
-        }
-    }
+    // 7. Verify external runtime boundaries, without expecting stage metrics.
+    let stats = client.verify_pipeline_stats(&pipeline_id);
+    let region = stats
+        .as_array()
+        .expect("processor stats array")
+        .iter()
+        .find(|stat| {
+            stat["processor_id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("Region_"))
+                && stat["stats"]["messages_in"].as_u64() == Some(3)
+                && stat["stats"]["bytes_in"]
+                    .as_u64()
+                    .is_some_and(|bytes| bytes > 0)
+        })
+        .expect("ingest region should receive all three GBF packets");
+    assert_eq!(region["stats"]["error_count"], 0);
 
     // Cleanup
     let _ = client.delete(&format!("/pipelines/{}", pipeline_id));

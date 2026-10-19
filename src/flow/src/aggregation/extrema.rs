@@ -126,6 +126,10 @@ fn validate_extrema_input(
 }
 
 impl AggregateFunction for MaxFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "max"
     }
@@ -144,6 +148,10 @@ impl AggregateFunction for MaxFunction {
 }
 
 impl AggregateFunction for MinFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "min"
     }

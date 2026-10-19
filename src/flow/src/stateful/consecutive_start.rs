@@ -153,6 +153,10 @@ impl StatefulEvalUpdate for ConsecutiveStartUpdate {
 }
 
 impl StatefulFunction for ConsecutiveStartFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "consecutive_start"
     }

@@ -175,32 +175,34 @@ async fn test_sampler_execution_latest_strategy() {
             .expect("send data");
     }
 
-    let sampler_stats = pipeline
-        .processor_stats()
-        .iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
-        .cloned()
-        .expect("sampler stats should exist");
-    for _ in 0..20 {
-        if sampler_stats.snapshot().stats.custom["messages_in"] == 5 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        sampler_stats.snapshot().stats.custom["messages_in"],
-        5,
-        "sampler should consume all inputs before the sampling tick"
+    let mut receiver = pipeline.take_output().expect("pipeline output");
+    // A data-lane fence proves all preceding inputs reached the sampler.
+    let fence = flow::processor::ControlSignal::Barrier(
+        flow::processor::BarrierControlSignalKind::SyncTest.with_id(1),
     );
+    pipeline
+        .send_stream_data("latest_stream", StreamData::control(fence.clone()))
+        .await
+        .expect("send input fence");
+    timeout(Duration::from_millis(100), async {
+        loop {
+            match receiver.recv().await.expect("fence output") {
+                StreamData::Control(signal) if signal == fence => break,
+                StreamData::Watermark(_) => {}
+                other => panic!(
+                    "unexpected output before sampler tick: {}",
+                    other.description()
+                ),
+            }
+        }
+    })
+    .await
+    .expect("input fence should reach output before sampler tick");
 
     tokio::time::advance(interval).await;
     tokio::task::yield_now().await;
 
-    let mut output = JsonOutput::new(
-        pipeline
-            .take_output()
-            .expect("pipeline should expose an output receiver"),
-    );
+    let mut output = JsonOutput::new(receiver);
 
     let json = output.recv_next_json(Duration::from_millis(500)).await;
     let rows = json.as_array().expect("output is array");
@@ -215,11 +217,6 @@ async fn test_sampler_execution_latest_strategy() {
         extra.is_none(),
         "Expected no extra outputs, sampler should have throttled intermediate values"
     );
-
-    // Verify stats: Sampler should have 5 inputs and 1 output
-    let stats = sampler_stats.snapshot().stats;
-    assert_eq!(stats.custom["messages_in"], 5);
-    assert_eq!(stats.custom["messages_out"], 1);
 
     // Attempt to close pipeline, but don't block indefinitely if it hangs (test artifact)
     let _ = timeout(
@@ -297,20 +294,24 @@ async fn shared_tail_barrier_graceful_close_flushes_batched_sibling_before_shutd
     );
 
     let stats = pipeline.processor_stats();
-    for processor_fragment in ["PhysicalBarrier", "PhysicalResultCollect"] {
-        let stats = stats
-            .iter()
-            .find(|entry| entry.processor_id.contains(processor_fragment))
-            .unwrap_or_else(|| panic!("missing {processor_fragment} stats"))
-            .snapshot()
-            .stats;
-        assert_eq!(stats.records_in, None);
-        assert_eq!(stats.records_out, None);
-        assert_eq!(stats.custom.get("messages_in"), Some(&1));
-        assert_eq!(stats.custom.get("messages_out"), Some(&1));
-        assert!(!stats.custom.contains_key("bytes_in"));
-        assert!(!stats.custom.contains_key("bytes_out"));
-    }
+    assert!(stats
+        .iter()
+        .any(|entry| entry.processor_id.starts_with("Region_")));
+    assert!(!stats
+        .iter()
+        .any(|entry| entry.processor_id.contains("PhysicalBarrier")));
+    let stats = stats
+        .iter()
+        .find(|entry| entry.processor_id.contains("PhysicalResultCollect"))
+        .expect("missing result collector stats")
+        .snapshot()
+        .stats;
+    assert_eq!(stats.records_in, None);
+    assert_eq!(stats.records_out, None);
+    assert_eq!(stats.custom.get("messages_in"), Some(&1));
+    assert_eq!(stats.custom.get("messages_out"), Some(&1));
+    assert!(!stats.custom.contains_key("bytes_in"));
+    assert!(!stats.custom.contains_key("bytes_out"));
 }
 
 #[tokio::test]

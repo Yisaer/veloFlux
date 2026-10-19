@@ -77,7 +77,7 @@ impl Processor for EosWindowProcessor {
 
         let processor_span = stats.processor_span();
         ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            let mut state = EosWindowState::new(Arc::clone(&stats));
+            let mut state = EosWindowStage::new(Arc::clone(&stats));
 
             loop {
                 tokio::select! {
@@ -104,58 +104,17 @@ impl Processor for EosWindowProcessor {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
-                                match data {
-                                    StreamData::Collection(collection) => {
-                                        stats.record_collection_in(collection.num_rows() as u64);
-                                        let handle_start = std::time::Instant::now();
-                                        let res = state.add_collection(collection);
-                                        stats.record_handle_duration(handle_start.elapsed());
-                                        if let Err(err) = res {
-                                            stats.record_error_logged("eos window processor error", err.to_string());
-                                            continue;
-                                        }
-                                    }
-                                    StreamData::Control(signal) => {
-                                        let is_terminal = signal.is_terminal();
-                                        let is_graceful = signal.is_graceful_end();
-                                        if is_terminal {
-                                            if is_graceful {
-                                                state.flush(
-                                                    &output,
-                                                    channel_capacities.data,
-                                                )
-                                                .await?;
-                                            } else {
-                                                state.clear();
-                                            }
-                                            send_with_backpressure(
-                                                &output,
-                                                channel_capacities.data,
-                                                StreamData::control(signal),
-                                                Some(stats.as_ref()),
-                                            )
-                                            .await?;
-                                            tracing::info!(processor_id = %id, "stopped");
-                                            return Ok(());
-                                        }
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            StreamData::control(signal),
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                    }
-                                    other => {
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            other,
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                    }
+                                if let Some(rows) = data.row_count() { stats.record_collection_in(rows); }
+                                let terminal = data.is_terminal();
+                                let started = std::time::Instant::now();
+                                let outputs = state.process(data)?;
+                                stats.record_handle_duration(started.elapsed());
+                                for data in outputs.into_iter().flatten() {
+                                    let rows = data.row_count();
+                                    send_with_backpressure(&output, channel_capacities.data, data, Some(&stats)).await?;
+                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
                                 }
+                                if terminal { return Ok(()); }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
                                 log_broadcast_lagged(&id, skipped, "eos window data input");
@@ -195,7 +154,7 @@ impl Processor for EosWindowProcessor {
     }
 }
 
-struct EosWindowState {
+pub(crate) struct EosWindowStage {
     rows: Vec<Tuple>,
     opened_at: Option<SystemTime>,
     last_seen_at: Option<SystemTime>,
@@ -203,8 +162,8 @@ struct EosWindowState {
     rows_buffered: GaugeHandle,
 }
 
-impl EosWindowState {
-    fn new(stats: Arc<ProcessorStats>) -> Self {
+impl EosWindowStage {
+    pub(crate) fn new(stats: Arc<ProcessorStats>) -> Self {
         let rows_buffered = stats.register_gauge(MetricSpec {
             id: "window.rows_buffered",
             flat_name: "rows_buffered",
@@ -217,6 +176,38 @@ impl EosWindowState {
             last_seen_at: None,
             stats,
             rows_buffered,
+        }
+    }
+
+    pub(crate) fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.rows_buffered = stats.register_gauge(MetricSpec {
+            id: "window.rows_buffered",
+            flat_name: "rows_buffered",
+            kind: MetricKind::Gauge,
+        });
+        self.rows_buffered.set(self.rows.len() as u64);
+        self.stats = stats;
+    }
+
+    pub(crate) fn process(
+        &mut self,
+        data: StreamData,
+    ) -> Result<[Option<StreamData>; 2], ProcessorError> {
+        match data {
+            StreamData::Collection(collection) => {
+                self.add_collection(collection)?;
+                Ok([None, None])
+            }
+            StreamData::Control(signal) if signal.is_terminal() => {
+                let output = if signal.is_graceful_end() {
+                    self.flush()?.map(StreamData::collection)
+                } else {
+                    self.clear();
+                    None
+                };
+                Ok([output, Some(StreamData::control(signal))])
+            }
+            other => Ok([Some(other), None]),
         }
     }
 
@@ -250,17 +241,12 @@ impl EosWindowState {
         Ok(())
     }
 
-    async fn flush(
-        &mut self,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-    ) -> Result<(), ProcessorError> {
+    fn flush(&mut self) -> Result<Option<Box<dyn Collection>>, ProcessorError> {
         if self.rows.is_empty() {
             self.rows_buffered.set(0);
-            return Ok(());
+            return Ok(None);
         }
         let rows = std::mem::take(&mut self.rows);
-        let row_count = rows.len() as u64;
         self.rows_buffered.set(0);
         let closed_at = self
             .last_seen_at
@@ -276,21 +262,13 @@ impl EosWindowState {
             Err(err) => {
                 self.stats
                     .record_error_logged("eos window processor error", err.to_string());
-                return Ok(());
+                return Ok(None);
             }
         };
-        send_with_backpressure(
-            output,
-            data_channel_capacity,
-            StreamData::collection(Box::new(collection)),
-            Some(self.stats.as_ref()),
-        )
-        .await?;
-        self.stats.record_collection_out(row_count);
-        Ok(())
+        Ok(Some(Box::new(collection)))
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.rows.clear();
         self.opened_at = None;
         self.last_seen_at = None;

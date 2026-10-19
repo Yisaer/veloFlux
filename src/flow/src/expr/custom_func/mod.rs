@@ -36,6 +36,13 @@ pub trait BatchFunc: Send + Sync + std::fmt::Debug {
 /// Custom function that can be implemented by users
 /// This trait allows users to define their own functions for evaluation
 pub trait CustomFunc: Send + Sync + std::fmt::Debug {
+    /// Whether this implementation is suitable for inline engine computation.
+    /// Unknown extensions stay isolated. This is an execution contract, not a
+    /// sandbox guarantee; implementations must not block on external work.
+    fn supports_inline_execution(&self) -> bool {
+        false
+    }
+
     /// Whether this definition must be lowered to the collection-level batch path.
     fn is_batch(&self) -> bool {
         false

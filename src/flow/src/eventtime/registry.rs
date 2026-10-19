@@ -26,6 +26,11 @@ impl std::fmt::Display for EventtimeParseError {
 impl std::error::Error for EventtimeParseError {}
 
 pub trait EventtimeTypeParser: Send + Sync {
+    /// Opaque parsers remain isolated unless their implementation opts in.
+    fn supports_inline_execution(&self) -> bool {
+        false
+    }
+
     fn parse(&self, value: &Value) -> Result<SystemTime, EventtimeParseError>;
 }
 
@@ -110,6 +115,9 @@ impl EventtimeTypeRegistry {
 struct UnixtimestampSecondsParser;
 
 impl EventtimeTypeParser for UnixtimestampSecondsParser {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
     fn parse(&self, value: &Value) -> Result<SystemTime, EventtimeParseError> {
         let seconds = parse_integer(value)?;
         let seconds = u64::try_from(seconds).map_err(|_| {
@@ -126,6 +134,9 @@ impl EventtimeTypeParser for UnixtimestampSecondsParser {
 struct UnixtimestampMillisParser;
 
 impl EventtimeTypeParser for UnixtimestampMillisParser {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
     fn parse(&self, value: &Value) -> Result<SystemTime, EventtimeParseError> {
         let millis = parse_integer(value)?;
         let millis = u64::try_from(millis).map_err(|_| {

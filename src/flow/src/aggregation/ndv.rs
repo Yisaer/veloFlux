@@ -53,6 +53,10 @@ impl NdvFunction {
 }
 
 impl AggregateFunction for NdvFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "ndv"
     }

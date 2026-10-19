@@ -1,12 +1,11 @@
-//! Shared batching, framing, and error boundaries for sink encoding.
+//! Shared synchronous batching and framing for sink encoding.
+//! The outer driver owns every timer and transport wait.
 use crate::codec::SinkEncoder;
 use crate::model::Collection;
 use crate::processor::batch_policy::BatchPolicy;
-use crate::processor::data_metrics::EncoderMetrics;
-use crate::processor::delivery_output::DeliveryOutput;
-use crate::processor::{ProcessorError, StreamData};
-use std::pin::Pin;
-use tokio::time::{Instant, Sleep};
+use crate::processor::{EncodedDeliveryFlags, ProcessorError, StreamData};
+use tokio::time::Instant;
+
 #[derive(Default)]
 struct DeliveryEncoding {
     row_count: usize,
@@ -15,10 +14,50 @@ struct DeliveryEncoding {
     pending_start_chunk: Option<bytes::Bytes>,
 }
 
+/// A concrete input description retaining only the unconsumed collection.
+/// No encoder work for the next segment occurs until its driver asks again.
+pub(crate) struct EncoderOutput {
+    collection: Option<Box<dyn Collection>>,
+    offset: usize,
+    total: usize,
+    done: bool,
+}
+
+/// Lifecycle notifications precede the frame; an error follows its successful send.
+pub(crate) struct EncodingStep {
+    pub(crate) began: bool,
+    pub(crate) aborted: bool,
+    pub(crate) frame: Option<StreamData>,
+    pub(crate) error: Option<ProcessorError>,
+}
+
+impl EncoderOutput {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.total == 0
+    }
+    pub(crate) fn stop(&mut self) {
+        self.done = true;
+    }
+}
+
+impl EncodingStep {
+    fn frame(began: bool, frame: Option<StreamData>) -> Self {
+        Self {
+            began,
+            aborted: false,
+            frame,
+            error: None,
+        }
+    }
+}
+
 pub(crate) struct EncoderStage {
     encoder: Box<dyn SinkEncoder>,
     delivery: DeliveryEncoding,
     policy: BatchPolicy,
+    origin: Option<Instant>,
+    deadline: Option<Instant>,
+    generation: u64,
 }
 
 impl EncoderStage {
@@ -27,317 +66,249 @@ impl EncoderStage {
             encoder,
             delivery: DeliveryEncoding::default(),
             policy,
+            origin: None,
+            deadline: None,
+            generation: 0,
+        }
+    }
+    pub(crate) fn start_clock(&mut self, now: Instant) {
+        self.origin = Some(now);
+    }
+    pub(crate) fn deadline(&self) -> Option<super::stage_clock::ClockDeadline> {
+        self.deadline.map(|at| super::stage_clock::ClockDeadline {
+            generation: self.generation,
+            at,
+        })
+    }
+    pub(crate) fn clear_deadline(&mut self) {
+        if self.deadline.take().is_some() {
+            self.generation = self.generation.wrapping_add(1);
+        }
+    }
+    pub(crate) fn take_due_deadline(&mut self) -> bool {
+        if self.deadline.is_some_and(|at| Instant::now() >= at) {
+            self.clear_deadline();
+            true
+        } else {
+            false
+        }
+    }
+    pub(crate) fn schedule_clock(&mut self) {
+        if !self.has_data() {
+            self.clear_deadline();
+        } else if self.deadline.is_none() {
+            if let (Some(origin), Some(duration)) = (self.origin, self.policy.duration()) {
+                self.deadline = Some(BatchPolicy::next_boundary(origin, duration, Instant::now()));
+                self.generation = self.generation.wrapping_add(1);
+            }
+        }
+    }
+    pub(crate) fn flush_step(&mut self) -> EncodingStep {
+        self.finish_delivery(None, false)
+    }
+    pub(crate) fn output_failed(&mut self, flags: EncodedDeliveryFlags) {
+        if flags.contains(EncodedDeliveryFlags::START) && !flags.contains(EncodedDeliveryFlags::END)
+        {
+            self.delivery.emitted_chunk = false;
         }
     }
     pub(crate) fn has_data(&self) -> bool {
         self.delivery.row_count > 0
     }
-    pub(crate) fn schedule_timer(&self, timer: &mut Option<Pin<Box<Sleep>>>, origin: Instant) {
-        if let Some(duration) = self.policy.duration() {
-            BatchPolicy::schedule_timer(timer, origin, duration, self.has_data());
+    pub(crate) fn batch_duration(&self) -> Option<std::time::Duration> {
+        self.policy.duration()
+    }
+    pub(crate) fn input(collection: Box<dyn Collection>) -> EncoderOutput {
+        let total = collection.num_rows();
+        EncoderOutput {
+            collection: Some(collection),
+            offset: 0,
+            total,
+            done: false,
         }
     }
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn feed(
-        &mut self,
-        id: &str,
-        collection: Box<dyn Collection>,
-        output: &mut impl DeliveryOutput,
-        timer: &mut Option<Pin<Box<Sleep>>>,
-        origin: Instant,
-        metrics: Option<&EncoderMetrics>,
-    ) -> Result<(), ProcessorError> {
-        if BatchPolicy::take_due_timer(timer, Instant::now()) {
-            if let Err(error) = self.flush(id, output, metrics).await {
-                output.on_encoder_flush_error(error)?;
+    pub(crate) fn finish() -> EncoderOutput {
+        EncoderOutput {
+            collection: None,
+            offset: 0,
+            total: 0,
+            done: false,
+        }
+    }
+
+    pub(crate) fn next_step(&mut self, output: &mut EncoderOutput) -> Option<EncodingStep> {
+        if output.done {
+            return None;
+        }
+        let Some(collection) = output.collection.as_ref() else {
+            output.done = true;
+            return Some(self.finish_delivery(None, false));
+        };
+        let total = output.total;
+        if total == 0 {
+            output.done = true;
+            if !matches!(self.policy, BatchPolicy::Immediate) {
+                return None;
+            }
+            return Some(match self.start_delivery() {
+                Ok(()) => self.finish_delivery(None, true),
+                Err(error) => self.fail(error, true),
+            });
+        }
+        if output.offset == total {
+            output.done = true;
+            return None;
+        }
+        let end = self.policy.count_threshold().map_or(total, |count| {
+            output.offset + (count - self.delivery.row_count).min(total - output.offset)
+        });
+        let segment;
+        let input = if output.offset == 0 && end == total {
+            collection.as_ref()
+        } else {
+            segment = match collection.slice(output.offset, end) {
+                Ok(segment) => segment,
+                Err(error) => {
+                    output.done = true;
+                    // A slice error precedes append; preserve the existing active
+                    // delivery just as the standalone processor does.
+                    return Some(EncodingStep {
+                        began: false,
+                        aborted: false,
+                        frame: None,
+                        error: Some(ProcessorError::ProcessingError(format!(
+                            "collection slice error: {error}"
+                        ))),
+                    });
+                }
+            };
+            segment.as_ref()
+        };
+        let began = !self.delivery.active;
+        if began {
+            if let Err(error) = self.start_delivery() {
+                output.done = true;
+                return Some(self.fail(error, true));
             }
         }
-        DeliveryEncoding::handle_collection(
-            id,
-            collection,
-            self.encoder.as_mut(),
-            &mut self.delivery,
-            &self.policy,
-            output,
-            timer,
-            origin,
-            metrics,
-        )
-        .await
+        let chunk = match self.encoder.append(input) {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                output.done = true;
+                return Some(self.fail(
+                    ProcessorError::ProcessingError(format!("encoder append error: {error}")),
+                    began,
+                ));
+            }
+        };
+        self.delivery.row_count += input.num_rows();
+        output.offset = end;
+        let step = if matches!(self.policy, BatchPolicy::Immediate)
+            || self
+                .policy
+                .count_threshold()
+                .is_some_and(|count| self.delivery.row_count >= count)
+        {
+            self.finish_delivery(chunk, began)
+        } else {
+            let chunk = if self.delivery.emitted_chunk {
+                chunk
+            } else {
+                Self::combine_chunks([self.delivery.pending_start_chunk.take(), chunk, None])
+            };
+            let frame = chunk.map(|chunk| {
+                if self.delivery.emitted_chunk {
+                    StreamData::encoded_delivery_chunk(chunk)
+                } else {
+                    self.delivery.emitted_chunk = true;
+                    StreamData::encoded_delivery_start(chunk)
+                }
+            });
+            EncodingStep::frame(began, frame)
+        };
+        if step.error.is_some() {
+            output.done = true;
+        }
+        Some(step)
     }
-    pub(crate) async fn flush(
-        &mut self,
-        id: &str,
-        output: &mut impl DeliveryOutput,
-        metrics: Option<&EncoderMetrics>,
-    ) -> Result<(), ProcessorError> {
-        DeliveryEncoding::finish_delivery(
-            id,
-            self.encoder.as_mut(),
-            &mut self.delivery,
-            None,
-            output,
-            metrics,
-        )
-        .await
-    }
-}
 
-impl DeliveryEncoding {
-    fn start_delivery(
-        encoder: &mut dyn SinkEncoder,
-        delivery: &mut DeliveryEncoding,
-        output: &mut impl DeliveryOutput,
-    ) -> Result<(), ProcessorError> {
-        let start_chunk = encoder.begin_delivery().map_err(|err| {
-            ProcessorError::ProcessingError(format!("encoder begin error: {err}"))
+    fn start_delivery(&mut self) -> Result<(), ProcessorError> {
+        self.delivery.active = true;
+        let chunk = self.encoder.begin_delivery().map_err(|error| {
+            ProcessorError::ProcessingError(format!("encoder begin error: {error}"))
         })?;
-        output.begin_delivery();
-        delivery.row_count = 0;
-        delivery.active = true;
-        delivery.emitted_chunk = false;
-        delivery.pending_start_chunk = start_chunk.filter(|chunk| !chunk.is_empty());
+        self.delivery = DeliveryEncoding {
+            active: true,
+            pending_start_chunk: chunk.filter(|chunk| !chunk.is_empty()),
+            ..Default::default()
+        };
         Ok(())
+    }
+
+    fn fail(&mut self, error: ProcessorError, began: bool) -> EncodingStep {
+        let aborted = self.delivery.active;
+        let emit_abort = self.delivery.emitted_chunk;
+        if aborted {
+            self.encoder.abort_delivery();
+            self.delivery = DeliveryEncoding::default();
+        }
+        EncodingStep {
+            began,
+            aborted,
+            frame: emit_abort.then(StreamData::encoded_delivery_abort),
+            error: Some(error),
+        }
+    }
+
+    fn finish_delivery(&mut self, prefix: Option<bytes::Bytes>, began: bool) -> EncodingStep {
+        if !self.delivery.active {
+            return EncodingStep::frame(began, None);
+        }
+        let end = match self.encoder.finish_delivery() {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                return self.fail(
+                    ProcessorError::ProcessingError(format!("encoder finish error: {error}")),
+                    began,
+                )
+            }
+        };
+        let chunk = Self::combine_chunks([
+            if self.delivery.emitted_chunk {
+                None
+            } else {
+                self.delivery.pending_start_chunk.take()
+            },
+            prefix,
+            end,
+        ])
+        .unwrap_or_default();
+        let frame = if self.delivery.emitted_chunk {
+            StreamData::encoded_delivery_end(chunk)
+        } else {
+            StreamData::encoded_delivery_single(chunk)
+        };
+        self.delivery = DeliveryEncoding::default();
+        EncodingStep::frame(began, Some(frame))
     }
 
     fn combine_chunks(chunks: [Option<bytes::Bytes>; 3]) -> Option<bytes::Bytes> {
         let mut count = 0;
         let mut total_len = 0;
-        for chunk in chunks.iter().flatten() {
-            if !chunk.is_empty() {
-                count += 1;
-                total_len += chunk.len();
-            }
+        for chunk in chunks.iter().flatten().filter(|chunk| !chunk.is_empty()) {
+            count += 1;
+            total_len += chunk.len();
         }
-
         match count {
             0 => None,
             1 => chunks.into_iter().flatten().find(|chunk| !chunk.is_empty()),
             _ => {
                 let mut bytes = Vec::with_capacity(total_len);
                 for chunk in chunks.into_iter().flatten() {
-                    if !chunk.is_empty() {
-                        bytes.extend_from_slice(&chunk);
-                    }
+                    bytes.extend_from_slice(&chunk);
                 }
                 Some(bytes.into())
             }
         }
-    }
-
-    fn take_pending_start_and_combine(
-        delivery: &mut DeliveryEncoding,
-        chunk: Option<bytes::Bytes>,
-    ) -> Option<bytes::Bytes> {
-        if delivery.emitted_chunk {
-            chunk
-        } else {
-            Self::combine_chunks([delivery.pending_start_chunk.take(), chunk, None])
-        }
-    }
-
-    async fn emit_intermediate_chunk(
-        chunk: Option<bytes::Bytes>,
-        delivery: &mut DeliveryEncoding,
-        output: &mut impl DeliveryOutput,
-        metrics: Option<&EncoderMetrics>,
-    ) -> Result<(), ProcessorError> {
-        let chunk = Self::take_pending_start_and_combine(delivery, chunk);
-        let Some(chunk) = chunk else {
-            return Ok(());
-        };
-        let output_bytes = chunk.len();
-        let is_first_chunk = !delivery.emitted_chunk;
-        let data = if is_first_chunk {
-            StreamData::encoded_delivery_start(chunk)
-        } else {
-            StreamData::encoded_delivery_chunk(chunk)
-        };
-        output.send(data).await?;
-        if let Some(metrics) = metrics {
-            metrics.record_output_bytes(output_bytes);
-        }
-        if is_first_chunk {
-            delivery.emitted_chunk = true;
-        }
-        Ok(())
-    }
-
-    async fn abort_delivery(
-        encoder: &mut dyn SinkEncoder,
-        delivery: &mut DeliveryEncoding,
-        output: &mut impl DeliveryOutput,
-        metrics: Option<&EncoderMetrics>,
-    ) -> Result<(), ProcessorError> {
-        if !delivery.active {
-            return Ok(());
-        }
-
-        encoder.abort_delivery();
-        output.abort_delivery();
-        if let Some(metrics) = metrics {
-            metrics.record_message_aborted();
-        }
-        let should_emit_abort = delivery.emitted_chunk;
-        *delivery = DeliveryEncoding::default();
-
-        if should_emit_abort {
-            output.send(StreamData::encoded_delivery_abort()).await?;
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn finish_delivery(
-        processor_id: &str,
-        encoder: &mut dyn SinkEncoder,
-        delivery: &mut DeliveryEncoding,
-        prefix_chunk: Option<bytes::Bytes>,
-        output: &mut impl DeliveryOutput,
-        metrics: Option<&EncoderMetrics>,
-    ) -> Result<(), ProcessorError> {
-        if !delivery.active {
-            return Ok(());
-        }
-
-        let end_chunk = match encoder.finish_delivery() {
-            Ok(chunk) => chunk,
-            Err(err) => {
-                Self::abort_delivery(encoder, delivery, output, metrics).await?;
-                return Err(ProcessorError::ProcessingError(format!(
-                    "encoder finish error: {err}"
-                )));
-            }
-        };
-        let chunk = if delivery.emitted_chunk {
-            Self::combine_chunks([prefix_chunk, end_chunk, None])
-        } else {
-            Self::combine_chunks([delivery.pending_start_chunk.take(), prefix_chunk, end_chunk])
-        };
-        let chunk = chunk.unwrap_or_default();
-        let output_bytes = chunk.len();
-        let data = if delivery.emitted_chunk {
-            StreamData::encoded_delivery_end(chunk)
-        } else {
-            StreamData::encoded_delivery_single(chunk)
-        };
-        *delivery = DeliveryEncoding::default();
-        output.send(data).await?;
-        if let Some(metrics) = metrics {
-            metrics.record_output_bytes(output_bytes);
-        }
-        if let Some(metrics) = metrics {
-            metrics.record_message_out();
-        }
-        tracing::debug!(processor_id = %processor_id, "flushed encoded delivery");
-        Ok(())
-    }
-
-    fn append_collection_to_delivery(
-        encoder: &mut dyn SinkEncoder,
-        delivery: &mut DeliveryEncoding,
-        collection: &dyn Collection,
-        output: &mut impl DeliveryOutput,
-    ) -> Result<Option<bytes::Bytes>, ProcessorError> {
-        if !delivery.active {
-            Self::start_delivery(encoder, delivery, output)?;
-        }
-
-        let chunk = match encoder.append(collection) {
-            Ok(chunk) => chunk,
-            Err(err) => {
-                return Err(ProcessorError::ProcessingError(format!(
-                    "encoder append error: {err}"
-                )));
-            }
-        };
-        delivery.row_count += collection.num_rows();
-        Ok(chunk)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_collection(
-        processor_id: &str,
-        collection: Box<dyn Collection>,
-        encoder: &mut dyn SinkEncoder,
-        delivery: &mut DeliveryEncoding,
-        mode: &BatchPolicy,
-        output: &mut impl DeliveryOutput,
-        timer: &mut Option<Pin<Box<Sleep>>>,
-        grid_origin: Instant,
-        metrics: Option<&EncoderMetrics>,
-    ) -> Result<(), ProcessorError> {
-        let row_total = collection.num_rows();
-
-        if row_total == 0 {
-            if matches!(mode, BatchPolicy::Immediate) {
-                Self::start_delivery(encoder, delivery, output)?;
-                Self::finish_delivery(processor_id, encoder, delivery, None, output, metrics)
-                    .await?;
-            }
-            return Ok(());
-        }
-
-        if let Some(count) = mode.count_threshold() {
-            let mut offset = 0;
-            while offset < row_total {
-                let remaining_capacity = count - delivery.row_count;
-                let take_rows = remaining_capacity.min(row_total - offset);
-                let end = offset + take_rows;
-                let segment;
-                let collection_segment: &dyn Collection = if offset == 0 && end == row_total {
-                    collection.as_ref()
-                } else {
-                    segment = collection.slice(offset, end).map_err(|err| {
-                        ProcessorError::ProcessingError(format!("collection slice error: {err}"))
-                    })?;
-                    segment.as_ref()
-                };
-                let chunk = match Self::append_collection_to_delivery(
-                    encoder,
-                    delivery,
-                    collection_segment,
-                    output,
-                ) {
-                    Ok(chunk) => chunk,
-                    Err(err) => {
-                        Self::abort_delivery(encoder, delivery, output, metrics).await?;
-                        return Err(err);
-                    }
-                };
-                offset = end;
-
-                if delivery.row_count >= count {
-                    Self::finish_delivery(processor_id, encoder, delivery, chunk, output, metrics)
-                        .await?;
-                } else {
-                    Self::emit_intermediate_chunk(chunk, delivery, output, metrics).await?;
-                }
-            }
-        } else {
-            let chunk = match Self::append_collection_to_delivery(
-                encoder,
-                delivery,
-                collection.as_ref(),
-                output,
-            ) {
-                Ok(chunk) => chunk,
-                Err(err) => {
-                    Self::abort_delivery(encoder, delivery, output, metrics).await?;
-                    return Err(err);
-                }
-            };
-            if matches!(mode, BatchPolicy::Immediate) {
-                Self::finish_delivery(processor_id, encoder, delivery, chunk, output, metrics)
-                    .await?;
-                return Ok(());
-            }
-            Self::emit_intermediate_chunk(chunk, delivery, output, metrics).await?;
-        }
-
-        if let Some(duration) = mode.duration() {
-            BatchPolicy::schedule_timer(timer, grid_origin, duration, delivery.row_count > 0);
-        }
-        Ok(())
     }
 }

@@ -26,7 +26,7 @@ use flow::{
 
 /// Register the `gbf` decoder with the global decoder registry.
 pub fn register_gbf_decoder(registry: &flow::DecoderRegistry) {
-    registry.register_decoder(
+    registry.register_inline_decoder(
         "gbf",
         Arc::new(|config, schema, stream_name| {
             let compiled = config
@@ -134,6 +134,9 @@ impl GbfDecoder {
 }
 
 impl RecordDecoder for GbfDecoder {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
     fn decode(&self, payload: &[u8]) -> Result<RecordBatch, CodecError> {
         self.decode_with_projection(payload, None)
     }

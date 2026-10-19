@@ -33,6 +33,7 @@ struct MetricEntry {
     flat_name: &'static str,
     kind: MetricKind,
     value: AtomicU64,
+    enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +48,9 @@ pub struct GaugeHandle {
 
 impl GaugeHandle {
     pub fn set(&self, value: u64) {
+        if !self.entry.enabled {
+            return;
+        }
         self.entry.value.store(value, Ordering::Relaxed);
         let prom_value = i64::try_from(value).unwrap_or(i64::MAX);
         let Some(gauge) = self.resolved_gauge() else {
@@ -143,6 +147,9 @@ pub struct CounterHandle {
 
 impl CounterHandle {
     pub fn inc_by(&self, delta: u64) {
+        if !self.entry.enabled {
+            return;
+        }
         self.entry.value.fetch_add(delta, Ordering::Relaxed);
         let Some(counter) = self.resolved_counter() else {
             return;
@@ -177,6 +184,7 @@ impl CounterHandle {
 
 #[derive(Debug)]
 pub struct ProcessorStats {
+    error_parent: Option<Arc<ProcessorStats>>,
     flow_instance_id: Arc<str>,
     processor_id: Arc<str>,
     kind: Arc<str>,
@@ -216,6 +224,7 @@ impl ProcessorStats {
         kind: impl Into<Arc<str>>,
     ) -> Self {
         Self {
+            error_parent: None,
             flow_instance_id: flow_instance_id.into(),
             processor_id: processor_id.into(),
             kind: kind.into(),
@@ -236,6 +245,16 @@ impl ProcessorStats {
             records_in_counter: OnceLock::new(),
             records_out_counter: OnceLock::new(),
         }
+    }
+
+    /// Error context for shared engines, without stage performance metrics.
+    pub(crate) fn stage_diagnostics(parent: Arc<Self>, stage_id: &str) -> Self {
+        let mut stats = Self::new(Arc::clone(&parent.flow_instance_id), stage_id, "stage");
+        stats.pipeline_id = Arc::clone(&parent.pipeline_id);
+        stats.stream_name = Arc::clone(&parent.stream_name);
+        stats.revision = Arc::clone(&parent.revision);
+        stats.error_parent = Some(parent);
+        stats
     }
 
     fn bound_metrics(&self) -> Option<&BoundMetrics> {
@@ -414,6 +433,7 @@ impl ProcessorStats {
                 flat_name: spec.flat_name,
                 kind: spec.kind,
                 value: AtomicU64::new(0),
+                enabled: self.error_parent.is_none(),
             })
         });
 
@@ -498,11 +518,15 @@ impl ProcessorStats {
     }
 
     pub fn record_error_count(&self, count: u64, message: impl Into<String>) {
+        let message: String = message.into();
+        if let Some(parent) = &self.error_parent {
+            parent.record_error_count(count, format!("{}: {}", self.processor_id, message));
+            return;
+        }
         self.error_count.fetch_add(count, Ordering::Relaxed);
         if let Some(bound) = self.bound_metrics() {
             bound.error_counter.inc_by(count);
         }
-        let message: String = message.into();
         let mut guard = self.last_error.write();
         *guard = Some(Arc::<str>::from(message));
     }

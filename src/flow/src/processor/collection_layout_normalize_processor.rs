@@ -92,7 +92,7 @@ fn value_by_name_with_index(msg: &Message, expected: &str) -> Option<(usize, Val
     None
 }
 
-fn normalize_collection(
+pub(crate) fn normalize_collection(
     schema_keys: &[Arc<str>],
     output_source_name: &Arc<str>,
     shared_keys: &Arc<[Arc<str>]>,

@@ -1,4 +1,4 @@
-use super::{build_group_by_meta, AggregationWorker, GroupByMeta};
+use super::{build_group_by_meta, AggregationWorker};
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::model::Collection;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
@@ -63,8 +63,6 @@ pub struct StreamingCountAggregationProcessor {
     output: LinkOutput<StreamData>,
     control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
-    group_by_meta: Vec<GroupByMeta>,
-    partition_by_scalars: Vec<crate::expr::ScalarExpr>,
     target: u64,
     stats: Arc<ProcessorStats>,
 }
@@ -92,15 +90,6 @@ impl StreamingCountAggregationProcessor {
         target: u64,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
-        let group_by_meta =
-            build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
-        let partition_by_scalars = match &physical.window {
-            StreamingWindowSpec::Count {
-                partition_by_scalars,
-                ..
-            } => partition_by_scalars.clone(),
-            _ => Vec::new(),
-        };
         let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
         let control_output = LinkOutput::new(
             channel_capacities.control_link_kind,
@@ -115,106 +104,9 @@ impl StreamingCountAggregationProcessor {
             output,
             control_output,
             channel_capacities,
-            group_by_meta,
-            partition_by_scalars,
             target,
             stats: Arc::new(ProcessorStats::collection_in_out()),
         }
-    }
-
-    fn process_collection(
-        worker: &mut AggregationWorker,
-        window_state: &mut CountWindowState,
-        collection: &dyn Collection,
-        stats: &ProcessorStats,
-    ) -> Result<Vec<Box<dyn Collection>>, String> {
-        let mut outputs = Vec::new();
-        for row in collection.rows() {
-            match window_metadata::validate_system_time(row.timestamp) {
-                Ok(()) => {}
-                Err(ProcessorError::ProcessingError(message)) => {
-                    stats.record_error_logged(
-                        "streaming count aggregation processor error",
-                        message,
-                    );
-                    continue;
-                }
-                Err(err) => return Err(err.to_string()),
-            }
-            if let Err(message) = worker.update_groups(row) {
-                stats.record_error_logged("streaming count aggregation processor error", message);
-                continue;
-            }
-            let now = row.timestamp;
-
-            if let Some(opened_at) = window_state.register_row_and_check_finalize(now) {
-                if let Some(batch) = worker.finalize_current_window()? {
-                    outputs.push(
-                        window_metadata::attach_from_system_time(batch, opened_at, now)
-                            .map_err(|err| err.to_string())?,
-                    );
-                }
-                window_state.reset();
-            }
-        }
-        Ok(outputs)
-    }
-
-    fn process_partitioned_collection(
-        worker: &AggregationWorker,
-        partition_by_scalars: &[crate::expr::ScalarExpr],
-        target: u64,
-        partitions: &mut PartitionedCountAggregationState,
-        collection: &dyn Collection,
-        stats: &ProcessorStats,
-    ) -> Result<Vec<Box<dyn Collection>>, String> {
-        let mut outputs = Vec::new();
-        for row in collection.rows() {
-            match window_metadata::validate_system_time(row.timestamp) {
-                Ok(()) => {}
-                Err(ProcessorError::ProcessingError(message)) => {
-                    stats.record_error_logged(
-                        "streaming count aggregation processor error",
-                        message,
-                    );
-                    continue;
-                }
-                Err(err) => return Err(err.to_string()),
-            }
-            let partition_key = match eval_partition_key(partition_by_scalars, row, "countwindow") {
-                Ok(key) => key,
-                Err(message) => {
-                    stats.record_error_logged(
-                        "streaming count aggregation processor error",
-                        message,
-                    );
-                    continue;
-                }
-            };
-            let state = partitions.get_or_insert(
-                partition_key,
-                target,
-                Arc::clone(&worker.physical),
-                Arc::clone(&worker.aggregate_registry),
-                worker.group_by_meta.clone(),
-            );
-            if let Err(message) = state.worker.update_groups(row) {
-                stats.record_error_logged("streaming count aggregation processor error", message);
-                continue;
-            }
-            let now = row.timestamp;
-
-            if let Some(opened_at) = state.window.register_row_and_check_finalize(now) {
-                if let Some(batch) = state.worker.finalize_current_window()? {
-                    outputs.push(
-                        window_metadata::attach_from_system_time(batch, opened_at, now)
-                            .map_err(|err| err.to_string())?,
-                    );
-                }
-                state.window.reset();
-            }
-        }
-        Ok(outputs)
     }
 
     pub fn id(&self) -> &str {
@@ -243,16 +135,12 @@ impl Processor for StreamingCountAggregationProcessor {
         let channel_capacities = self.channel_capacities;
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let physical = Arc::clone(&self.physical);
-        let group_by_meta = self.group_by_meta.clone();
-        let partition_by_scalars = self.partition_by_scalars.clone();
         let target = self.target;
         let stats = Arc::clone(&self.stats);
 
         let processor_span = stats.processor_span();
         ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            let mut worker = AggregationWorker::new(physical, aggregate_registry, group_by_meta);
-            let mut window_state = CountWindowState::new(target);
-            let mut partitioned_state = PartitionedCountAggregationState::new();
+            let mut stage = StreamingCountStage::new(physical, aggregate_registry, target);
 
             loop {
                 tokio::select! {
@@ -276,80 +164,17 @@ impl Processor for StreamingCountAggregationProcessor {
                         match data_item {
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
-                                match data {
-                                    StreamData::Collection(collection) => {
-                                        stats.record_collection_in(collection.num_rows() as u64);
-                                        let handle_start = std::time::Instant::now();
-                                        let outputs_result = if partition_by_scalars.is_empty() {
-                                            StreamingCountAggregationProcessor::process_collection(
-                                                &mut worker,
-                                                &mut window_state,
-                                                collection.as_ref(),
-                                                stats.as_ref(),
-                                            )
-                                        } else {
-                                            StreamingCountAggregationProcessor::process_partitioned_collection(
-                                                &worker,
-                                                &partition_by_scalars,
-                                                target,
-                                                &mut partitioned_state,
-                                                collection.as_ref(),
-                                                stats.as_ref(),
-                                            )
-                                        };
-                                        match outputs_result {
-                                            Ok(outputs) => {
-                                                for out in outputs {
-                                                    stats.record_collection_out(out.num_rows() as u64);
-                                                    let data = StreamData::Collection(out);
-                                                    let send_res = send_with_backpressure(
-                                                        &output,
-                                                        channel_capacities.data,
-                                                        data,
-                                                        Some(stats.as_ref()),
-                                                    )
-                                                    .await;
-                                                    if let Err(err) = send_res {
-                                                        stats.record_handle_duration(handle_start.elapsed());
-                                                        return Err(err);
-                                                    }
-                                                }
-                                                // Handle duration for collection processing includes downstream send/backpressure time.
-                                                stats.record_handle_duration(handle_start.elapsed());
-                                            }
-                                            Err(e) => {
-                                                stats.record_handle_duration(handle_start.elapsed());
-                                                return Err(ProcessorError::ProcessingError(
-                                                    format!(
-                                                        "Failed to process streaming count aggregation: {e}"
-                                                    ),
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    StreamData::Control(control_signal) => {
-                                        let is_terminal = control_signal.is_terminal();
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            StreamData::control(control_signal),
-                                            Some(stats.as_ref()),
-                                        )
-                                    .await?;
-                                        if is_terminal {
-                                            break;
-                                        }
-                                    }
-                                    other => {
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            other,
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                    }
+                                if let Some(rows) = data.row_count() { stats.record_collection_in(rows); }
+                                let terminal = data.is_terminal();
+                                let started = std::time::Instant::now();
+                                let mut outputs = stage.process(data);
+                                while let Some(data) = stage.next_output(&mut outputs, &stats)? {
+                                    let rows = data.row_count();
+                                    send_with_backpressure(&output, channel_capacities.data, data, Some(&stats)).await?;
+                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
                                 }
+                                stats.record_handle_duration(started.elapsed());
+                                if terminal { break; }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
                                 log_broadcast_lagged(&id, n, "data input");
@@ -390,6 +215,140 @@ impl Processor for StreamingCountAggregationProcessor {
     }
 }
 
+/// Synchronous row-at-a-time aggregation; downstream waits stay in the caller.
+pub(crate) struct StreamingCountStage {
+    template: AggregationWorker,
+    global: CountWindowState,
+    partitions: PartitionedCountAggregationState,
+    partition_by: Vec<crate::expr::ScalarExpr>,
+    target: u64,
+}
+
+pub(crate) enum StreamingCountOutput {
+    Single(Option<StreamData>),
+    Rows {
+        collection: Box<dyn Collection>,
+        next_row: usize,
+    },
+}
+
+impl StreamingCountStage {
+    pub(crate) fn new(
+        physical: Arc<PhysicalStreamingAggregation>,
+        registry: Arc<AggregateFunctionRegistry>,
+        target: u64,
+    ) -> Self {
+        let group_by = build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
+        let partition_by = match &physical.window {
+            StreamingWindowSpec::Count {
+                partition_by_scalars,
+                ..
+            } => partition_by_scalars.clone(),
+            _ => Vec::new(),
+        };
+        Self {
+            template: AggregationWorker::new(physical, registry, group_by),
+            global: CountWindowState::new(target),
+            partitions: PartitionedCountAggregationState::new(),
+            partition_by,
+            target,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.template.groups.clear();
+        self.global.reset();
+        self.partitions.states.clear();
+        self.partitions.state_ids.clear();
+    }
+
+    pub(crate) fn process(&mut self, data: StreamData) -> StreamingCountOutput {
+        if data.is_terminal() {
+            self.clear();
+        }
+        match data {
+            StreamData::Collection(collection) => StreamingCountOutput::Rows {
+                collection,
+                next_row: 0,
+            },
+            other => StreamingCountOutput::Single(Some(other)),
+        }
+    }
+
+    pub(crate) fn next_output(
+        &mut self,
+        output: &mut StreamingCountOutput,
+        stats: &ProcessorStats,
+    ) -> Result<Option<StreamData>, ProcessorError> {
+        let (collection, next_row) = match output {
+            StreamingCountOutput::Single(data) => return Ok(data.take()),
+            StreamingCountOutput::Rows {
+                collection,
+                next_row,
+            } => (collection, next_row),
+        };
+        while let Some(row) = collection.rows().get(*next_row) {
+            *next_row += 1;
+            match window_metadata::validate_system_time(row.timestamp) {
+                Ok(()) => {}
+                Err(ProcessorError::ProcessingError(message)) => {
+                    stats.record_error_logged(
+                        "streaming count aggregation processor error",
+                        message,
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    return Err(ProcessorError::ProcessingError(format!(
+                        "Failed to process streaming count aggregation: {error}",
+                    )))
+                }
+            }
+            let (worker, window) = if self.partition_by.is_empty() {
+                (&mut self.template, &mut self.global)
+            } else {
+                let key = match eval_partition_key(&self.partition_by, row, "countwindow") {
+                    Ok(key) => key,
+                    Err(error) => {
+                        stats.record_error_logged(
+                            "streaming count aggregation processor error",
+                            error,
+                        );
+                        continue;
+                    }
+                };
+                let state = self
+                    .partitions
+                    .get_or_insert(key, self.target, &self.template);
+                (&mut state.worker, &mut state.window)
+            };
+            if let Err(error) = worker.update_groups(row) {
+                stats.record_error_logged("streaming count aggregation processor error", error);
+                continue;
+            }
+            if let Some(start) = window.register_row_and_check_finalize(row.timestamp) {
+                let batch = worker.finalize_current_window().map_err(|error| {
+                    ProcessorError::ProcessingError(format!(
+                        "Failed to process streaming count aggregation: {error}"
+                    ))
+                })?;
+                window.reset();
+                if let Some(batch) = batch {
+                    let batch =
+                        window_metadata::attach_from_system_time(batch, start, row.timestamp)
+                            .map_err(|error| {
+                                ProcessorError::ProcessingError(format!(
+                                    "Failed to process streaming count aggregation: {error}"
+                                ))
+                            })?;
+                    return Ok(Some(StreamData::collection(batch)));
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
 struct PartitionCountAggregationState {
     window: CountWindowState,
     worker: AggregationWorker,
@@ -412,9 +371,7 @@ impl PartitionedCountAggregationState {
         &mut self,
         key: PartitionKey,
         target: u64,
-        physical: Arc<PhysicalStreamingAggregation>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-        group_by_meta: Vec<GroupByMeta>,
+        template: &AggregationWorker,
     ) -> &mut PartitionCountAggregationState {
         if let Some(id) = self.state_ids.get(&key).copied() {
             return &mut self.states[id];
@@ -424,7 +381,11 @@ impl PartitionedCountAggregationState {
         self.state_ids.insert(key, id);
         self.states.push(PartitionCountAggregationState {
             window: CountWindowState::new(target),
-            worker: AggregationWorker::new(physical, aggregate_registry, group_by_meta),
+            worker: AggregationWorker::new(
+                Arc::clone(&template.physical),
+                Arc::clone(&template.aggregate_registry),
+                template.group_by_meta.clone(),
+            ),
         });
         &mut self.states[id]
     }

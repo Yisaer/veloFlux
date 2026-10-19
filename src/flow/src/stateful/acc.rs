@@ -618,6 +618,10 @@ impl StatefulEvalUpdate for AccAvgUpdate {
 }
 
 impl StatefulFunction for AccSumFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "acc_sum"
     }
@@ -632,6 +636,10 @@ impl StatefulFunction for AccSumFunction {
 }
 
 impl StatefulFunction for AccMaxFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "acc_max"
     }
@@ -646,6 +654,10 @@ impl StatefulFunction for AccMaxFunction {
 }
 
 impl StatefulFunction for AccMinFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "acc_min"
     }
@@ -660,6 +672,10 @@ impl StatefulFunction for AccMinFunction {
 }
 
 impl StatefulFunction for AccCountFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "acc_count"
     }
@@ -676,6 +692,10 @@ impl StatefulFunction for AccCountFunction {
 }
 
 impl StatefulFunction for AccAvgFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "acc_avg"
     }

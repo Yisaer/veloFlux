@@ -58,6 +58,10 @@ impl CountFunction {
 }
 
 impl AggregateFunction for CountFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "count"
     }

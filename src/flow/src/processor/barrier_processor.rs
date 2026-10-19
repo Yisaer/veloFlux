@@ -29,22 +29,9 @@ struct PendingCheckpoint {
 }
 
 enum CheckpointDataAction {
-    Forward {
-        data: StreamData,
-        measurement: PassthroughMeasurement,
-    },
+    Forward { data: StreamData },
     Pause,
-    Complete {
-        signal: BarrierControlSignal,
-    },
-}
-
-struct DataForwardContext<'a> {
-    data_barrier: &'a mut BarrierAligner,
-    output: &'a LinkOutput<StreamData>,
-    channel_capacity: usize,
-    stats: &'a ProcessorStats,
-    metrics: &'a PassthroughMetrics,
+    Complete { signal: BarrierControlSignal },
 }
 
 fn handle_checkpoint_data(
@@ -52,7 +39,6 @@ fn handle_checkpoint_data(
     expected_upstreams: usize,
     upstream: usize,
     data: StreamData,
-    measurement: PassthroughMeasurement,
     data_barrier_pending: bool,
 ) -> Result<CheckpointDataAction, ProcessorError> {
     if upstream >= expected_upstreams {
@@ -102,11 +88,11 @@ fn handle_checkpoint_data(
             )));
         }
 
-        return Ok(CheckpointDataAction::Forward { data, measurement });
+        return Ok(CheckpointDataAction::Forward { data });
     }
 
     let Some(barrier) = checkpoint else {
-        return Ok(CheckpointDataAction::Forward { data, measurement });
+        return Ok(CheckpointDataAction::Forward { data });
     };
 
     if data_barrier_pending {
@@ -146,29 +132,65 @@ async fn forward_data_item(
     Ok(is_terminal)
 }
 
-async fn forward_data(
-    context: &mut DataForwardContext<'_>,
-    data: StreamData,
-    measurement: PassthroughMeasurement,
-) -> Result<bool, ProcessorError> {
-    let data = match data {
-        StreamData::Control(control_signal) => {
-            let Some(signal) = align_control_signal(context.data_barrier, control_signal)? else {
-                return Ok(false);
-            };
-            StreamData::control(signal)
+/// Synchronous alignment state; transport pause/resume belongs to the driver.
+pub(crate) struct BarrierStage {
+    expected_upstreams: usize,
+    data: BarrierAligner,
+    control: BarrierAligner,
+    pending_checkpoint: Option<PendingCheckpoint>,
+}
+
+pub(crate) enum BarrierAction {
+    Pause,
+    Forward(Option<StreamData>),
+    Resume(StreamData),
+}
+
+impl BarrierStage {
+    pub(crate) fn new(expected_upstreams: usize) -> Self {
+        Self {
+            expected_upstreams,
+            data: BarrierAligner::new("data", expected_upstreams),
+            control: BarrierAligner::new("control", expected_upstreams),
+            pending_checkpoint: None,
         }
-        other => other,
-    };
-    forward_data_item(
-        context.output,
-        context.channel_capacity,
-        context.stats,
-        context.metrics,
-        data,
-        measurement,
-    )
-    .await
+    }
+    pub(crate) fn expected_upstreams(&self) -> usize {
+        self.expected_upstreams
+    }
+    pub(crate) fn control(
+        &mut self,
+        signal: ControlSignal,
+    ) -> Result<Option<ControlSignal>, ProcessorError> {
+        align_control_signal(&mut self.control, signal)
+    }
+    pub(crate) fn process(
+        &mut self,
+        upstream: usize,
+        data: StreamData,
+    ) -> Result<BarrierAction, ProcessorError> {
+        match handle_checkpoint_data(
+            &mut self.pending_checkpoint,
+            self.expected_upstreams,
+            upstream,
+            data,
+            self.data.is_pending(),
+        )? {
+            CheckpointDataAction::Pause => Ok(BarrierAction::Pause),
+            CheckpointDataAction::Complete { signal } => Ok(BarrierAction::Resume(
+                StreamData::control(ControlSignal::Barrier(signal)),
+            )),
+            CheckpointDataAction::Forward { data, .. } => {
+                let data = match data {
+                    StreamData::Control(signal) => {
+                        align_control_signal(&mut self.data, signal)?.map(StreamData::control)
+                    }
+                    data => Some(data),
+                };
+                Ok(BarrierAction::Forward(data))
+            }
+        }
+    }
 }
 
 /// BarrierProcessor forwards all data and aligns barrier control signals per channel.
@@ -267,9 +289,7 @@ impl Processor for BarrierProcessor {
                 )));
             }
 
-            let mut data_barrier = BarrierAligner::new("data", expected_data_upstreams);
-            let mut control_barrier = BarrierAligner::new("control", expected_control_upstreams);
-            let mut pending_checkpoint = None;
+            let mut stage = BarrierStage::new(expected_upstreams);
 
             loop {
                 tokio::select! {
@@ -278,7 +298,7 @@ impl Processor for BarrierProcessor {
                         match control_item {
                             Some(Ok(control_signal)) => {
                                 if let Some(signal) =
-                                    align_control_signal(&mut control_barrier, control_signal)?
+                                    stage.control(control_signal)?
                                 {
                                     let is_terminal = signal.is_terminal();
                                     send_control_with_backpressure(
@@ -307,57 +327,18 @@ impl Processor for BarrierProcessor {
                             Some(Ok(IndexedInput::Item { upstream, item: data })) => {
                                 log_received_data(&id, &data);
                                 let measurement = metrics.record_input(stats.as_ref(), &data)?;
-                                let action = handle_checkpoint_data(
-                                    &mut pending_checkpoint,
-                                    expected_data_upstreams,
-                                    upstream,
-                                    data,
-                                    measurement,
-                                    data_barrier.is_pending(),
-                                )?;
-                                match action {
-                                    CheckpointDataAction::Pause => {
-                                        input_streams.pause(upstream);
-                                    }
-                                    CheckpointDataAction::Complete { signal } => {
-                                        let terminal = forward_data_item(
-                                            &output,
-                                            channel_capacities.data,
-                                            stats.as_ref(),
-                                            &metrics,
-                                            StreamData::control(ControlSignal::Barrier(signal)),
-                                            PassthroughMeasurement::Other,
-                                        )
-                                        .await?;
-                                        if terminal {
-                                            tracing::info!(processor_id = %id, "received terminal signal (data)");
-                                            tracing::info!(processor_id = %id, "stopped");
-                                            return Ok(());
-                                        }
-                                        input_streams.resume_all();
-                                    }
-                                    CheckpointDataAction::Forward { data, measurement } => {
-                                        let mut context = DataForwardContext {
-                                            data_barrier: &mut data_barrier,
-                                            output: &output,
-                                            channel_capacity: channel_capacities.data,
-                                            stats: stats.as_ref(),
-                                            metrics: &metrics,
-                                        };
-                                        if forward_data(&mut context, data, measurement).await? {
-                                            tracing::info!(processor_id = %id, "received terminal signal (data)");
-                                            tracing::info!(processor_id = %id, "stopped");
-                                            return Ok(());
-                                        }
-                                    }
-                                }
+                                let action = stage.process(upstream, data)?;
+                                let (data, resume) = match action {
+                                    BarrierAction::Pause => { input_streams.pause(upstream); continue; }
+                                    BarrierAction::Forward(None) => continue,
+                                    BarrierAction::Forward(Some(data)) => (data, false),
+                                    BarrierAction::Resume(data) => (data, true),
+                                };
+                                if forward_data_item(&output, channel_capacities.data, stats.as_ref(),
+                                    &metrics, data, measurement).await? { return Ok(()); }
+                                if resume { input_streams.resume_all(); }
                             }
-                            Some(Ok(IndexedInput::Closed)) => {
-                                if pending_checkpoint.is_some() {
-                                    return Err(ProcessorError::ChannelClosed);
-                                }
-                                return Err(ProcessorError::ChannelClosed);
-                            }
+                            Some(Ok(IndexedInput::Closed)) => return Err(ProcessorError::ChannelClosed),
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
                                 log_broadcast_lagged(&id, skipped, "barrier data input");
                                 continue;

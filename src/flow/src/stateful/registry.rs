@@ -90,6 +90,11 @@ pub trait StatefulFunctionInstance: Send + Sync {
 }
 
 pub trait StatefulFunction: Send + Sync {
+    /// Custom implementations remain isolated unless they explicitly opt in.
+    fn supports_inline_execution(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &str;
     fn return_type(&self, input_types: &[ConcreteDatatype]) -> Result<ConcreteDatatype, String>;
     fn create_instance(&self) -> Box<dyn StatefulFunctionInstance>;

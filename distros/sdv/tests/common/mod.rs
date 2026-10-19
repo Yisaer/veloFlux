@@ -258,44 +258,33 @@ impl ApiClient {
         }
     }
 
-    /// Fetch pipeline stats and verify data was processed correctly.
-    /// Returns the stats response if successful, panics if:
-    /// - Stats API call fails
-    /// - Any processor has non-zero error
-    /// - No records were processed (records_in == 0 for all processors)
+    /// Fetch runtime stats and require successful processing at an input boundary.
+    /// Regions may fuse decoding through encoding, exposing only message/byte
+    /// traffic; an internal row counter is not required in that case.
     pub fn verify_pipeline_stats(&self, pipeline_id: &str) -> serde_json::Value {
         let stats = self
             .get_pipeline_stats(pipeline_id)
             .unwrap_or_else(|| panic!("stats API failed for pipeline {pipeline_id}"));
-        if let Some(processors) = stats.as_array() {
-            let mut total_records_in = 0u64;
-            for proc in processors {
-                // Check for errors
-                if let Some(error) = proc
-                    .get("stats")
-                    .and_then(|s| s.get("error"))
-                    .and_then(|e| e.as_str())
-                {
-                    panic!(
-                        "Processor {} has error: {}",
-                        proc.get("processor_id").unwrap_or(&serde_json::Value::Null),
-                        error
-                    );
-                }
-                // Accumulate records_in
-                if let Some(records_in) = proc
-                    .get("stats")
-                    .and_then(|s| s.get("records_in"))
-                    .and_then(|r| r.as_u64())
-                {
-                    total_records_in += records_in;
-                }
-            }
-            assert!(
-                total_records_in > 0,
-                "No records processed - check pipeline configuration"
+        let processors = stats.as_array().expect("processor stats array");
+        let mut processed = false;
+        for processor in processors {
+            assert_eq!(
+                processor["stats"]["error_count"].as_u64(),
+                Some(0),
+                "processor reported errors: {processor}"
             );
+            processed |= ["messages_in", "collections_in", "records_in"]
+                .iter()
+                .any(|field| {
+                    processor["stats"][*field]
+                        .as_u64()
+                        .is_some_and(|count| count > 0)
+                });
         }
+        assert!(
+            processed,
+            "No inputs processed - check pipeline configuration"
+        );
         stats
     }
 }

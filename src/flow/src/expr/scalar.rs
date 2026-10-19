@@ -137,6 +137,47 @@ fn value_for_column(tuple: &Tuple, column: &ColumnRef) -> Result<Value, EvalErro
 }
 
 impl ScalarExpr {
+    /// Inspect function contracts without evaluating or moving guarded calls.
+    pub(crate) fn requires_execution_isolation(&self) -> bool {
+        match self {
+            Self::CallFunc { func, args } => {
+                !func.supports_inline_execution()
+                    || args.iter().any(Self::requires_execution_isolation)
+            }
+            Self::CallUnary { expr, .. } | Self::FieldAccess { expr, .. } => {
+                expr.requires_execution_isolation()
+            }
+            Self::CallBinary { expr1, expr2, .. } => {
+                expr1.requires_execution_isolation() || expr2.requires_execution_isolation()
+            }
+            Self::ListIndex { expr, index_expr } => {
+                expr.requires_execution_isolation() || index_expr.requires_execution_isolation()
+            }
+            Self::Case {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                operand
+                    .as_deref()
+                    .is_some_and(Self::requires_execution_isolation)
+                    || when_then.iter().any(|(when, then)| {
+                        when.requires_execution_isolation() || then.requires_execution_isolation()
+                    })
+                    || else_expr
+                        .as_deref()
+                        .is_some_and(Self::requires_execution_isolation)
+            }
+            Self::Column(_)
+            | Self::OriginRow { .. }
+            | Self::Wildcard { .. }
+            | Self::Literal(..)
+            | Self::PipelineState { .. }
+            | Self::ProcessorState { .. }
+            | Self::WindowMetadata { .. } => false,
+        }
+    }
+
     /// Bind origin-row references to one pending tuple before evaluating a deferred predicate.
     pub fn bind_origin_row(&mut self, tuple: &Tuple) -> Result<(), EvalError> {
         match self {

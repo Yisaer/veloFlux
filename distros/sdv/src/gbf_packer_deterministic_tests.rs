@@ -195,18 +195,28 @@ mod tests {
             .await
             .expect("send packet 3");
 
-        let sampler_stats = pipeline
-            .processor_stats()
-            .into_iter()
-            .find(|stats| stats.processor_id.to_lowercase().contains("sampler"))
-            .expect("sampler stats");
-        for _ in 0..20 {
-            if sampler_stats.snapshot().stats.custom["messages_in"] == 3 {
-                break;
+        // Synchronize through the data lane without relying on stage metrics.
+        let fence = flow::processor::ControlSignal::Barrier(
+            flow::processor::BarrierControlSignalKind::SyncTest.with_id(1),
+        );
+        pipeline
+            .send_stream_data("can", StreamData::control(fence.clone()))
+            .await
+            .expect("send input fence");
+        timeout(Duration::from_millis(100), async {
+            loop {
+                match output.recv().await.expect("fence output") {
+                    StreamData::Control(signal) if signal == fence => break,
+                    StreamData::Watermark(_) => {}
+                    other => panic!(
+                        "unexpected output before sampler tick: {}",
+                        other.description()
+                    ),
+                }
             }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(sampler_stats.snapshot().stats.custom["messages_in"], 3);
+        })
+        .await
+        .expect("input fence should reach output before sampler tick");
 
         advance(Duration::from_millis(500)).await;
         tokio::task::yield_now().await;
@@ -216,7 +226,6 @@ mod tests {
         assert_eq!(rows[0]["ts"], 1_720_765_705_310_i64);
         assert_eq!(rows[0]["Mess0_Sig1"], 238);
         assert_eq!(rows[0]["Mess1_Sig1"], 170);
-        assert_eq!(sampler_stats.snapshot().stats.records_out, Some(1));
 
         timeout(
             Duration::from_millis(100),

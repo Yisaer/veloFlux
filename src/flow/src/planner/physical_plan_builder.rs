@@ -772,7 +772,7 @@ fn create_physical_stateful_function_with_builder(
     for (entry, spec) in logical_stateful.calls.iter().zip(stateful_specs.iter()) {
         let output_column = &entry.output_column;
         let func_name = spec.func_name.clone();
-        registries
+        let function = registries
             .stateful_registry()
             .get(&func_name)
             .ok_or_else(|| format!("unknown stateful function '{}'", func_name))?;
@@ -826,6 +826,7 @@ fn create_physical_stateful_function_with_builder(
         }
 
         calls.push(StatefulCall {
+            supports_inline_execution: function.supports_inline_execution(),
             output_column: output_column.clone(),
             func_name,
             arg_scalars,
@@ -1375,13 +1376,19 @@ fn create_physical_data_source_with_builder(
             let datasource_plan = Arc::new(PhysicalPlan::DataSource(physical_ds));
             let sampler_plan = logical_ds.sampler().map(|sampler_config| {
                 let sampler_index = builder.allocate_index();
-                Arc::new(PhysicalPlan::Sampler(PhysicalSampler::new(
+                let mut sampler = PhysicalSampler::new(
                     sampler_config.interval,
                     sampler_config.strategy.clone(),
                     logical_ds.decoder().schema_artifact.clone(),
                     vec![Arc::clone(&datasource_plan)],
                     sampler_index,
-                )))
+                );
+                if let crate::processor::SamplingStrategy::Packer { props } = &sampler.strategy {
+                    sampler.supports_inline_execution = registries
+                        .merger_registry()
+                        .supports_inline_execution(&props.merger.merger_type);
+                }
+                Arc::new(PhysicalPlan::Sampler(sampler))
             });
 
             if decoder_kind == "none" {
@@ -1405,7 +1412,7 @@ fn create_physical_data_source_with_builder(
                 .map(|plan| vec![Arc::clone(plan)])
                 .unwrap_or_else(|| vec![Arc::clone(&datasource_plan)]);
             let decoder_index = builder.allocate_index();
-            let decoder = PhysicalDecoder::new(
+            let mut decoder = PhysicalDecoder::new(
                 logical_ds.source_name.clone(),
                 logical_ds.decoder().clone(),
                 schema,
@@ -1414,6 +1421,15 @@ fn create_physical_data_source_with_builder(
                 decoder_children,
                 decoder_index,
             );
+            decoder.supports_inline_execution = registries
+                .decoder_registry()
+                .supports_inline_execution(decoder.decoder().kind())
+                && decoder.eventtime().is_none_or(|eventtime| {
+                    registries
+                        .eventtime_type_registry()
+                        .resolve(&eventtime.type_key)
+                        .is_ok_and(|parser| parser.supports_inline_execution())
+                });
             wrap_source_change_gate(
                 Arc::new(PhysicalPlan::Decoder(decoder)),
                 logical_ds,
@@ -1434,6 +1450,10 @@ fn create_physical_data_source_with_builder(
                 Arc::clone(&schema),
                 logical_ds.decoder().clone(),
                 logical_ds.sampler().cloned(),
+                registries
+                    .decoder_registry()
+                    .supports_inline_execution(logical_ds.decoder().kind()),
+                &registries.merger_registry(),
             );
             let physical_shared = PhysicalSharedStream::new(
                 logical_ds.source_name.clone(),
@@ -2244,13 +2264,16 @@ fn add_regular_encoder_with_builder(
         // Batching is handled by either:
         // - PhysicalBatch (standalone, for encoder=none), or
         // - PhysicalIncSinkEncoder (fused by StreamingEncoderRewrite, for regular encoders).
-        let encoder = PhysicalSinkEncoder::new(
+        let mut encoder = PhysicalSinkEncoder::new(
             vec![encoder_input],
             encoder_index,
             sink.sink_id.clone(),
             connector.encoder.clone(),
             CommonSinkProps::default(),
         );
+        encoder.supports_inline_execution = registries
+            .encoder_registry()
+            .supports_inline_execution(encoder_kind);
         let encoder_node: Arc<PhysicalPlan> = Arc::new(PhysicalPlan::SinkEncoder(encoder));
 
         // Insert delivery transforms in fixed order: encoder -> compress -> encrypt -> connector.

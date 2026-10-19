@@ -10,6 +10,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct PhysicalSampler {
     pub base: BasePhysicalPlan,
+    pub(crate) supports_inline_execution: bool,
     pub interval: Duration,
     pub strategy: SamplingStrategy,
     schema_artifact: Option<Arc<dyn Any + Send + Sync>>,
@@ -39,6 +40,7 @@ impl PhysicalSampler {
     ) -> Self {
         Self {
             base: BasePhysicalPlan::new(children, index),
+            supports_inline_execution: matches!(strategy, SamplingStrategy::Latest),
             interval,
             strategy,
             schema_artifact,

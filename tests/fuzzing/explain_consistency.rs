@@ -160,7 +160,9 @@ fn plan_lines(body: &str, section_header: &str) -> Vec<String> {
         }
 
         if in_section
-            && (lower.contains("logical plan explain") || lower.contains("physical plan explain"))
+            && (lower.contains("logical plan explain")
+                || lower.contains("physical plan explain")
+                || lower.contains("execution regions:"))
             && !lower.contains(&section_header.to_lowercase())
         {
             break;
@@ -184,7 +186,6 @@ fn normalize_plan_topology(lines: &[String]) -> Vec<String> {
                 "physicalresultcollect",
                 "physicalsinkconnector",
                 "physicalsinkencoder",
-                "physicalfusedtransform",
                 "physicalproject",
                 "physicalfilter",
                 "physicaldecoder",
@@ -351,7 +352,9 @@ fn supported_sql_fragments_match_expected_physical_explain_shape() {
                 vec![
                     "physicalresultcollect",
                     "physicalsinkconnector",
-                    "physicalfusedtransform",
+                    "physicalsinkencoder",
+                    "physicalproject",
+                    "physicalfilter",
                     "physicaldecoder",
                     "physicaldatasource",
                 ],

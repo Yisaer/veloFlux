@@ -1,4 +1,4 @@
-use super::{build_group_by_meta, AggregationWorker, GroupByMeta};
+use super::{build_group_by_meta, AggregationWorker};
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::model::Collection;
 use crate::planner::physical::PhysicalStreamingAggregation;
@@ -27,7 +27,6 @@ pub struct StreamingEosAggregationProcessor {
     output: LinkOutput<StreamData>,
     control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
-    group_by_meta: Vec<GroupByMeta>,
     stats: Arc<ProcessorStats>,
 }
 
@@ -51,8 +50,6 @@ impl StreamingEosAggregationProcessor {
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Self {
-        let group_by_meta =
-            build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
         let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
         let control_output = LinkOutput::new(
             channel_capacities.control_link_kind,
@@ -67,7 +64,6 @@ impl StreamingEosAggregationProcessor {
             output,
             control_output,
             channel_capacities,
-            group_by_meta,
             stats: Arc::new(ProcessorStats::collection_in_out()),
         }
     }
@@ -100,35 +96,6 @@ impl StreamingEosAggregationProcessor {
         Ok(())
     }
 
-    async fn flush_current_window(
-        worker: &mut AggregationWorker,
-        output: &LinkOutput<StreamData>,
-        channel_capacity: usize,
-        stats: &ProcessorStats,
-        opened_at: Option<SystemTime>,
-        last_seen_at: Option<SystemTime>,
-    ) -> Result<(), ProcessorError> {
-        if let Some(collection) = worker.finalize_current_window().map_err(|err| {
-            ProcessorError::ProcessingError(format!("Failed to finalize EOS aggregation: {err}"))
-        })? {
-            let closed_at = last_seen_at.or(opened_at).unwrap_or(SystemTime::UNIX_EPOCH);
-            let collection = window_metadata::attach_from_system_time(
-                collection,
-                opened_at.unwrap_or(closed_at),
-                closed_at,
-            )?;
-            stats.record_collection_out(collection.num_rows() as u64);
-            send_with_backpressure(
-                output,
-                channel_capacity,
-                StreamData::Collection(collection),
-                Some(stats),
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -155,14 +122,11 @@ impl Processor for StreamingEosAggregationProcessor {
         let channel_capacities = self.channel_capacities;
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let physical = Arc::clone(&self.physical);
-        let group_by_meta = self.group_by_meta.clone();
         let stats = Arc::clone(&self.stats);
 
         let processor_span = stats.processor_span();
         ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            let mut worker = AggregationWorker::new(physical, aggregate_registry, group_by_meta);
-            let mut opened_at: Option<SystemTime> = None;
-            let mut last_seen_at: Option<SystemTime> = None;
+            let mut stage = StreamingEosStage::new(physical, aggregate_registry);
 
             loop {
                 tokio::select! {
@@ -185,66 +149,17 @@ impl Processor for StreamingEosAggregationProcessor {
                         match data_item {
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
-                                match data {
-                                    StreamData::Collection(collection) => {
-                                        stats.record_collection_in(collection.num_rows() as u64);
-                                        let handle_start = std::time::Instant::now();
-                                        let result = Self::process_collection(
-                                            &mut worker,
-                                            collection.as_ref(),
-                                            &mut opened_at,
-                                            &mut last_seen_at,
-                                            stats.as_ref(),
-                                        );
-                                        stats.record_handle_duration(handle_start.elapsed());
-                                        if let Err(err) = result {
-                                            return Err(ProcessorError::ProcessingError(format!(
-                                                "Failed to process streaming EOS aggregation: {err}"
-                                            )));
-                                        }
-                                    }
-                                    StreamData::Control(control_signal) => {
-                                        let is_terminal = control_signal.is_terminal();
-                                        let is_graceful = control_signal.is_graceful_end();
-                                        if is_terminal {
-                                            if is_graceful {
-                                                Self::flush_current_window(
-                                                    &mut worker,
-                                                    &output,
-                                                    channel_capacities.data,
-                                                    stats.as_ref(),
-                                                    opened_at.take(),
-                                                    last_seen_at.take(),
-                                                )
-                                                .await?;
-                                            }
-                                            send_with_backpressure(
-                                                &output,
-                                                channel_capacities.data,
-                                                StreamData::control(control_signal),
-                                                Some(stats.as_ref()),
-                                            )
-                                            .await?;
-                                            break;
-                                        }
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            StreamData::control(control_signal),
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                    }
-                                    other => {
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            other,
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                    }
+                                if let Some(rows) = data.row_count() { stats.record_collection_in(rows); }
+                                let terminal = data.is_terminal();
+                                let started = std::time::Instant::now();
+                                let outputs = stage.process(data, &stats)?;
+                                stats.record_handle_duration(started.elapsed());
+                                for data in outputs.into_iter().flatten() {
+                                    let rows = data.row_count();
+                                    send_with_backpressure(&output, channel_capacities.data, data, Some(&stats)).await?;
+                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
                                 }
+                                if terminal { break; }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
                                 log_broadcast_lagged(&id, n, "data input");
@@ -282,5 +197,84 @@ impl Processor for StreamingEosAggregationProcessor {
         R: Into<LinkReceiver<ControlSignal>>,
     {
         self.control_inputs.push(receiver.into());
+    }
+}
+
+/// Synchronous EOS aggregation shared by standalone and region placement.
+pub(crate) struct StreamingEosStage {
+    worker: AggregationWorker,
+    opened_at: Option<SystemTime>,
+    last_seen_at: Option<SystemTime>,
+}
+
+impl StreamingEosStage {
+    pub(crate) fn new(
+        physical: Arc<PhysicalStreamingAggregation>,
+        registry: Arc<AggregateFunctionRegistry>,
+    ) -> Self {
+        let group_by = build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
+        Self {
+            worker: AggregationWorker::new(physical, registry, group_by),
+            opened_at: None,
+            last_seen_at: None,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.worker.groups.clear();
+        self.opened_at = None;
+        self.last_seen_at = None;
+    }
+
+    pub(crate) fn process(
+        &mut self,
+        data: StreamData,
+        stats: &ProcessorStats,
+    ) -> Result<[Option<StreamData>; 2], ProcessorError> {
+        match data {
+            StreamData::Collection(collection) => {
+                StreamingEosAggregationProcessor::process_collection(
+                    &mut self.worker,
+                    collection.as_ref(),
+                    &mut self.opened_at,
+                    &mut self.last_seen_at,
+                    stats,
+                )
+                .map_err(|error| {
+                    ProcessorError::ProcessingError(format!(
+                        "Failed to process streaming EOS aggregation: {error}"
+                    ))
+                })?;
+                Ok([None, None])
+            }
+            StreamData::Control(signal) if signal.is_terminal() => {
+                let batch = if signal.is_graceful_end() {
+                    self.worker.finalize_current_window().map_err(|error| {
+                        ProcessorError::ProcessingError(format!(
+                            "Failed to finalize EOS aggregation: {error}"
+                        ))
+                    })?
+                } else {
+                    None
+                };
+                let closed_at = self
+                    .last_seen_at
+                    .or(self.opened_at)
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let output = batch
+                    .map(|batch| {
+                        window_metadata::attach_from_system_time(
+                            batch,
+                            self.opened_at.unwrap_or(closed_at),
+                            closed_at,
+                        )
+                    })
+                    .transpose()?
+                    .map(StreamData::collection);
+                self.clear();
+                Ok([output, Some(StreamData::control(signal))])
+            }
+            other => Ok([Some(other), None]),
+        }
     }
 }

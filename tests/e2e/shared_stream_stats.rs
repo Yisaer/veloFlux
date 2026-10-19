@@ -117,10 +117,10 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
         let processors = stats["processors"]
             .as_array()
             .expect("processors should be an array");
-        let decoder_ready = processors.iter().any(|entry| {
+        let region_ready = processors.iter().any(|entry| {
             entry["processor_id"]
                 .as_str()
-                .is_some_and(|id| id.ends_with("PhysicalDecoder_1"))
+                .is_some_and(|id| id.ends_with("Region_1"))
                 && stats_value(entry, "messages_in") > 0
         });
         let collect_ready = processors.iter().any(|entry| {
@@ -130,7 +130,7 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
                 && stats_value(entry, "records_in") > 0
                 && stats_value(entry, "records_out") > 0
         });
-        if decoder_ready && collect_ready {
+        if region_ready && collect_ready {
             break stats;
         }
         assert!(
@@ -148,16 +148,21 @@ async fn shared_stream_stats_reflect_runtime_activity_via_rest() {
         .as_array()
         .expect("processors should be an array");
     let data_source = find_processor(processors, "PhysicalDataSource_0");
-    let decoder = find_processor(processors, "PhysicalDecoder_1");
+    let region = find_processor(processors, "Region_1");
     let result_collect = find_processor(processors, "PhysicalResultCollect_2");
+    assert_eq!(stats_value(region, "messages_in"), 1);
+    assert_eq!(stats_value(region, "collections_out"), 1);
+    assert_eq!(stats_value(region, "records_out"), 1);
+    assert!(region["stats"].get("records_in").is_none());
+    assert!(region["stats"].get("messages_out").is_none());
 
     assert!(
         stats_value(data_source, "messages_out") > 0,
         "datasource stats should reflect emitted messages: {data_source}"
     );
     assert!(
-        stats_value(decoder, "messages_in") > 0,
-        "decoder stats should reflect consumed messages: {decoder}"
+        stats_value(region, "messages_in") > 0,
+        "region stats should reflect consumed messages: {region}"
     );
     assert!(
         stats_value(result_collect, "records_in") > 0,

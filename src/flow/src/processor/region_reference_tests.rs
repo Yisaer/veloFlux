@@ -1,3 +1,5 @@
+//! Historical sink transport used only as an equivalence-test reference.
+//! SQL planning and production runtime use general execution regions.
 //! FusedTransformProcessor - a fused stateless transform chain in one task.
 //!
 //! Produced by the `fuse_stateless_transform` physical optimizer rule out of
@@ -21,7 +23,7 @@ use crate::processor::batch_processor::{BatchMode, BatchProcessor};
 use crate::processor::data_metrics::EncoderMetrics;
 use crate::processor::delivery_output::ChannelDeliveryOutput;
 use crate::processor::empty_suppress_processor::collection_is_effectively_empty;
-use crate::processor::encoder_stage::EncoderStage;
+use crate::processor::encoder_driver::EncoderDriver;
 use crate::processor::filter_processor::apply_filter;
 use crate::processor::filter_processor::FilterStage;
 use crate::processor::inline_delivery::ByteTransformChain;
@@ -87,7 +89,7 @@ pub(crate) struct FusedRowStages {
 /// Shared encoder state and inline byte-stage connections owned by the task.
 struct FusedWriters {
     metrics: Option<EncoderMetrics>,
-    encoder: Option<EncoderStage>,
+    encoder: Option<EncoderDriver>,
     pipeline: ByteTransformChain,
 }
 
@@ -201,7 +203,7 @@ impl Processor for FusedTransformProcessor {
         let mut writers = FusedWriters {
             metrics,
             encoder: encoder.map(|encoder| {
-                EncoderStage::new(
+                EncoderDriver::new(
                     encoder,
                     BatchPolicy::new(self.batch_count, self.batch_duration),
                 )
@@ -304,7 +306,7 @@ impl Processor for FusedTransformProcessor {
                                     batch_grid_origin,
                                     *duration,
                                     !batch_buffer.is_empty()
-                                        || writers.encoder.as_ref().is_some_and(EncoderStage::has_data),
+                                        || writers.encoder.as_ref().is_some_and(EncoderDriver::has_data),
                                 );
                             }
                         }
@@ -1765,7 +1767,7 @@ mod tests {
                 let origin = Instant::now();
                 let mut timer = None;
                 let mut output = CapturedOutput::default();
-                let mut stage = EncoderStage::new(
+                let mut stage = EncoderDriver::new(
                     Box::new(FixedEncoder {
                         payload: Bytes::from_static(b"AB"),
                     }),
@@ -1990,7 +1992,7 @@ mod tests {
         let origin = Instant::now();
         let mut timer = None;
         let mut output = CapturedOutput::default();
-        let mut stage = EncoderStage::new(
+        let mut stage = EncoderDriver::new(
             Box::new(FailFirstFinish(true)),
             BatchPolicy::new(None, Some(Duration::from_secs(1))),
         );

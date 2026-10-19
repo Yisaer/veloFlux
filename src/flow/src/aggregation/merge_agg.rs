@@ -54,6 +54,10 @@ impl MergeAggFunction {
 }
 
 impl AggregateFunction for MergeAggFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "merge_agg"
     }

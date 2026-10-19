@@ -9,6 +9,7 @@ use crate::processor::base::{
 use crate::processor::batch_policy::BatchPolicy;
 use crate::processor::data_metrics::EncoderMetrics;
 use crate::processor::delivery_output::ChannelDeliveryOutput;
+use crate::processor::encoder_driver::EncoderDriver;
 use crate::processor::encoder_stage::EncoderStage;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -84,6 +85,17 @@ impl SinkEncoderProcessor {
         }
     }
 
+    pub(crate) fn into_stage(self) -> Result<EncoderStage, ProcessorError> {
+        Self::validate_batch_config(self.batch_count, self.batch_duration)?;
+        let encoder = self.take_encoder()?.ok_or_else(|| {
+            ProcessorError::ProcessingError("sink encoder already started".into())
+        })?;
+        Ok(EncoderStage::new(
+            encoder,
+            BatchPolicy::new(self.batch_count, self.batch_duration),
+        ))
+    }
+
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         self.stats = stats;
     }
@@ -132,7 +144,7 @@ impl Processor for SinkEncoderProcessor {
         };
         let batch_count = self.batch_count;
         let batch_duration = self.batch_duration;
-        let mut stage = EncoderStage::new(encoder, BatchPolicy::new(batch_count, batch_duration));
+        let mut stage = EncoderDriver::new(encoder, BatchPolicy::new(batch_count, batch_duration));
         let processor_id = self.id.clone();
         let stats = Arc::clone(&self.stats);
         let metrics = EncoderMetrics::new(stats.as_ref());

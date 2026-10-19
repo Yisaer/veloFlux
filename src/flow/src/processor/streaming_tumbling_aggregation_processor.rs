@@ -6,6 +6,7 @@ use crate::processor::base::{
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
+use crate::processor::tumbling_window_processor::TumblingWindowOutput;
 use crate::processor::window_metadata;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
@@ -31,9 +32,6 @@ pub struct StreamingTumblingAggregationProcessor {
     output: LinkOutput<StreamData>,
     control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
-    group_by_meta: Vec<GroupByMeta>,
-    partition_by_scalars: Vec<crate::expr::ScalarExpr>,
-    window_length: Duration,
     stats: Arc<ProcessorStats>,
 }
 
@@ -57,16 +55,7 @@ impl StreamingTumblingAggregationProcessor {
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         channel_capacities: ProcessorChannelCapacities,
     ) -> Result<Self, ProcessorError> {
-        let group_by_meta =
-            build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
-        let partition_by_scalars = match &physical.window {
-            StreamingWindowSpec::Tumbling {
-                partition_by_scalars,
-                ..
-            } => partition_by_scalars.clone(),
-            _ => Vec::new(),
-        };
-        let window_length = Self::extract_window_length(physical.as_ref())?;
+        Self::extract_window_length(physical.as_ref())?;
         let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
         let control_output = LinkOutput::new(
             channel_capacities.control_link_kind,
@@ -81,9 +70,6 @@ impl StreamingTumblingAggregationProcessor {
             output,
             control_output,
             channel_capacities,
-            group_by_meta,
-            partition_by_scalars,
-            window_length,
             stats: Arc::new(ProcessorStats::collection_in_out()),
         })
     }
@@ -127,20 +113,11 @@ impl Processor for StreamingTumblingAggregationProcessor {
         let channel_capacities = self.channel_capacities;
         let aggregate_registry = Arc::clone(&self.aggregate_registry);
         let physical = Arc::clone(&self.physical);
-        let group_by_meta = self.group_by_meta.clone();
-        let partition_by_scalars = self.partition_by_scalars.clone();
         let stats = Arc::clone(&self.stats);
-        let window_length = self.window_length;
 
         let processor_span = stats.processor_span();
         ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            let mut window_state = PartitionedProcessingWindowState::new(
-                window_length,
-                Arc::clone(&physical),
-                Arc::clone(&aggregate_registry),
-                group_by_meta.clone(),
-                partition_by_scalars,
-            );
+            let mut stage = StreamingTumblingStage::new(physical, aggregate_registry, Arc::clone(&stats))?;
 
             loop {
                 tokio::select! {
@@ -163,90 +140,18 @@ impl Processor for StreamingTumblingAggregationProcessor {
                         match data_item {
                             Some(Ok(data)) => {
                                 log_received_data(&id, &data);
-                                match data {
-                                    StreamData::Collection(collection) => {
-                                        stats.record_collection_in(collection.num_rows() as u64);
-                                        let handle_start = std::time::Instant::now();
-                                        for row in collection.rows() {
-                                            match window_state.add_row(row) {
-                                                Ok(()) => {}
-                                                Err(AddRowError::BeforeMutation(message)) => {
-                                                    stats.record_error_logged(
-                                                        "streaming tumbling aggregation processor error",
-                                                        message,
-                                                    );
-                                                }
-                                                Err(AddRowError::AfterMutation(message)) => {
-                                                    stats.record_error_logged(
-                                                        "streaming tumbling aggregation processor error",
-                                                        message,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        stats.record_handle_duration(handle_start.elapsed());
-                                    }
-                                    StreamData::Watermark(ts) => {
-                                        match window_metadata::validate_system_time(ts) {
-                                            Ok(()) => {}
-                                            Err(ProcessorError::ProcessingError(message)) => {
-                                                stats.record_error_logged(
-                                                    "streaming tumbling aggregation processor error",
-                                                    message,
-                                                );
-                                                continue;
-                                            }
-                                            Err(err) => return Err(err),
-                                        }
-                                        window_state
-                                            .flush_until(
-                                                ts,
-                                                &output,
-                                                channel_capacities.data,
-                                                &stats,
-                                            )
-                                            .await?;
-                                    }
-                                    StreamData::Control(control_signal) => {
-                                        let is_terminal = control_signal.is_terminal();
-                                        let is_graceful = control_signal.is_graceful_end();
-                                        if is_terminal {
-                                            if is_graceful {
-                                                window_state
-                                                    .flush_all(
-                                                        &output,
-                                                        channel_capacities.data,
-                                                        &stats,
-                                                    )
-                                                    .await?;
-                                            }
-                                            send_with_backpressure(
-                                                &output,
-                                                channel_capacities.data,
-                                                StreamData::control(control_signal),
-                                                Some(stats.as_ref()),
-                                            )
-                                            .await?;
-                                            break;
-                                        }
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            StreamData::control(control_signal),
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                    }
-                                    other => {
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            other,
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                    }
+                                if let Some(rows) = data.row_count() { stats.record_collection_in(rows); }
+                                let terminal = data.is_terminal();
+                                let collection_input = matches!(data, StreamData::Collection(_));
+                                let started = std::time::Instant::now();
+                                let mut outputs = stage.process(data)?;
+                                if collection_input { stats.record_handle_duration(started.elapsed()); }
+                                while let Some(data) = stage.next_output(&mut outputs)? {
+                                    let rows = data.row_count();
+                                    send_with_backpressure(&output, channel_capacities.data, data, Some(stats.as_ref())).await?;
+                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
                                 }
+                                if terminal { break; }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
                                 log_broadcast_lagged(&id, n, "data input");
@@ -360,63 +265,25 @@ impl ProcessingWindowState {
         Ok(())
     }
 
-    async fn flush_until(
+    fn next_batch(
         &mut self,
-        watermark: SystemTime,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
+        watermark: Option<SystemTime>,
+    ) -> Result<Option<Box<dyn crate::model::Collection>>, ProcessorError> {
         while let Some(mut state) = self.windows.pop_front() {
-            if state.end > watermark {
+            if watermark.is_some_and(|limit| state.end > limit) {
                 self.windows.push_front(state);
-                break;
+                return Ok(None);
             }
             if let Some(batch) = state
                 .worker
                 .finalize_current_window()
                 .map_err(ProcessorError::ProcessingError)?
             {
-                let batch =
-                    window_metadata::attach_from_system_time(batch, state.start, state.end)?;
-                stats.record_collection_out(batch.num_rows() as u64);
-                send_with_backpressure(
-                    output,
-                    data_channel_capacity,
-                    StreamData::Collection(batch),
-                    Some(stats.as_ref()),
-                )
-                .await?;
+                return window_metadata::attach_from_system_time(batch, state.start, state.end)
+                    .map(Some);
             }
         }
-        Ok(())
-    }
-
-    async fn flush_all(
-        &mut self,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
-        while let Some(mut state) = self.windows.pop_front() {
-            if let Some(batch) = state
-                .worker
-                .finalize_current_window()
-                .map_err(ProcessorError::ProcessingError)?
-            {
-                let batch =
-                    window_metadata::attach_from_system_time(batch, state.start, state.end)?;
-                stats.record_collection_out(batch.num_rows() as u64);
-                send_with_backpressure(
-                    output,
-                    data_channel_capacity,
-                    StreamData::Collection(batch),
-                    Some(stats.as_ref()),
-                )
-                .await?;
-            }
-        }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -472,33 +339,18 @@ impl PartitionedProcessingWindowState {
             .map_err(AddRowError::AfterMutation)
     }
 
-    async fn flush_until(
+    fn next_batch(
         &mut self,
-        watermark: SystemTime,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
-        for state in &mut self.states {
-            state
-                .flush_until(watermark, output, data_channel_capacity, stats)
-                .await?;
+        partition: &mut usize,
+        watermark: Option<SystemTime>,
+    ) -> Result<Option<Box<dyn crate::model::Collection>>, ProcessorError> {
+        while let Some(state) = self.states.get_mut(*partition) {
+            if let Some(batch) = state.next_batch(watermark)? {
+                return Ok(Some(batch));
+            }
+            *partition += 1;
         }
-        Ok(())
-    }
-
-    async fn flush_all(
-        &mut self,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
-        for state in &mut self.states {
-            state
-                .flush_all(output, data_channel_capacity, stats)
-                .await?;
-        }
-        Ok(())
+        Ok(None)
     }
 
     fn get_or_insert(&mut self, key: PartitionKey) -> &mut ProcessingWindowState {
@@ -515,6 +367,127 @@ impl PartitionedProcessingWindowState {
             self.group_by_meta.clone(),
         ));
         &mut self.states[id]
+    }
+}
+
+/// Synchronous incremental tumbling aggregation shared by both execution placements.
+pub(crate) struct StreamingTumblingStage {
+    state: PartitionedProcessingWindowState,
+    stats: Arc<ProcessorStats>,
+}
+
+impl StreamingTumblingStage {
+    pub(crate) fn new(
+        physical: Arc<PhysicalStreamingAggregation>,
+        registry: Arc<AggregateFunctionRegistry>,
+        stats: Arc<ProcessorStats>,
+    ) -> Result<Self, ProcessorError> {
+        let length = StreamingTumblingAggregationProcessor::extract_window_length(&physical)?;
+        let partition_by = match &physical.window {
+            StreamingWindowSpec::Tumbling {
+                partition_by_scalars,
+                ..
+            } => partition_by_scalars.clone(),
+            other => {
+                return Err(ProcessorError::InvalidConfiguration(format!(
+                    "streaming tumbling aggregation requires tumbling window spec, got {other:?}",
+                )))
+            }
+        };
+        let group_by = build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
+        Ok(Self {
+            state: PartitionedProcessingWindowState::new(
+                length,
+                physical,
+                registry,
+                group_by,
+                partition_by,
+            ),
+            stats,
+        })
+    }
+
+    pub(crate) fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.stats = stats;
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.state.state_ids.clear();
+        self.state.states.clear();
+    }
+
+    pub(crate) fn process(
+        &mut self,
+        data: StreamData,
+    ) -> Result<TumblingWindowOutput, ProcessorError> {
+        match data {
+            StreamData::Collection(collection) => {
+                for row in collection.rows() {
+                    if let Err(error) = self.state.add_row(row) {
+                        let message = match error {
+                            AddRowError::BeforeMutation(message)
+                            | AddRowError::AfterMutation(message) => message,
+                        };
+                        self.stats.record_error_logged(
+                            "streaming tumbling aggregation processor error",
+                            message,
+                        );
+                    }
+                }
+                Ok(TumblingWindowOutput::Single(None))
+            }
+            StreamData::Watermark(watermark) => {
+                match window_metadata::validate_system_time(watermark) {
+                    Ok(()) => Ok(TumblingWindowOutput::Drain {
+                        partition: 0,
+                        watermark: Some(watermark),
+                        terminal: None,
+                    }),
+                    Err(ProcessorError::ProcessingError(message)) => {
+                        self.stats.record_error_logged(
+                            "streaming tumbling aggregation processor error",
+                            message,
+                        );
+                        Ok(TumblingWindowOutput::Single(None))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            StreamData::Control(signal) if signal.is_terminal() => {
+                if signal.is_graceful_end() {
+                    Ok(TumblingWindowOutput::Drain {
+                        partition: 0,
+                        watermark: None,
+                        terminal: Some(signal),
+                    })
+                } else {
+                    self.clear();
+                    Ok(TumblingWindowOutput::Single(Some(StreamData::control(
+                        signal,
+                    ))))
+                }
+            }
+            other => Ok(TumblingWindowOutput::Single(Some(other))),
+        }
+    }
+
+    pub(crate) fn next_output(
+        &mut self,
+        output: &mut TumblingWindowOutput,
+    ) -> Result<Option<StreamData>, ProcessorError> {
+        match output {
+            TumblingWindowOutput::Single(data) => Ok(data.take()),
+            TumblingWindowOutput::Drain {
+                partition,
+                watermark,
+                terminal,
+            } => {
+                if let Some(batch) = self.state.next_batch(partition, *watermark)? {
+                    return Ok(Some(StreamData::collection(batch)));
+                }
+                Ok(terminal.take().map(StreamData::control))
+            }
+        }
     }
 }
 
@@ -580,6 +553,7 @@ mod tests {
         length: u64,
     ) -> Arc<PhysicalStreamingAggregation> {
         let call = AggregateCall {
+            supports_inline_execution: true,
             output_column: "sum_a".to_string(),
             func_name: "sum".to_string(),
             args: vec![col("a")],

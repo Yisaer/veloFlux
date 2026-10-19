@@ -1,29 +1,30 @@
 //! BatchProcessor - aggregates collections based on count/duration thresholds.
 
 use crate::expr::ScalarExpr;
-use crate::model::{Collection, Tuple};
 use crate::processor::base::{
     default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
     log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
     LinkReceiver, ProcessorChannelCapacities,
 };
 use crate::processor::batch_policy::BatchPolicy;
-use crate::processor::delivery_output::ChannelDeliveryOutput;
-use crate::processor::native_batch_stage::NativeBatchStage;
-use crate::processor::window_partition::{eval_partition_key, PartitionKey};
+use crate::processor::count_window_stage::CountWindowStage;
+use crate::processor::stage_clock::StageClock;
+use crate::processor::timed_batch_stage::TimedBatchStage;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
 #[cfg(test)]
 use datatypes::Value;
-use futures::stream::StreamExt;
-use std::collections::HashMap;
+use futures::{future::poll_fn, stream::StreamExt};
+#[cfg(test)]
 use std::pin::Pin;
 use std::sync::Arc;
 #[cfg(test)]
 use tokio::sync::broadcast;
-use tokio::time::{Duration, Instant, Sleep};
+#[cfg(test)]
+use tokio::time::Sleep;
+use tokio::time::{Duration, Instant};
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 /// Processor that buffers collections before releasing them downstream.
@@ -41,35 +42,6 @@ pub struct BatchProcessor {
 }
 
 pub(crate) type BatchMode = BatchPolicy;
-
-struct CountPartitionBuffers {
-    buffer_ids: HashMap<PartitionKey, usize>,
-    buffers: Vec<Vec<Tuple>>,
-}
-
-impl CountPartitionBuffers {
-    fn new() -> Self {
-        Self {
-            buffer_ids: HashMap::new(),
-            buffers: Vec::new(),
-        }
-    }
-
-    fn buffer_for(&mut self, key: PartitionKey) -> &mut Vec<Tuple> {
-        if let Some(id) = self.buffer_ids.get(&key).copied() {
-            return &mut self.buffers[id];
-        }
-
-        let id = self.buffers.len();
-        self.buffer_ids.insert(key, id);
-        self.buffers.push(Vec::new());
-        &mut self.buffers[id]
-    }
-
-    fn buffers_mut(&mut self) -> impl Iterator<Item = &mut Vec<Tuple>> {
-        self.buffers.iter_mut()
-    }
-}
 
 impl BatchProcessor {
     pub(crate) fn validate_batch_config(
@@ -151,99 +123,11 @@ impl BatchProcessor {
         self.stats = stats;
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn flush_all(
-        processor_id: &str,
-        buffer: &mut Vec<Tuple>,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
-        let mut stage_output = ChannelDeliveryOutput {
-            output,
-            capacity: data_channel_capacity,
-            stats,
-        };
-        NativeBatchStage::flush_all(processor_id, buffer, &mut stage_output, stats).await
-    }
-    #[allow(clippy::too_many_arguments)]
-    async fn drain_by_count(
-        processor_id: &str,
-        buffer: &mut Vec<Tuple>,
-        output: &LinkOutput<StreamData>,
-        count: usize,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
-        let mut stage_output = ChannelDeliveryOutput {
-            output,
-            capacity: data_channel_capacity,
-            stats,
-        };
-        NativeBatchStage::drain_by_count(processor_id, buffer, &mut stage_output, count, stats)
-            .await
-    }
-    fn append_partitioned_collection(
-        partitions: &mut CountPartitionBuffers,
-        partition_by_scalars: &[ScalarExpr],
-        collection: Box<dyn Collection>,
-        stats: &ProcessorStats,
-    ) -> Result<(), ProcessorError> {
-        let rows = collection.into_rows().map_err(|err| {
-            ProcessorError::ProcessingError(format!("failed to extract rows: {err}"))
-        })?;
-        for tuple in rows {
-            let key = match eval_partition_key(partition_by_scalars, &tuple, "countwindow") {
-                Ok(key) => key,
-                Err(message) => {
-                    stats.record_error_logged("batch processor error", message);
-                    continue;
-                }
-            };
-            partitions.buffer_for(key).push(tuple);
-        }
-        Ok(())
-    }
-
-    async fn drain_partitioned_by_count(
-        processor_id: &str,
-        partitions: &mut CountPartitionBuffers,
-        output: &LinkOutput<StreamData>,
-        count: usize,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
-        for buffer in partitions.buffers_mut() {
-            Self::drain_by_count(
-                processor_id,
-                buffer,
-                output,
-                count,
-                data_channel_capacity,
-                stats,
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    async fn flush_partitioned_all(
-        processor_id: &str,
-        partitions: &mut CountPartitionBuffers,
-        output: &LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: &Arc<ProcessorStats>,
-    ) -> Result<(), ProcessorError> {
-        for buffer in partitions.buffers_mut() {
-            Self::flush_all(processor_id, buffer, output, data_channel_capacity, stats).await?;
-        }
-        Ok(())
-    }
-
     #[cfg(test)]
     fn next_boundary(origin: Instant, duration: Duration, now: Instant) -> Instant {
         BatchPolicy::next_boundary(origin, duration, now)
     }
+    #[cfg(test)]
     pub(crate) fn schedule_timer(
         timer: &mut Option<Pin<Box<Sleep>>>,
         origin: Instant,
@@ -275,256 +159,118 @@ impl Processor for BatchProcessor {
         let stats = Arc::clone(&self.stats);
         let partition_by_scalars = self.partition_by_scalars.clone();
 
-        if !partition_by_scalars.is_empty() {
-            let BatchMode::CountOnly { count } = mode else {
-                return ProcessorStart::failed(
-                    spawner,
-                    ProcessorError::InvalidConfiguration(
-                        "partitioned batch processor only supports count mode".to_string(),
-                    ),
-                );
+        if !partition_by_scalars.is_empty() && !matches!(mode, BatchMode::CountOnly { .. }) {
+            return ProcessorStart::failed(
+                spawner,
+                ProcessorError::InvalidConfiguration(
+                    "partitioned batch processor only supports count mode".into(),
+                ),
+            );
+        }
+        if let BatchMode::CountOnly { count } = mode {
+            let mut stage = match CountWindowStage::new(count, partition_by_scalars) {
+                Ok(stage) => stage,
+                Err(error) => return ProcessorStart::failed(spawner, error),
             };
             let processor_span = stats.processor_span();
             return ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-                let mut partitions = CountPartitionBuffers::new();
                 loop {
-                    tokio::select! {
+                    let mut handle_started = None;
+                    let (mut outputs, terminal) = tokio::select! {
                         biased;
                         control_item = control_streams.next(), if control_active => {
-                            if let Some(Ok(control_signal)) = control_item {
-                                let is_terminal = control_signal.is_terminal();
-                                send_control_with_backpressure(
-                                    &control_output,
-                                    channel_capacities.control,
-                                    control_signal,
-                                )
-                                .await?;
-                                if is_terminal {
-                                    BatchProcessor::flush_partitioned_all(
-                                        &processor_id,
-                                        &mut partitions,
-                                        &output,
-                                        channel_capacities.data,
-                                        &stats,
-                                    )
-                                    .await?;
-                                    tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
-                                    return Ok(());
+                            match control_item {
+                                Some(Ok(signal)) => {
+                                    let terminal = signal.is_terminal();
+                                    send_control_with_backpressure(&control_output, channel_capacities.control, signal).await?;
+                                    if terminal { (stage.finish(None), true) } else { continue; }
                                 }
-                                continue;
-                            } else {
-                                control_active = false;
+                                _ => { control_active = false; continue; }
                             }
                         }
                         item = input_streams.next() => {
                             match item {
                                 Some(Ok(data)) => {
                                     log_received_data(&processor_id, &data);
-                                    match data {
-                                        StreamData::Collection(collection) => {
-                                            stats.record_collection_in(collection.num_rows() as u64);
-                                            let handle_start = std::time::Instant::now();
-                                            let res = async {
-                                                BatchProcessor::append_partitioned_collection(
-                                                    &mut partitions,
-                                                    &partition_by_scalars,
-                                                    collection,
-                                                    stats.as_ref(),
-                                                )?;
-                                                BatchProcessor::drain_partitioned_by_count(
-                                                    &processor_id,
-                                                    &mut partitions,
-                                                    &output,
-                                                    count,
-                                                    channel_capacities.data,
-                                                    &stats,
-                                                )
-                                                .await
-                                            }
-                                            .await;
-                                            stats.record_handle_duration(handle_start.elapsed());
-                                            res?;
-                                        }
-                                        data => {
-                                            let is_terminal = data.is_terminal();
-                                            if is_terminal {
-                                                BatchProcessor::flush_partitioned_all(
-                                                    &processor_id,
-                                                    &mut partitions,
-                                                    &output,
-                                                    channel_capacities.data,
-                                                    &stats,
-                                                )
-                                                .await?;
-                                            }
-                                            send_with_backpressure(
-                                                &output,
-                                                channel_capacities.data,
-                                                data,
-                                                Some(stats.as_ref()),
-                                            )
-                                            .await?;
-                                            if is_terminal {
-                                                tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
-                                                return Ok(());
-                                            }
-                                        }
-                                    }
+                                    if let Some(rows) = data.row_count() { stats.record_collection_in(rows); }
+                                    let terminal = data.is_terminal();
+                                    handle_started = Some(std::time::Instant::now());
+                                    (stage.process(data, &stats)?, terminal)
                                 }
                                 Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                    log_broadcast_lagged(&processor_id, skipped, "batch data input");
-                                    continue;
+                                    log_broadcast_lagged(&processor_id, skipped, "batch data input"); continue;
                                 }
-                                None => {
-                                    BatchProcessor::flush_partitioned_all(
-                                        &processor_id,
-                                        &mut partitions,
-                                        &output,
-                                        channel_capacities.data,
-                                        &stats,
-                                    )
-                                    .await?;
-                                    tracing::info!(processor_id = %processor_id, "input streams closed");
-                                    return Ok(());
-                                }
+                                None => (stage.finish(None), true),
                             }
                         }
+                    };
+                    let started = handle_started.unwrap_or_else(std::time::Instant::now);
+                    while let Some(data) = stage.next_output(&mut outputs)? {
+                        let rows = data.row_count();
+                        send_with_backpressure(&output, channel_capacities.data, data, Some(&stats)).await?;
+                        if let Some(rows) = rows { stats.record_collection_out(rows); }
                     }
+                    stats.record_handle_duration(started.elapsed());
+                    if terminal { return Ok(()); }
                 }
             }, processor_span)));
         }
 
-        let policy = BatchPolicy::new(self.batch_count, self.batch_duration);
+        let Some(duration) = self.batch_duration else {
+            return ProcessorStart::failed(
+                spawner,
+                ProcessorError::InvalidConfiguration("timed batching requires a duration".into()),
+            );
+        };
+        let mut stage = match TimedBatchStage::new(self.batch_count, duration) {
+            Ok(stage) => stage,
+            Err(error) => return ProcessorStart::failed(spawner, error),
+        };
         let processor_span = stats.processor_span();
         ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            let mut buffer: Vec<Tuple> = Vec::new();
-            let mut timer: Option<Pin<Box<Sleep>>> = None;
-            // Fixed grid origin, captured once before any tuple so duration windows
-            // never re-anchor to a batch's first tuple. See `next_boundary`.
-            let grid_origin = Instant::now();
+            stage.start(Instant::now());
+            let mut clock = StageClock::new(None);
             loop {
-                tokio::select! {
+                clock.update(stage.deadline());
+                let (mut outputs, terminal) = tokio::select! {
                     biased;
-                    control_item = control_streams.next(), if control_active => {
-                        if let Some(Ok(control_signal)) = control_item {
-                                let is_terminal = control_signal.is_terminal();
-                                send_control_with_backpressure(
-                                    &control_output,
-                                    channel_capacities.control,
-                                    control_signal,
-                                )
-                                .await?;
-                                if is_terminal {
-                                    BatchProcessor::flush_all(
-                                        &processor_id,
-                                        &mut buffer,
-                                        &output,
-                                        channel_capacities.data,
-                                        &stats,
-                                    )
-                                    .await?;
-                                    tracing::info!(processor_id = %processor_id, "received StreamEnd (control)");
-                                    return Ok(());
-                                }
-                                continue;
-                            } else {
-                                control_active = false;
+                    item = control_streams.next(), if control_active => {
+                        match item {
+                            Some(Ok(signal)) => {
+                                let terminal = signal.is_terminal();
+                                send_control_with_backpressure(&control_output, channel_capacities.control, signal).await?;
+                                if terminal { (stage.finish(None), true) } else { continue; }
+                            }
+                            _ => { control_active = false; continue; }
                         }
                     }
-                    _ = async {
-                        if let Some(timer) = &mut timer {
-                            timer.as_mut().await;
-                        }
-                    }, if timer.is_some() => {
-                        BatchProcessor::flush_all(
-                            &processor_id,
-                            &mut buffer,
-                            &output,
-                            channel_capacities.data,
-                            &stats,
-                        )
-                        .await?;
-                        if let BatchMode::DurationOnly { duration } | BatchMode::Combined { duration, .. } = &mode {
-                            BatchProcessor::schedule_timer(&mut timer, grid_origin, *duration, !buffer.is_empty());
-                        }
-                    }
+                    _ = poll_fn(|cx| clock.poll_next(cx)) => (stage.finish(None), false),
                     item = input_streams.next() => {
                         match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
-                                match data {
-                                    StreamData::Collection(collection) => {
-                                        stats.record_collection_in(collection.num_rows() as u64);
-                                        let handle_start = std::time::Instant::now();
-                                        let mut stage_output = ChannelDeliveryOutput {
-                                            output: &output, capacity: channel_capacities.data, stats: &stats,
-                                        };
-                                        let res = NativeBatchStage::feed(
-                                            &processor_id, collection.rows().iter().cloned(),
-                                            &mut buffer, &mut stage_output, &mut timer,
-                                            grid_origin, &policy, &stats,
-                                        ).await;
-                                        // Handle duration measures per-collection processing wall time. If this handle
-                                        // triggers one or more count-based flushes, the downstream send/backpressure
-                                        // time is intentionally included.
-                                        stats.record_handle_duration(handle_start.elapsed());
-                                        res?;
-                                    }
-                                    data => {
-                                        let is_terminal = data.is_terminal();
-                                        if is_terminal {
-                                            BatchProcessor::flush_all(
-                                                &processor_id,
-                                                &mut buffer,
-                                                &output,
-                                                channel_capacities.data,
-                                                &stats,
-                                            )
-                                            .await?;
-                                        }
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            data,
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                        if is_terminal {
-                                            tracing::info!(processor_id = %processor_id, "received StreamEnd (data)");
-                                            return Ok(());
-                                        }
-                                        if let BatchMode::DurationOnly { duration }
-                                        | BatchMode::Combined { duration, .. } = &mode
-                                        {
-                                            BatchProcessor::schedule_timer(
-                                                &mut timer,
-                                                grid_origin,
-                                                *duration,
-                                                !buffer.is_empty(),
-                                            );
-                                        }
-                                    }
-                                }
+                                if let Some(rows) = data.row_count() { stats.record_collection_in(rows); }
+                                let terminal = data.is_terminal();
+                                (stage.process(data), terminal)
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                log_broadcast_lagged(&processor_id, skipped, "batch data input");
-                                continue;
+                                log_broadcast_lagged(&processor_id, skipped, "batch data input"); continue;
                             }
-                            None => {
-                                BatchProcessor::flush_all(
-                                    &processor_id,
-                                    &mut buffer,
-                                    &output,
-                                    channel_capacities.data,
-                                    &stats,
-                                )
-                                .await?;
-                                tracing::info!(processor_id = %processor_id, "input streams closed");
-                                return Ok(());
-                            }
+                            None => (stage.finish(None), true),
                         }
                     }
+                };
+                let mut started = std::time::Instant::now();
+                let mut elapsed = Duration::ZERO;
+                while let Some(data) = stage.next_output(&mut outputs)? {
+                    let rows = data.row_count();
+                    elapsed += started.elapsed();
+                    send_with_backpressure(&output, channel_capacities.data, data, Some(&stats)).await?;
+                    started = std::time::Instant::now();
+                    if let Some(rows) = rows { stats.record_collection_out(rows); }
                 }
+                stats.record_handle_duration(elapsed + started.elapsed());
+                if terminal { return Ok(()); }
             }
         }, processor_span)))
     }

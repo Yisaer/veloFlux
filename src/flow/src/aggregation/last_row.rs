@@ -96,6 +96,10 @@ impl AggregateUpdate for LastRowUpdate {
 }
 
 impl AggregateFunction for LastRowFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "last_row"
     }

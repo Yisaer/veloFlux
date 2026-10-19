@@ -78,7 +78,7 @@ impl MemoryCollectionMaterializeProcessor {
     }
 }
 
-fn materialize_collection(
+pub(crate) fn materialize_collection(
     output_source_name: &Arc<str>,
     shared_keys: &Arc<[Arc<str>]>,
     row_accessor: &mut OutputRowAccessor,

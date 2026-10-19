@@ -245,6 +245,10 @@ pub fn obj_to_kvpair_array_function_def() -> FunctionDef {
 }
 
 impl CustomFunc for KeysFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_object_or_null(args)
     }
@@ -268,6 +272,10 @@ impl CustomFunc for KeysFunc {
 }
 
 impl CustomFunc for ValuesFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_object_or_null(args)
     }
@@ -291,6 +299,10 @@ impl CustomFunc for ValuesFunc {
 }
 
 impl CustomFunc for ObjectFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         nth_string_array_or_null(args, 0)?;
@@ -325,6 +337,10 @@ impl CustomFunc for ObjectFunc {
 }
 
 impl CustomFunc for ZipFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_array_or_null(args)
     }
@@ -373,6 +389,10 @@ impl CustomFunc for ZipFunc {
 }
 
 impl CustomFunc for ItemsFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_object_or_null(args)
     }
@@ -401,6 +421,10 @@ impl CustomFunc for ItemsFunc {
 }
 
 impl CustomFunc for ObjectConcatFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         if args.len() < 2 {
             return Err(EvalError::TypeMismatch {
@@ -446,6 +470,10 @@ impl CustomFunc for ObjectConcatFunc {
 }
 
 impl CustomFunc for ObjectConstructFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         if !args.len().is_multiple_of(2) {
             return Err(EvalError::TypeMismatch {
@@ -491,6 +519,10 @@ impl CustomFunc for ObjectConstructFunc {
 }
 
 impl CustomFunc for EraseFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         nth_object_or_null(args, 0)?;
@@ -550,6 +582,10 @@ impl CustomFunc for EraseFunc {
 }
 
 impl CustomFunc for ObjectSizeFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         if let Some(v) = args.first() {
@@ -580,6 +616,10 @@ impl CustomFunc for ObjectSizeFunc {
 pub struct ObjectPickFunc;
 
 impl CustomFunc for ObjectPickFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         if args.len() < 2 {
             return Err(EvalError::TypeMismatch {
@@ -711,6 +751,10 @@ fn insert_nested_value(
 pub struct ObjToKvPairArrayFunc;
 
 impl CustomFunc for ObjToKvPairArrayFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_object_or_null(args, 0)?;

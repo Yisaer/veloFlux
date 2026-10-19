@@ -20,7 +20,7 @@ static MALFORMED_PACKET_LOG_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Register the `busmirror` decoder.
 pub fn register_busmirror_decoder(registry: &flow::DecoderRegistry) {
-    registry.register_decoder(
+    registry.register_inline_decoder(
         "busmirror",
         Arc::new(|config, schema, stream_name| {
             let compiled = config
@@ -54,6 +54,9 @@ impl BusMirrorDecoder {
 }
 
 impl RecordDecoder for BusMirrorDecoder {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
     fn decode(&self, payload: &[u8]) -> Result<RecordBatch, CodecError> {
         self.decode_with_projection(payload, None)
     }

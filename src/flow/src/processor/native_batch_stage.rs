@@ -1,14 +1,28 @@
-//! Shared non-partitioned batch drains for standalone and fused native delivery.
+//! Shared collection construction; historical batch transport exists only in tests.
 use crate::model::{Collection, RecordBatch, Tuple};
+#[cfg(test)]
 use crate::processor::batch_policy::BatchPolicy;
+#[cfg(test)]
 use crate::processor::delivery_output::DeliveryOutput;
-use crate::processor::{ProcessorError, ProcessorStats, StreamData};
+use crate::processor::ProcessorError;
+#[cfg(test)]
+use crate::processor::{ProcessorStats, StreamData};
+#[cfg(test)]
 use std::pin::Pin;
+#[cfg(test)]
 use std::sync::Arc;
+#[cfg(test)]
 use tokio::time::{Instant, Sleep};
 pub(crate) struct NativeBatchStage;
 impl NativeBatchStage {
+    pub(crate) fn collection(rows: Vec<Tuple>) -> Result<Box<dyn Collection>, ProcessorError> {
+        RecordBatch::new(rows)
+            .map(|batch| Box::new(batch) as Box<dyn Collection>)
+            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))
+    }
+
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(crate) async fn feed<R: IntoIterator<Item = Tuple> + Send>(
         id: &str,
         rows: R,
@@ -32,6 +46,7 @@ impl NativeBatchStage {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn emit_batch(
         processor_id: &str,
         rows: Vec<Tuple>,
@@ -39,15 +54,14 @@ impl NativeBatchStage {
         stats: &Arc<ProcessorStats>,
     ) -> Result<(), ProcessorError> {
         let row_count = rows.len() as u64;
-        let batch = RecordBatch::new(rows)
-            .map_err(|err| ProcessorError::ProcessingError(err.to_string()))?;
-        let collection: Box<dyn Collection> = Box::new(batch);
+        let collection = Self::collection(rows)?;
         output.send(StreamData::collection(collection)).await?;
         stats.record_collection_out(row_count);
         tracing::info!(processor_id = %processor_id, "flushed batch");
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn flush_all(
         processor_id: &str,
         buffer: &mut Vec<Tuple>,
@@ -61,6 +75,7 @@ impl NativeBatchStage {
         Self::emit_batch(processor_id, rows, output, stats).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn flush_count(
         processor_id: &str,
         buffer: &mut Vec<Tuple>,
@@ -75,6 +90,7 @@ impl NativeBatchStage {
         Self::emit_batch(processor_id, rows, output, stats).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn drain_by_count(
         processor_id: &str,
         buffer: &mut Vec<Tuple>,

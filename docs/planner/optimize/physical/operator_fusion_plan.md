@@ -1,7 +1,15 @@
-# Operator Fusion Plan
+# Operator Fusion Plan (Historical)
 
-Status: proposed. Tracks emqx/VeloFlux#107 (operator fusion) with measurements
-from the experimental `feat/fuse-stateless-sink` branch.
+Status: superseded by [general execution regions](execution_regions.md).
+
+This document records the former fixed sink-template design and measurements from the
+experimental `feat/fuse-stateless-sink` branch. Stateful/window exclusions below are not
+restrictions of the region architecture.
+
+Production SQL planning no longer emits PhysicalFusedTransform; its physical variant and
+runtime entry are removed. The former executor exists only as a cfg(test) equivalence
+reference. EncoderStage is synchronous, and EncoderDriver owns standalone transport waits.
+See the region document for current adapters, placement, diagnostics, and remaining work.
 
 ## Background
 

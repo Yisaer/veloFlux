@@ -14,17 +14,18 @@ use crate::processor::base::{
     LinkReceiver, ProcessorChannelCapacities,
 };
 use crate::processor::data_metrics::{DataMetricDomains, DataMetrics, SAMPLER_METRICS};
+use crate::processor::stage_clock::StageClock;
 use crate::processor::{
     ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
 };
 use crate::runtime::TaskSpawner;
-use futures::stream::StreamExt;
+use futures::{future::poll_fn, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::time::MissedTickBehavior;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::codec::{Merger, MergerRegistry};
@@ -146,6 +147,27 @@ impl SamplerProcessor {
         Self::new(id, SamplerConfig::new(interval))
     }
 
+    fn create_stage(&self) -> Result<SamplerStage, ProcessorError> {
+        if self.config.interval.is_zero() {
+            return Err(ProcessorError::InvalidConfiguration(
+                "sampler interval must be positive".into(),
+            ));
+        }
+        Ok(SamplerStage {
+            interval: self.config.interval,
+            state: StrategyState::new(
+                self.config.strategy.clone(),
+                self.merger_registry.clone(),
+                self.merger_schema.clone(),
+                self.merger_schema_artifact.clone(),
+                self.applied_decode_state.clone(),
+            )?,
+        })
+    }
+    pub(crate) fn into_stage(self) -> Result<SamplerStage, ProcessorError> {
+        self.create_stage()
+    }
+
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         self.stats = stats;
     }
@@ -194,158 +216,51 @@ impl Processor for SamplerProcessor {
         let processor_id = self.id.clone();
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
-        let strategy = self.config.strategy.clone();
-
-        tracing::info!(
-            processor_id = %processor_id,
-            interval = ?emit_interval,
-            strategy = ?strategy,
-            "sampler processor starting"
-        );
-
-        let merger_registry = self.merger_registry.clone();
-        let merger_schema = self.merger_schema.clone();
-        let merger_schema_artifact = self.merger_schema_artifact.clone();
-        let applied_decode_state = self.applied_decode_state.clone();
-        let metric_domains = self.metric_domains;
-        let mut strategy_state = match StrategyState::new(
-            strategy,
-            merger_registry,
-            merger_schema,
-            merger_schema_artifact,
-            applied_decode_state,
-        ) {
-            Ok(state) => state,
-            Err(err) => return ProcessorStart::failed(spawner, err),
+        let mut stage = match self.create_stage() {
+            Ok(stage) => stage,
+            Err(error) => return ProcessorStart::failed(spawner, error),
         };
-        let data_metrics = DataMetrics::new(stats.as_ref(), SAMPLER_METRICS, metric_domains);
+        let data_metrics = DataMetrics::new(stats.as_ref(), SAMPLER_METRICS, self.metric_domains);
 
         let processor_span = stats.processor_span();
         ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            let mut ticker = interval(emit_interval);
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let mut clock = StageClock::new(Some((emit_interval, MissedTickBehavior::Skip)));
             let mut control_active = control_active;
-
             loop {
-                tokio::select! {
+                let (outputs, terminal) = tokio::select! {
                     biased;
-                    control_item = control_streams.next(), if control_active => {
-                        if let Some(Ok(control_signal)) = control_item {
-                            let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(
-                                &control_output,
-                                channel_capacities.control,
-                                control_signal,
-                            )
-                            .await?;
-                            if is_terminal {
-                                if let Some(pending) = strategy_state.flush() {
-                                    emit_data(
-                                        &output,
-                                        channel_capacities.data,
-                                        &stats,
-                                        &data_metrics,
-                                        pending,
-                                    )
-                                        .await?;
-                                }
-                                tracing::info!(processor_id = %processor_id, "sampler received terminal signal, shutting down");
-                                return Ok(());
+                    item = control_streams.next(), if control_active => {
+                        match item {
+                            Some(Ok(signal)) => {
+                                let terminal = signal.is_terminal();
+                                send_control_with_backpressure(&control_output, channel_capacities.control, signal).await?;
+                                if terminal { ([stage.finish(), None], true) } else { continue; }
                             }
-                        } else if control_item.is_none() {
-                            control_active = false;
-                        } else if let Some(Err(BroadcastStreamRecvError::Lagged(n))) = control_item {
-                            log_broadcast_lagged(&processor_id, n, "control");
+                            Some(Err(BroadcastStreamRecvError::Lagged(n))) => { log_broadcast_lagged(&processor_id, n, "control"); continue; }
+                            None => { control_active = false; continue; }
                         }
                     }
-                    _ = ticker.tick() => {
-                        if let Some(data) = strategy_state.on_tick() {
-                            emit_data(
-                                &output,
-                                channel_capacities.data,
-                                &stats,
-                                &data_metrics,
-                                data,
-                            )
-                            .await?;
-                            tracing::trace!(processor_id = %processor_id, "sampler emitted tick value");
-                        }
-                    }
-                    data_item = input_streams.next() => {
-                        match data_item {
+                    _ = poll_fn(|cx| clock.poll_next(cx)) => ([stage.on_tick(), None], false),
+                    item = input_streams.next() => {
+                        match item {
                             Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
                                 data_metrics.record_input(stats.as_ref(), &data)?;
-
-                                if !should_sample_data(&data) {
-                                    // Do not throttle non-data items received on the data channel.
-                                    // This keeps watermark/error/control events flowing promptly.
-                                    let is_terminal = data.is_terminal();
-                                    if is_terminal {
-                                        if let Some(pending) = strategy_state.flush() {
-                                            emit_data(
-                                                &output,
-                                                channel_capacities.data,
-                                                &stats,
-                                                &data_metrics,
-                                                pending,
-                                            )
-                                            .await?;
-                                        }
-                                        emit_data(
-                                            &output,
-                                            channel_capacities.data,
-                                            &stats,
-                                            &data_metrics,
-                                            data,
-                                        )
-                                            .await?;
-                                        tracing::info!(processor_id = %processor_id, "sampler received terminal item on data channel, shutting down");
-                                        return Ok(());
-                                    }
-                                    emit_data(
-                                        &output,
-                                        channel_capacities.data,
-                                        &stats,
-                                        &data_metrics,
-                                        data,
-                                    )
-                                        .await?;
-                                    continue;
-                                }
-
-                                // Sample data based on selected strategy (lossy).
-                                let handle_start = std::time::Instant::now();
-                                if let Err(e) = strategy_state.on_sampled_data(data) {
-                                    // For sampler (async emit), handle duration measures local state update time only.
-                                    stats.record_handle_duration(handle_start.elapsed());
-                                    tracing::error!(processor_id = %processor_id, error = ?e, "strategy sampling error");
-                                    stats.record_error(e.to_string());
-                                    continue;
-                                }
-                                // For sampler (async emit), handle duration measures local state update time only.
-                                stats.record_handle_duration(handle_start.elapsed());
+                                let terminal = data.is_terminal();
+                                let started = std::time::Instant::now();
+                                let outputs = stage.process(data, &stats);
+                                stats.record_handle_duration(started.elapsed());
+                                (outputs, terminal)
                             }
-                            Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
-                                log_broadcast_lagged(&processor_id, n, "data");
-                            }
-                            None => {
-                                if let Some(pending) = strategy_state.flush() {
-                                    emit_data(
-                                        &output,
-                                        channel_capacities.data,
-                                        &stats,
-                                        &data_metrics,
-                                        pending,
-                                    )
-                                        .await?;
-                                }
-                                tracing::info!(processor_id = %processor_id, "sampler input closed, shutting down");
-                                return Ok(());
-                            }
+                            Some(Err(BroadcastStreamRecvError::Lagged(n))) => { log_broadcast_lagged(&processor_id, n, "data"); continue; }
+                            None => ([stage.finish(), None], true),
                         }
                     }
+                };
+                for data in outputs.into_iter().flatten() {
+                    emit_data(&output, channel_capacities.data, &stats, &data_metrics, data).await?;
                 }
+                if terminal { return Ok(()); }
             }
         }, processor_span)))
     }
@@ -370,6 +285,39 @@ impl Processor for SamplerProcessor {
         R: Into<LinkReceiver<ControlSignal>>,
     {
         self.control_inputs.push(receiver.into());
+    }
+}
+
+/// Synchronous sampling state shared by standalone and region execution.
+pub(crate) struct SamplerStage {
+    interval: Duration,
+    state: StrategyState,
+}
+impl SamplerStage {
+    pub(crate) fn period(&self) -> Duration {
+        self.interval
+    }
+    pub(crate) fn on_tick(&mut self) -> Option<StreamData> {
+        self.state.on_tick()
+    }
+    pub(crate) fn finish(&mut self) -> Option<StreamData> {
+        self.state.flush()
+    }
+    pub(crate) fn process(
+        &mut self,
+        data: StreamData,
+        stats: &ProcessorStats,
+    ) -> [Option<StreamData>; 2] {
+        if should_sample_data(&data) {
+            if let Err(error) = self.state.on_sampled_data(data) {
+                stats.record_error_logged("sampler input error", error.to_string());
+            }
+            [None, None]
+        } else if data.is_terminal() {
+            [self.finish(), Some(data)]
+        } else {
+            [Some(data), None]
+        }
     }
 }
 

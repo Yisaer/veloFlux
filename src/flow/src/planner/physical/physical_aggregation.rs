@@ -14,6 +14,8 @@ use super::PhysicalPlan;
 
 #[derive(Debug, Clone)]
 pub struct AggregateCall {
+    /// Captured from the registered implementation when compiling the call.
+    pub supports_inline_execution: bool,
     pub output_column: String,
     pub func_name: String,
     pub args: Vec<ScalarExpr>,
@@ -93,9 +95,9 @@ fn build_aggregate_call(
     match expr {
         Expr::Function(func) => {
             let func_name = func.name.to_string().to_lowercase();
-            if !aggregate_registry.is_registered(&func_name) {
-                return Err(format!("Unsupported aggregate function: {}", func_name));
-            }
+            let function = aggregate_registry
+                .get(&func_name)
+                .ok_or_else(|| format!("Unsupported aggregate function: {func_name}"))?;
 
             let args = extract_aggregate_args(func.args.as_slice(), bindings, custom_func_registry)
                 .map_err(|err| {
@@ -106,6 +108,7 @@ fn build_aggregate_call(
                 })?;
 
             Ok(AggregateCall {
+                supports_inline_execution: function.supports_inline_execution(),
                 output_column: output_column.to_string(),
                 func_name,
                 args,

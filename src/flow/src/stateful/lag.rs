@@ -197,6 +197,10 @@ impl StatefulEvalUpdate for LagUpdate {
 }
 
 impl StatefulFunction for LagFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "lag"
     }

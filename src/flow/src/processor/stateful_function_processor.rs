@@ -79,9 +79,7 @@ struct PartitionGroup {
 
 pub struct StatefulFunctionProcessor {
     id: String,
-    physical_stateful: Arc<PhysicalStatefulFunction>,
-    partition_groups: Vec<PartitionGroup>,
-    calls: Vec<StatefulProcessorCall>,
+    stage: Option<StatefulStage>,
     inputs: Vec<LinkReceiver<StreamData>>,
     control_inputs: Vec<LinkReceiver<ControlSignal>>,
     output: LinkOutput<StreamData>,
@@ -117,56 +115,10 @@ impl StatefulFunctionProcessor {
             channel_capacities.control,
         );
 
-        let mut partition_group_ids: HashMap<PartitionGroupKey, usize> = HashMap::new();
-        let mut partition_groups = vec![PartitionGroup {
-            scalars: Vec::new(),
-        }];
-        let mut calls = Vec::with_capacity(physical_stateful.calls.len());
-        for StatefulCall {
-            output_column,
-            func_name,
-            arg_scalars,
-            when_scalar,
-            until_scalar,
-            partition_group_key,
-            partition_by_scalars,
-            ..
-        } in &physical_stateful.calls
-        {
-            let function = stateful_registry.get(func_name).ok_or_else(|| {
-                ProcessorError::InvalidConfiguration(format!(
-                    "unknown stateful function '{}'",
-                    func_name
-                ))
-            })?;
-            let partition_group_id = if partition_by_scalars.is_empty() {
-                0
-            } else if let Some(existing) = partition_group_ids.get(partition_group_key) {
-                *existing
-            } else {
-                let id = partition_groups.len();
-                partition_groups.push(PartitionGroup {
-                    scalars: partition_by_scalars.clone(),
-                });
-                partition_group_ids.insert(partition_group_key.clone(), id);
-                id
-            };
-            calls.push(StatefulProcessorCall {
-                output_column: Arc::new(output_column.clone()),
-                function,
-                arg_scalars: arg_scalars.clone(),
-                when_scalar: when_scalar.clone(),
-                until_scalar: until_scalar.clone(),
-                partition_group_id,
-                states: HashMap::new(),
-                pending: HashMap::new(),
-            });
-        }
+        let stage = StatefulStage::new(physical_stateful, stateful_registry)?;
         Ok(Self {
             id,
-            physical_stateful,
-            partition_groups,
-            calls,
+            stage: Some(stage),
             inputs: Vec::new(),
             control_inputs: Vec::new(),
             output,
@@ -505,12 +457,14 @@ impl Processor for StatefulFunctionProcessor {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
         let channel_capacities = self.channel_capacities;
-        let partition_groups = std::mem::take(&mut self.partition_groups);
-        let mut calls = std::mem::take(&mut self.calls);
-        let mut pending_rows = HashMap::new();
-        let mut pending_order = VecDeque::new();
-        let mut next_origin_id = 0;
-        let _physical_stateful = Arc::clone(&self.physical_stateful);
+        let Some(mut stage) = self.stage.take() else {
+            return ProcessorStart::failed(
+                spawner,
+                ProcessorError::InvalidConfiguration(
+                    "stateful processor was already started".into(),
+                ),
+            );
+        };
         let stats = Arc::clone(&self.stats);
 
         tracing::info!(processor_id = %id, "stateful function processor starting");
@@ -545,79 +499,16 @@ impl Processor for StatefulFunctionProcessor {
                                 if let Some(rows) = data.row_count() {
                                     stats.record_collection_in(rows);
                                 }
-                                match data {
-                                    StreamData::Collection(collection) => {
-                                        let handle_start = std::time::Instant::now();
-                                        match Self::apply_stateful(
-                                            collection,
-                                            &partition_groups,
-                                            &mut calls,
-                                            &mut pending_rows,
-                                            &mut pending_order,
-                                            &mut next_origin_id,
-                                            Some(stats.as_ref()),
-                                        ) {
-                                            Ok(out_collection) => {
-                                                let out = StreamData::collection(out_collection);
-                                                let out_rows = out.row_count();
-                                                let send_res = if out_rows != Some(0) {
-                                                    send_with_backpressure(
-                                                        &output,
-                                                        channel_capacities.data,
-                                                        out,
-                                                        Some(stats.as_ref()),
-                                                    )
-                                                    .await
-                                                } else {
-                                                    Ok(())
-                                                };
-                                                // For synchronous processors, handle duration includes downstream send/backpressure time.
-                                                stats.record_handle_duration(handle_start.elapsed());
-                                                send_res?;
-                                                if let Some(rows) = out_rows {
-                                                    stats.record_collection_out(rows);
-                                                }
-                                            }
-                                            Err(e) => {
-                                                stats.record_handle_duration(handle_start.elapsed());
-                                                stats.record_error_logged("stateful function processor error", e.to_string());
-                                            }
-                                        }
-                                    }
-                                    data => {
-                                        let is_terminal = data.is_terminal();
-                                        if is_terminal {
-                                            let rows = Self::finish_stateful(
-                                                &mut calls,
-                                                &mut pending_rows,
-                                                &mut pending_order,
-                                            )?;
-                                            if !rows.is_empty() {
-                                                let batch = RecordBatch::new(rows)
-                                                    .map_err(|error| ProcessorError::ProcessingError(error.to_string()))?;
-                                                send_with_backpressure(
-                                                    &output,
-                                                    channel_capacities.data,
-                                                    StreamData::collection(Box::new(batch)),
-                                                    Some(stats.as_ref()),
-                                                )
-                                                .await?;
-                                            }
-                                        }
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            data,
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                        if is_terminal {
-                                            tracing::info!(processor_id = %id, "received StreamEnd (data)");
-                                            tracing::info!(processor_id = %id, "stopped");
-                                            return Ok(());
-                                        }
-                                    }
+                                let terminal = data.is_terminal();
+                                let started = std::time::Instant::now();
+                                let outputs = stage.process(data, &stats)?;
+                                stats.record_handle_duration(started.elapsed());
+                                for data in outputs.into_iter().flatten() {
+                                    let rows = data.row_count();
+                                    send_with_backpressure(&output, channel_capacities.data, data, Some(&stats)).await?;
+                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
                                 }
+                                if terminal { return Ok(()); }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
                                 log_broadcast_lagged(
@@ -658,5 +549,134 @@ impl Processor for StatefulFunctionProcessor {
         R: Into<LinkReceiver<ControlSignal>>,
     {
         self.control_inputs.push(receiver.into());
+    }
+}
+
+/// Stateful evaluation owns only synchronous function and pending-row state.
+pub(crate) struct StatefulStage {
+    _physical: Arc<PhysicalStatefulFunction>,
+    partition_groups: Vec<PartitionGroup>,
+    calls: Vec<StatefulProcessorCall>,
+    pending_rows: HashMap<u64, BufferedRow>,
+    pending_order: VecDeque<u64>,
+    next_origin_id: u64,
+}
+
+impl StatefulStage {
+    pub(crate) fn new(
+        physical_stateful: Arc<PhysicalStatefulFunction>,
+        stateful_registry: Arc<StatefulFunctionRegistry>,
+    ) -> Result<Self, ProcessorError> {
+        let mut partition_group_ids: HashMap<PartitionGroupKey, usize> = HashMap::new();
+        let mut partition_groups = vec![PartitionGroup {
+            scalars: Vec::new(),
+        }];
+        let mut calls = Vec::with_capacity(physical_stateful.calls.len());
+        for StatefulCall {
+            output_column,
+            func_name,
+            arg_scalars,
+            when_scalar,
+            until_scalar,
+            partition_group_key,
+            partition_by_scalars,
+            ..
+        } in &physical_stateful.calls
+        {
+            let function = stateful_registry.get(func_name).ok_or_else(|| {
+                ProcessorError::InvalidConfiguration(format!(
+                    "unknown stateful function '{}'",
+                    func_name
+                ))
+            })?;
+            let partition_group_id = if partition_by_scalars.is_empty() {
+                0
+            } else if let Some(existing) = partition_group_ids.get(partition_group_key) {
+                *existing
+            } else {
+                let id = partition_groups.len();
+                partition_groups.push(PartitionGroup {
+                    scalars: partition_by_scalars.clone(),
+                });
+                partition_group_ids.insert(partition_group_key.clone(), id);
+                id
+            };
+            calls.push(StatefulProcessorCall {
+                output_column: Arc::new(output_column.clone()),
+                function,
+                arg_scalars: arg_scalars.clone(),
+                when_scalar: when_scalar.clone(),
+                until_scalar: until_scalar.clone(),
+                partition_group_id,
+                states: HashMap::new(),
+                pending: HashMap::new(),
+            });
+        }
+        Ok(Self {
+            _physical: physical_stateful,
+            partition_groups,
+            calls,
+            pending_rows: HashMap::new(),
+            pending_order: VecDeque::new(),
+            next_origin_id: 0,
+        })
+    }
+
+    pub(crate) fn clear(&mut self) {
+        for call in &mut self.calls {
+            call.states.clear();
+            call.pending.clear();
+        }
+        self.pending_rows.clear();
+        self.pending_order.clear();
+    }
+
+    pub(crate) fn process(
+        &mut self,
+        data: StreamData,
+        stats: &ProcessorStats,
+    ) -> Result<[Option<StreamData>; 2], ProcessorError> {
+        match data {
+            StreamData::Collection(collection) => {
+                match StatefulFunctionProcessor::apply_stateful(
+                    collection,
+                    &self.partition_groups,
+                    &mut self.calls,
+                    &mut self.pending_rows,
+                    &mut self.pending_order,
+                    &mut self.next_origin_id,
+                    Some(stats),
+                ) {
+                    Ok(batch) => Ok([
+                        (batch.num_rows() != 0).then(|| StreamData::collection(batch)),
+                        None,
+                    ]),
+                    Err(error) => {
+                        stats.record_error_logged(
+                            "stateful function processor error",
+                            error.to_string(),
+                        );
+                        Ok([None, None])
+                    }
+                }
+            }
+            data if data.is_terminal() => {
+                let rows = StatefulFunctionProcessor::finish_stateful(
+                    &mut self.calls,
+                    &mut self.pending_rows,
+                    &mut self.pending_order,
+                )?;
+                let output = if rows.is_empty() {
+                    None
+                } else {
+                    Some(StreamData::collection(Box::new(
+                        RecordBatch::new(rows)
+                            .map_err(|error| ProcessorError::ProcessingError(error.to_string()))?,
+                    )))
+                };
+                Ok([output, Some(data)])
+            }
+            other => Ok([Some(other), None]),
+        }
     }
 }

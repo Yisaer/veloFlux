@@ -937,6 +937,8 @@ impl SharedStreamInner {
             Arc::clone(&self.schema),
             self.decoder_config.clone(),
             self.sampler.clone(),
+            decoder.supports_inline_execution(),
+            &self.merger_registry,
         );
 
         let options = SharedStreamPipelineOptions {

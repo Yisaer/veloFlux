@@ -240,6 +240,10 @@ impl StatefulEvalUpdate for LeadUpdate {
 }
 
 impl StatefulFunction for LeadFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "lead"
     }

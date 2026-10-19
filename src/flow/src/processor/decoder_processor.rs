@@ -34,10 +34,7 @@ pub struct DecoderProcessor {
     output: LinkOutput<StreamData>,
     control_output: LinkOutput<ControlSignal>,
     channel_capacities: ProcessorChannelCapacities,
-    decoder: Arc<dyn RecordDecoder>,
-    shared_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
-    decode_projection: Option<DecodeProjection>,
-    eventtime: Option<EventtimeDecodeConfig>,
+    stage: DecoderStage,
     metric_domains: DataMetricDomains,
     stats: Arc<ProcessorStats>,
 }
@@ -69,10 +66,12 @@ impl DecoderProcessor {
             output,
             control_output,
             channel_capacities,
-            decoder,
-            shared_decode_state: None,
-            decode_projection: None,
-            eventtime: None,
+            stage: DecoderStage {
+                decoder,
+                shared_decode_state: None,
+                decode_projection: None,
+                eventtime: None,
+            },
             metric_domains: DataMetricDomains::NONE
                 .with_input(DataDomain::Message)
                 .with_output(DataDomain::Collection),
@@ -84,18 +83,22 @@ impl DecoderProcessor {
         mut self,
         state: Arc<parking_lot::RwLock<AppliedDecodeState>>,
     ) -> Self {
-        self.shared_decode_state = Some(state);
+        self.stage.shared_decode_state = Some(state);
         self
     }
 
     pub fn with_decode_projection(mut self, projection: DecodeProjection) -> Self {
-        self.decode_projection = Some(projection);
+        self.stage.decode_projection = Some(projection);
         self
     }
 
     pub fn with_eventtime(mut self, eventtime: EventtimeDecodeConfig) -> Self {
-        self.eventtime = Some(eventtime);
+        self.stage.eventtime = Some(eventtime);
         self
+    }
+
+    pub(crate) fn into_stage(self) -> DecoderStage {
+        self.stage
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
@@ -115,10 +118,7 @@ impl Processor for DecoderProcessor {
     fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         let output = self.output.clone();
         let control_output = self.control_output.clone();
-        let decoder = Arc::clone(&self.decoder);
-        let shared_decode_state = self.shared_decode_state.clone();
-        let decode_projection = self.decode_projection.clone();
-        let eventtime = self.eventtime.clone();
+        let stage = self.stage.clone();
         let processor_id = self.id.clone();
         let channel_capacities = self.channel_capacities;
         let stats = Arc::clone(&self.stats);
@@ -155,86 +155,13 @@ impl Processor for DecoderProcessor {
                     }
                     item = input_streams.next() => {
                         match item {
-                            Some(Ok(mut data)) => {
+                            Some(Ok(data)) => {
                                 log_received_data(&processor_id, &data);
                                 data_metrics.record_input(stats.as_ref(), &data)?;
-                                let mut decode_handle_start: Option<std::time::Instant> = None;
-                                if let StreamData::Bytes(payload) = &data {
-                                    decode_handle_start = Some(std::time::Instant::now());
-                                    let decoded = if let Some(proj) = decode_projection.as_ref() {
-                                        decoder.decode_with_projection(payload.as_ref(), Some(proj))
-                                    } else if let Some(lock) = &shared_decode_state {
-                                        let projection = {
-                                            let guard = lock.read();
-                                            Arc::clone(&guard.decode_projection)
-                                        };
-                                        decoder.decode_with_projection(
-                                            payload.as_ref(),
-                                            Some(projection.as_ref()),
-                                        )
-                                    } else {
-                                        decoder.decode(payload.as_ref())
-                                    };
-                                    match decoded {
-                                        Ok(batch) => {
-                                            let result = apply_eventtime(batch, &eventtime);
-                                            if let Some(last) = result.errors.last() {
-                                                stats.record_error_count_logged(
-                                                    "decoder processor error",
-                                                    result.errors.len() as u64,
-                                                    last.clone(),
-                                                );
-                                            }
-                                            if let Some(batch) = result.batch {
-                                                data = StreamData::collection(Box::new(batch));
-                                            } else {
-                                                if let Some(handle_start) = decode_handle_start.take() {
-                                                    stats.record_handle_duration(handle_start.elapsed());
-                                                }
-                                                continue;
-                                            }
-                                        }
-                                        Err(err) => {
-                                            if let Some(handle_start) = decode_handle_start.take() {
-                                                stats.record_handle_duration(handle_start.elapsed());
-                                            }
-                                            let message = format!("decode error: {}", err);
-                                            stats.record_error_logged("decoder processor error", message);
-                                            continue;
-                                        }
-                                    }
-                                } else if eventtime.is_some() {
-                                    data = match data {
-                                        StreamData::Collection(collection) => {
-                                            let batch = match crate::model::RecordBatch::new(
-                                                collection.rows().to_vec(),
-                                            ) {
-                                                Ok(batch) => batch,
-                                                Err(err) => {
-                                                    stats.record_error_logged(
-                                                        "decoder processor error",
-                                                        format!("eventtime batch build error: {err}"),
-                                                    );
-                                                    continue;
-                                                }
-                                            };
-                                            let result = apply_eventtime(batch, &eventtime);
-                                            if let Some(last) = result.errors.last() {
-                                                stats.record_error_count_logged(
-                                                    "decoder processor error",
-                                                    result.errors.len() as u64,
-                                                    last.clone(),
-                                                );
-                                            }
-                                            if let Some(batch) = result.batch {
-                                                StreamData::collection(Box::new(batch))
-                                            } else {
-                                                continue;
-                                            }
-                                        }
-                                        other => other,
-                                    };
-                                }
+                                let started = std::time::Instant::now();
+                                let decoded = stage.process(data, &stats);
+                                stats.record_handle_duration(started.elapsed());
+                                let Some(data) = decoded else { continue; };
                                 let is_terminal = data.is_terminal();
                                 let output_measurement = DataMetrics::measure(&data);
                                 let send_res = send_with_backpressure(
@@ -244,10 +171,6 @@ impl Processor for DecoderProcessor {
                                     Some(stats.as_ref()),
                                 )
                                 .await;
-                                // For synchronous processors, handle duration includes downstream send/backpressure time.
-                                if let Some(handle_start) = decode_handle_start {
-                                    stats.record_handle_duration(handle_start.elapsed());
-                                }
                                 send_res?;
                                 data_metrics.record_output(stats.as_ref(), output_measurement)?;
                                 if is_terminal {
@@ -291,6 +214,68 @@ impl Processor for DecoderProcessor {
         R: Into<LinkReceiver<ControlSignal>>,
     {
         self.control_inputs.push(receiver.into());
+    }
+}
+
+/// Shared synchronous decoder and timestamp preparation, independent of transport.
+#[derive(Clone)]
+pub(crate) struct DecoderStage {
+    decoder: Arc<dyn RecordDecoder>,
+    shared_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
+    decode_projection: Option<DecodeProjection>,
+    eventtime: Option<EventtimeDecodeConfig>,
+}
+
+impl DecoderStage {
+    pub(crate) fn process(&self, data: StreamData, stats: &ProcessorStats) -> Option<StreamData> {
+        let batch = match data {
+            StreamData::Bytes(payload) => {
+                let decoded = if let Some(projection) = &self.decode_projection {
+                    self.decoder
+                        .decode_with_projection(&payload, Some(projection))
+                } else if let Some(state) = &self.shared_decode_state {
+                    let projection = Arc::clone(&state.read().decode_projection);
+                    self.decoder
+                        .decode_with_projection(&payload, Some(&projection))
+                } else {
+                    self.decoder.decode(&payload)
+                };
+                match decoded {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        stats.record_error_logged(
+                            "decoder processor error",
+                            format!("decode error: {error}"),
+                        );
+                        return None;
+                    }
+                }
+            }
+            StreamData::Collection(collection) if self.eventtime.is_some() => {
+                match crate::model::RecordBatch::new(collection.rows().to_vec()) {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        stats.record_error_logged(
+                            "decoder processor error",
+                            format!("eventtime batch build error: {error}"),
+                        );
+                        return None;
+                    }
+                }
+            }
+            other => return Some(other),
+        };
+        let result = apply_eventtime(batch, &self.eventtime);
+        if let Some(last) = result.errors.last() {
+            stats.record_error_count_logged(
+                "decoder processor error",
+                result.errors.len() as u64,
+                last.clone(),
+            );
+        }
+        result
+            .batch
+            .map(|batch| StreamData::collection(Box::new(batch)))
     }
 }
 

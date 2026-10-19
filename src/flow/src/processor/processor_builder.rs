@@ -16,18 +16,17 @@ use crate::codec::{
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::expr::custom_func::{CustomFuncBindings, CustomFuncRegistry};
 use crate::pipeline::PipelineRuntimeFailure;
+use crate::planner::execution::{
+    classify_stage, has_inline_adapter, ExecutionClass, ExecutionPlan,
+};
 use crate::planner::physical::{DataDomain, PhysicalPlan};
 use crate::processor::base::{
     normalize_channel_capacity, LinkKind, LinkReceiver, ProcessorChannelCapacities,
     DEFAULT_CONTROL_CHANNEL_CAPACITY, DEFAULT_DATA_CHANNEL_CAPACITY,
 };
-use crate::processor::byte_stage::{CompressDriver, EncryptDriver};
 use crate::processor::data_metrics::DataMetricDomains;
 use crate::processor::decoder_processor::EventtimeDecodeConfig;
-use crate::processor::filter_processor::FilterStage;
-use crate::processor::inline_delivery::ByteTransformChain;
-use crate::processor::order_processor::OrderStage;
-use crate::processor::project_processor::ProjectStage;
+use crate::processor::region_processor::{RegionProcessor, RegionResources};
 use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
@@ -35,7 +34,7 @@ use crate::processor::{
     BatchFunctionComputeProcessor, BatchProcessor, CheckpointCoordinator, CheckpointTrigger,
     CollectionLayoutNormalizeProcessor, ComputeProcessor, ControlSignal, ControlSourceProcessor,
     DataSourceProcessor, DecoderProcessor, EmptySuppressProcessor, EosWindowProcessor,
-    FilterProcessor, FusedTransformProcessor, Ingress, InstantControlSignal, LookupJoinProcessor,
+    FilterProcessor, Ingress, InstantControlSignal, LookupJoinProcessor,
     MemoryCollectionMaterializeProcessor, OrderProcessor, Processor, ProcessorError,
     ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor, SamplerProcessor,
     SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor, SinkEncryptProcessor,
@@ -164,8 +163,8 @@ pub(crate) enum PlanProcessor {
     EosWindow(EosWindowProcessor),
     /// SinkProcessor created from PhysicalDataSink
     Sink(SinkProcessor),
-    /// FusedTransformProcessor created from PhysicalFusedTransform
-    FusedTransform(Box<FusedTransformProcessor>),
+    /// A serial sequence of shared synchronous stage engines.
+    Region(Box<RegionProcessor>),
     /// ResultCollectProcessor created from PhysicalResultCollect
     ResultCollect(ResultCollectProcessor),
     /// BarrierProcessor created from PhysicalBarrier
@@ -472,7 +471,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.id(),
             PlanProcessor::EosWindow(p) => p.id(),
             PlanProcessor::Sink(p) => p.id(),
-            PlanProcessor::FusedTransform(p) => p.id(),
+            PlanProcessor::Region(p) => p.id(),
             PlanProcessor::ResultCollect(p) => p.id(),
             PlanProcessor::Barrier(p) => p.id(),
             PlanProcessor::Sampler(p) => p.id(),
@@ -509,7 +508,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.checkpoint_key(),
             PlanProcessor::EosWindow(p) => p.checkpoint_key(),
             PlanProcessor::Sink(p) => p.checkpoint_key(),
-            PlanProcessor::FusedTransform(p) => p.checkpoint_key(),
+            PlanProcessor::Region(p) => p.checkpoint_key(),
             PlanProcessor::ResultCollect(p) => p.checkpoint_key(),
             PlanProcessor::Barrier(p) => p.checkpoint_key(),
             PlanProcessor::Sampler(p) => p.checkpoint_key(),
@@ -546,7 +545,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(_) => "state_window",
             PlanProcessor::EosWindow(_) => "eos_window",
             PlanProcessor::Sink(_) => "sink",
-            PlanProcessor::FusedTransform(_) => "fused_transform",
+            PlanProcessor::Region(_) => "region",
             PlanProcessor::ResultCollect(_) => "result_collect",
             PlanProcessor::Barrier(_) => "barrier",
             PlanProcessor::Sampler(_) => "sampler",
@@ -594,7 +593,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::EosWindow(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Sink(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::FusedTransform(p) => p.set_checkpoint_snapshot_collector(collector),
+            PlanProcessor::Region(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::ResultCollect(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Barrier(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Sampler(p) => p.set_checkpoint_snapshot_collector(collector),
@@ -634,7 +633,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::EosWindow(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Sink(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::FusedTransform(p) => p.restore_checkpoint(snapshot),
+            PlanProcessor::Region(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::ResultCollect(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Barrier(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Sampler(p) => p.restore_checkpoint(snapshot),
@@ -671,7 +670,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::EosWindow(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Sink(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::FusedTransform(p) => p.validate_checkpoint(snapshot),
+            PlanProcessor::Region(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::ResultCollect(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Barrier(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Sampler(p) => p.validate_checkpoint(snapshot),
@@ -708,7 +707,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.clear_checkpoint_restore(),
             PlanProcessor::EosWindow(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Sink(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::FusedTransform(p) => p.clear_checkpoint_restore(),
+            PlanProcessor::Region(p) => p.clear_checkpoint_restore(),
             PlanProcessor::ResultCollect(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Barrier(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Sampler(p) => p.clear_checkpoint_restore(),
@@ -745,7 +744,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.set_stats(stats),
             PlanProcessor::EosWindow(p) => p.set_stats(stats),
             PlanProcessor::Sink(p) => p.set_stats(stats),
-            PlanProcessor::FusedTransform(p) => p.set_stats(stats),
+            PlanProcessor::Region(p) => p.set_stats(stats),
             PlanProcessor::ResultCollect(p) => p.set_stats(stats),
             PlanProcessor::Barrier(p) => p.set_stats(stats),
             PlanProcessor::Sampler(p) => p.set_stats(stats),
@@ -789,7 +788,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.start(spawner),
             PlanProcessor::EosWindow(p) => p.start(spawner),
             PlanProcessor::Sink(p) => p.start(spawner),
-            PlanProcessor::FusedTransform(p) => p.start(spawner),
+            PlanProcessor::Region(p) => p.start(spawner),
             PlanProcessor::ResultCollect(p) => p.start(spawner),
             PlanProcessor::Barrier(p) => p.start(spawner),
             PlanProcessor::Sampler(p) => p.start(spawner),
@@ -827,7 +826,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.subscribe_output(),
             PlanProcessor::EosWindow(p) => p.subscribe_output(),
             PlanProcessor::Sink(p) => p.subscribe_output(),
-            PlanProcessor::FusedTransform(p) => p.subscribe_output(),
+            PlanProcessor::Region(p) => p.subscribe_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_output(),
             PlanProcessor::Barrier(p) => p.subscribe_output(),
             PlanProcessor::Sampler(p) => p.subscribe_output(),
@@ -865,7 +864,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.subscribe_control_output(),
             PlanProcessor::EosWindow(p) => p.subscribe_control_output(),
             PlanProcessor::Sink(p) => p.subscribe_control_output(),
-            PlanProcessor::FusedTransform(p) => p.subscribe_control_output(),
+            PlanProcessor::Region(p) => p.subscribe_control_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_control_output(),
             PlanProcessor::Barrier(p) => p.subscribe_control_output(),
             PlanProcessor::Sampler(p) => p.subscribe_control_output(),
@@ -903,7 +902,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.add_input(receiver),
             PlanProcessor::EosWindow(p) => p.add_input(receiver),
             PlanProcessor::Sink(p) => p.add_input(receiver),
-            PlanProcessor::FusedTransform(p) => p.add_input(receiver),
+            PlanProcessor::Region(p) => p.add_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_input(receiver),
             PlanProcessor::Barrier(p) => p.add_input(receiver),
             PlanProcessor::Sampler(p) => p.add_input(receiver),
@@ -944,7 +943,7 @@ impl PlanProcessor {
             PlanProcessor::StateWindow(p) => p.add_control_input(receiver),
             PlanProcessor::EosWindow(p) => p.add_control_input(receiver),
             PlanProcessor::Sink(p) => p.add_control_input(receiver),
-            PlanProcessor::FusedTransform(p) => p.add_control_input(receiver),
+            PlanProcessor::Region(p) => p.add_control_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_control_input(receiver),
             PlanProcessor::Barrier(p) => p.add_control_input(receiver),
             PlanProcessor::Sampler(p) => p.add_control_input(receiver),
@@ -1996,7 +1995,7 @@ fn create_processor_from_plan_node(
                     parser,
                 });
             }
-            let input_domain = plan_input_domain(plan, context.merger_registry()?.as_ref())?;
+            let input_domain = plan_input_domain(plan, context.merger_registry.as_deref())?;
             processor.set_metric_domains(
                 DataMetricDomains::NONE
                     .with_input(input_domain)
@@ -2263,7 +2262,9 @@ fn create_processor_from_plan_node(
                 PlanProcessor::StreamingAggregation(processor),
             ))
         }
-        PhysicalPlan::ProcessTimeWatermark(_) | PhysicalPlan::EventtimeWatermark(_) => {
+        PhysicalPlan::ProcessTimeWatermark(_)
+        | PhysicalPlan::EventtimeWatermark(_)
+        | PhysicalPlan::Watermark(_) => {
             let processor = WatermarkProcessor::from_physical_plan_with_channel_capacities(
                 processor_id.clone(),
                 Arc::clone(plan),
@@ -2278,9 +2279,6 @@ fn create_processor_from_plan_node(
                 PlanProcessor::Watermark(processor),
             ))
         }
-        PhysicalPlan::Watermark(_) => Err(ProcessorError::InvalidConfiguration(
-            "PhysicalWatermark is deprecated; use PhysicalProcessTimeWatermark".to_string(),
-        )),
         PhysicalPlan::CountWindow(count_window) => {
             BatchProcessor::validate_batch_config(Some(count_window.count as usize), None)?;
             let processor = BatchProcessor::new_partitioned_with_channel_capacities(
@@ -2345,10 +2343,8 @@ fn create_processor_from_plan_node(
                 ))
             })?;
             processor.set_checkpoint_key(checkpoint_key);
-            processor.set_input_domain(plan_input_domain(
-                plan,
-                context.merger_registry()?.as_ref(),
-            )?);
+            processor
+                .set_input_domain(plan_input_domain(plan, context.merger_registry.as_deref())?);
             if sink_plan.connector.forward_to_result {
                 processor.enable_result_forwarding();
             } else {
@@ -2377,95 +2373,10 @@ fn create_processor_from_plan_node(
                 processor,
             )))
         }
-        PhysicalPlan::FusedTransform(fused_plan) => {
-            if fused_plan.batch_count.is_some() || fused_plan.batch_duration.is_some() {
-                crate::processor::batch_processor::BatchProcessor::validate_batch_config(
-                    fused_plan.batch_count,
-                    fused_plan.batch_duration,
-                )?;
-            }
-            let processor_id = format!("{}_{}", processor_id, fused_plan.sink_id);
-            let encoder_runtime = match fused_plan.encoder.as_ref() {
-                Some(encoder_config) => {
-                    let encoder_impl = context
-                        .encoder_registry()?
-                        .instantiate(encoder_config)
-                        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-                    let encoder_impl = attach_encoder_output_layout(
-                        fused_plan.encoder_output_layout.as_ref(),
-                        encoder_impl,
-                    )?;
-                    Some(
-                        encoder_impl
-                            .start_encoder()
-                            .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?,
-                    )
-                }
-                None => None,
-            };
-            let compress_writer = match fused_plan.compress.as_ref() {
-                Some(codec) => Some(
-                    codec
-                        .build_writer()
-                        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?,
-                ),
-                None => None,
-            };
-            let encrypt_writer = match fused_plan.encrypt.as_ref() {
-                Some(encrypt) => {
-                    let config = crate::codec::SinkEncryptionConfig {
-                        algorithm: encrypt.algorithm,
-                        key_id: encrypt.key_id.clone(),
-                        key_bits: encrypt.key_bits,
-                        key: Arc::clone(&encrypt.key),
-                    };
-                    let writer = crate::codec::AesGcmStreamWriter::from_config(&config)
-                        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-                    if writer.key_bits() != encrypt.key_bits {
-                        return Err(ProcessorError::InvalidConfiguration(format!(
-                            "sink encrypt key_bits mismatch for key_id `{}`",
-                            encrypt.key_id
-                        )));
-                    }
-                    Some(writer)
-                }
-                None => None,
-            };
-            // Assemble the whole task configuration at once: the processor
-            // stores it whole and moves it into the task at start. The byte
-            // stages compose in pipeline order (compress before encrypt) so
-            // the fused task reuses the standalone stage logic.
-            let byte_pipeline = ByteTransformChain::new(
-                compress_writer.map(CompressDriver::new),
-                encrypt_writer.map(|writer| EncryptDriver::new(Box::new(writer))),
-            );
-            let stages = crate::processor::fused_transform_processor::FusedRowStages {
-                filter: fused_plan.filter.as_ref().map(FilterStage::from_plan),
-                project: ProjectStage::from_plan(&fused_plan.project),
-                order: fused_plan.order.as_ref().map(OrderStage::from_plan),
-                filter_before_order: fused_plan.filter_before_order,
-                empty_suppress_omit: fused_plan.empty_suppress_omit,
-                empty_suppress_counters: None,
-            };
-            let processor = FusedTransformProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                stages,
-                encoder_runtime,
-                byte_pipeline,
-                fused_plan.batch_count,
-                fused_plan.batch_duration,
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::FusedTransform(Box::new(processor)),
-            ))
-        }
         PhysicalPlan::ResultCollect(_result_collect) => {
             let mut processor = ResultCollectProcessor::new(processor_id.clone());
-            processor.set_input_domain(plan_input_domain(
-                plan,
-                context.merger_registry()?.as_ref(),
-            )?);
+            processor
+                .set_input_domain(plan_input_domain(plan, context.merger_registry.as_deref())?);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::ResultCollect(processor),
             ))
@@ -2477,10 +2388,8 @@ fn create_processor_from_plan_node(
                 expected_upstreams,
                 channel_capacities,
             );
-            processor.set_input_domain(plan_input_domain(
-                plan,
-                context.merger_registry()?.as_ref(),
-            )?);
+            processor
+                .set_input_domain(plan_input_domain(plan, context.merger_registry.as_deref())?);
             Ok(ProcessorBuildOutput::with_processor(
                 PlanProcessor::Barrier(processor),
             ))
@@ -2497,8 +2406,8 @@ fn create_processor_from_plan_node(
             let merger_registry = context.merger_registry()?;
             processor.set_metric_domains(
                 DataMetricDomains::NONE
-                    .with_input(plan_input_domain(plan, merger_registry.as_ref())?)
-                    .with_output(plan_output_domain(plan, merger_registry.as_ref())?),
+                    .with_input(plan_input_domain(plan, Some(merger_registry.as_ref()))?)
+                    .with_output(plan_output_domain(plan, Some(merger_registry.as_ref()))?),
             );
             if let crate::processor::SamplingStrategy::Packer { .. } = &sampler.strategy {
                 processor.set_merger_registry(merger_registry);
@@ -2535,7 +2444,7 @@ fn create_processor_from_plan_node(
 
 fn plan_input_domain(
     plan: &PhysicalPlan,
-    merger_registry: &MergerRegistry,
+    merger_registry: Option<&MergerRegistry>,
 ) -> Result<DataDomain, ProcessorError> {
     let children = plan.children();
     let first_child = children.first().ok_or_else(|| {
@@ -2562,7 +2471,7 @@ fn plan_input_domain(
 
 fn plan_output_domain(
     plan: &PhysicalPlan,
-    merger_registry: &MergerRegistry,
+    merger_registry: Option<&MergerRegistry>,
 ) -> Result<DataDomain, ProcessorError> {
     match plan {
         PhysicalPlan::DataSource(source) => Ok(source.output_domain()),
@@ -2573,6 +2482,11 @@ fn plan_output_domain(
         PhysicalPlan::Sampler(sampler) => match &sampler.strategy {
             crate::processor::SamplingStrategy::Latest => plan_input_domain(plan, merger_registry),
             crate::processor::SamplingStrategy::Packer { props } => merger_registry
+                .ok_or_else(|| {
+                    ProcessorError::InvalidConfiguration(
+                        "merger registry unavailable for packer domain".into(),
+                    )
+                })?
                 .output_kind(&props.merger.merger_type)
                 .map(|kind| match kind {
                     crate::codec::MergerOutputKind::Bytes => DataDomain::Message,
@@ -2581,11 +2495,6 @@ fn plan_output_domain(
                 .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string())),
         },
         PhysicalPlan::DataSink(_) | PhysicalPlan::SinkConnector(_) => Ok(DataDomain::Message),
-        PhysicalPlan::FusedTransform(fused) => Ok(if fused.encoder.is_some() {
-            DataDomain::Message
-        } else {
-            DataDomain::Collection
-        }),
         PhysicalPlan::ResultCollect(_) | PhysicalPlan::Barrier(_) => {
             plan_input_domain(plan, merger_registry)
         }
@@ -2704,21 +2613,108 @@ fn build_processors_recursive(
     plan: Arc<PhysicalPlan>,
     processor_map: &mut ProcessorMap,
     context: &ProcessorBuilderContext,
+    execution: &ExecutionPlan,
+    refs: &HashMap<i64, Arc<PhysicalPlan>>,
 ) -> Result<(), ProcessorError> {
     let plan_name = plan.get_plan_name();
     if !processor_map.mark_visited(&plan_name) {
         return Ok(());
     }
 
-    // Create processor for current node
-    let creation = create_processor_from_plan_node(&plan, context)?;
-    if let Some(processor) = creation.processor {
-        processor_map.insert_processor(plan_name, processor);
+    let region = execution.region_for(plan.get_plan_index());
+    if region.output == plan.get_plan_index() {
+        if region.stages.len() > 1
+            || (matches!(
+                classify_stage(&plan),
+                ExecutionClass::Engine | ExecutionClass::OpaqueFunction
+            ) && has_inline_adapter(&plan))
+        {
+            let bindings = context.custom_func_bindings()?;
+            let plans: Vec<_> = region
+                .stages
+                .iter()
+                .map(|index| {
+                    let mut node = refs[index].as_ref().clone();
+                    node.bind_custom_functions(&bindings);
+                    node
+                })
+                .collect();
+            let id = context
+                .shared_stream()
+                .map(|opts| format!("shared:{}/Region_{}", opts.stream_name, region.output))
+                .unwrap_or_else(|| format!("Region_{}", region.output));
+            let mut encoders = std::collections::BTreeMap::new();
+            let mut decoders = std::collections::BTreeMap::new();
+            let mut samplers = std::collections::BTreeMap::new();
+            for node in &plans {
+                if matches!(
+                    node,
+                    PhysicalPlan::SinkEncoder(_) | PhysicalPlan::IncSinkEncoder(_)
+                ) {
+                    let creation =
+                        create_processor_from_plan_node(&Arc::new(node.clone()), context)?;
+                    let Some(PlanProcessor::SinkEncoder(encoder)) = creation.processor else {
+                        return Err(ProcessorError::InvalidConfiguration(
+                            "encoder stage binding failed".into(),
+                        ));
+                    };
+                    encoders.insert(node.get_plan_index(), encoder.into_stage()?);
+                }
+                if matches!(node, PhysicalPlan::Sampler(_)) {
+                    let creation =
+                        create_processor_from_plan_node(&Arc::new(node.clone()), context)?;
+                    let Some(PlanProcessor::Sampler(sampler)) = creation.processor else {
+                        return Err(ProcessorError::InvalidConfiguration(
+                            "sampler stage binding failed".into(),
+                        ));
+                    };
+                    samplers.insert(node.get_plan_index(), sampler.into_stage()?);
+                }
+                if matches!(node, PhysicalPlan::Decoder(_)) {
+                    let creation =
+                        create_processor_from_plan_node(&Arc::new(node.clone()), context)?;
+                    let Some(PlanProcessor::Decoder(decoder)) = creation.processor else {
+                        return Err(ProcessorError::InvalidConfiguration(
+                            "decoder stage binding failed".into(),
+                        ));
+                    };
+                    decoders.insert(node.get_plan_index(), decoder.into_stage());
+                }
+            }
+            let input_domain = plan_input_domain(&plans[0], context.merger_registry.as_deref())?;
+            let metric_domains = DataMetricDomains::NONE
+                .with_input(input_domain)
+                .with_output(plan_output_domain(
+                    &plan,
+                    context.merger_registry.as_deref(),
+                )?);
+            let processor = RegionProcessor::new(
+                id,
+                &plans,
+                RegionResources {
+                    isolate_opaque: classify_stage(&plan) == ExecutionClass::OpaqueFunction,
+                    encoders,
+                    decoders,
+                    samplers,
+                    metric_domains,
+                    input_domain,
+                    aggregate_registry: context.aggregate_registry.clone(),
+                    stateful_registry: context.stateful_registry.clone(),
+                },
+                context.channel_capacities_for(&plan),
+            )?;
+            processor_map.insert_processor(plan_name, PlanProcessor::Region(Box::new(processor)));
+        } else {
+            let creation = create_processor_from_plan_node(&plan, context)?;
+            if let Some(processor) = creation.processor {
+                processor_map.insert_processor(plan_name, processor);
+            }
+        }
     }
 
     // Recursively process children
     for child in plan.children() {
-        build_processors_recursive(Arc::clone(child), processor_map, context)?;
+        build_processors_recursive(Arc::clone(child), processor_map, context, execution, refs)?;
     }
 
     Ok(())
@@ -2787,31 +2783,6 @@ fn collect_leaf_indices(plan: Arc<PhysicalPlan>) -> Vec<i64> {
     leaves.into_iter().collect()
 }
 
-/// Collect parent-child relationships from PhysicalPlan tree
-fn collect_parent_child_relations(plan: Arc<PhysicalPlan>) -> Vec<(i64, i64)> {
-    use std::collections::HashSet;
-    fn helper(
-        plan: Arc<PhysicalPlan>,
-        relations: &mut HashSet<(i64, i64)>,
-        visited: &mut HashSet<i64>,
-    ) {
-        let parent_index = plan.get_plan_index();
-        if !visited.insert(parent_index) {
-            return;
-        }
-        for child in plan.children() {
-            let child_index = child.get_plan_index();
-            relations.insert((parent_index, child_index));
-            helper(Arc::clone(child), relations, visited);
-        }
-    }
-
-    let mut relations = HashSet::new();
-    let mut visited = HashSet::new();
-    helper(plan, &mut relations, &mut visited);
-    relations.into_iter().collect()
-}
-
 fn collect_plan_refs_by_index(
     plan: &Arc<PhysicalPlan>,
     refs: &mut HashMap<i64, Arc<PhysicalPlan>>,
@@ -2828,13 +2799,14 @@ fn collect_plan_refs_by_index(
 }
 
 fn classify_output_link_kinds(physical_plan: &Arc<PhysicalPlan>) -> HashMap<i64, LinkKind> {
-    let mut downstream_counts: HashMap<i64, usize> = HashMap::new();
-    for (_parent_index, child_index) in collect_parent_child_relations(Arc::clone(physical_plan)) {
-        *downstream_counts.entry(child_index).or_insert(0) += 1;
-    }
-
     let mut refs = HashMap::new();
     collect_plan_refs_by_index(physical_plan, &mut refs, &mut HashSet::new());
+    let mut downstream_counts: HashMap<i64, usize> = HashMap::new();
+    for plan in refs.values() {
+        for child in plan.children() {
+            *downstream_counts.entry(child.get_plan_index()).or_default() += 1;
+        }
+    }
 
     refs.into_iter()
         .map(|(index, plan)| {
@@ -2853,10 +2825,11 @@ fn classify_output_link_kinds(physical_plan: &Arc<PhysicalPlan>) -> HashMap<i64,
 fn count_pipeline_link_kinds(
     physical_plan: &Arc<PhysicalPlan>,
     output_link_kinds: &HashMap<i64, LinkKind>,
+    execution: &ExecutionPlan,
 ) -> PipelineLinkKindCounts {
     let mut linked_outputs = HashSet::new();
-    for (_parent_index, child_index) in collect_parent_child_relations(Arc::clone(physical_plan)) {
-        linked_outputs.insert(child_index);
+    for link in &execution.links {
+        linked_outputs.insert(execution.region_for(link.upstream).output);
     }
 
     let mut counts = PipelineLinkKindCounts {
@@ -2906,6 +2879,9 @@ fn build_index_to_name_mapping(
     mapping: &mut std::collections::HashMap<i64, String>,
 ) {
     let plan_index = plan.get_plan_index();
+    if mapping.contains_key(&plan_index) {
+        return;
+    }
     let plan_name = plan.get_plan_name();
     mapping.insert(plan_index, plan_name);
 
@@ -2924,11 +2900,16 @@ fn connect_processors(
     physical_plan: Arc<PhysicalPlan>,
     processor_map: &mut ProcessorMap,
     control_source: &mut ControlSourceProcessor,
+    execution: &ExecutionPlan,
 ) -> Result<(), ProcessorError> {
     // Build index to name mapping for quick lookup
     let mut index_to_name_map: std::collections::HashMap<i64, String> =
         std::collections::HashMap::new();
     build_index_to_name_mapping(&physical_plan, &mut index_to_name_map);
+    let original_names = index_to_name_map.clone();
+    for (&index, name) in &mut index_to_name_map {
+        *name = original_names[&execution.region_for(index).output].clone();
+    }
 
     // 1. Connect ControlSourceProcessor to all leaf nodes
     let leaf_indices = collect_leaf_indices(Arc::clone(&physical_plan));
@@ -2946,27 +2927,11 @@ fn connect_processors(
         }
     }
 
-    // 2. Connect children outputs to parent inputs
-    let relations = collect_parent_child_relations(Arc::clone(&physical_plan));
-
-    // Debug: Print connection relationships
-    // println!("=== Processor Connection Relationships ===");
-    // let mut relation_counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
-    // for (parent_idx, child_idx) in &relations {
-    //     *relation_counts.entry(*child_idx).or_insert(0) += 1;
-    //     if let (Some(child_name), Some(parent_name)) = (index_to_name_map.get(child_idx), index_to_name_map.get(parent_idx)) {
-    //         println!("  {} (index: {}) -> {} (index: {})", child_name, child_idx, parent_name, parent_idx);
-    //     }
-    // }
-    // println!("Child processor subscription counts:");
-    // for (child_idx, count) in relation_counts {
-    //     if let Some(child_name) = index_to_name_map.get(&child_idx) {
-    //         println!("  {} (index: {}): {} parent(s)", child_name, child_idx, count);
-    //     }
-    // }
-    // println!("=========================================");
-
-    for (parent_index, child_index) in relations {
+    // Retained links preserve input-port order and distinguish repeated edges.
+    // Internal edges never subscribe to a channel.
+    for link in &execution.links {
+        let parent_index = execution.region_for(link.downstream).output;
+        let child_index = execution.region_for(link.upstream).output;
         if let (Some(child_plan_name), Some(parent_plan_name)) = (
             index_to_name_map.get(&child_index),
             index_to_name_map.get(&parent_index),
@@ -3011,6 +2976,8 @@ fn create_processor_pipeline_with_context(
             "checkpoint store is required when checkpointing is enabled".to_string(),
         ));
     }
+    let execution =
+        ExecutionPlan::build(&physical_plan).map_err(ProcessorError::InvalidConfiguration)?;
     #[cfg(feature = "onnx")]
     {
         let mut prepared_models = HashMap::new();
@@ -3026,7 +2993,8 @@ fn create_processor_pipeline_with_context(
     }
     context.checkpoint_keys = build_checkpoint_keys(&physical_plan);
     context.output_link_kinds = classify_output_link_kinds(&physical_plan);
-    let link_kind_counts = count_pipeline_link_kinds(&physical_plan, &context.output_link_kinds);
+    let link_kind_counts =
+        count_pipeline_link_kinds(&physical_plan, &context.output_link_kinds, &execution);
     let channel_capacities = context.channel_capacities;
     let mut control_source =
         ControlSourceProcessor::new_with_channel_capacities("control_source", channel_capacities);
@@ -3040,12 +3008,21 @@ fn create_processor_pipeline_with_context(
     ));
 
     let mut processor_map = ProcessorMap::new();
-    build_processors_recursive(Arc::clone(&physical_plan), &mut processor_map, &context)?;
+    let mut plan_refs = HashMap::new();
+    collect_plan_refs_by_index(&physical_plan, &mut plan_refs, &mut HashSet::new());
+    build_processors_recursive(
+        Arc::clone(&physical_plan),
+        &mut processor_map,
+        &context,
+        &execution,
+        &plan_refs,
+    )?;
 
     connect_processors(
         Arc::clone(&physical_plan),
         &mut processor_map,
         &mut control_source,
+        &execution,
     )?;
 
     // Set up pipeline output from ResultCollect processor if present

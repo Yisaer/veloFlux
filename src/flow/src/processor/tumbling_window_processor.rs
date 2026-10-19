@@ -97,13 +97,8 @@ impl Processor for TumblingWindowProcessor {
 
         // Local state captured by the task.
         let window_length = self.window_length;
-        let mut state = PartitionedProcessingState::new(
-            window_length,
-            partition_by_scalars,
-            output.clone(),
-            channel_capacities.data,
-            Arc::clone(&stats),
-        );
+        let mut state =
+            TumblingWindowStage::new(window_length, partition_by_scalars, Arc::clone(&stats));
 
         let processor_span = stats.processor_span();
         ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
@@ -120,6 +115,7 @@ impl Processor for TumblingWindowProcessor {
                             )
                             .await?;
                             if is_terminal {
+                                state.drop_all();
                                 tracing::info!(processor_id = %id, "stopped");
                                 return Ok(());
                             }
@@ -130,64 +126,30 @@ impl Processor for TumblingWindowProcessor {
                     }
                     item = input_streams.next() => {
                         match item {
-                            Some(Ok(StreamData::Collection(collection))) => {
-                                stats.record_collection_in(collection.num_rows() as u64);
-                                let handle_start = std::time::Instant::now();
-                                let res = state.add_collection(collection).await;
-                                // Tumbling window enqueue/buffer work is local-only.
-                                stats.record_handle_duration(handle_start.elapsed());
-                                if let Err(err) = res {
-                                    stats.record_error_logged(
-                                        "tumbling window processor error",
-                                        err.to_string(),
-                                    );
+                            Some(Ok(data)) => {
+                                if let Some(rows) = data.row_count() {
+                                    stats.record_collection_in(rows);
                                 }
-                            }
-                            Some(Ok(StreamData::Watermark(ts))) => {
-                                state.flush_up_to(ts).await?;
-                            }
-                            Some(Ok(StreamData::Control(signal))) => {
-                                let is_terminal = signal.is_terminal();
-                                let is_graceful = signal.is_graceful_end();
-                                if is_terminal {
-                                    if is_graceful {
-                                        state.flush_all().await?;
-                                    } else {
-                                        state.drop_all();
+                                let terminal = data.is_terminal();
+                                let collection_input = matches!(data, StreamData::Collection(_));
+                                let started = std::time::Instant::now();
+                                let mut outputs = match state.process(data) {
+                                    Ok(outputs) => outputs,
+                                    Err(error) => {
+                                        stats.record_error_logged("tumbling window processor error", error.to_string());
+                                        stats.record_handle_duration(started.elapsed());
+                                        continue;
                                     }
+                                };
+                                if collection_input { stats.record_handle_duration(started.elapsed()); }
+                                while let Some(data) = state.next_output(&mut outputs)? {
+                                    let rows = data.row_count();
                                     send_with_backpressure(
-                                        &output,
-                                        channel_capacities.data,
-                                        StreamData::control(signal),
-                                        Some(stats.as_ref()),
-                                    )
-                                    .await?;
-                                    tracing::info!(processor_id = %id, "stopped");
-                                    return Ok(());
+                                        &output, channel_capacities.data, data, Some(stats.as_ref()),
+                                    ).await?;
+                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
                                 }
-                                send_with_backpressure(
-                                    &output,
-                                    channel_capacities.data,
-                                    StreamData::control(signal),
-                                    Some(stats.as_ref()),
-                                )
-                                .await?;
-                            }
-                            Some(Ok(other)) => {
-                                let is_terminal = other.is_terminal();
-                                send_with_backpressure(
-                                    &output,
-                                    channel_capacities.data,
-                                    other,
-                                    Some(stats.as_ref()),
-                                )
-                                .await?;
-                                if is_terminal {
-                                    // Non-graceful end on data path: drop buffered rows.
-                                    state.drop_all();
-                                    tracing::info!(processor_id = %id, "stopped");
-                                    return Ok(());
-                                }
+                                if terminal { return Ok(()); }
                             }
                             Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
                                 log_broadcast_lagged(&id, skipped, "tumbling window data input");
@@ -229,44 +191,144 @@ impl Processor for TumblingWindowProcessor {
     }
 }
 
-struct PartitionedProcessingState {
+/// Synchronous window engine shared by channel and inline execution.
+pub(crate) struct TumblingWindowStage {
     state_ids: HashMap<PartitionKey, usize>,
     states: Vec<ProcessingState>,
     window_length: Duration,
     partition_by_scalars: Vec<ScalarExpr>,
-    output: LinkOutput<StreamData>,
-    data_channel_capacity: usize,
     stats: Arc<ProcessorStats>,
     rows_buffered: GaugeHandle,
+    buffered_rows: usize,
 }
 
-impl PartitionedProcessingState {
-    fn new(
+/// Incremental window output, with no task, Future, or transport ownership.
+pub(crate) enum TumblingWindowOutput {
+    Single(Option<StreamData>),
+    Drain {
+        partition: usize,
+        watermark: Option<SystemTime>,
+        terminal: Option<ControlSignal>,
+    },
+}
+
+impl TumblingWindowStage {
+    pub(crate) fn new(
         window_length: Duration,
         partition_by_scalars: Vec<ScalarExpr>,
-        output: LinkOutput<StreamData>,
-        data_channel_capacity: usize,
         stats: Arc<ProcessorStats>,
     ) -> Self {
-        let rows_buffered = stats.register_gauge(MetricSpec {
-            id: "window.rows_buffered",
-            flat_name: "rows_buffered",
-            kind: MetricKind::Gauge,
-        });
+        let rows_buffered = Self::buffer_gauge(&stats);
         rows_buffered.set(0);
         Self {
             state_ids: HashMap::new(),
             states: Vec::new(),
             window_length,
             partition_by_scalars,
-            output,
-            data_channel_capacity,
             stats,
             rows_buffered,
+            buffered_rows: 0,
         }
     }
 
-    async fn add_collection(
+    fn buffer_gauge(stats: &ProcessorStats) -> GaugeHandle {
+        stats.register_gauge(MetricSpec {
+            id: "window.rows_buffered",
+            flat_name: "rows_buffered",
+            kind: MetricKind::Gauge,
+        })
+    }
+
+    pub(crate) fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
+        self.rows_buffered = Self::buffer_gauge(&stats);
+        self.rows_buffered.set(self.buffered_rows as u64);
+        for state in &mut self.states {
+            state.stats = Arc::clone(&stats);
+        }
+        self.stats = stats;
+    }
+
+    pub(crate) fn process(
+        &mut self,
+        data: StreamData,
+    ) -> Result<TumblingWindowOutput, ProcessorError> {
+        match data {
+            StreamData::Collection(collection) => {
+                self.add_collection(collection)?;
+                Ok(TumblingWindowOutput::Single(None))
+            }
+            StreamData::Watermark(watermark) => Ok(TumblingWindowOutput::Drain {
+                partition: 0,
+                watermark: Some(watermark),
+                terminal: None,
+            }),
+            StreamData::Control(signal) if signal.is_terminal() => {
+                if signal.is_graceful_end() {
+                    Ok(TumblingWindowOutput::Drain {
+                        partition: 0,
+                        watermark: None,
+                        terminal: Some(signal),
+                    })
+                } else {
+                    self.drop_all();
+                    Ok(TumblingWindowOutput::Single(Some(StreamData::control(
+                        signal,
+                    ))))
+                }
+            }
+            other => Ok(TumblingWindowOutput::Single(Some(other))),
+        }
+    }
+
+    pub(crate) fn next_output(
+        &mut self,
+        output: &mut TumblingWindowOutput,
+    ) -> Result<Option<StreamData>, ProcessorError> {
+        match output {
+            TumblingWindowOutput::Single(data) => Ok(data.take()),
+            TumblingWindowOutput::Drain {
+                partition,
+                watermark,
+                terminal,
+            } => {
+                while let Some(state) = self.states.get_mut(*partition) {
+                    let before = state.rows.len();
+                    let result = state.next_window(*watermark);
+                    self.buffered_rows -= before - state.rows.len();
+                    self.rows_buffered.set(self.buffered_rows as u64);
+                    if let Some(batch) = result? {
+                        return Ok(Some(StreamData::collection(batch)));
+                    }
+                    *partition += 1;
+                }
+                Ok(terminal.take().map(StreamData::control))
+            }
+        }
+    }
+
+    pub(crate) fn drop_all(&mut self) {
+        for state in &mut self.states {
+            state.rows.clear();
+        }
+        self.buffered_rows = 0;
+        self.rows_buffered.set(0);
+    }
+
+    fn state_for(&mut self, key: PartitionKey) -> &mut ProcessingState {
+        if let Some(&id) = self.state_ids.get(&key) {
+            return &mut self.states[id];
+        }
+        let id = self.states.len();
+        self.state_ids.insert(key, id);
+        self.states.push(ProcessingState {
+            rows: VecDeque::new(),
+            window_length: self.window_length,
+            stats: Arc::clone(&self.stats),
+        });
+        &mut self.states[id]
+    }
+
+    fn add_collection(
         &mut self,
         collection: Box<dyn crate::model::Collection>,
     ) -> Result<(), ProcessorError> {
@@ -317,255 +379,91 @@ impl PartitionedProcessingState {
                         continue;
                     }
                 };
-            self.state_for(partition_key).add_tuple(tuple);
+            self.state_for(partition_key).rows.push_back(tuple);
+            self.buffered_rows += 1;
         }
-        self.update_rows_buffered();
+        self.rows_buffered.set(self.buffered_rows as u64);
         Ok(())
-    }
-
-    async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
-        for state in &mut self.states {
-            state.flush_up_to(watermark).await?;
-        }
-        self.update_rows_buffered();
-        Ok(())
-    }
-
-    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
-        for state in &mut self.states {
-            state.flush_all().await?;
-        }
-        self.update_rows_buffered();
-        Ok(())
-    }
-
-    fn drop_all(&mut self) {
-        for state in &mut self.states {
-            state.rows.clear();
-        }
-        self.update_rows_buffered();
-    }
-
-    fn update_rows_buffered(&self) {
-        let total = self
-            .states
-            .iter()
-            .map(|state| state.rows.len() as u64)
-            .sum();
-        self.rows_buffered.set(total);
-    }
-
-    fn state_for(&mut self, key: PartitionKey) -> &mut ProcessingState {
-        if let Some(id) = self.state_ids.get(&key).copied() {
-            return &mut self.states[id];
-        }
-
-        let id = self.states.len();
-        self.state_ids.insert(key, id);
-        self.states.push(ProcessingState::new(
-            self.window_length,
-            self.output.clone(),
-            self.data_channel_capacity,
-            Arc::clone(&self.stats),
-        ));
-        &mut self.states[id]
     }
 }
 
-/// Processing-time window state: assumes timestamps are non-decreasing, buffers rows in order.
+/// Per-partition ordered row buffer; transport is owned by the caller.
 struct ProcessingState {
     rows: VecDeque<crate::model::Tuple>,
     window_length: Duration,
-    output: LinkOutput<StreamData>,
-    data_channel_capacity: usize,
     stats: Arc<ProcessorStats>,
 }
 
 impl ProcessingState {
-    fn new(
-        window_length: Duration,
-        output: LinkOutput<StreamData>,
-        data_channel_capacity: usize,
-        stats: Arc<ProcessorStats>,
-    ) -> Self {
-        Self {
-            rows: VecDeque::new(),
-            window_length,
-            output,
-            data_channel_capacity,
-            stats,
-        }
-    }
-
-    fn add_tuple(&mut self, tuple: crate::model::Tuple) {
-        self.rows.push_back(tuple);
-    }
-
-    async fn flush_up_to(&mut self, watermark: SystemTime) -> Result<(), ProcessorError> {
-        // Flush whole windows whose end <= watermark.
+    fn next_window(
+        &mut self,
+        watermark: Option<SystemTime>,
+    ) -> Result<Option<Box<dyn crate::model::Collection>>, ProcessorError> {
         while let Some(front) = self.rows.front() {
-            let window_start = match window_metadata::floor_to_window_start(
+            let start = match window_metadata::floor_to_window_start(
                 front.timestamp,
                 self.window_length,
                 "timestamp",
             ) {
                 Ok(start) => start,
-                Err(err) => {
+                Err(error) => {
                     self.stats
-                        .record_error_logged("tumbling window processor error", err.to_string());
+                        .record_error_logged("tumbling window processor error", error.to_string());
                     self.rows.pop_front();
                     continue;
                 }
             };
-            let window_end = match window_start.checked_add(self.window_length) {
+            let end = match start.checked_add(self.window_length) {
                 Some(end) => end,
                 None => {
                     self.stats.record_error_logged(
                         "tumbling window processor error",
-                        "tumblingwindow end timestamp overflow".to_string(),
+                        "tumblingwindow end timestamp overflow",
                     );
                     self.rows.pop_front();
                     continue;
                 }
             };
-            if window_end > watermark {
-                break;
+            if watermark.is_some_and(|limit| end > limit) {
+                return Ok(None);
             }
-
-            let mut current_rows = Vec::new();
-            while let Some(row) = self.rows.front() {
+            let mut rows = Vec::new();
+            while let Some(front) = self.rows.front() {
                 let row_start = match window_metadata::floor_to_window_start(
-                    row.timestamp,
+                    front.timestamp,
                     self.window_length,
                     "timestamp",
                 ) {
                     Ok(start) => start,
-                    Err(err) => {
+                    Err(error) => {
                         self.stats.record_error_logged(
                             "tumbling window processor error",
-                            err.to_string(),
+                            error.to_string(),
                         );
                         self.rows.pop_front();
                         continue;
                     }
                 };
-                if row_start != window_start {
+                if row_start != start {
                     break;
                 }
-                let row = self.rows.pop_front().ok_or_else(|| {
+                rows.push(self.rows.pop_front().ok_or_else(|| {
                     ProcessorError::ProcessingError(
-                        "tumbling window row buffer corrupted during flush".to_string(),
+                        "tumbling window row buffer corrupted during flush".into(),
                     )
-                })?;
-                current_rows.push(row);
+                })?);
             }
-
-            if current_rows.is_empty() {
+            if rows.is_empty() {
                 continue;
             }
-            let row_count = current_rows.len() as u64;
-            let batch = match window_metadata::record_batch_from_system_time(
-                current_rows,
-                window_start,
-                window_end,
-            ) {
-                Ok(batch) => batch,
-                Err(err) => {
-                    self.stats
-                        .record_error_logged("tumbling window processor error", err.to_string());
-                    continue;
-                }
-            };
-            send_with_backpressure(
-                &self.output,
-                self.data_channel_capacity,
-                StreamData::collection(Box::new(batch)),
-                Some(self.stats.as_ref()),
-            )
-            .await?;
-            self.stats.record_collection_out(row_count);
-        }
-        Ok(())
-    }
-
-    async fn flush_all(&mut self) -> Result<(), ProcessorError> {
-        while let Some(front) = self.rows.front() {
-            let window_start = match window_metadata::floor_to_window_start(
-                front.timestamp,
-                self.window_length,
-                "timestamp",
-            ) {
-                Ok(start) => start,
-                Err(err) => {
-                    self.stats
-                        .record_error_logged("tumbling window processor error", err.to_string());
-                    self.rows.pop_front();
-                    continue;
-                }
-            };
-            let mut current_rows = Vec::new();
-            while let Some(row) = self.rows.front() {
-                let row_start = match window_metadata::floor_to_window_start(
-                    row.timestamp,
-                    self.window_length,
-                    "timestamp",
-                ) {
-                    Ok(start) => start,
-                    Err(err) => {
-                        self.stats.record_error_logged(
-                            "tumbling window processor error",
-                            err.to_string(),
-                        );
-                        self.rows.pop_front();
-                        continue;
-                    }
-                };
-                if row_start != window_start {
-                    break;
-                }
-                let row = self.rows.pop_front().ok_or_else(|| {
-                    ProcessorError::ProcessingError(
-                        "tumbling window row buffer corrupted during flush_all".to_string(),
-                    )
-                })?;
-                current_rows.push(row);
+            match window_metadata::record_batch_from_system_time(rows, start, end) {
+                Ok(batch) => return Ok(Some(Box::new(batch))),
+                Err(error) => self
+                    .stats
+                    .record_error_logged("tumbling window processor error", error.to_string()),
             }
-            if current_rows.is_empty() {
-                continue;
-            }
-            let row_count = current_rows.len() as u64;
-            let window_end = match window_start.checked_add(self.window_length) {
-                Some(end) => end,
-                None => {
-                    self.stats.record_error_logged(
-                        "tumbling window processor error",
-                        "tumblingwindow end timestamp overflow".to_string(),
-                    );
-                    continue;
-                }
-            };
-            let batch = match window_metadata::record_batch_from_system_time(
-                current_rows,
-                window_start,
-                window_end,
-            ) {
-                Ok(batch) => batch,
-                Err(err) => {
-                    self.stats
-                        .record_error_logged("tumbling window processor error", err.to_string());
-                    continue;
-                }
-            };
-            send_with_backpressure(
-                &self.output,
-                self.data_channel_capacity,
-                StreamData::collection(Box::new(batch)),
-                Some(self.stats.as_ref()),
-            )
-            .await?;
-            self.stats.record_collection_out(row_count);
         }
-        Ok(())
+        Ok(None)
     }
 }
 

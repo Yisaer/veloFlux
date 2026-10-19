@@ -58,7 +58,7 @@ pub struct AggregationProcessor {
 
 impl AggregationProcessor {
     /// Process a collection with optional grouping (group_by_scalars in PhysicalAggregation).
-    fn process_batch_with_grouping(
+    pub(crate) fn process_batch_with_grouping(
         physical_aggregation: &PhysicalAggregation,
         aggregate_registry: &Arc<AggregateFunctionRegistry>,
         collection: &dyn Collection,

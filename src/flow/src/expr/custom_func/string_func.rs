@@ -536,6 +536,10 @@ pub fn upper_function_def() -> FunctionDef {
 }
 
 impl CustomFunc for ConcatFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_two_strict_strings(args)
     }
@@ -553,6 +557,10 @@ impl CustomFunc for ConcatFunc {
 }
 
 impl CustomFunc for EndsWithFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_two_strings_or_null(args)
     }
@@ -567,6 +575,10 @@ impl CustomFunc for EndsWithFunc {
 }
 
 impl CustomFunc for IndexOfFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_two_strings_or_null(args)
     }
@@ -586,6 +598,10 @@ impl CustomFunc for IndexOfFunc {
 }
 
 impl CustomFunc for LengthFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_string_or_null(args)
     }
@@ -600,6 +616,10 @@ impl CustomFunc for LengthFunc {
 }
 
 impl CustomFunc for LowerFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_string_or_null(args)
     }
@@ -614,6 +634,10 @@ impl CustomFunc for LowerFunc {
 }
 
 impl CustomFunc for LPadFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_string_i64_or_null(args)
     }
@@ -628,6 +652,10 @@ impl CustomFunc for LPadFunc {
 }
 
 impl CustomFunc for LTrimFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_string_or_null(args)
     }
@@ -642,6 +670,10 @@ impl CustomFunc for LTrimFunc {
 }
 
 impl CustomFunc for NumBytesFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_string_or_null(args)
     }
@@ -656,6 +688,10 @@ impl CustomFunc for NumBytesFunc {
 }
 
 impl CustomFunc for RegexpMatchesFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_two_strings_or_null(args)
     }
@@ -673,6 +709,10 @@ impl CustomFunc for RegexpMatchesFunc {
 }
 
 impl CustomFunc for RegexpReplaceFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[3])?;
         nth_string_or_null(args, 0)?;
@@ -694,6 +734,10 @@ impl CustomFunc for RegexpReplaceFunc {
 }
 
 impl CustomFunc for RegexpSubstrFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_two_strings_or_null(args)
     }
@@ -718,6 +762,10 @@ impl CustomFunc for RegexpSubstrFunc {
 }
 
 impl CustomFunc for CompiledRegexpMatchesFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_two_strings_or_null(args)
     }
@@ -732,6 +780,10 @@ impl CustomFunc for CompiledRegexpMatchesFunc {
 }
 
 impl CustomFunc for CompiledRegexpReplaceFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[3])?;
         nth_string_or_null(args, 0)?;
@@ -752,6 +804,10 @@ impl CustomFunc for CompiledRegexpReplaceFunc {
 }
 
 impl CustomFunc for CompiledRegexpSubstrFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_two_strings_or_null(args)
     }
@@ -776,6 +832,10 @@ impl CustomFunc for CompiledRegexpSubstrFunc {
 }
 
 impl CustomFunc for ReverseFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_string_or_null(args)
     }
@@ -790,6 +850,10 @@ impl CustomFunc for ReverseFunc {
 }
 
 impl CustomFunc for RPadFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_string_i64_or_null(args)
     }
@@ -804,6 +868,10 @@ impl CustomFunc for RPadFunc {
 }
 
 impl CustomFunc for RTrimFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_string_or_null(args)
     }
@@ -818,6 +886,10 @@ impl CustomFunc for RTrimFunc {
 }
 
 impl CustomFunc for SubstringFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2, 3])?;
         nth_string_or_null(args, 0)?;
@@ -858,6 +930,10 @@ impl CustomFunc for SubstringFunc {
 }
 
 impl CustomFunc for StartsWithFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_two_strings_or_null(args)
     }
@@ -872,6 +948,10 @@ impl CustomFunc for StartsWithFunc {
 }
 
 impl CustomFunc for SplitValueFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[3])?;
         nth_string_or_null(args, 0)?;
@@ -913,6 +993,10 @@ impl CustomFunc for SplitValueFunc {
 }
 
 impl CustomFunc for TrimFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_string_or_null(args)
     }
@@ -927,6 +1011,10 @@ impl CustomFunc for TrimFunc {
 }
 
 impl CustomFunc for UpperFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_one_string_or_null(args)
     }
@@ -1012,6 +1100,10 @@ fn format_decimal_with_locale(
 }
 
 impl CustomFunc for FormatFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2, 3])?;
         nth_f64_or_null(args, 0)?;

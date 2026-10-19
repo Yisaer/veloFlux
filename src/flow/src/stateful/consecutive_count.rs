@@ -122,6 +122,10 @@ impl StatefulEvalUpdate for ConsecutiveCountUpdate {
 }
 
 impl StatefulFunction for ConsecutiveCountFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "consecutive_count"
     }

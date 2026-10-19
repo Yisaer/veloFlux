@@ -107,6 +107,10 @@ impl StatefulEvalUpdate for LatestUpdate {
 }
 
 impl StatefulFunction for LatestFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "latest"
     }

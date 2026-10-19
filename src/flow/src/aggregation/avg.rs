@@ -86,6 +86,10 @@ impl Default for AvgFunction {
 }
 
 impl AggregateFunction for AvgFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "avg"
     }

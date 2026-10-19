@@ -111,6 +111,7 @@ pub struct PipelineExplain {
     pub options: Option<PipelineExplainOptions>,
     pub logical: ExplainReport,
     pub physical: ExplainReport,
+    execution: Result<crate::planner::execution::ExecutionPlan, String>,
 }
 
 impl PipelineExplain {
@@ -119,6 +120,7 @@ impl PipelineExplain {
         physical_plan: Arc<PhysicalPlan>,
         config: PipelineExplainConfig,
     ) -> Self {
+        let execution = crate::planner::execution::ExecutionPlan::build(&physical_plan);
         let logical = ExplainReport {
             root: build_logical_node(&logical_plan),
         };
@@ -139,24 +141,35 @@ impl PipelineExplain {
             options: config.pipeline_options,
             logical,
             physical,
+            execution,
         }
     }
 
     pub fn to_pretty_string(&self) -> String {
         format!(
-            "Logical Plan Explain:\n{}\n\nPhysical Plan Explain:\n{}",
+            "Logical Plan Explain:\n{}\n\nPhysical Plan Explain:\n{}\n\nExecution Regions:\n{}",
             self.logical.table_string(),
-            self.physical.table_string()
+            self.physical.table_string(),
+            serde_json::to_string_pretty(&self.execution_to_json()).unwrap_or_default()
         )
     }
 
-    /// Structured JSON view containing both logical and physical explains.
+    /// Complete JSON view containing options, semantic plans, and execution placement.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::json!({
             "options": self.options,
             "logical": self.logical.to_json(),
             "physical": self.physical.to_json(),
+            "execution": self.execution_to_json(),
         })
+    }
+
+    /// Execution-only view, also included in the complete `to_json()` output.
+    pub fn execution_to_json(&self) -> serde_json::Value {
+        match &self.execution {
+            Ok(plan) => serde_json::to_value(plan).unwrap_or(serde_json::Value::Null),
+            Err(error) => serde_json::json!({ "error": error }),
+        }
     }
 }
 
@@ -1012,53 +1025,6 @@ fn build_physical_node_with_prefix(
                 }
             }
         }
-        PhysicalPlan::FusedTransform(fused) => {
-            info.push(format!("sink_id={}", fused.sink_id));
-            match fused.encoder.as_ref() {
-                Some(encoder) => info.push(format!("encoder={}", encoder.kind_str())),
-                None => info.push("encoder=none".to_string()),
-            }
-            let mut stages = Vec::new();
-            if fused.filter.is_some() && fused.filter_before_order {
-                stages.push("filter");
-            }
-            if fused.order.is_some() {
-                stages.push("order");
-            }
-            if fused.filter.is_some() && !fused.filter_before_order {
-                stages.push("filter");
-            }
-            stages.push("project");
-            if fused.encoder.is_some() {
-                stages.push("encoder");
-            }
-            if fused.compress.is_some() {
-                stages.push("compress");
-            }
-            if fused.encrypt.is_some() {
-                stages.push("encrypt");
-            }
-            info.push(format!("fused={}", stages.join("+")));
-            if let Some(compress) = fused.compress.as_ref() {
-                info.push(format!("codec={}", compress.kind_str()));
-                if let Some(level) = compress.level_display() {
-                    info.push(format!("level={level}"));
-                }
-            }
-            if let Some(encrypt) = fused.encrypt.as_ref() {
-                info.push(format!("algorithm={}", encrypt.algorithm.as_str()));
-                info.push(format!("key_bits={}", encrypt.key_bits));
-                info.push(format!("key_id={}", encrypt.key_id));
-            }
-            if fused.batch_count.is_some() || fused.batch_duration.is_some() {
-                if let Some(count) = fused.batch_count {
-                    info.push(format!("batch_count={}", count));
-                }
-                if let Some(duration) = fused.batch_duration {
-                    info.push(format!("batch_duration_ms={}", duration.as_millis()));
-                }
-            }
-        }
         PhysicalPlan::IncSinkEncoder(encoder) => {
             info.push(format!("sink_id={}", encoder.sink_id));
             info.push(format!("encoder={}", encoder.encoder.kind_str()));
@@ -1338,6 +1304,8 @@ mod tests {
             Arc::clone(&schema),
             StreamDecoderConfig::json(),
             None,
+            true,
+            &crate::codec::MergerRegistry::new(),
         );
 
         let plan = Arc::new(PhysicalPlan::SharedStream(PhysicalSharedStream::new(
@@ -1394,6 +1362,8 @@ mod tests {
             Arc::clone(&schema),
             StreamDecoderConfig::json(),
             Some(SamplerConfig::new(Duration::from_millis(100))),
+            true,
+            &crate::codec::MergerRegistry::new(),
         );
 
         let report = ExplainReport::from_physical(plan);

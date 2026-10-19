@@ -26,13 +26,16 @@ mod streaming_tumbling_aggregation_processor;
 
 pub use streaming_count_aggregation_processor::StreamingCountAggregationProcessor;
 pub use streaming_eos_aggregation_processor::StreamingEosAggregationProcessor;
+pub(crate) use streaming_eos_aggregation_processor::StreamingEosStage;
 #[path = "streaming_sliding_aggregation_processor.rs"]
 mod streaming_sliding_aggregation_processor;
 pub use streaming_sliding_aggregation_processor::StreamingSlidingAggregationProcessor;
+pub(crate) use streaming_sliding_aggregation_processor::StreamingSlidingStage;
 pub use streaming_tumbling_aggregation_processor::StreamingTumblingAggregationProcessor;
 #[path = "streaming_state_aggregation_processor.rs"]
 mod streaming_state_aggregation_processor;
 pub use streaming_state_aggregation_processor::StreamingStateAggregationProcessor;
+pub(crate) use streaming_state_aggregation_processor::StreamingStateStage;
 
 /// StreamingAggregationProcessor - performs incremental aggregation with windowing.
 pub enum StreamingAggregationProcessor {
@@ -42,6 +45,9 @@ pub enum StreamingAggregationProcessor {
     State(StreamingStateAggregationProcessor),
     Eos(StreamingEosAggregationProcessor),
 }
+
+pub(crate) use streaming_count_aggregation_processor::{StreamingCountOutput, StreamingCountStage};
+pub(crate) use streaming_tumbling_aggregation_processor::StreamingTumblingStage;
 
 impl StreamingAggregationProcessor {
     pub fn new(

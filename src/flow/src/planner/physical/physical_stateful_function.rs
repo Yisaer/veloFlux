@@ -24,6 +24,7 @@ impl PartitionGroupKey {
 
 #[derive(Debug, Clone)]
 pub struct StatefulCall {
+    pub supports_inline_execution: bool,
     pub output_column: String,
     pub func_name: String,
     pub arg_scalars: Vec<ScalarExpr>,

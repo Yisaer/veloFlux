@@ -72,15 +72,32 @@ first observed data variant. Receiving data outside the planned domain is a pipe
 Conversion boundaries deliberately expose different units by direction. A decoder declares
 message/byte input and collection/row output. An encoder declares collection/row input and
 message/byte output; it does not expose `records_out` because rows are not its output domain.
-A fused transform declares collection input and either collection output
-(`encoder:none`) or encoded message/byte output. Internal filter/project
-collections do not contribute output counters.
-Its processor kind is `fused_transform`; the separate connector retains kind
-`sink`. Encoded output counters describe the final stage's successfully
-forwarded chunks and completed deliveries, excluding internal encoder output.
-For a fused task, `messages_aborted` counts distinct aborted deliveries; multiple
-stage failures in the same delivery increment it once and each increments
-`error_count`.
+Encoded regions count `messages_aborted` once per delivery even when several constituent
+stages fail. Stage errors contribute to the region error count, and the last error retains
+the physical stage name. Encoder output is an internal handoff when compression/encryption
+follows it; those bytes do not inflate the region's final output counters.
+
+Supported stages, including singletons, run in tasks with kind `region` and ID
+`Region_<output-plan-index>`. Region counters measure actual input and successfully
+forwarded output in the corresponding message/byte or collection/row domain; eliminated
+internal handoffs do not count as region traffic. Constituent stages do not expose stats
+entries, traffic counters, duration histograms, or buffer gauges. Shared engines retain a
+stage error context that logs the physical stage identity and forwards errors to the
+region. Their optional internal metric handles are disabled inside regions. Independent
+source and sink processors retain their own metrics; an eligible stage running alone uses
+the same region metrics as a multi-stage region.
+
+Region handling durations include synchronous engine and executor work, including Barrier
+alignment on both data and control lanes, timer, control pre-flush, terminal and EOF callbacks. Callbacks that produce no output or return
+an error still contribute their synchronous time. External output waits and cooperative
+yields are excluded. Output counters advance only after
+successful external sends. Pipeline link gauges count retained external connections.
+The historical `fused_transform` production kind has been removed; sink connectors retain
+kind `sink`.
+See [Fixed Execution Regions](../../planner/optimize/physical/execution_regions.md).
+A [planned semantic-metrics follow-up](../../planner/optimize/physical/execution_regions.md#planned-follow-up-selective-semantic-stage-metrics)
+describes selective filter/drop/window effects without restoring generic per-stage
+performance monitoring; these semantic counters are not implemented yet.
 
 Every sink declares message output. A collection-native sink declares collection/row input and
 message output; retaining a collection as the payload representation does not turn the sink output
@@ -155,8 +172,9 @@ Manager filters out some internal processors before returning pipeline stats:
 - `PhysicalResultCollect_*`
 
 The goal is to keep the payload focused on user-meaningful runtime work instead of framework
-bookends. Tests should therefore assert stats on semantic processors such as decoder, project,
-watermark, sampler, sink, and similar stages.
+bookends. Tests should assert external traffic on runtime regions and independent source/sink
+processors. Use the execution plan to identify the region owning a semantic stage; do not expect
+separate decoder, project, watermark, or sampler stats entries.
 
 ## Error Reporting
 

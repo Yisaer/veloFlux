@@ -17,7 +17,7 @@ use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 #[derive(Default)]
-struct SourceChangeGateState {
+pub(crate) struct SourceChangeGateState {
     previous_tracked_row: Option<Vec<Option<Value>>>,
 }
 
@@ -93,7 +93,7 @@ fn extract_tracked_row(
         .collect()
 }
 
-fn gate_collection(
+pub(crate) fn gate_collection(
     collection: Box<dyn crate::model::Collection>,
     source_name: &str,
     tracked_column_indexes: &[usize],

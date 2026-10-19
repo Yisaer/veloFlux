@@ -20,10 +20,22 @@ use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 #[derive(Clone)]
-struct ComputeExpr {
+pub(crate) struct ComputeExpr {
     output_name: Arc<String>,
     field_name: String,
     expr: ScalarExpr,
+}
+
+/// Build task-local expression configuration once, shared by standalone and region execution.
+pub(crate) fn compute_fields(plan: &PhysicalCompute) -> Vec<ComputeExpr> {
+    plan.fields
+        .iter()
+        .map(|field| ComputeExpr {
+            output_name: Arc::new(field.field_name.clone()),
+            field_name: field.field_name.clone(),
+            expr: field.compiled_expr.clone(),
+        })
+        .collect()
 }
 
 /// ComputeProcessor - evaluates expressions and appends them as affiliate columns.
@@ -53,15 +65,7 @@ impl ComputeProcessor {
             channel_capacities.control_link_kind,
             channel_capacities.control,
         );
-        let fields = physical_compute
-            .fields
-            .iter()
-            .map(|field| ComputeExpr {
-                output_name: Arc::new(field.field_name.clone()),
-                field_name: field.field_name.clone(),
-                expr: field.compiled_expr.clone(),
-            })
-            .collect();
+        let fields = compute_fields(&physical_compute);
         Self {
             id: id.into(),
             fields,
@@ -87,7 +91,7 @@ impl ComputeProcessor {
     }
 }
 
-fn apply_compute(
+pub(crate) fn apply_compute(
     input_collection: &dyn Collection,
     fields: &[ComputeExpr],
     stats: Option<&ProcessorStats>,

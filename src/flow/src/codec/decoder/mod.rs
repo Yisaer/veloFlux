@@ -38,6 +38,11 @@ pub enum CodecError {
 
 /// Trait implemented by all record decoders.
 pub trait RecordDecoder: Send + Sync + 'static {
+    /// Direct decoder instances default to isolated execution.
+    fn supports_inline_execution(&self) -> bool {
+        false
+    }
+
     /// Convert raw bytes into a RecordBatch, optionally applying a decode projection.
     ///
     /// Projection semantics:
@@ -267,6 +272,9 @@ impl FileLineDecoder {
 }
 
 impl RecordDecoder for FileLineDecoder {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
     fn decode_with_projection(
         &self,
         payload: &[u8],
@@ -352,6 +360,9 @@ fn parse_file_line_frame(payload: &[u8]) -> Result<(&[u8], &[u8]), CodecError> {
 }
 
 impl RecordDecoder for JsonDecoder {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
     fn decode_with_projection(
         &self,
         payload: &[u8],

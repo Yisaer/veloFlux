@@ -19,6 +19,7 @@ pub struct PhysicalIncSinkEncoder {
     pub encoder: SinkEncoderConfig,
     pub common: CommonSinkProps,
     pub output_layout: Option<Arc<OutputLayout>>,
+    pub(crate) supports_inline_execution: bool,
 }
 
 impl PhysicalIncSinkEncoder {
@@ -35,6 +36,7 @@ impl PhysicalIncSinkEncoder {
             encoder,
             common,
             output_layout: None,
+            supports_inline_execution: false,
         }
     }
 }

@@ -205,6 +205,10 @@ fn validate_numeric_input(
 }
 
 impl AggregateFunction for StddevFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "stddev"
     }
@@ -223,6 +227,10 @@ impl AggregateFunction for StddevFunction {
 }
 
 impl AggregateFunction for StddevsFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "stddevs"
     }
@@ -241,6 +249,10 @@ impl AggregateFunction for StddevsFunction {
 }
 
 impl AggregateFunction for VarFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "var"
     }
@@ -259,6 +271,10 @@ impl AggregateFunction for VarFunction {
 }
 
 impl AggregateFunction for VarsFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "vars"
     }

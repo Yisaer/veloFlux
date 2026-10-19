@@ -7,13 +7,18 @@ user pipeline.
 
 When a pipeline consumes a shared stream, the user-facing physical plan contains a
 `PhysicalSharedStream` node, but the actual ingest work is executed by a separate internal shared
-pipeline. Its explain tree looks like:
+pipeline. A simple ingest runtime has this task graph:
 
 ```text
-shared/<stream>/PhysicalDataSource_0
-  -> shared/<stream>/PhysicalDecoder_1
-  -> shared/<stream>/PhysicalResultCollect_2
+shared:<stream>/PhysicalDataSource_0
+  -> shared:<stream>/Region_1
+  -> shared:<stream>/PhysicalResultCollect_2
 ```
+
+The semantic decoder is executed by `Region_1` in this simple example. Larger shared ingest
+plans can fuse more stages into a region; its ID uses the output stage index. Stage metrics are
+not exported separately. Region counters describe external input/output domains, while independent
+sources and result collection retain their own counters.
 
 These processors are the true runtime boundary for:
 
@@ -30,7 +35,7 @@ This becomes a real observability gap once one shared stream is consumed by many
 - pipeline stats are duplicated per consumer pipeline
 - pipeline stats do not describe the shared ingest runtime as a first-class object
 - operators cannot independently inspect shared processors such as
-  `shared/<stream>/PhysicalDataSource_*` or `shared/<stream>/PhysicalDecoder_*`
+  `shared:<stream>/PhysicalDataSource_*` or `shared:<stream>/Region_*`
 
 ## Problem Statement
 
@@ -40,9 +45,9 @@ pipeline.
 The missing observability target is not the per-pipeline `PhysicalSharedStream_*` processor.
 Instead, it is the internal shared ingest processors:
 
-- `shared/<stream>/PhysicalDataSource_*`
-- `shared/<stream>/PhysicalDecoder_*`
-- `shared/<stream>/PhysicalResultCollect_*`
+- `shared:<stream>/PhysicalDataSource_*`
+- `shared:<stream>/Region_*`
+- `shared:<stream>/PhysicalResultCollect_*`
 
 ## Why Stream-Level Stats Only Make Sense For Shared Streams
 
@@ -133,28 +138,32 @@ Suggested response:
   "status_message": null,
   "processors": [
     {
-      "processor_id": "shared/shared_demo/PhysicalDataSource_0",
+      "processor_id": "shared:shared_demo/PhysicalDataSource_0",
       "stats": {
-        "records_in": 100,
-        "records_out": 100,
+        "messages_out": 100,
+        "bytes_out": 2400,
         "error_count": 0,
         "last_error": null
       }
     },
     {
-      "processor_id": "shared/shared_demo/PhysicalDecoder_1",
+      "processor_id": "shared:shared_demo/Region_1",
       "stats": {
-        "records_in": 100,
-        "records_out": 100,
+        "messages_in": 100,
+        "bytes_in": 2400,
+        "collections_out": 99,
+        "records_out": 99,
         "error_count": 1,
         "last_error": "invalid json payload"
       }
     },
     {
-      "processor_id": "shared/shared_demo/PhysicalResultCollect_2",
+      "processor_id": "shared:shared_demo/PhysicalResultCollect_2",
       "stats": {
-        "records_in": 100,
-        "records_out": 100,
+        "collections_in": 99,
+        "records_in": 99,
+        "collections_out": 99,
+        "records_out": 99,
         "error_count": 0,
         "last_error": null
       }

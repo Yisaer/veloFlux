@@ -152,6 +152,9 @@ impl ProtobufDecoder {
 }
 
 impl RecordDecoder for ProtobufDecoder {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
     fn decode_with_projection(
         &self,
         payload: &[u8],

@@ -113,6 +113,7 @@ struct JsonOutput {
     receiver: mpsc::Receiver<StreamData>,
     delivery: Vec<u8>,
     active_delivery: bool,
+    pending: std::collections::VecDeque<JsonValue>,
 }
 
 impl JsonOutput {
@@ -121,6 +122,7 @@ impl JsonOutput {
             receiver,
             delivery: Vec::new(),
             active_delivery: false,
+            pending: Default::default(),
         }
     }
 
@@ -149,6 +151,9 @@ impl JsonOutput {
 }
 
 async fn recv_next_json(output: &mut JsonOutput, timeout_duration: Duration) -> JsonValue {
+    if let Some(value) = output.pending.pop_front() {
+        return value;
+    }
     let deadline = tokio::time::Instant::now() + timeout_duration;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -170,6 +175,10 @@ async fn recv_next_json(output: &mut JsonOutput, timeout_duration: Duration) -> 
 }
 
 async fn assert_no_output(output: &mut JsonOutput, timeout_duration: Duration) {
+    assert!(
+        output.pending.is_empty(),
+        "unexpected buffered sampler output"
+    );
     let deadline = tokio::time::Instant::now() + timeout_duration;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -247,7 +256,7 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
     let sampler_handle = pipeline
         .processor_stats()
         .into_iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
+        .find(|handle| handle.processor_id.starts_with("Region_"))
         .expect("sampler stats should exist");
     for _ in 0..20 {
         if sampler_handle.snapshot().stats.custom["messages_in"] == 5 {
@@ -267,16 +276,6 @@ async fn sampler_latest_emits_only_last_value_per_interval() {
     let actual = recv_next_json(&mut output, Duration::from_millis(10)).await;
     assert_eq!(actual, serde_json::json!([{"x": 5}]));
     assert_no_output(&mut output, Duration::from_millis(100)).await;
-
-    let sampler_stats = sampler_handle.snapshot().stats;
-    assert_eq!(
-        sampler_stats.custom["messages_in"], 5,
-        "sampler should observe all inputs"
-    );
-    assert_eq!(
-        sampler_stats.custom["messages_out"], 1,
-        "sampler should emit one sampled message"
-    );
 
     timeout(
         Duration::from_secs(2),
@@ -341,22 +340,6 @@ async fn sampler_latest_flushes_buffer_on_close() {
         actual
     };
     assert_eq!(actual, serde_json::json!([{"x": 20}]));
-
-    let sampler_stats = pipeline
-        .processor_stats()
-        .iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
-        .expect("sampler stats should exist")
-        .snapshot()
-        .stats;
-    assert_eq!(
-        sampler_stats.custom["messages_in"], 2,
-        "sampler should observe both inputs"
-    );
-    assert_eq!(
-        sampler_stats.custom["messages_out"], 1,
-        "sampler should flush one buffered message on close"
-    );
 }
 
 #[tokio::test]
@@ -409,22 +392,6 @@ async fn sampler_latest_before_filter_and_projection() {
 
     let actual = recv_next_json(&mut output, Duration::from_millis(500)).await;
     assert_eq!(actual, serde_json::json!([{"sampled": 20}]));
-
-    let sampler_stats = pipeline
-        .processor_stats()
-        .iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
-        .expect("sampler stats should exist")
-        .snapshot()
-        .stats;
-    assert_eq!(
-        sampler_stats.custom["messages_in"], 3,
-        "sampler should observe both filtered and passing inputs"
-    );
-    assert_eq!(
-        sampler_stats.custom["messages_out"], 2,
-        "sampler should emit one sampled message per interval before downstream filtering"
-    );
 
     timeout(
         Duration::from_secs(2),
@@ -485,22 +452,6 @@ async fn sampler_latest_with_omit_if_empty_suppresses_empty_windows() {
 
     let actual = recv_next_json(&mut output, Duration::from_millis(500)).await;
     assert_eq!(actual, serde_json::json!([{"sampled": 20}]));
-
-    let sampler_stats = pipeline
-        .processor_stats()
-        .iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
-        .expect("sampler stats should exist")
-        .snapshot()
-        .stats;
-    assert_eq!(
-        sampler_stats.custom["messages_in"], 3,
-        "sampler should observe filtered and non-filtered inputs before omit_if_empty"
-    );
-    assert_eq!(
-        sampler_stats.custom["messages_out"], 2,
-        "sampler should still emit one sampled message per interval before downstream suppression"
-    );
 
     timeout(
         Duration::from_secs(2),
@@ -578,22 +529,6 @@ async fn sampler_latest_before_row_diff_delta_output() {
 
     let third = recv_next_json(&mut output, Duration::from_millis(500)).await;
     assert_eq!(third, serde_json::json!([{"sampled": 3}]));
-
-    let sampler_stats = pipeline
-        .processor_stats()
-        .iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
-        .expect("sampler stats should exist")
-        .snapshot()
-        .stats;
-    assert_eq!(
-        sampler_stats.custom["messages_in"], 5,
-        "sampler should observe every raw input before row diff"
-    );
-    assert_eq!(
-        sampler_stats.custom["messages_out"], 3,
-        "sampler should emit one sampled message per interval into row diff"
-    );
 
     timeout(
         Duration::from_secs(2),
@@ -698,22 +633,6 @@ async fn sampler_latest_before_streaming_aggregation_then_delta_output() {
     let third = recv_next_json(&mut output, Duration::from_millis(500)).await;
     assert_eq!(third, serde_json::json!([{"total": 5}]));
 
-    let sampler_stats = pipeline
-        .processor_stats()
-        .iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
-        .expect("sampler stats should exist")
-        .snapshot()
-        .stats;
-    assert_eq!(
-        sampler_stats.custom["messages_in"], 12,
-        "sampler should observe every raw input before streaming aggregation"
-    );
-    assert_eq!(
-        sampler_stats.custom["messages_out"], 6,
-        "sampler should emit one sampled message per interval into streaming aggregation"
-    );
-
     timeout(
         Duration::from_secs(2),
         pipeline.close(Duration::from_secs(1)),
@@ -761,7 +680,7 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
     let sampler_handle = pipeline
         .processor_stats()
         .iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
+        .find(|handle| handle.processor_id.starts_with("Region_"))
         .cloned()
         .expect("sampler stats should exist");
 
@@ -776,7 +695,31 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
             }
             wait_for_sampler_counter(&sampler_handle, "messages_in", $input_count).await;
             tokio::time::advance(interval).await;
-            wait_for_sampler_counter(&sampler_handle, "messages_out", $output_count).await;
+            // A data-lane fence follows the due timer through the same region.
+            // Preserve complete encoded outputs for the assertions below.
+            let fence = flow::processor::ControlSignal::Barrier(
+                flow::processor::BarrierControlSignalKind::SyncTest.with_id($output_count),
+            );
+            pipeline
+                .send_stream_data(
+                    "agg_batch_sampler_stream",
+                    StreamData::control(fence.clone()),
+                )
+                .await
+                .unwrap();
+            loop {
+                let data = output.receiver.recv().await.expect("fence output");
+                match data {
+                    StreamData::Control(signal) if signal == fence => break,
+                    StreamData::EncodedDelivery { flags, bytes } => {
+                        if let Some(value) = output.append_encoded_delivery(flags, bytes) {
+                            output.pending.push_back(value);
+                        }
+                    }
+                    StreamData::Watermark(_) => {}
+                    data => panic!("unexpected fence output: {}", data.description()),
+                }
+            }
         }};
     }
 
@@ -800,16 +743,6 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
         "streaming encoder batching should emit the second complete batch"
     );
 
-    let sampler_stats = sampler_handle.snapshot().stats;
-    assert_eq!(
-        sampler_stats.custom["messages_in"], 16,
-        "sampler should observe every raw input before streaming aggregation and batching"
-    );
-    assert_eq!(
-        sampler_stats.custom["messages_out"], 8,
-        "sampler should still emit one sampled message per interval before downstream batching"
-    );
-
     timeout(
         Duration::from_secs(2),
         pipeline.close(Duration::from_secs(1)),
@@ -821,149 +754,181 @@ async fn sampler_latest_before_streaming_aggregation_then_batched_output() {
 
 #[tokio::test]
 async fn sampler_packer_emits_merged_payload_once_per_interval() {
-    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
-        "default", None,
-    ))
-    .expect("create flow instance");
-    instance.merger_registry().register(
-        "json_object_merge",
-        MergerOutputKind::Bytes,
-        |_props, _schema| Ok(Box::new(JsonObjectMerger::default())),
-    );
-    create_stream_with_sampler(
-        &instance,
-        "packer_stream",
-        &["x", "y"],
-        SamplerConfig::new(Duration::from_millis(200))
-            .with_strategy(packer_strategy("json_object_merge")),
-    )
-    .await;
+    for inline in [false, true] {
+        let instance = FlowInstance::new(
+            flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
+        )
+        .expect("create flow instance");
+        if inline {
+            instance
+                .merger_registry()
+                .register_inline_with_schema_artifact(
+                    "json_object_merge",
+                    MergerOutputKind::Bytes,
+                    |_props, _schema, _artifact| Ok(Box::new(JsonObjectMerger::default())),
+                );
+        } else {
+            instance.merger_registry().register(
+                "json_object_merge",
+                MergerOutputKind::Bytes,
+                |_props, _schema| Ok(Box::new(JsonObjectMerger::default())),
+            );
+        }
+        create_stream_with_sampler(
+            &instance,
+            "packer_stream",
+            &["x", "y"],
+            SamplerConfig::new(Duration::from_millis(200))
+                .with_strategy(packer_strategy("json_object_merge")),
+        )
+        .await;
 
-    let mut pipeline = instance
-        .build_pipeline("SELECT x, y FROM packer_stream", vec![build_result_sink()])
-        .expect("build pipeline");
-    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
+        let sql = "SELECT x, y FROM packer_stream";
+        let definition = flow::PipelineDefinition::new("packer_contract", sql, vec![]);
+        let explain = instance
+            .explain_pipeline(flow::ExplainPipelineTarget::Definition(&definition))
+            .unwrap();
+        println!(
+            "SQL: {sql}; inline merger={inline}\n{}",
+            explain.to_pretty_string()
+        );
+        let execution = explain.execution_to_json();
+        let sampler = execution["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| {
+                stage["name"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("PhysicalSampler_")
+            })
+            .unwrap();
+        assert_eq!(
+            sampler["class"],
+            if inline { "engine" } else { "opaque_function" }
+        );
+        let region = execution["regions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|region| {
+                region["stages"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&sampler["index"])
+            })
+            .unwrap();
+        assert_eq!(
+            region["stages"].as_array().unwrap().len(),
+            if inline { 3 } else { 1 }
+        );
+        let mut pipeline = instance
+            .build_pipeline("SELECT x, y FROM packer_stream", vec![build_result_sink()])
+            .expect("build pipeline");
+        let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
 
-    pipeline.start().await.expect("start pipeline");
-    tokio::time::sleep(Duration::from_millis(50)).await;
+        pipeline.start().await.expect("start pipeline");
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-    for payload in [
-        r#"{"x": 1}"#.as_bytes(),
-        r#"{"y": 2}"#.as_bytes(),
-        r#"{"x": 3}"#.as_bytes(),
-    ] {
-        pipeline
-            .send_stream_data("packer_stream", StreamData::bytes(payload.to_vec()))
-            .await
-            .expect("send data to packer sampler");
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        for payload in [
+            r#"{"x": 1}"#.as_bytes(),
+            r#"{"y": 2}"#.as_bytes(),
+            r#"{"x": 3}"#.as_bytes(),
+        ] {
+            pipeline
+                .send_stream_data("packer_stream", StreamData::bytes(payload.to_vec()))
+                .await
+                .expect("send data to packer sampler");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let actual = recv_next_json(&mut output, Duration::from_millis(500)).await;
+        assert_eq!(actual, serde_json::json!([{"x": 3, "y": 2}]));
+        assert_no_output(&mut output, Duration::from_millis(100)).await;
+
+        timeout(
+            Duration::from_secs(2),
+            pipeline.close(Duration::from_secs(1)),
+        )
+        .await
+        .expect("close pipeline should not hang")
+        .expect("close pipeline");
     }
-
-    let actual = recv_next_json(&mut output, Duration::from_millis(500)).await;
-    assert_eq!(actual, serde_json::json!([{"x": 3, "y": 2}]));
-    assert_no_output(&mut output, Duration::from_millis(100)).await;
-
-    let sampler_stats = pipeline
-        .processor_stats()
-        .iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
-        .expect("sampler stats should exist")
-        .snapshot()
-        .stats;
-    assert_eq!(
-        sampler_stats.custom["messages_in"], 3,
-        "sampler should observe all bytes inputs"
-    );
-    assert_eq!(
-        sampler_stats.custom["messages_out"], 1,
-        "sampler should emit one merged payload per interval"
-    );
-
-    timeout(
-        Duration::from_secs(2),
-        pipeline.close(Duration::from_secs(1)),
-    )
-    .await
-    .expect("close pipeline should not hang")
-    .expect("close pipeline");
 }
 
 #[tokio::test]
 async fn sampler_packer_flushes_buffer_on_close() {
-    let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
-        "default", None,
-    ))
-    .expect("create flow instance");
-    instance.merger_registry().register(
-        "json_object_merge",
-        MergerOutputKind::Bytes,
-        |_props, _schema| Ok(Box::new(JsonObjectMerger::default())),
-    );
-    create_stream_with_sampler(
-        &instance,
-        "packer_flush_stream",
-        &["x", "y"],
-        SamplerConfig::new(Duration::from_secs(1))
-            .with_strategy(packer_strategy("json_object_merge")),
-    )
-    .await;
-
-    let mut pipeline = instance
-        .build_pipeline(
-            "SELECT x, y FROM packer_flush_stream",
-            vec![build_result_sink()],
+    for inline in [false, true] {
+        let instance = FlowInstance::new(
+            flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
         )
-        .expect("build pipeline");
-    let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
-
-    pipeline.start().await.expect("start pipeline");
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    for payload in [r#"{"x": 7}"#.as_bytes(), r#"{"y": 9}"#.as_bytes()] {
-        pipeline
-            .send_stream_data("packer_flush_stream", StreamData::bytes(payload.to_vec()))
-            .await
-            .expect("send data to packer sampler");
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-
-    assert_no_output(&mut output, Duration::from_millis(100)).await;
-
-    let actual = {
-        let close = pipeline.close(Duration::from_secs(1));
-        tokio::pin!(close);
-        let mut close_done = false;
-        let actual = tokio::select! {
-            close_result = &mut close => {
-                close_done = true;
-                close_result.expect("close pipeline");
-                recv_next_json(&mut output, Duration::from_millis(500)).await
-            }
-            actual = recv_next_json(&mut output, Duration::from_secs(2)) => actual,
-        };
-        if !close_done {
-            timeout(Duration::from_secs(2), &mut close)
-                .await
-                .expect("close pipeline should not hang")
-                .expect("close pipeline");
+        .expect("create flow instance");
+        if inline {
+            instance
+                .merger_registry()
+                .register_inline_with_schema_artifact(
+                    "json_object_merge",
+                    MergerOutputKind::Bytes,
+                    |_props, _schema, _artifact| Ok(Box::new(JsonObjectMerger::default())),
+                );
+        } else {
+            instance.merger_registry().register(
+                "json_object_merge",
+                MergerOutputKind::Bytes,
+                |_props, _schema| Ok(Box::new(JsonObjectMerger::default())),
+            );
         }
-        actual
-    };
-    assert_eq!(actual, serde_json::json!([{"x": 7, "y": 9}]));
+        create_stream_with_sampler(
+            &instance,
+            "packer_flush_stream",
+            &["x", "y"],
+            SamplerConfig::new(Duration::from_secs(1))
+                .with_strategy(packer_strategy("json_object_merge")),
+        )
+        .await;
 
-    let sampler_stats = pipeline
-        .processor_stats()
-        .iter()
-        .find(|handle| handle.processor_id.to_lowercase().contains("sampler"))
-        .expect("sampler stats should exist")
-        .snapshot()
-        .stats;
-    assert_eq!(
-        sampler_stats.custom["messages_in"], 2,
-        "sampler should observe both packed inputs"
-    );
-    assert_eq!(
-        sampler_stats.custom["messages_out"], 1,
-        "sampler should flush one merged payload on close"
-    );
+        let mut pipeline = instance
+            .build_pipeline(
+                "SELECT x, y FROM packer_flush_stream",
+                vec![build_result_sink()],
+            )
+            .expect("build pipeline");
+        let mut output = JsonOutput::new(pipeline.take_output().expect("take output receiver"));
+
+        pipeline.start().await.expect("start pipeline");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        for payload in [r#"{"x": 7}"#.as_bytes(), r#"{"y": 9}"#.as_bytes()] {
+            pipeline
+                .send_stream_data("packer_flush_stream", StreamData::bytes(payload.to_vec()))
+                .await
+                .expect("send data to packer sampler");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_no_output(&mut output, Duration::from_millis(100)).await;
+
+        let actual = {
+            let close = pipeline.close(Duration::from_secs(1));
+            tokio::pin!(close);
+            let mut close_done = false;
+            let actual = tokio::select! {
+                close_result = &mut close => {
+                    close_done = true;
+                    close_result.expect("close pipeline");
+                    recv_next_json(&mut output, Duration::from_millis(500)).await
+                }
+                actual = recv_next_json(&mut output, Duration::from_secs(2)) => actual,
+            };
+            if !close_done {
+                timeout(Duration::from_secs(2), &mut close)
+                    .await
+                    .expect("close pipeline should not hang")
+                    .expect("close pipeline");
+            }
+            actual
+        };
+        assert_eq!(actual, serde_json::json!([{"x": 7, "y": 9}]));
+    }
 }

@@ -87,6 +87,10 @@ impl Default for MedianFunction {
 }
 
 impl AggregateFunction for MedianFunction {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &str {
         "median"
     }

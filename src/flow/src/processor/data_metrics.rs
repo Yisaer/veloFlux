@@ -22,11 +22,35 @@ pub(crate) struct EncoderMetrics {
 impl EncoderMetrics {
     pub(crate) fn new(stats: &ProcessorStats) -> Self {
         stats.declare_collection_in();
+        Self::register(
+            stats,
+            [
+                counter_spec!("sink_encoder", "messages_out"),
+                counter_spec!("sink_encoder", "messages_aborted"),
+                counter_spec!("sink_encoder", "bytes_out"),
+            ],
+        )
+    }
+
+    pub(crate) fn region(stats: &ProcessorStats) -> Self {
+        Self::register(
+            stats,
+            [
+                counter_spec!("region", "messages_out"),
+                counter_spec!("region", "messages_aborted"),
+                counter_spec!("region", "bytes_out"),
+            ],
+        )
+    }
+
+    fn register(
+        stats: &ProcessorStats,
+        [messages_out, messages_aborted, bytes_out]: [MetricSpec; 3],
+    ) -> Self {
         Self {
-            messages_out: stats.register_counter(counter_spec!("sink_encoder", "messages_out")),
-            messages_aborted: stats
-                .register_counter(counter_spec!("sink_encoder", "messages_aborted")),
-            bytes_out: stats.register_counter(counter_spec!("sink_encoder", "bytes_out")),
+            messages_out: stats.register_counter(messages_out),
+            messages_aborted: stats.register_counter(messages_aborted),
+            bytes_out: stats.register_counter(bytes_out),
         }
     }
 
@@ -135,6 +159,7 @@ macro_rules! transform_specs {
 
 pub(crate) const SINK_COMPRESS_METRICS: TransformMetricSpecs = transform_specs!("sink_compress");
 pub(crate) const SINK_ENCRYPT_METRICS: TransformMetricSpecs = transform_specs!("sink_encrypt");
+pub(crate) const REGION_TRANSFORM_METRICS: TransformMetricSpecs = transform_specs!("region");
 
 impl TransformMetrics {
     pub(crate) fn new(stats: &ProcessorStats, specs: TransformMetricSpecs) -> Self {
@@ -237,6 +262,7 @@ macro_rules! data_specs {
 }
 
 pub(crate) const DATASOURCE_METRICS: DataMetricSpecs = data_specs!("datasource");
+pub(crate) const REGION_METRICS: DataMetricSpecs = data_specs!("region");
 pub(crate) const DECODER_METRICS: DataMetricSpecs = data_specs!("decoder");
 pub(crate) const SAMPLER_METRICS: DataMetricSpecs = data_specs!("sampler");
 pub(crate) const BARRIER_METRICS: DataMetricSpecs = data_specs!("barrier");
@@ -397,7 +423,10 @@ impl PassthroughMetrics {
         }
     }
 
-    fn measure(&self, data: &StreamData) -> Result<PassthroughMeasurement, ProcessorError> {
+    pub(crate) fn measure(
+        &self,
+        data: &StreamData,
+    ) -> Result<PassthroughMeasurement, ProcessorError> {
         match (self.domain, data) {
             (DataDomain::Collection, StreamData::Collection(collection)) => {
                 Ok(PassthroughMeasurement::Collection {

@@ -337,6 +337,10 @@ fn days_in_month(year: i32, month: u32) -> u32 {
 }
 
 impl CustomFunc for NowFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[0])
     }
@@ -356,6 +360,10 @@ impl CustomFunc for NowFunc {
 }
 
 impl CustomFunc for CurDateFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[0])
     }
@@ -377,6 +385,10 @@ impl CustomFunc for CurDateFunc {
 }
 
 impl CustomFunc for CurTimeFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[0])
     }
@@ -396,6 +408,10 @@ impl CustomFunc for CurTimeFunc {
 }
 
 impl CustomFunc for FormatTimeFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[2])?;
         nth_timestamp_or_null(args, 0)?;
@@ -425,6 +441,10 @@ impl CustomFunc for FormatTimeFunc {
 }
 
 impl CustomFunc for DayNameFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;
@@ -443,6 +463,10 @@ impl CustomFunc for DayNameFunc {
 }
 
 impl CustomFunc for DayOfMonthFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;
@@ -463,6 +487,10 @@ impl CustomFunc for DayOfMonthFunc {
 }
 
 impl CustomFunc for DayOfWeekFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;
@@ -481,6 +509,10 @@ impl CustomFunc for DayOfWeekFunc {
 }
 
 impl CustomFunc for DayOfYearFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;
@@ -497,6 +529,10 @@ impl CustomFunc for DayOfYearFunc {
 }
 
 impl CustomFunc for FromUnixTimeFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_i64_or_null(args, 0)?;
@@ -523,6 +559,10 @@ impl CustomFunc for FromUnixTimeFunc {
 }
 
 impl CustomFunc for HourFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;
@@ -539,6 +579,10 @@ impl CustomFunc for HourFunc {
 }
 
 impl CustomFunc for LastDayFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;
@@ -566,6 +610,10 @@ impl CustomFunc for LastDayFunc {
 }
 
 impl CustomFunc for MicrosecondFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;
@@ -584,6 +632,10 @@ impl CustomFunc for MicrosecondFunc {
 }
 
 impl CustomFunc for MinuteFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;
@@ -600,6 +652,10 @@ impl CustomFunc for MinuteFunc {
 }
 
 impl CustomFunc for MonthFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;
@@ -616,6 +672,10 @@ impl CustomFunc for MonthFunc {
 }
 
 impl CustomFunc for MonthNameFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;
@@ -634,6 +694,10 @@ impl CustomFunc for MonthNameFunc {
 }
 
 impl CustomFunc for SecondFunc {
+    fn supports_inline_execution(&self) -> bool {
+        true
+    }
+
     fn validate_row(&self, args: &[Value]) -> Result<(), EvalError> {
         validate_arity(args, &[1])?;
         nth_timestamp_or_null(args, 0)?;

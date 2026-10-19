@@ -237,27 +237,32 @@ fn wait_for_buffered_sampler_input(client: &ApiClient, pipeline_id: &str) {
         if let Some(stats) = client.get_pipeline_stats(pipeline_id) {
             let matched = stats.as_array().is_some_and(|processors| {
                 processors.iter().any(|processor| {
-                    let is_sampler = processor
+                    let is_region = processor
                         .get("processor_id")
                         .and_then(Value::as_str)
-                        .is_some_and(|id| id.contains("PhysicalSampler"));
+                        .is_some_and(|id| {
+                            id.rsplit('/')
+                                .next()
+                                .is_some_and(|id| id.starts_with("Region_"))
+                        });
                     let messages_in = processor
                         .pointer("/stats/messages_in")
                         .and_then(Value::as_u64);
                     let bytes_in = processor.pointer("/stats/bytes_in").and_then(Value::as_u64);
-                    let collections_out = processor
-                        .pointer("/stats/collections_out")
-                        .and_then(Value::as_u64);
-                    let records_out = processor
-                        .pointer("/stats/records_out")
-                        .and_then(Value::as_u64);
-                    is_sampler
+                    // The region may include decode/encode stages. Its external
+                    // output domain depends on the retained execution boundaries.
+                    let no_output = [
+                        "messages_out",
+                        "collections_out",
+                        "records_out",
+                        "bytes_out",
+                    ]
+                    .iter()
+                    .all(|field| processor["stats"][*field].as_u64().unwrap_or(0) == 0);
+                    is_region
                         && messages_in == Some(11)
                         && bytes_in.is_some_and(|value| value > 0)
-                        && collections_out == Some(0)
-                        && records_out == Some(0)
-                        && processor.pointer("/stats/messages_out").is_none()
-                        && processor.pointer("/stats/bytes_out").is_none()
+                        && no_output
                         && processor.pointer("/stats/collections_in").is_none()
                         && processor.pointer("/stats/records_in").is_none()
                 })
@@ -373,7 +378,7 @@ fn decodes_and_packs_busmirror_end_to_end() {
     for frame in frames {
         publisher.publish(&packer_input, frame);
     }
-    // Use sampler stats as a delivery barrier before triggering a graceful
+    // Use the ingest region input count as a delivery barrier before a graceful
     // stop. The long interval prevents a wall-clock tick from splitting the
     // MQTT burst, while messages_in=11 proves that all separate messages have
     // reached the same packer window. Graceful stop then exercises the
