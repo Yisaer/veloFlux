@@ -171,7 +171,7 @@ requests.
 
 ## Stateful instance lifecycle
 
-`lead` remains a stateful function and runs in the shared `StatefulFunctionProcessor`. It does not
+`lead` remains a stateful function and runs in the shared `StatefulStage`. It does not
 use a separate LEAD processor.
 
 The existing immediate stateful lifecycle is extended with deferred output:

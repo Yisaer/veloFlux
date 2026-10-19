@@ -1,195 +1,17 @@
-//! TumblingWindowProcessor - buffers rows by tumbling windows and flushes on watermarks.
+//! Synchronous tumbling-window buffering and watermark-driven output.
 //!
 
 use crate::expr::ScalarExpr;
-use crate::planner::physical::{PhysicalPlan, PhysicalTumblingWindow};
-use crate::processor::base::{
-    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
-    ProcessorChannelCapacities,
-};
 use crate::processor::window_metadata;
 use crate::processor::window_partition::{eval_partition_key, PartitionKey};
 use crate::processor::{
-    ControlSignal, GaugeHandle, MetricKind, MetricSpec, Processor, ProcessorError, ProcessorStart,
-    ProcessorStats, StreamData,
+    ControlSignal, GaugeHandle, MetricKind, MetricSpec, ProcessorError, ProcessorStats, StreamData,
 };
-use crate::runtime::TaskSpawner;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 #[cfg(test)]
 use tokio::sync::broadcast;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tokio_stream::StreamExt;
-
-pub struct TumblingWindowProcessor {
-    id: String,
-    window_length: Duration,
-    partition_by_scalars: Vec<ScalarExpr>,
-    inputs: Vec<LinkReceiver<StreamData>>,
-    control_inputs: Vec<LinkReceiver<ControlSignal>>,
-    output: LinkOutput<StreamData>,
-    control_output: LinkOutput<ControlSignal>,
-    channel_capacities: ProcessorChannelCapacities,
-    stats: Arc<ProcessorStats>,
-}
-
-impl TumblingWindowProcessor {
-    pub fn new(id: impl Into<String>, physical: Arc<PhysicalTumblingWindow>) -> Self {
-        Self::new_with_channel_capacities(id, physical, default_channel_capacities())
-    }
-
-    pub(crate) fn new_with_channel_capacities(
-        id: impl Into<String>,
-        physical: Arc<PhysicalTumblingWindow>,
-        channel_capacities: ProcessorChannelCapacities,
-    ) -> Self {
-        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
-        let control_output = LinkOutput::new(
-            channel_capacities.control_link_kind,
-            channel_capacities.control,
-        );
-        let length = physical.time_unit.duration(physical.length);
-        let partition_by_scalars = physical.partition_by_scalars.clone();
-        Self {
-            id: id.into(),
-            window_length: length,
-            partition_by_scalars,
-            inputs: Vec::new(),
-            control_inputs: Vec::new(),
-            output,
-            control_output,
-            channel_capacities,
-            stats: Arc::new(ProcessorStats::collection_in_out()),
-        }
-    }
-
-    pub fn from_physical_plan(id: impl Into<String>, plan: Arc<PhysicalPlan>) -> Option<Self> {
-        match plan.as_ref() {
-            PhysicalPlan::TumblingWindow(window) => Some(Self::new(id, Arc::new(window.clone()))),
-            _ => None,
-        }
-    }
-
-    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-        stats.declare_collection_in_out();
-        self.stats = stats;
-    }
-}
-
-impl Processor for TumblingWindowProcessor {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-        let id = self.id.clone();
-        let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
-        let control_receivers = std::mem::take(&mut self.control_inputs);
-        let mut control_streams = fan_in_control_streams(control_receivers);
-        let mut control_active = !control_streams.is_empty();
-        let output = self.output.clone();
-        let control_output = self.control_output.clone();
-        let channel_capacities = self.channel_capacities;
-        let stats = Arc::clone(&self.stats);
-        let partition_by_scalars = self.partition_by_scalars.clone();
-
-        // Local state captured by the task.
-        let window_length = self.window_length;
-        let mut state =
-            TumblingWindowStage::new(window_length, partition_by_scalars, Arc::clone(&stats));
-
-        let processor_span = stats.processor_span();
-        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    control_item = control_streams.next(), if control_active => {
-                        if let Some(Ok(control_signal)) = control_item {
-                            let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(
-                                &control_output,
-                                channel_capacities.control,
-                                control_signal,
-                            )
-                            .await?;
-                            if is_terminal {
-                                state.drop_all();
-                                tracing::info!(processor_id = %id, "stopped");
-                                return Ok(());
-                            }
-                            continue;
-                        } else {
-                            control_active = false;
-                        }
-                    }
-                    item = input_streams.next() => {
-                        match item {
-                            Some(Ok(data)) => {
-                                if let Some(rows) = data.row_count() {
-                                    stats.record_collection_in(rows);
-                                }
-                                let terminal = data.is_terminal();
-                                let collection_input = matches!(data, StreamData::Collection(_));
-                                let started = std::time::Instant::now();
-                                let mut outputs = match state.process(data) {
-                                    Ok(outputs) => outputs,
-                                    Err(error) => {
-                                        stats.record_error_logged("tumbling window processor error", error.to_string());
-                                        stats.record_handle_duration(started.elapsed());
-                                        continue;
-                                    }
-                                };
-                                if collection_input { stats.record_handle_duration(started.elapsed()); }
-                                while let Some(data) = state.next_output(&mut outputs)? {
-                                    let rows = data.row_count();
-                                    send_with_backpressure(
-                                        &output, channel_capacities.data, data, Some(stats.as_ref()),
-                                    ).await?;
-                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
-                                }
-                                if terminal { return Ok(()); }
-                            }
-                            Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                log_broadcast_lagged(&id, skipped, "tumbling window data input");
-                                continue;
-                            }
-                            None => {
-                                // Upstream ended without control signal: drop buffered rows.
-                                state.drop_all();
-                                tracing::info!(processor_id = %id, "stopped");
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-            }
-        }, processor_span)))
-    }
-
-    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
-        self.output.subscribe()
-    }
-
-    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
-        self.control_output.subscribe()
-    }
-
-    fn add_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<StreamData>>,
-    {
-        self.inputs.push(receiver.into());
-    }
-
-    fn add_control_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<ControlSignal>>,
-    {
-        self.control_inputs.push(receiver.into());
-    }
-}
 
 /// Synchronous window engine shared by channel and inline execution.
 pub(crate) struct TumblingWindowStage {
@@ -469,11 +291,16 @@ impl ProcessingState {
 
 #[cfg(test)]
 mod tests {
+    use crate::processor::*;
+
+    use crate::runtime::*;
+    use tokio::time::*;
+
     use super::*;
     use crate::planner::logical::TimeUnit;
     use crate::planner::physical::PhysicalTumblingWindow;
     use crate::processor::base::{Processor, DEFAULT_DATA_CHANNEL_CAPACITY};
-    use crate::processor::{BarrierControlSignal, ProcessorStats};
+    use crate::processor::BarrierControlSignal;
     use std::time::UNIX_EPOCH;
     use tokio::time::timeout;
 
@@ -504,9 +331,17 @@ mod tests {
     async fn tumbling_window_graceful_end_flushes_buffer_before_terminal_control() {
         let spawner = test_spawner();
         let physical = PhysicalTumblingWindow::new(TimeUnit::Seconds, 10, Vec::new(), 0);
-        let mut processor = TumblingWindowProcessor::new("tw", Arc::new(physical));
-        let stats = Arc::new(ProcessorStats::collection_in_out());
-        processor.set_stats(Arc::clone(&stats));
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "tw".into(),
+            &[crate::planner::physical::PhysicalPlan::TumblingWindow(
+                physical,
+            )],
+            crate::processor::region_processor::RegionResources::default(),
+            crate::processor::base::default_channel_capacities(),
+        )
+        .unwrap();
+
+        let stats = Arc::clone(&processor.stage_stats()[0].stats);
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
@@ -546,9 +381,17 @@ mod tests {
     async fn tumbling_window_skips_invalid_timestamp_and_preserves_buffered_rows() {
         let spawner = test_spawner();
         let physical = PhysicalTumblingWindow::new(TimeUnit::Seconds, 10, Vec::new(), 0);
-        let mut processor = TumblingWindowProcessor::new("tw", Arc::new(physical));
-        let stats = Arc::new(ProcessorStats::collection_in_out());
-        processor.set_stats(Arc::clone(&stats));
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "tw".into(),
+            &[crate::planner::physical::PhysicalPlan::TumblingWindow(
+                physical,
+            )],
+            crate::processor::region_processor::RegionResources::default(),
+            crate::processor::base::default_channel_capacities(),
+        )
+        .unwrap();
+
+        let stats = Arc::clone(&processor.stage_stats()[0].stats);
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
@@ -589,7 +432,15 @@ mod tests {
     async fn millisecond_tumbling_window_uses_exact_boundaries_and_metadata() {
         let spawner = test_spawner();
         let physical = PhysicalTumblingWindow::new(TimeUnit::Milliseconds, 100, Vec::new(), 0);
-        let mut processor = TumblingWindowProcessor::new("tw", Arc::new(physical));
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "tw".into(),
+            &[crate::planner::physical::PhysicalPlan::TumblingWindow(
+                physical,
+            )],
+            crate::processor::region_processor::RegionResources::default(),
+            crate::processor::base::default_channel_capacities(),
+        )
+        .unwrap();
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();

@@ -14,7 +14,7 @@ pub struct PhysicalFilter {
     pub predicate: Expr,
     pub scalar_predicate: ScalarExpr,
     /// Processor-local state for pipeline state functions (e.g. `last_hit_count`).
-    /// When `Some`, `FilterProcessor` switches to row-by-row iteration and
+    /// When `Some`, the filter stage switches to row-by-row iteration and
     /// increments the counter after each accepted row.
     pub processor_state: Option<Arc<ProcessorState>>,
     pub pipeline_state_usage: PipelineStateUsage,

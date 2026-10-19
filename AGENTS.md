@@ -76,8 +76,8 @@
 - `parser` 模块：负责将 SQL 解析为 AST；解析结果存放在 `SelectStmt` 中，作为后续模块交互的契约。
 - 修改 `parser` 模块相关代码时，可优先阅读 `docs/` 下与语法（syntax）相关的文档。
 - `flow` 模块（planner/optimizer）：对于 logical optimize 与 physical optimize 的每一条 rule，优先在 `docs/planner_optimize/logical/` 与 `docs/planner_optimize/physical/` 查找对应设计文档，理解约束与适用边界；再结合 `src/flow/tests/planner/` 的 `EXPLAIN` JSON 断言验证规则效果（如需新增 case，先与维护者确认），确认无误后将结论/注意事项补充回 `AGENTS.md`。
-- Window 时间精度结论：`tumblingwindow` 与 `slidingwindow` 的 `ss`/`ms` 在 standalone window processor 和 fused streaming aggregation 两条路径中都统一使用 `SystemTime`/`Duration` 作为时间坐标（边界计算收口在 `window_metadata::floor_to_window_start` / `saturating_sub_to_epoch`），processor 层不感知具体时间单位；新增时间单位只需扩展 `TimeUnit::duration()`。watermark 到达窗口 end 边界时触发 flush，`window_start()` / `window_end()` 保留微秒精度。
-- Sliding window 融合路径语义结论：无 `OVER (WHEN ...)` 时仍是每行触发，fused streaming aggregation 必须与 standalone processor 一样使用 `[t - lookback, t + lookahead]` 的逻辑边界并包含 lookback 内的历史行；调度 deadline 不得通过把逻辑 `window.start` 改成触发时间来复用。
+- Window 时间精度结论：`tumblingwindow` 与 `slidingwindow` 的 `ss`/`ms` 在 window stage 和 fused streaming aggregation 两条路径中都统一使用 `SystemTime`/`Duration` 作为时间坐标（边界计算收口在 `window_metadata::floor_to_window_start` / `saturating_sub_to_epoch`），processor 层不感知具体时间单位；新增时间单位只需扩展 `TimeUnit::duration()`。watermark 到达窗口 end 边界时触发 flush，`window_start()` / `window_end()` 保留微秒精度。
+- Sliding window 融合路径语义结论：无 `OVER (WHEN ...)` 时仍是每行触发，fused streaming aggregation 必须与 window stage 一样使用 `[t - lookback, t + lookahead]` 的逻辑边界并包含 lookback 内的历史行；调度 deadline 不得通过把逻辑 `window.start` 改成触发时间来复用。
 - 固定输出布局审计结论：sink 最终列统一由 planner 的 `OutputLayout` 描述；direct column/alias 继承 message 固定槽位，计算列使用有序 affiliate 槽位。encoder、row-diff、template 与 memory materialize 不得重新按 source/name 猜测布局，也不得恢复 `ByIndexProjection`、`late_projection` 或 `passthrough_messages` 兼容路径；fan-in 布局不兼容时应在规划阶段失败。
 - `processor` 模块：processor 指实际处理流数据的算子；每个 processor 处理完数据后会将数据转交给下一个算子。
 - 通道约束：每个 processor 有两类订阅通道 `control channel` 与 `data channel`；从哪个 channel 收到的数据，就只能转发到同类型的 channel（不得混用/串线）。
@@ -86,8 +86,8 @@
 - Hot path 约束：对于 processor 中的高频路径（尤其是 `partition key` 相关逻辑），避免使用 `format!("{:?}", key_values)` 这类写法；这类实现通常会同时引入 `Vec<Value>` 分配、`String` 分配和 `Debug` 格式化开销，容易成为明显的 CPU 热点。优先保持结构化 key，并直接使用可 `Hash` / `Eq` 的数据结构作为 key。
 - Sink transform 融合审计结论：按 plan index 统计 DAG 的消费者数量，融合跨度内任何共享节点均保留独立执行，避免多 sink 重复推进 pipeline-state；Immediate 空集合保留编码 delivery，batch 空集合不启动 delivery；stage stats 统计各自输入/输出，region 不统计指标；native 输出计 Collection/row，encoded 输出计 message/byte。
 - Sink transform 字节路径审计结论：HTTP、MQTT、自定义 connector 保留独立 sink 任务；通用 region 的字节转换必须逐帧发送，以维持 SinkConnector::max_delivery_bytes 的增量检查；压缩器自然 drain 的空块不得传给 encrypt.write，但 finish 必须完成；融合节点内部 Filter/Project/Order 必须绑定 custom function runtime，begin/write 错误必须记录并 abort delivery。
-- Sink transform 等价性结论：encoded control terminal 按 SinkEncoderProcessor 先 flush 后转发，flush/send 错误在相同边界记录；native control 保持 BatchProcessor 原有顺序。count batch 每完成一批即等待发送背压，禁止先累计所有完成 payload；stage 编码输出按生成计数，sink 成功投递另计。fused native 输出布局复用 projection 推导，encoded 输出布局使用 captured encoder layout，保证优化前后布局契约一致。
+- Sink transform 等价性结论：encoded control terminal 保持先 flush 后转发，flush/send 错误在相同边界记录；native control 保持 batch stage 原有顺序。count batch 每完成一批即等待发送背压，禁止先累计所有完成 payload；stage 编码输出按生成计数，sink 成功投递另计。fused native 输出布局复用 projection 推导，encoded 输出布局使用 captured encoder layout，保证优化前后布局契约一致。
 
-- Sink stage 维护结论：standalone 与 fused 共用 EncoderStage、BatchPolicy、NativeBatchStage 和完整 compress/encrypt delivery handler；融合仅以内联调用替换内部 channel，不再组装整批字节。编码器错误结束当前输入，转换错误在本 stage 恢复，含转换 stage 的 ChannelClosed 必须退出；sink 投递指标只在成功发送后更新。
+- Sink stage 维护结论：singleton 与 fused region 共用 EncoderStage、BatchPolicy、NativeBatchStage 和完整 compress/encrypt delivery handler；融合仅以内联调用替换内部 channel，不再组装整批字节。编码器错误结束当前输入，转换错误在本 stage 恢复，含转换 stage 的 ChannelClosed 必须退出；sink 投递指标只在成功发送后更新。
 
 - Sink stage 边界结论：共享 encoded/native 输入入口必须在 row preparation 后复查固定 deadline，先 flush 到期旧批次再追加新输入；旧批次编码 flush 的可恢复错误按 timer 边界记录，不得额外丢弃新 collection。fused messages_aborted 按 encoder delivery 生命周期去重，未发 START 的失败也覆盖；stage 错误由对应 stage 自行统计，下一 delivery 开始时重置记账。

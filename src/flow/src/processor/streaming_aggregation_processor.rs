@@ -1,16 +1,9 @@
-//! StreamingAggregationProcessor - incremental aggregation with windowing.
+//! Synchronous incremental aggregation engines.
 
 use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry, AggregateUpdate};
 use crate::expr::ScalarExpr;
 use crate::model::{Collection, RecordBatch};
-use crate::planner::physical::{
-    AggregateCall, PhysicalPlan, PhysicalStreamingAggregation, StreamingWindowSpec,
-};
-use crate::processor::base::{
-    default_channel_capacities, LinkReceiver, ProcessorChannelCapacities,
-};
-use crate::processor::{Processor, ProcessorError, ProcessorStart, ProcessorStats};
-use crate::runtime::TaskSpawner;
+use crate::planner::physical::{AggregateCall, PhysicalStreamingAggregation};
 use datatypes::Value;
 use sqlparser::ast::Expr;
 use std::collections::hash_map::Entry;
@@ -24,190 +17,16 @@ mod streaming_eos_aggregation_processor;
 #[path = "streaming_tumbling_aggregation_processor.rs"]
 mod streaming_tumbling_aggregation_processor;
 
-pub use streaming_count_aggregation_processor::StreamingCountAggregationProcessor;
-pub use streaming_eos_aggregation_processor::StreamingEosAggregationProcessor;
 pub(crate) use streaming_eos_aggregation_processor::StreamingEosStage;
 #[path = "streaming_sliding_aggregation_processor.rs"]
 mod streaming_sliding_aggregation_processor;
-pub use streaming_sliding_aggregation_processor::StreamingSlidingAggregationProcessor;
 pub(crate) use streaming_sliding_aggregation_processor::StreamingSlidingStage;
-pub use streaming_tumbling_aggregation_processor::StreamingTumblingAggregationProcessor;
 #[path = "streaming_state_aggregation_processor.rs"]
 mod streaming_state_aggregation_processor;
-pub use streaming_state_aggregation_processor::StreamingStateAggregationProcessor;
 pub(crate) use streaming_state_aggregation_processor::StreamingStateStage;
-
-/// StreamingAggregationProcessor - performs incremental aggregation with windowing.
-pub enum StreamingAggregationProcessor {
-    Count(StreamingCountAggregationProcessor),
-    Tumbling(StreamingTumblingAggregationProcessor),
-    Sliding(StreamingSlidingAggregationProcessor),
-    State(StreamingStateAggregationProcessor),
-    Eos(StreamingEosAggregationProcessor),
-}
 
 pub(crate) use streaming_count_aggregation_processor::{StreamingCountOutput, StreamingCountStage};
 pub(crate) use streaming_tumbling_aggregation_processor::StreamingTumblingStage;
-
-impl StreamingAggregationProcessor {
-    pub fn new(
-        id: impl Into<String>,
-        physical: Arc<PhysicalStreamingAggregation>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Result<Self, ProcessorError> {
-        Self::new_with_channel_capacities(
-            id,
-            physical,
-            aggregate_registry,
-            default_channel_capacities(),
-        )
-    }
-
-    pub(crate) fn new_with_channel_capacities(
-        id: impl Into<String>,
-        physical: Arc<PhysicalStreamingAggregation>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-        channel_capacities: ProcessorChannelCapacities,
-    ) -> Result<Self, ProcessorError> {
-        let window = physical.window.clone();
-        match window {
-            StreamingWindowSpec::Count { count, .. } => Ok(StreamingAggregationProcessor::Count(
-                StreamingCountAggregationProcessor::new_with_channel_capacities(
-                    id,
-                    Arc::clone(&physical),
-                    Arc::clone(&aggregate_registry),
-                    count,
-                    channel_capacities,
-                ),
-            )),
-            StreamingWindowSpec::Tumbling { .. } => Ok(StreamingAggregationProcessor::Tumbling(
-                StreamingTumblingAggregationProcessor::new_with_channel_capacities(
-                    id,
-                    Arc::clone(&physical),
-                    aggregate_registry,
-                    channel_capacities,
-                )?,
-            )),
-            StreamingWindowSpec::Sliding { .. } => Ok(StreamingAggregationProcessor::Sliding(
-                StreamingSlidingAggregationProcessor::new_with_channel_capacities(
-                    id,
-                    physical,
-                    aggregate_registry,
-                    channel_capacities,
-                )?,
-            )),
-            StreamingWindowSpec::State { .. } => Ok(StreamingAggregationProcessor::State(
-                StreamingStateAggregationProcessor::new_with_channel_capacities(
-                    id,
-                    physical,
-                    aggregate_registry,
-                    channel_capacities,
-                )?,
-            )),
-            StreamingWindowSpec::Eos => Ok(StreamingAggregationProcessor::Eos(
-                StreamingEosAggregationProcessor::new_with_channel_capacities(
-                    id,
-                    physical,
-                    aggregate_registry,
-                    channel_capacities,
-                ),
-            )),
-        }
-    }
-
-    pub fn from_physical_plan(
-        id: impl Into<String>,
-        plan: Arc<PhysicalPlan>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Result<Option<Self>, ProcessorError> {
-        match plan.as_ref() {
-            PhysicalPlan::StreamingAggregation(aggregation) => Ok(Some(Self::new(
-                id,
-                Arc::new(aggregation.clone()),
-                aggregate_registry,
-            )?)),
-            _ => Ok(None),
-        }
-    }
-
-    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-        match self {
-            StreamingAggregationProcessor::Count(p) => p.set_stats(stats),
-            StreamingAggregationProcessor::Tumbling(p) => p.set_stats(stats),
-            StreamingAggregationProcessor::Sliding(p) => p.set_stats(stats),
-            StreamingAggregationProcessor::State(p) => p.set_stats(stats),
-            StreamingAggregationProcessor::Eos(p) => p.set_stats(stats),
-        }
-    }
-}
-
-impl Processor for StreamingAggregationProcessor {
-    fn id(&self) -> &str {
-        match self {
-            StreamingAggregationProcessor::Count(p) => p.id(),
-            StreamingAggregationProcessor::Tumbling(p) => p.id(),
-            StreamingAggregationProcessor::Sliding(p) => p.id(),
-            StreamingAggregationProcessor::State(p) => p.id(),
-            StreamingAggregationProcessor::Eos(p) => p.id(),
-        }
-    }
-
-    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-        match self {
-            StreamingAggregationProcessor::Count(p) => p.start(spawner),
-            StreamingAggregationProcessor::Tumbling(p) => p.start(spawner),
-            StreamingAggregationProcessor::Sliding(p) => p.start(spawner),
-            StreamingAggregationProcessor::State(p) => p.start(spawner),
-            StreamingAggregationProcessor::Eos(p) => p.start(spawner),
-        }
-    }
-
-    fn subscribe_output(&self) -> Option<LinkReceiver<crate::processor::StreamData>> {
-        match self {
-            StreamingAggregationProcessor::Count(p) => p.subscribe_output(),
-            StreamingAggregationProcessor::Tumbling(p) => p.subscribe_output(),
-            StreamingAggregationProcessor::Sliding(p) => p.subscribe_output(),
-            StreamingAggregationProcessor::State(p) => p.subscribe_output(),
-            StreamingAggregationProcessor::Eos(p) => p.subscribe_output(),
-        }
-    }
-
-    fn subscribe_control_output(&self) -> Option<LinkReceiver<crate::processor::ControlSignal>> {
-        match self {
-            StreamingAggregationProcessor::Count(p) => p.subscribe_control_output(),
-            StreamingAggregationProcessor::Tumbling(p) => p.subscribe_control_output(),
-            StreamingAggregationProcessor::Sliding(p) => p.subscribe_control_output(),
-            StreamingAggregationProcessor::State(p) => p.subscribe_control_output(),
-            StreamingAggregationProcessor::Eos(p) => p.subscribe_control_output(),
-        }
-    }
-
-    fn add_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<crate::processor::StreamData>>,
-    {
-        match self {
-            StreamingAggregationProcessor::Count(p) => p.add_input(receiver),
-            StreamingAggregationProcessor::Tumbling(p) => p.add_input(receiver),
-            StreamingAggregationProcessor::Sliding(p) => p.add_input(receiver),
-            StreamingAggregationProcessor::State(p) => p.add_input(receiver),
-            StreamingAggregationProcessor::Eos(p) => p.add_input(receiver),
-        }
-    }
-
-    fn add_control_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<crate::processor::ControlSignal>>,
-    {
-        match self {
-            StreamingAggregationProcessor::Count(p) => p.add_control_input(receiver),
-            StreamingAggregationProcessor::Tumbling(p) => p.add_control_input(receiver),
-            StreamingAggregationProcessor::Sliding(p) => p.add_control_input(receiver),
-            StreamingAggregationProcessor::State(p) => p.add_control_input(receiver),
-            StreamingAggregationProcessor::Eos(p) => p.add_control_input(receiver),
-        }
-    }
-}
 
 /// Group-by metadata bundled for evaluation and output.
 #[derive(Clone)]

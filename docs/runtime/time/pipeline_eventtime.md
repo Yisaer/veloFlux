@@ -1,6 +1,6 @@
 # Pipeline Event Time (Eventtime)
 
-This document describes how veloFlux adds **event-time** support to the `flow` module and how watermark-driven window operators (e.g. `StreamingTumblingAggregationProcessor`) are advanced by explicit `StreamData::Watermark` messages.
+This document describes how veloFlux adds **event-time** support to the `flow` module and how watermark-driven window operators (e.g. `StreamingTumblingStage`) are advanced by explicit `StreamData::Watermark` messages.
 
 ## Background
 
@@ -91,7 +91,7 @@ Replace the single `PhysicalWatermark` with two dedicated physical plan nodes:
 - If `eventtime.enabled=false`: insert `PhysicalProcessTimeWatermark` before window/aggregation operators that require time.
 - If `eventtime.enabled=true`: insert `PhysicalEventtimeWatermark` before those operators.
 
-Downstream processors (e.g. `StreamingTumblingAggregationProcessor`) advance event time only via received `StreamData::Watermark(ts)` and must not rely on a wall-clock ticker in event-time mode.
+Downstream processors (e.g. `StreamingTumblingStage`) advance event time only via received `StreamData::Watermark(ts)` and must not rely on a wall-clock ticker in event-time mode.
 
 ## PhysicalEventtimeWatermark design
 

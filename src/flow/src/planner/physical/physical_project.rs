@@ -27,7 +27,7 @@ pub struct PhysicalProject {
     pub base: BasePhysicalPlan,
     pub fields: Arc<[PhysicalProjectField]>,
     /// Processor-local state for pipeline state functions (e.g. `last_hit_count`).
-    /// When `Some`, `ProjectProcessor` increments the counter after each projected row.
+    /// When `Some`, the projection stage increments the counter after each projected row.
     pub processor_state: Option<Arc<ProcessorState>>,
     pub pipeline_state_usage: PipelineStateUsage,
 }

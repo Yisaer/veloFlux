@@ -7,8 +7,8 @@ experimental `feat/fuse-stateless-sink` branch. Stateful/window exclusions below
 restrictions of the region architecture.
 
 Production SQL planning no longer emits PhysicalFusedTransform; its physical variant and
-runtime entry are removed. The former executor exists only as a cfg(test) equivalence
-reference. EncoderStage is synchronous, and EncoderDriver owns standalone transport waits.
+runtime entry are removed. The former executor and standalone engine channel wrappers have also been removed.
+EncoderStage is synchronous, and the region driver owns transport waits.
 See the region document for current adapters, placement, diagnostics, and remaining work.
 
 ## Background

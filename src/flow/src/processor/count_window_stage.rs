@@ -1,4 +1,4 @@
-//! Synchronous count buffering shared by BatchProcessor and execution regions.
+//! Synchronous count buffering for CountWindow and count-only Batch.
 use crate::expr::ScalarExpr;
 use crate::model::Tuple;
 use crate::processor::native_batch_stage::NativeBatchStage;

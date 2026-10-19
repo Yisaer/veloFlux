@@ -43,23 +43,23 @@ in `time_unit` (`ms` for milliseconds, `ss` for seconds):
 ### Watermarks
 
 - Processing time:
-  - `SlidingWatermarkProcessor` emits periodic processing-time watermarks (tick interval is `1s`)
+  - `WatermarkStage` configured for sliding processing time emits periodic processing-time watermarks (tick interval is `1s`)
     to advance time and enable downstream GC.
   - When `lookahead` is present, it also generates per-tuple deadline processing-time watermarks at
     `deadline = tuple.timestamp + lookahead`.
   - This watermark stream is independent from event-time watermarking.
 - Event time:
-  - `EventtimeWatermarkProcessor` is responsible for event-time watermarks.
+  - `WatermarkStage` configured for event time is responsible for event-time watermarks.
   - Sliding lookahead relies on the upstream event-time watermark stream reaching each trigger's
     deadline (`t + lookahead`). This is treated as a contract requirement.
 
 ### Runtime
 
-- `SlidingWindowProcessor` is watermark-driven and uses `SystemTime`/`Duration` internally, so
+- `SlidingWindowStage` is watermark-driven and uses `SystemTime`/`Duration` internally, so
   window boundaries are unit-agnostic:
   - `lookahead = None` emits windows immediately on data.
   - `lookahead = Some(L)` emits windows when it observes watermarks `>= t + L`.
-- `StreamingSlidingAggregationProcessor` exists, and the optimizer can fuse
+- `StreamingSlidingStage` exists, and the optimizer can fuse
   `SlidingWindow -> Aggregation` into `PhysicalStreamingAggregation(window=sliding, ...)` when all
   aggregate calls support incremental updates.
 

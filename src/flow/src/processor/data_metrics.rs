@@ -251,9 +251,6 @@ macro_rules! data_specs {
 
 pub(crate) const DATASOURCE_METRICS: DataMetricSpecs = data_specs!("datasource");
 pub(crate) const STAGE_METRICS: DataMetricSpecs = data_specs!("stage");
-pub(crate) const DECODER_METRICS: DataMetricSpecs = data_specs!("decoder");
-pub(crate) const SAMPLER_METRICS: DataMetricSpecs = data_specs!("sampler");
-pub(crate) const BARRIER_METRICS: DataMetricSpecs = data_specs!("barrier");
 pub(crate) const RESULT_COLLECT_METRICS: DataMetricSpecs = data_specs!("result_collect");
 
 #[derive(Clone, Copy)]

@@ -1,28 +1,16 @@
-//! StatefulFunctionProcessor - evaluates stateful scalar functions per row.
+//! Synchronous stateful-function evaluation.
 
 use crate::expr::ScalarExpr;
 use crate::model::{Collection, RecordBatch};
-use crate::planner::physical::{
-    PartitionGroupKey, PhysicalPlan, PhysicalStatefulFunction, StatefulCall,
-};
-use crate::processor::base::{
-    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
-    LinkReceiver, ProcessorChannelCapacities,
-};
-use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
-};
-use crate::runtime::TaskSpawner;
+use crate::planner::physical::{PartitionGroupKey, PhysicalStatefulFunction, StatefulCall};
+use crate::processor::{ProcessorError, ProcessorStats, StreamData};
 use crate::stateful::{
     DeferredEvalInput, DeferredProbe, ResolvedStatefulRow, StatefulEvalInput, StatefulEvalOutput,
     StatefulFunction, StatefulFunctionInstance, StatefulFunctionRegistry,
 };
 use datatypes::Value;
-use futures::stream::StreamExt;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 struct StatefulPartitionState {
     instance: Box<dyn StatefulFunctionInstance>,
@@ -77,72 +65,7 @@ struct PartitionGroup {
     scalars: Vec<ScalarExpr>,
 }
 
-pub struct StatefulFunctionProcessor {
-    id: String,
-    stage: Option<StatefulStage>,
-    inputs: Vec<LinkReceiver<StreamData>>,
-    control_inputs: Vec<LinkReceiver<ControlSignal>>,
-    output: LinkOutput<StreamData>,
-    control_output: LinkOutput<ControlSignal>,
-    channel_capacities: ProcessorChannelCapacities,
-    stats: Arc<ProcessorStats>,
-}
-
-impl StatefulFunctionProcessor {
-    pub fn new(
-        id: impl Into<String>,
-        physical_stateful: Arc<PhysicalStatefulFunction>,
-        stateful_registry: Arc<StatefulFunctionRegistry>,
-    ) -> Result<Self, ProcessorError> {
-        Self::new_with_channel_capacities(
-            id,
-            physical_stateful,
-            stateful_registry,
-            default_channel_capacities(),
-        )
-    }
-
-    pub(crate) fn new_with_channel_capacities(
-        id: impl Into<String>,
-        physical_stateful: Arc<PhysicalStatefulFunction>,
-        stateful_registry: Arc<StatefulFunctionRegistry>,
-        channel_capacities: ProcessorChannelCapacities,
-    ) -> Result<Self, ProcessorError> {
-        let id = id.into();
-        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
-        let control_output = LinkOutput::new(
-            channel_capacities.control_link_kind,
-            channel_capacities.control,
-        );
-
-        let stage = StatefulStage::new(physical_stateful, stateful_registry)?;
-        Ok(Self {
-            id,
-            stage: Some(stage),
-            inputs: Vec::new(),
-            control_inputs: Vec::new(),
-            output,
-            control_output,
-            channel_capacities,
-            stats: Arc::new(ProcessorStats::collection_in_out()),
-        })
-    }
-
-    pub fn from_physical_plan(
-        id: impl Into<String>,
-        plan: Arc<PhysicalPlan>,
-        stateful_registry: Arc<StatefulFunctionRegistry>,
-    ) -> Result<Option<Self>, ProcessorError> {
-        match plan.as_ref() {
-            PhysicalPlan::StatefulFunction(stateful) => Ok(Some(Self::new(
-                id,
-                Arc::new(stateful.clone()),
-                stateful_registry,
-            )?)),
-            _ => Ok(None),
-        }
-    }
-
+impl StatefulStage {
     fn apply_stateful(
         collection: Box<dyn Collection>,
         partition_groups: &[PartitionGroup],
@@ -413,7 +336,6 @@ impl StatefulFunctionProcessor {
             .map_err(|e| ProcessorError::ProcessingError(e.to_string()))?;
         Ok(Box::new(batch))
     }
-
     fn finish_stateful(
         calls: &mut [StatefulProcessorCall],
         pending_rows: &mut HashMap<u64, BufferedRow>,
@@ -435,120 +357,6 @@ impl StatefulFunctionProcessor {
             }
         }
         Ok(rows)
-    }
-
-    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-        stats.declare_collection_in_out();
-        self.stats = stats;
-    }
-}
-
-impl Processor for StatefulFunctionProcessor {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-        let id = self.id.clone();
-        let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
-        let control_receivers = std::mem::take(&mut self.control_inputs);
-        let mut control_streams = fan_in_control_streams(control_receivers);
-        let mut control_active = !control_streams.is_empty();
-        let output = self.output.clone();
-        let control_output = self.control_output.clone();
-        let channel_capacities = self.channel_capacities;
-        let Some(mut stage) = self.stage.take() else {
-            return ProcessorStart::failed(
-                spawner,
-                ProcessorError::InvalidConfiguration(
-                    "stateful processor was already started".into(),
-                ),
-            );
-        };
-        let stats = Arc::clone(&self.stats);
-
-        tracing::info!(processor_id = %id, "stateful function processor starting");
-        let processor_span = stats.processor_span();
-        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    control_item = control_streams.next(), if control_active => {
-                        if let Some(Ok(control_signal)) = control_item {
-                            let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(
-                                &control_output,
-                                channel_capacities.control,
-                                control_signal,
-                            )
-                            .await?;
-                            if is_terminal {
-                                tracing::info!(processor_id = %id, "received StreamEnd (control)");
-                                tracing::info!(processor_id = %id, "stopped");
-                                return Ok(());
-                            }
-                            continue;
-                        } else {
-                            control_active = false;
-                        }
-                    }
-                    item = input_streams.next() => {
-                        match item {
-                            Some(Ok(data)) => {
-                                log_received_data(&id, &data);
-                                if let Some(rows) = data.row_count() {
-                                    stats.record_collection_in(rows);
-                                }
-                                let terminal = data.is_terminal();
-                                let started = std::time::Instant::now();
-                                let outputs = stage.process(data, &stats)?;
-                                stats.record_handle_duration(started.elapsed());
-                                for data in outputs.into_iter().flatten() {
-                                    let rows = data.row_count();
-                                    send_with_backpressure(&output, channel_capacities.data, data, Some(&stats)).await?;
-                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
-                                }
-                                if terminal { return Ok(()); }
-                            }
-                            Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                log_broadcast_lagged(
-                                    &id,
-                                    skipped,
-                                    "stateful function data input",
-                                );
-                                continue;
-                            }
-                            None => {
-                                tracing::info!(processor_id = %id, "stopped");
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-            }
-        }, processor_span)))
-    }
-
-    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
-        self.output.subscribe()
-    }
-
-    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
-        self.control_output.subscribe()
-    }
-
-    fn add_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<StreamData>>,
-    {
-        self.inputs.push(receiver.into());
-    }
-
-    fn add_control_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<ControlSignal>>,
-    {
-        self.control_inputs.push(receiver.into());
     }
 }
 
@@ -638,7 +446,7 @@ impl StatefulStage {
     ) -> Result<[Option<StreamData>; 2], ProcessorError> {
         match data {
             StreamData::Collection(collection) => {
-                match StatefulFunctionProcessor::apply_stateful(
+                match StatefulStage::apply_stateful(
                     collection,
                     &self.partition_groups,
                     &mut self.calls,
@@ -661,7 +469,7 @@ impl StatefulStage {
                 }
             }
             data if data.is_terminal() => {
-                let rows = StatefulFunctionProcessor::finish_stateful(
+                let rows = StatefulStage::finish_stateful(
                     &mut self.calls,
                     &mut self.pending_rows,
                     &mut self.pending_order,

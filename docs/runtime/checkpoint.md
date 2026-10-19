@@ -59,7 +59,7 @@ runtime trigger is graceful pipeline shutdown. The current coordinator is an in-
 Checkpoint status reporting and periodic request scheduling are deferred.
 
 The coordinator must not hold the complete `ProcessorPipeline` or call a specific
-`BarrierProcessor` directly. Instead, pipeline construction creates a cloneable trigger containing
+`BarrierStage` directly. Instead, pipeline construction creates a cloneable trigger containing
 the pipeline ingress sender, barrier-id allocator, and tail-ack registration capability.
 
 ## Barrier injection
@@ -84,7 +84,7 @@ checkpoint boundary.
 
 The coordinator does not send a separate barrier to every downstream processor. The barrier is
 propagated by the normal data graph, and fan-in barriers are aligned at explicit
-`BarrierProcessor` nodes.
+`PhysicalBarrier` nodes executed by `BarrierStage` within a region.
 
 The current implementation provides the following internal runtime path:
 
@@ -176,29 +176,31 @@ internal task, it must quiesce that task before producing its snapshot.
 
 ## Fan-in alignment
 
-The planner inserts a `BarrierProcessor` at fan-in boundaries. Its responsibilities are:
+The planner inserts `PhysicalBarrier` at fan-in boundaries. `BarrierStage` owns synchronous
+alignment state, while its region driver owns input polling and transport. Together they:
 
 - wait for the same checkpoint barrier from every upstream
 - prevent post-barrier data from passing the checkpoint boundary
-- forward one aligned barrier downstream
-- stop after forwarding a final barrier
+- forward one aligned barrier through the region suffix
+- stop after draining/forwarding a final barrier
 
-`BarrierProcessor` does not own business state and normally does not produce a business snapshot.
+`BarrierStage` does not own business state and normally does not produce a business snapshot.
 
 Checkpoint support requires post-barrier data isolation. The current checkpoint-aware alignment
 state tracks each data upstream separately. After an upstream delivers a checkpoint barrier, the
-`BarrierProcessor` stops polling that upstream, so its post-barrier data remains in the input
-channel. The existing cooperative send backpressure then prevents an active sender from overrunning
-the paused receiver. Once all upstreams deliver the same checkpoint barrier, the processor forwards
-one barrier and resumes polling all upstreams. `BarrierProcessor` does not own a post-barrier data
-buffer or a separate buffer limit. Arrival-count-only alignment remains the behavior for the
-existing non-checkpoint synchronization signals.
+stage returns a pause action and the region stops polling that upstream, so its post-barrier
+data remains in the input channel. The existing cooperative send backpressure then prevents
+an active sender from overrunning the paused receiver. Once all upstreams deliver the same checkpoint barrier, the region drains
+one aligned barrier through its suffix before resuming polling all upstreams. `BarrierStage`
+does not own a post-barrier data buffer or a separate buffer limit. Arrival-count-only
+alignment remains the behavior for existing non-checkpoint synchronization signals.
 
-Only `BarrierProcessor` is checkpoint-aware at this boundary. Ordinary upstream processors keep
-processing and forwarding data; when they send to a paused link, the link's cooperative
+Multi-input checkpoint alignment is confined to `BarrierStage` and its region driver.
+Ordinary upstream stages keep processing and forwarding data; when an upstream region sends
+to a paused link, the link's cooperative
 backpressure makes the send await channel capacity.
 
-If the planner guarantees that every fan-in is protected by a `BarrierProcessor`, other
+If the planner guarantees that every fan-in is protected by a `PhysicalBarrier` stage, other
 intermediate processors do not need multi-input alignment logic. The datasource boundary remains a
 special source-participant boundary because connector data is external to the processor graph.
 

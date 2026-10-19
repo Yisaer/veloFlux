@@ -1,7 +1,6 @@
 //! Shared count/duration policy; buffering belongs to individual stages.
 use crate::processor::ProcessorError;
-use std::pin::Pin;
-use tokio::time::{sleep_until, Duration, Instant, Sleep};
+use tokio::time::{Duration, Instant};
 pub(crate) enum BatchPolicy {
     Immediate,
     CountOnly { count: usize },
@@ -10,6 +9,19 @@ pub(crate) enum BatchPolicy {
 }
 
 impl BatchPolicy {
+    pub(crate) fn validate_batch_config(
+        count: Option<usize>,
+        duration: Option<Duration>,
+    ) -> Result<(), ProcessorError> {
+        Self::validate(count, duration, "batch processor")?;
+        if count.is_none() && duration.is_none() {
+            return Err(ProcessorError::InvalidConfiguration(
+                "batch processor requires batch_count or batch_duration".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(batch_count: Option<usize>, batch_duration: Option<Duration>) -> Self {
         match (batch_count, batch_duration) {
             (Some(count), Some(duration)) => Self::Combined { count, duration },
@@ -92,32 +104,5 @@ impl BatchPolicy {
                 .expect("validated batch duration keeps boundary offset within u64 milliseconds"),
         );
         grid_origin + boundary_offset
-    }
-
-    /// Input preparation can cross a boundary after the task selected data.
-    /// Compare the deadline with the clock, even if the sleep was not polled.
-    pub(crate) fn take_due_timer(timer: &mut Option<Pin<Box<Sleep>>>, now: Instant) -> bool {
-        if timer.as_ref().is_some_and(|timer| now >= timer.deadline()) {
-            *timer = None;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub(crate) fn schedule_timer(
-        timer: &mut Option<Pin<Box<Sleep>>>,
-        grid_origin: Instant,
-        duration: Duration,
-        has_data: bool,
-    ) {
-        if has_data {
-            if timer.is_none() {
-                let boundary = Self::next_boundary(grid_origin, duration, Instant::now());
-                *timer = Some(Box::pin(sleep_until(boundary)));
-            }
-        } else if timer.is_some() {
-            *timer = None;
-        }
     }
 }

@@ -114,7 +114,7 @@ Hot path optimization:
   `decoding_columns`.
 - When `decoding_columns` changes, the shared stream rebuilds the projection once and bumps
   `DecodeProjection.version`.
-- `DecoderProcessor` reads the cached `Arc<DecodeProjection>` and passes `Some(&DecodeProjection)`
+- `DecoderStage` reads the cached `Arc<DecodeProjection>` and passes `Some(&DecodeProjection)`
   into `RecordDecoder::decode_with_projection(...)`, avoiding per-message cloning/rebuilding of
   projection structures.
 - Decoder implementations that need to cache projection-dependent state can use

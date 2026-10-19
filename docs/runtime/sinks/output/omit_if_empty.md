@@ -214,8 +214,9 @@ semantics.
 
 ## Runtime Behavior
 
-`PhysicalEmptySuppress` should be executed by a dedicated sink-side processor, for example
-`EmptySuppressProcessor`.
+`PhysicalEmptySuppress` executes as an empty-suppression stage in a region. Its synchronous
+`collection_is_effectively_empty` check determines whether to emit the input collection;
+no dedicated channel loop is created for this stage.
 
 For each incoming `Collection`:
 

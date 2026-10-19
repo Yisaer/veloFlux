@@ -1,32 +1,11 @@
-//! SamplerProcessor - Samples a stream by emitting data based on configurable strategies.
-//!
-//! This processor is designed for downsampling high-frequency streams at the source level.
-//! All pipelines using a stream with a sampler receive the same downsampled data.
-//!
-//! Strategies:
-//! - Latest: Keep only the latest value, emit at fixed intervals (lossy downsampling)
-//! - Future: Merge strategy for combining multiple records
+//! Synchronous sampling and merger state.
 
-use crate::planner::physical::DataDomain;
-use crate::processor::base::{
-    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
-    LinkReceiver, ProcessorChannelCapacities,
-};
-use crate::processor::data_metrics::{DataMetricDomains, DataMetrics, SAMPLER_METRICS};
-use crate::processor::stage_clock::StageClock;
-use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
-};
-use crate::runtime::TaskSpawner;
-use futures::{future::poll_fn, stream::StreamExt};
+use crate::processor::{ProcessorError, ProcessorStats, StreamData};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::any::Any;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::MissedTickBehavior;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::codec::{Merger, MergerRegistry};
 use crate::shared_stream::AppliedDecodeState;
@@ -37,7 +16,7 @@ pub struct PackerProps {
     pub merger: MergerConfig,
 }
 
-/// Sampling strategy for the SamplerProcessor.
+/// Sampling strategy for the sampler stage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum SamplingStrategy {
@@ -62,7 +41,7 @@ pub struct MergerConfig {
     pub props: JsonMap<String, JsonValue>,
 }
 
-/// Configuration for the SamplerProcessor.
+/// Configuration for the sampler stage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SamplerConfig {
     /// Interval between emissions (e.g., "100ms", "1s").
@@ -87,213 +66,30 @@ impl SamplerConfig {
     }
 }
 
-/// Processor that samples a stream based on configurable strategies.
-///
-/// Currently supports:
-/// - Latest: Emits the most recent value at fixed intervals
-/// - Packer: Accumulates values and emits packed binary
-pub struct SamplerProcessor {
-    id: String,
-    inputs: Vec<LinkReceiver<StreamData>>,
-    control_inputs: Vec<LinkReceiver<ControlSignal>>,
-    output: LinkOutput<StreamData>,
-    control_output: LinkOutput<ControlSignal>,
-    channel_capacities: ProcessorChannelCapacities,
-    config: SamplerConfig,
-    stats: Arc<ProcessorStats>,
-    merger_registry: Option<Arc<MergerRegistry>>,
-    /// Output schema used to build a fused (decode-capable) Packer merger.
-    merger_schema: Option<Arc<Schema>>,
-    merger_schema_artifact: Option<Arc<dyn Any + Send + Sync>>,
-    /// Shared decode state for projection pushdown into the fused decode path.
-    applied_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
-    metric_domains: DataMetricDomains,
-}
-
-impl SamplerProcessor {
-    pub fn new(id: impl Into<String>, config: SamplerConfig) -> Self {
-        Self::new_with_channel_capacities(id, config, default_channel_capacities())
-    }
-
-    pub(crate) fn new_with_channel_capacities(
-        id: impl Into<String>,
-        config: SamplerConfig,
-        channel_capacities: ProcessorChannelCapacities,
-    ) -> Self {
-        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
-        let control_output = LinkOutput::new(
-            channel_capacities.control_link_kind,
-            channel_capacities.control,
-        );
-        Self {
-            id: id.into(),
-            inputs: Vec::new(),
-            control_inputs: Vec::new(),
-            output,
-            control_output,
-            channel_capacities,
-            config,
-            stats: Arc::new(ProcessorStats::default()),
-            merger_registry: None,
-            merger_schema: None,
-            merger_schema_artifact: None,
-            applied_decode_state: None,
-            metric_domains: DataMetricDomains::NONE.passthrough(DataDomain::Message),
-        }
-    }
-
-    /// Convenience constructor for Latest strategy with interval.
-    pub fn latest(id: impl Into<String>, interval: Duration) -> Self {
-        Self::new(id, SamplerConfig::new(interval))
-    }
-
-    fn create_stage(&self) -> Result<SamplerStage, ProcessorError> {
-        if self.config.interval.is_zero() {
-            return Err(ProcessorError::InvalidConfiguration(
-                "sampler interval must be positive".into(),
-            ));
-        }
-        Ok(SamplerStage {
-            interval: self.config.interval,
-            state: StrategyState::new(
-                self.config.strategy.clone(),
-                self.merger_registry.clone(),
-                self.merger_schema.clone(),
-                self.merger_schema_artifact.clone(),
-                self.applied_decode_state.clone(),
-            )?,
-        })
-    }
-    pub(crate) fn into_stage(self) -> Result<SamplerStage, ProcessorError> {
-        self.create_stage()
-    }
-
-    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-        self.stats = stats;
-    }
-
-    pub fn set_merger_registry(&mut self, registry: Arc<MergerRegistry>) {
-        self.merger_registry = Some(registry);
-    }
-
-    pub(crate) fn set_metric_domains(&mut self, metric_domains: DataMetricDomains) {
-        self.metric_domains = metric_domains;
-    }
-
-    /// Provide the output schema used to construct a Packer merger (required for
-    /// mergers that build an embedded decoder for the fused path).
-    pub fn set_merger_schema(&mut self, schema: Arc<Schema>) {
-        self.merger_schema = Some(schema);
-    }
-
-    pub fn set_merger_schema_artifact(&mut self, artifact: Arc<dyn Any + Send + Sync>) {
-        self.merger_schema_artifact = Some(artifact);
-    }
-
-    /// Provide shared decode state so the fused decode path can apply the
-    /// current column projection.
-    pub(crate) fn set_applied_decode_state(
-        &mut self,
-        state: Arc<parking_lot::RwLock<AppliedDecodeState>>,
-    ) {
-        self.applied_decode_state = Some(state);
-    }
-}
-
-impl Processor for SamplerProcessor {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-        let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
-        let control_receivers = std::mem::take(&mut self.control_inputs);
-        let mut control_streams = fan_in_control_streams(control_receivers);
-        let control_active = !control_streams.is_empty();
-        let output = self.output.clone();
-        let control_output = self.control_output.clone();
-        let emit_interval = self.config.interval;
-        let processor_id = self.id.clone();
-        let channel_capacities = self.channel_capacities;
-        let stats = Arc::clone(&self.stats);
-        let mut stage = match self.create_stage() {
-            Ok(stage) => stage,
-            Err(error) => return ProcessorStart::failed(spawner, error),
-        };
-        let data_metrics = DataMetrics::new(stats.as_ref(), SAMPLER_METRICS, self.metric_domains);
-
-        let processor_span = stats.processor_span();
-        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            let mut clock = StageClock::new(Some((emit_interval, MissedTickBehavior::Skip)));
-            let mut control_active = control_active;
-            loop {
-                let (outputs, terminal) = tokio::select! {
-                    biased;
-                    item = control_streams.next(), if control_active => {
-                        match item {
-                            Some(Ok(signal)) => {
-                                let terminal = signal.is_terminal();
-                                send_control_with_backpressure(&control_output, channel_capacities.control, signal).await?;
-                                if terminal { ([stage.finish(), None], true) } else { continue; }
-                            }
-                            Some(Err(BroadcastStreamRecvError::Lagged(n))) => { log_broadcast_lagged(&processor_id, n, "control"); continue; }
-                            None => { control_active = false; continue; }
-                        }
-                    }
-                    _ = poll_fn(|cx| clock.poll_next(cx)) => ([stage.on_tick(), None], false),
-                    item = input_streams.next() => {
-                        match item {
-                            Some(Ok(data)) => {
-                                log_received_data(&processor_id, &data);
-                                data_metrics.record_input(stats.as_ref(), &data)?;
-                                let terminal = data.is_terminal();
-                                let started = std::time::Instant::now();
-                                let outputs = stage.process(data, &stats);
-                                stats.record_handle_duration(started.elapsed());
-                                (outputs, terminal)
-                            }
-                            Some(Err(BroadcastStreamRecvError::Lagged(n))) => { log_broadcast_lagged(&processor_id, n, "data"); continue; }
-                            None => ([stage.finish(), None], true),
-                        }
-                    }
-                };
-                for data in outputs.into_iter().flatten() {
-                    emit_data(&output, channel_capacities.data, &stats, &data_metrics, data).await?;
-                }
-                if terminal { return Ok(()); }
-            }
-        }, processor_span)))
-    }
-
-    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
-        self.output.subscribe()
-    }
-
-    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
-        self.control_output.subscribe()
-    }
-
-    fn add_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<StreamData>>,
-    {
-        self.inputs.push(receiver.into());
-    }
-
-    fn add_control_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<ControlSignal>>,
-    {
-        self.control_inputs.push(receiver.into());
-    }
-}
-
 /// Synchronous sampling state shared by standalone and region execution.
 pub(crate) struct SamplerStage {
     interval: Duration,
     state: StrategyState,
 }
 impl SamplerStage {
+    pub(crate) fn new(
+        config: SamplerConfig,
+        registry: Option<Arc<MergerRegistry>>,
+        schema: Option<Arc<Schema>>,
+        artifact: Option<Arc<dyn Any + Send + Sync>>,
+        applied: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
+    ) -> Result<Self, ProcessorError> {
+        if config.interval.is_zero() {
+            return Err(ProcessorError::InvalidConfiguration(
+                "sampler interval must be positive".into(),
+            ));
+        }
+        Ok(Self {
+            interval: config.interval,
+            state: StrategyState::new(config.strategy, registry, schema, artifact, applied)?,
+        })
+    }
+
     pub(crate) fn period(&self) -> Duration {
         self.interval
     }
@@ -435,21 +231,13 @@ fn should_sample_data(item: &StreamData) -> bool {
     )
 }
 
-async fn emit_data(
-    output: &LinkOutput<StreamData>,
-    data_channel_capacity: usize,
-    stats: &Arc<ProcessorStats>,
-    data_metrics: &DataMetrics,
-    data: StreamData,
-) -> Result<(), ProcessorError> {
-    let measurement = DataMetrics::measure(&data);
-    send_with_backpressure(output, data_channel_capacity, data, Some(stats.as_ref())).await?;
-    data_metrics.record_output(stats.as_ref(), measurement)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
+
+    use crate::planner::physical::*;
+    use crate::processor::base::*;
+    use crate::processor::data_metrics::*;
+
     use super::*;
     use crate::model::{Message, RecordBatch, Tuple};
     use crate::processor::StreamData;
@@ -483,8 +271,27 @@ mod tests {
     #[tokio::test]
     async fn test_sampler_emits_latest_value() {
         let spawner = test_spawner();
-        let mut sampler = SamplerProcessor::latest("latest_test", Duration::from_millis(200));
-        sampler.set_metric_domains(DataMetricDomains::NONE.passthrough(DataDomain::Collection));
+        let config = SamplerConfig::new(Duration::from_millis(200));
+        let mut resources = crate::processor::region_processor::RegionResources::default();
+        resources.samplers.insert(
+            0,
+            SamplerStage::new(config.clone(), None, None, None, None).unwrap(),
+        );
+        resources.stage_default_domains =
+            DataMetricDomains::NONE.passthrough(DataDomain::Collection);
+        let mut sampler = crate::processor::region_processor::RegionProcessor::new(
+            "latest_test".into(),
+            &[PhysicalPlan::Sampler(PhysicalSampler::new(
+                config.interval,
+                config.strategy,
+                None,
+                vec![],
+                0,
+            ))],
+            resources,
+            default_channel_capacities(),
+        )
+        .unwrap();
 
         let (input_tx, input_rx) = broadcast::channel::<StreamData>(16);
         sampler.add_input(input_rx);

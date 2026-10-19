@@ -27,16 +27,19 @@ We model control signals as two categories:
 - `ControlSignal::Barrier(BarrierControlSignal)`:
   requires synchronization at fan-in boundaries.
 
-Instead of making every processor barrier-aware, we insert a dedicated physical plan node and a
-dedicated processor:
+Instead of making every stage barrier-aware, physical planning inserts an explicit alignment
+stage. The region driver owns its channel waits and input polling:
 
 - **Physical plan**: `PhysicalPlan::Barrier(PhysicalBarrier)` is inserted between a fan-in node and
   its children during physical plan optimization.
-- **Processor**: `BarrierProcessor` implements barrier synchronization and forwarding.
+- **Stage**: `BarrierStage` synchronously aligns signals and returns forwarding/pause/resume actions.
+- **Execution**: the region driver polls external inputs, applies those actions, and forwards
+  aligned signals through the remaining stages on the original channel lane. The Barrier stage
+  may share a region with its exclusive downstream stages.
 
-With this structure, normal processors (e.g. `FilterProcessor`, `ResultCollectProcessor`) can treat
-control signals as ordinary items to forward/handle, while the barrier semantics are enforced at
-the explicit barrier boundary.
+With this structure, other stages and boundary processors (such as `ResultCollectProcessor`)
+can treat control signals as ordinary items to forward/handle, while alignment semantics remain
+at the explicit Barrier stage and its region driver.
 
 ## Signal Model
 
@@ -79,14 +82,15 @@ This marks every fan-in boundary explicitly in the physical plan.
 
 `EXPLAIN` surfaces this node as `PhysicalBarrier` with `upstream_count=n`.
 
-## BarrierProcessor Behaviour
+## Barrier Stage and Region Behaviour
 
-`BarrierProcessor` is a pure synchronization + forwarding operator:
+`BarrierStage` owns alignment state for `K` upstreams (`expected_upstreams = K`). The region
+owns the external data/control receivers and drives this synchronous stage:
 
-- It consumes `K` upstreams on both the data channel and the control channel
-  (`expected_upstreams = K`).
-- It forwards all non-control data downstream unchanged.
-- It synchronizes barrier control signals using a shared aligner implementation.
+- Ordinary data passes through unchanged.
+- Barrier signals are synchronized using the shared aligner implementation.
+- The stage returns pause/resume actions for checkpoint alignment; the region applies them to
+  indexed upstream inputs and drains aligned output through its suffix before resuming polling.
 
 ### Per-Channel Isolation
 
@@ -125,7 +129,7 @@ Handling:
   once.
 - A paused checkpoint upstream resumes after all upstreams reach the same checkpoint. Its queued
   post-checkpoint data is then polled after the aligned barrier has been forwarded.
-- If the forwarded signal is terminal, the processor forwards it and then stops.
+- If the forwarded signal is terminal, the region drains/forwards it and then stops.
 
 ## Testing Notes
 

@@ -2,19 +2,8 @@
 use crate::expr::custom_func::BatchFunc;
 use crate::expr::EvalRowContext;
 use crate::model::{Collection, RecordBatch, Tuple};
-use crate::planner::physical::{
-    PhysicalBatchFunctionCompute, PhysicalBatchFunctionEvaluation, PhysicalPlan,
-};
-use crate::processor::base::{
-    default_channel_capacities, fan_in_control_streams, fan_in_streams,
-    send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
-    ProcessorChannelCapacities,
-};
-use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
-};
-use crate::runtime::TaskSpawner;
-use futures::stream::StreamExt;
+use crate::planner::physical::PhysicalBatchFunctionEvaluation;
+use crate::processor::ProcessorError;
 use std::sync::Arc;
 pub(crate) struct BoundBatchEvaluation {
     output_name: Arc<String>,
@@ -32,61 +21,7 @@ struct ActiveRow {
     original_index: usize,
     tuple: Tuple,
 }
-pub struct BatchFunctionComputeProcessor {
-    id: String,
-    evaluations: Arc<Vec<BoundBatchEvaluation>>,
-    inputs: Vec<LinkReceiver<StreamData>>,
-    control_inputs: Vec<LinkReceiver<ControlSignal>>,
-    output: LinkOutput<StreamData>,
-    control_output: LinkOutput<ControlSignal>,
-    channel_capacities: ProcessorChannelCapacities,
-    stats: Arc<ProcessorStats>,
-}
-impl BatchFunctionComputeProcessor {
-    pub fn new(
-        id: impl Into<String>,
-        plan: Arc<PhysicalBatchFunctionCompute>,
-    ) -> Result<Self, ProcessorError> {
-        Self::new_with_channel_capacities(id, plan, default_channel_capacities())
-    }
-    pub(crate) fn new_with_channel_capacities(
-        id: impl Into<String>,
-        plan: Arc<PhysicalBatchFunctionCompute>,
-        channel_capacities: ProcessorChannelCapacities,
-    ) -> Result<Self, ProcessorError> {
-        let evaluations = bind_evaluations(&plan.evaluations)?;
-        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
-        let control_output = LinkOutput::new(
-            channel_capacities.control_link_kind,
-            channel_capacities.control,
-        );
-        Ok(Self {
-            id: id.into(),
-            evaluations: Arc::new(evaluations),
-            inputs: Vec::new(),
-            control_inputs: Vec::new(),
-            output,
-            control_output,
-            channel_capacities,
-            stats: Arc::new(ProcessorStats::collection_in_out()),
-        })
-    }
-    pub fn from_physical_plan(
-        id: impl Into<String>,
-        plan: Arc<PhysicalPlan>,
-    ) -> Result<Option<Self>, ProcessorError> {
-        match plan.as_ref() {
-            PhysicalPlan::BatchFunctionCompute(compute) => {
-                Ok(Some(Self::new(id, Arc::new(compute.clone()))?))
-            }
-            _ => Ok(None),
-        }
-    }
-    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-        stats.declare_collection_in_out();
-        self.stats = stats;
-    }
-}
+
 fn bind_evaluation(
     evaluation: &PhysicalBatchFunctionEvaluation,
 ) -> Result<BoundBatchEvaluation, ProcessorError> {
@@ -201,78 +136,12 @@ pub(crate) fn apply_compute(
     })?;
     Ok((Box::new(output), errors))
 }
-impl Processor for BatchFunctionComputeProcessor {
-    fn id(&self) -> &str {
-        &self.id
-    }
-    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-        let mut inputs = fan_in_streams(std::mem::take(&mut self.inputs));
-        let mut controls = fan_in_control_streams(std::mem::take(&mut self.control_inputs));
-        let mut control_active = !controls.is_empty();
-        let output = self.output.clone();
-        let control_output = self.control_output.clone();
-        let evaluations = Arc::clone(&self.evaluations);
-        let capacities = self.channel_capacities;
-        let stats = Arc::clone(&self.stats);
-        ProcessorStart::ready(spawner.spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    item = controls.next(), if control_active => {
-                        if let Some(Ok(signal)) = item {
-                            let terminal = signal.is_terminal();
-                            send_control_with_backpressure(&control_output, capacities.control, signal).await?;
-                            if terminal { return Ok(()); }
-                        } else { control_active = false; }
-                    }
-                    item = inputs.next() => match item {
-                        Some(Ok(StreamData::Collection(collection))) => {
-                            let start = std::time::Instant::now();
-                            let result = apply_compute(collection, &evaluations);
-                            stats.record_handle_duration(start.elapsed());
-                            match result {
-                                Ok((collection, errors)) => {
-                                    for error in errors {
-                                        stats.record_error_logged("batch function compute error", error);
-                                    }
-                                    send_with_backpressure(&output, capacities.data, StreamData::collection(collection), Some(stats.as_ref())).await?
-                                }
-                                Err(error) => stats.record_error_logged("batch function compute error", error.to_string()),
-                            }
-                        }
-                        Some(Ok(data)) => {
-                            let terminal = data.is_terminal();
-                            send_with_backpressure(&output, capacities.data, data, Some(stats.as_ref())).await?;
-                            if terminal { return Ok(()); }
-                        }
-                        Some(Err(_error)) => return Err(ProcessorError::ChannelClosed),
-                        None => return Ok(()),
-                    }
-                }
-            }
-        }))
-    }
-    fn add_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<StreamData>>,
-    {
-        self.inputs.push(receiver.into());
-    }
-    fn add_control_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<ControlSignal>>,
-    {
-        self.control_inputs.push(receiver.into());
-    }
-    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
-        self.output.subscribe()
-    }
-    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
-        self.control_output.subscribe()
-    }
-}
+
 #[cfg(test)]
 mod tests {
+
+    use crate::planner::physical::*;
+
     use super::*;
     use crate::expr::custom_func::BatchFunc;
     use crate::expr::scalar::ColumnRef;

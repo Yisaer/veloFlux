@@ -1,423 +1,15 @@
-//! WatermarkProcessor - emits or forwards watermarks to drive time-related operators.
+//! Synchronous watermark generation; region owns timer waits.
 
 use crate::planner::physical::{
-    PhysicalEventtimeWatermark, PhysicalPlan, PhysicalProcessTimeWatermark, WatermarkConfig,
+    PhysicalEventtimeWatermark, PhysicalProcessTimeWatermark, WatermarkConfig,
 };
-use crate::processor::base::{
-    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
-    ProcessorChannelCapacities,
-};
-use crate::processor::stage_clock::{ClockDeadline, ClockEvent, StageClock};
-use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
-};
-use crate::runtime::TaskSpawner;
-use futures::future::poll_fn;
-use futures::stream::StreamExt;
+use crate::processor::stage_clock::{ClockDeadline, ClockEvent};
+use crate::processor::{ControlSignal, ProcessorError, ProcessorStats, StreamData};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[cfg(test)]
 use tokio::sync::broadcast;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-
-/// Watermark processor variants by window/operator kind.
-pub enum WatermarkProcessor {
-    ProcessTime(ProcessTimeWatermarkProcessor),
-    Eventtime(EventtimeWatermarkProcessor),
-}
-
-/// Processing-time watermark processor variants by window/operator kind.
-pub enum ProcessTimeWatermarkProcessor {
-    Tumbling(TumblingWatermarkProcessor),
-    Sliding(SlidingWatermarkProcessor),
-}
-
-impl WatermarkProcessor {
-    pub fn from_physical_plan(
-        id: impl Into<String>,
-        plan: Arc<PhysicalPlan>,
-    ) -> Result<Option<Self>, ProcessorError> {
-        Self::from_physical_plan_with_channel_capacities(id, plan, default_channel_capacities())
-    }
-
-    pub(crate) fn from_physical_plan_with_channel_capacities(
-        id: impl Into<String>,
-        plan: Arc<PhysicalPlan>,
-        channel_capacities: ProcessorChannelCapacities,
-    ) -> Result<Option<Self>, ProcessorError> {
-        match plan.as_ref() {
-            PhysicalPlan::Watermark(watermark) => Self::from_physical_plan_with_channel_capacities(
-                id,
-                Arc::new(PhysicalPlan::ProcessTimeWatermark(
-                    PhysicalProcessTimeWatermark::new(
-                        watermark.config.clone(),
-                        watermark.base.children().to_vec(),
-                        watermark.base.index(),
-                    ),
-                )),
-                channel_capacities,
-            ),
-            PhysicalPlan::ProcessTimeWatermark(watermark) => match &watermark.config {
-                WatermarkConfig::Tumbling { .. } => Ok(Some(WatermarkProcessor::ProcessTime(
-                    ProcessTimeWatermarkProcessor::Tumbling(
-                        TumblingWatermarkProcessor::new_with_channel_capacities(
-                            id,
-                            Arc::new(watermark.clone()),
-                            channel_capacities,
-                        ),
-                    ),
-                ))),
-                WatermarkConfig::Sliding { .. } => {
-                    let processor = SlidingWatermarkProcessor::new_with_channel_capacities(
-                        id,
-                        Arc::new(watermark.clone()),
-                        channel_capacities,
-                    )?;
-                    Ok(Some(WatermarkProcessor::ProcessTime(
-                        ProcessTimeWatermarkProcessor::Sliding(processor),
-                    )))
-                }
-            },
-            PhysicalPlan::EventtimeWatermark(watermark) => Ok(Some(WatermarkProcessor::Eventtime(
-                EventtimeWatermarkProcessor::new_with_channel_capacities(
-                    id,
-                    Arc::new(watermark.clone()),
-                    channel_capacities,
-                ),
-            ))),
-            _ => Ok(None),
-        }
-    }
-
-    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-        match self {
-            WatermarkProcessor::ProcessTime(p) => p.set_stats(stats),
-            WatermarkProcessor::Eventtime(p) => p.set_stats(stats),
-        }
-    }
-}
-
-impl ProcessTimeWatermarkProcessor {
-    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-        match self {
-            ProcessTimeWatermarkProcessor::Tumbling(p) => p.set_stats(stats),
-            ProcessTimeWatermarkProcessor::Sliding(p) => p.set_stats(stats),
-        }
-    }
-}
-
-impl Processor for WatermarkProcessor {
-    fn id(&self) -> &str {
-        match self {
-            WatermarkProcessor::ProcessTime(p) => p.id(),
-            WatermarkProcessor::Eventtime(p) => p.id(),
-        }
-    }
-
-    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-        match self {
-            WatermarkProcessor::ProcessTime(p) => p.start(spawner),
-            WatermarkProcessor::Eventtime(p) => p.start(spawner),
-        }
-    }
-
-    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
-        match self {
-            WatermarkProcessor::ProcessTime(p) => p.subscribe_output(),
-            WatermarkProcessor::Eventtime(p) => p.subscribe_output(),
-        }
-    }
-
-    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
-        match self {
-            WatermarkProcessor::ProcessTime(p) => p.subscribe_control_output(),
-            WatermarkProcessor::Eventtime(p) => p.subscribe_control_output(),
-        }
-    }
-
-    fn add_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<StreamData>>,
-    {
-        match self {
-            WatermarkProcessor::ProcessTime(p) => p.add_input(receiver),
-            WatermarkProcessor::Eventtime(p) => p.add_input(receiver),
-        }
-    }
-
-    fn add_control_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<ControlSignal>>,
-    {
-        match self {
-            WatermarkProcessor::ProcessTime(p) => p.add_control_input(receiver),
-            WatermarkProcessor::Eventtime(p) => p.add_control_input(receiver),
-        }
-    }
-}
-
-impl Processor for ProcessTimeWatermarkProcessor {
-    fn id(&self) -> &str {
-        match self {
-            ProcessTimeWatermarkProcessor::Tumbling(p) => p.id(),
-            ProcessTimeWatermarkProcessor::Sliding(p) => p.id(),
-        }
-    }
-
-    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-        match self {
-            ProcessTimeWatermarkProcessor::Tumbling(p) => p.start(spawner),
-            ProcessTimeWatermarkProcessor::Sliding(p) => p.start(spawner),
-        }
-    }
-
-    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
-        match self {
-            ProcessTimeWatermarkProcessor::Tumbling(p) => p.subscribe_output(),
-            ProcessTimeWatermarkProcessor::Sliding(p) => p.subscribe_output(),
-        }
-    }
-
-    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
-        match self {
-            ProcessTimeWatermarkProcessor::Tumbling(p) => p.subscribe_control_output(),
-            ProcessTimeWatermarkProcessor::Sliding(p) => p.subscribe_control_output(),
-        }
-    }
-
-    fn add_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<StreamData>>,
-    {
-        match self {
-            ProcessTimeWatermarkProcessor::Tumbling(p) => p.add_input(receiver),
-            ProcessTimeWatermarkProcessor::Sliding(p) => p.add_input(receiver),
-        }
-    }
-
-    fn add_control_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<ControlSignal>>,
-    {
-        match self {
-            ProcessTimeWatermarkProcessor::Tumbling(p) => p.add_control_input(receiver),
-            ProcessTimeWatermarkProcessor::Sliding(p) => p.add_control_input(receiver),
-        }
-    }
-}
-
-/// Watermark operator processor.
-pub struct TumblingWatermarkProcessor {
-    driver: WatermarkDriver,
-}
-pub struct SlidingWatermarkProcessor {
-    driver: WatermarkDriver,
-}
-pub struct EventtimeWatermarkProcessor {
-    driver: WatermarkDriver,
-}
-
-impl TumblingWatermarkProcessor {
-    pub fn new(id: impl Into<String>, physical: Arc<PhysicalProcessTimeWatermark>) -> Self {
-        Self::new_with_channel_capacities(id, physical, default_channel_capacities())
-    }
-    pub(crate) fn new_with_channel_capacities(
-        id: impl Into<String>,
-        physical: Arc<PhysicalProcessTimeWatermark>,
-        capacities: ProcessorChannelCapacities,
-    ) -> Self {
-        Self {
-            driver: WatermarkDriver::new(
-                id.into(),
-                WatermarkStage::periodic(physical.config.interval_duration()),
-                capacities,
-            ),
-        }
-    }
-}
-impl SlidingWatermarkProcessor {
-    pub fn new(
-        id: impl Into<String>,
-        physical: Arc<PhysicalProcessTimeWatermark>,
-    ) -> Result<Self, ProcessorError> {
-        Self::new_with_channel_capacities(id, physical, default_channel_capacities())
-    }
-    pub(crate) fn new_with_channel_capacities(
-        id: impl Into<String>,
-        physical: Arc<PhysicalProcessTimeWatermark>,
-        capacities: ProcessorChannelCapacities,
-    ) -> Result<Self, ProcessorError> {
-        let id = id.into();
-        if !matches!(physical.config, WatermarkConfig::Sliding { .. }) {
-            return Err(ProcessorError::InvalidConfiguration(format!(
-                "SlidingWatermarkProcessor requires WatermarkConfig::Sliding for processor '{id}'"
-            )));
-        }
-        Ok(Self {
-            driver: WatermarkDriver::new(
-                id,
-                WatermarkStage::from_processing(&physical),
-                capacities,
-            ),
-        })
-    }
-}
-impl EventtimeWatermarkProcessor {
-    pub fn new(id: impl Into<String>, physical: Arc<PhysicalEventtimeWatermark>) -> Self {
-        Self::new_with_channel_capacities(id, physical, default_channel_capacities())
-    }
-    pub(crate) fn new_with_channel_capacities(
-        id: impl Into<String>,
-        physical: Arc<PhysicalEventtimeWatermark>,
-        capacities: ProcessorChannelCapacities,
-    ) -> Self {
-        Self {
-            driver: WatermarkDriver::new(
-                id.into(),
-                WatermarkStage::from_eventtime(&physical),
-                capacities,
-            ),
-        }
-    }
-    fn to_nanos(ts: SystemTime) -> Result<u128, ProcessorError> {
-        watermark_to_nanos(ts)
-    }
-    fn from_nanos(nanos: u128) -> Result<SystemTime, ProcessorError> {
-        watermark_from_nanos(nanos)
-    }
-}
-
-macro_rules! watermark_driver {
-    ($ty:ty) => {
-        impl $ty {
-            pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-                stats.declare_collection_in_out();
-                self.driver.stats = stats;
-            }
-        }
-        impl Processor for $ty {
-            fn id(&self) -> &str {
-                &self.driver.id
-            }
-            fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-                self.driver.start(spawner)
-            }
-            fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
-                self.driver.output.subscribe()
-            }
-            fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
-                self.driver.control_output.subscribe()
-            }
-            fn add_input<R: Into<LinkReceiver<StreamData>>>(&mut self, receiver: R) {
-                self.driver.inputs.push(receiver.into());
-            }
-            fn add_control_input<R: Into<LinkReceiver<ControlSignal>>>(&mut self, receiver: R) {
-                self.driver.control_inputs.push(receiver.into());
-            }
-        }
-    };
-}
-watermark_driver!(TumblingWatermarkProcessor);
-watermark_driver!(SlidingWatermarkProcessor);
-watermark_driver!(EventtimeWatermarkProcessor);
-
-struct WatermarkDriver {
-    id: String,
-    stage: Option<WatermarkStage>,
-    inputs: Vec<LinkReceiver<StreamData>>,
-    control_inputs: Vec<LinkReceiver<ControlSignal>>,
-    output: LinkOutput<StreamData>,
-    control_output: LinkOutput<ControlSignal>,
-    capacities: ProcessorChannelCapacities,
-    stats: Arc<ProcessorStats>,
-}
-impl WatermarkDriver {
-    fn new(id: String, stage: WatermarkStage, capacities: ProcessorChannelCapacities) -> Self {
-        Self {
-            id,
-            stage: Some(stage),
-            inputs: Vec::new(),
-            control_inputs: Vec::new(),
-            output: LinkOutput::new(capacities.data_link_kind, capacities.data),
-            control_output: LinkOutput::new(capacities.control_link_kind, capacities.control),
-            capacities,
-            stats: Arc::new(ProcessorStats::collection_in_out()),
-        }
-    }
-    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-        let Some(mut stage) = self.stage.take() else {
-            return ProcessorStart::failed(
-                spawner,
-                ProcessorError::InvalidConfiguration("watermark driver was already started".into()),
-            );
-        };
-        let id = self.id.clone();
-        let mut input = fan_in_streams(std::mem::take(&mut self.inputs));
-        let mut control = fan_in_control_streams(std::mem::take(&mut self.control_inputs));
-        let mut control_active = !control.is_empty();
-        let output = self.output.clone();
-        let control_output = self.control_output.clone();
-        let capacities = self.capacities;
-        let stats = Arc::clone(&self.stats);
-        let span = stats.processor_span();
-        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            let mut clock = StageClock::new(stage.period().map(|period| (period, tokio::time::MissedTickBehavior::Delay)));
-            loop {
-                clock.update(stage.deadline()?);
-                let outputs = tokio::select! {
-                    biased;
-                    item = control.next(), if control_active => {
-                        match item {
-                            Some(Ok(signal)) => {
-                                for data in stage.control(&signal, &stats)?.into_iter().flatten() {
-                                    let rows = data.row_count();
-                                    send_with_backpressure(&output, capacities.data, data, Some(&stats)).await?;
-                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
-                                }
-                                let terminal = signal.is_terminal();
-                                send_control_with_backpressure(&control_output, capacities.control, signal).await?;
-                                if terminal { stage.clear(); return Ok(()); }
-                                continue;
-                            }
-                            _ => { control_active = false; continue; }
-                        }
-                    }
-                    event = poll_fn(|cx| clock.poll_next(cx)) => {
-                        [stage.on_timer(event, SystemTime::now())?, None]
-                    }
-                    item = input.next() => {
-                        match item {
-                            Some(Ok(data)) => {
-                                if let Some(rows) = data.row_count() { stats.record_collection_in(rows); }
-                                let terminal = data.is_terminal();
-                                let outputs = stage.process(data, &stats)?;
-                                // Schedule data-driven deadlines before waiting for output.
-                                clock.update(stage.deadline()?);
-                                for data in outputs.into_iter().flatten() {
-                                    let rows = data.row_count();
-                                    send_with_backpressure(&output, capacities.data, data, Some(&stats)).await?;
-                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
-                                }
-                                if terminal { stage.clear(); return Ok(()); }
-                                continue;
-                            }
-                            Some(Err(BroadcastStreamRecvError::Lagged(skipped))) => {
-                                log_broadcast_lagged(&id, skipped, "watermark data input"); continue;
-                            }
-                            None => { stage.clear(); return Ok(()); }
-                        }
-                    }
-                };
-                for data in outputs.into_iter().flatten() {
-                    send_with_backpressure(&output, capacities.data, data, Some(&stats)).await?;
-                }
-            }
-        }, span)))
-    }
-}
 
 fn watermark_to_nanos(ts: SystemTime) -> Result<u128, ProcessorError> {
     ts.duration_since(UNIX_EPOCH)
@@ -708,7 +300,7 @@ impl EventtimeWatermarkState {
         let mut errors = Vec::new();
 
         for tuple in rows {
-            let ts_nanos = match EventtimeWatermarkProcessor::to_nanos(tuple.timestamp) {
+            let ts_nanos = match watermark_to_nanos(tuple.timestamp) {
                 Ok(ts) => ts,
                 Err(err) => {
                     errors.push(err.to_string());
@@ -764,7 +356,7 @@ impl EventtimeWatermarkState {
             out.push(StreamData::collection(Box::new(batch)));
         }
 
-        let watermark_ts = EventtimeWatermarkProcessor::from_nanos(target)?;
+        let watermark_ts = watermark_from_nanos(target)?;
         out.push(StreamData::watermark(watermark_ts));
         self.current_watermark_nanos = target;
         Ok(out)
@@ -789,12 +381,19 @@ impl EventtimeWatermarkState {
 
 #[cfg(test)]
 mod tests {
+    use crate::processor::base::*;
+    use crate::processor::*;
+
+    use crate::planner::physical::*;
+
+    use tokio::time::*;
+
     use super::*;
     use crate::planner::logical::TimeUnit;
     use crate::planner::physical::WatermarkConfig;
     use crate::processor::base::DEFAULT_DATA_CHANNEL_CAPACITY;
     use crate::runtime::TaskSpawner;
-    use std::sync::Arc;
+
     use tokio::time::timeout;
 
     fn test_spawner() -> TaskSpawner {
@@ -832,8 +431,13 @@ mod tests {
             Vec::new(),
             0,
         );
-        let mut processor =
-            SlidingWatermarkProcessor::new("wm", Arc::new(physical)).expect("valid sliding config");
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "wm".into(),
+            &[crate::planner::physical::PhysicalPlan::ProcessTimeWatermark(physical)],
+            crate::processor::region_processor::RegionResources::default(),
+            crate::processor::base::default_channel_capacities(),
+        )
+        .expect("valid sliding config");
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
@@ -884,8 +488,13 @@ mod tests {
             Vec::new(),
             0,
         );
-        let mut processor =
-            SlidingWatermarkProcessor::new("wm", Arc::new(physical)).expect("valid sliding config");
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "wm".into(),
+            &[crate::planner::physical::PhysicalPlan::ProcessTimeWatermark(physical)],
+            crate::processor::region_processor::RegionResources::default(),
+            crate::processor::base::default_channel_capacities(),
+        )
+        .expect("valid sliding config");
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
@@ -937,8 +546,13 @@ mod tests {
             Vec::new(),
             0,
         );
-        let mut processor =
-            SlidingWatermarkProcessor::new("wm", Arc::new(physical)).expect("valid sliding config");
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "wm".into(),
+            &[crate::planner::physical::PhysicalPlan::ProcessTimeWatermark(physical)],
+            crate::processor::region_processor::RegionResources::default(),
+            crate::processor::base::default_channel_capacities(),
+        )
+        .expect("valid sliding config");
         let (_input, _) = broadcast::channel::<StreamData>(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(_input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
@@ -962,7 +576,15 @@ mod tests {
         let spawner = test_spawner();
         let physical = PhysicalEventtimeWatermark::new(Duration::from_secs(1), None, Vec::new(), 0);
 
-        let mut processor = EventtimeWatermarkProcessor::new("ewm", Arc::new(physical));
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "ewm".into(),
+            &[crate::planner::physical::PhysicalPlan::EventtimeWatermark(
+                physical,
+            )],
+            crate::processor::region_processor::RegionResources::default(),
+            crate::processor::base::default_channel_capacities(),
+        )
+        .unwrap();
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
         processor.add_input(input.subscribe());
         let mut output_rx = processor.subscribe_output().unwrap();
@@ -1117,25 +739,5 @@ mod tests {
             .on_rows(vec![tuple_at(2), tuple_at(1)])
             .expect("on_rows");
         assert!(step.outputs.is_empty());
-    }
-
-    #[test]
-    fn sliding_watermark_processor_rejects_non_sliding_config() {
-        use crate::planner::physical::PhysicalProcessTimeWatermark;
-
-        let physical = PhysicalProcessTimeWatermark::new(
-            WatermarkConfig::Tumbling {
-                time_unit: TimeUnit::Seconds,
-                length: 10,
-            },
-            Vec::new(),
-            0,
-        );
-
-        let result = SlidingWatermarkProcessor::new("wm", Arc::new(physical));
-        assert!(
-            matches!(result, Err(ProcessorError::InvalidConfiguration(_))),
-            "expected Err(InvalidConfiguration)"
-        );
     }
 }

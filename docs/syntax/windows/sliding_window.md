@@ -76,7 +76,7 @@ create an emission request, but it will not by itself suppress stateful state up
 Delayed emission is entirely watermark-driven. The upstream pipeline must eventually produce
 watermarks that reach each trigger's deadline (`t + lookahead`):
 
-- In processing-time mode, `SlidingWatermarkProcessor` emits periodic processing-time watermarks
+- In processing-time mode, `WatermarkStage` configured for sliding processing time emits periodic processing-time watermarks
   (tick interval is `1s`) and, when `lookahead` is present, generates per-tuple deadline
   processing-time watermarks.
 - In event-time mode, the deadline watermark behavior is controlled by the upstream event-time

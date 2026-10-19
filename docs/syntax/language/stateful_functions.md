@@ -702,7 +702,7 @@ This makes stateful dependencies explicit in `EXPLAIN`.
 
 ### Execution model
 
-`StatefulFunctionProcessor` evaluates ordered stateful calls row by row and writes results into
+`StatefulStage` evaluates ordered stateful calls row by row and writes results into
 affiliate columns using the parser placeholders.
 
 For each stateful call, the processor maintains:

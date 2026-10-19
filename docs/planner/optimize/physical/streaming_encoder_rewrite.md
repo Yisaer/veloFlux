@@ -14,7 +14,7 @@ enabled (`batch_count` or `batch_duration`). This creates a two-node chain:
 PhysicalBatch → PhysicalSinkEncoder(Immediate)
 ```
 
-For registered sink encoders, the `BatchProcessor` and `SinkEncoderProcessor`
+For registered sink encoders, the batch and encoder stages
 can be merged into one fused processor, eliminating an extra data-pass and an
 async task. The `SinkEncoder` delivery API is streaming by contract: an encoder
 that cannot emit incrementally may buffer records in `append` and emit from
@@ -62,8 +62,8 @@ CountOnly / DurationOnly / Combined policy from the original batch. Eligible enc
 computation, and byte transforms share a region without internal channels. PhysicalBatch
 for native output uses the shared count/timed batch engines independently of encoding.
 
-The standalone SinkEncoderProcessor uses EncoderDriver for transport and timer waits;
-its framing and batching algorithms are the same EncoderStage methods used by regions.
+The region driver owns transport and timer waits. `EncoderStage` owns synchronous
+framing and batching for both immediate and incremental encoder plans.
 The fixed PhysicalFusedTransform rewrite has been removed from SQL optimization.
 
 ## Output Layout

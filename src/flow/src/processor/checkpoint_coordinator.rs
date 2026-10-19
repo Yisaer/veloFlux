@@ -101,12 +101,12 @@ impl CheckpointCoordinator {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::processor::base::Processor;
     use crate::processor::result_collect_processor::AckHook;
     use crate::processor::{
-        BarrierProcessor, ControlSignal, ControlSourceProcessor, IngressTarget,
-        ResultCollectProcessor,
+        ControlSignal, ControlSourceProcessor, IngressTarget, ResultCollectProcessor,
     };
     use crate::runtime::TaskSpawner;
     use std::time::Duration;
@@ -188,8 +188,22 @@ mod tests {
         let (ingress, ingress_receiver) = mpsc::channel(channel_capacities.control);
         source.set_ingress_input(ingress_receiver);
 
-        let mut barrier =
-            BarrierProcessor::new_with_channel_capacities("test_barrier", 1, channel_capacities);
+        let mut barrier = crate::processor::region_processor::RegionProcessor::new(
+            "test_barrier".into(),
+            &[crate::planner::physical::PhysicalPlan::Barrier(
+                crate::planner::physical::PhysicalBarrier::new(
+                    vec![std::sync::Arc::new(
+                        crate::planner::physical::PhysicalPlan::Compute(
+                            crate::planner::physical::PhysicalCompute::new(vec![], vec![], 1),
+                        ),
+                    )],
+                    0,
+                ),
+            )],
+            crate::processor::region_processor::RegionResources::default(),
+            channel_capacities,
+        )
+        .unwrap();
         barrier.add_input(source.subscribe_output().expect("source data output"));
         barrier.add_control_input(
             source

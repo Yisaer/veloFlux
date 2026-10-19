@@ -364,7 +364,7 @@ PhysicalRowDiff: sink_id=vehicle_sink, mode=delta, columns=[speed, rpm]
 
 ### Processor Shape
 
-At runtime, `RowDiffProcessor` should be a normal row-preserving processor:
+At runtime, the region executor invokes `apply_row_diff` as a synchronous row-preserving stage:
 
 - input: `StreamData::Collection`
 - output: `StreamData::Collection`
@@ -409,12 +409,12 @@ After row diff is introduced, downstream sink-side components fall into two grou
 
 Components that can consume the mask:
 
-- `SinkEncoderProcessor`
+- `EncoderStage`
 - future mask-aware direct sink paths
 
 Components that do not interpret the mask but must preserve it when rebuilding rows:
 
-- `MemoryCollectionMaterializeProcessor`
+- the collection-materialization stage
 - any future processor placed after `RowDiff` that reconstructs `Tuple`
 
 Components that simply forward the same collection / rows without rebuilding tuples usually need no
@@ -430,7 +430,7 @@ For this branch shape:
 Project -> RowDiff -> Batch? -> MemoryCollectionMaterialize -> DataSink
 ```
 
-`MemoryCollectionMaterializeProcessor` currently rebuilds tuples into a normalized stable layout.
+The collection-materialization stage currently rebuilds tuples into a normalized stable layout.
 If row diff is enabled on that branch, it must also copy `output_mask` onto the rebuilt tuple.
 
 If that propagation step is omitted:
@@ -622,7 +622,7 @@ change set.
 
 - add sink-side `output.mode=delta` configuration
 - add optional `output.delta.columns`
-- add explicit `PhysicalRowDiff` and `RowDiffProcessor`
+- add explicit `PhysicalRowDiff` and its synchronous `apply_row_diff` handler
 - materialize dense diff rows and mark changed output indexes in `output_mask`
 - add `output_mask` to runtime row metadata
 - preserve the mask on sink paths that rebuild tuples, especially memory collection materialization

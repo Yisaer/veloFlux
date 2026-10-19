@@ -25,25 +25,20 @@ pub(crate) struct EncoderOutput {
 
 /// Lifecycle notifications precede the frame; an error follows its successful send.
 pub(crate) struct EncodingStep {
-    pub(crate) began: bool,
     pub(crate) aborted: bool,
     pub(crate) frame: Option<StreamData>,
     pub(crate) error: Option<ProcessorError>,
 }
 
 impl EncoderOutput {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.total == 0
-    }
     pub(crate) fn stop(&mut self) {
         self.done = true;
     }
 }
 
 impl EncodingStep {
-    fn frame(began: bool, frame: Option<StreamData>) -> Self {
+    fn frame(frame: Option<StreamData>) -> Self {
         Self {
-            began,
             aborted: false,
             frame,
             error: None,
@@ -104,7 +99,7 @@ impl EncoderStage {
         }
     }
     pub(crate) fn flush_step(&mut self) -> EncodingStep {
-        self.finish_delivery(None, false)
+        self.finish_delivery(None)
     }
     pub(crate) fn output_failed(&mut self, flags: EncodedDeliveryFlags) {
         if flags.contains(EncodedDeliveryFlags::START) && !flags.contains(EncodedDeliveryFlags::END)
@@ -142,7 +137,7 @@ impl EncoderStage {
         }
         let Some(collection) = output.collection.as_ref() else {
             output.done = true;
-            return Some(self.finish_delivery(None, false));
+            return Some(self.finish_delivery(None));
         };
         let total = output.total;
         if total == 0 {
@@ -151,8 +146,8 @@ impl EncoderStage {
                 return None;
             }
             return Some(match self.start_delivery() {
-                Ok(()) => self.finish_delivery(None, true),
-                Err(error) => self.fail(error, true),
+                Ok(()) => self.finish_delivery(None),
+                Err(error) => self.fail(error),
             });
         }
         if output.offset == total {
@@ -173,7 +168,6 @@ impl EncoderStage {
                     // A slice error precedes append; preserve the existing active
                     // delivery just as the standalone processor does.
                     return Some(EncodingStep {
-                        began: false,
                         aborted: false,
                         frame: None,
                         error: Some(ProcessorError::ProcessingError(format!(
@@ -184,21 +178,19 @@ impl EncoderStage {
             };
             segment.as_ref()
         };
-        let began = !self.delivery.active;
-        if began {
+        if !self.delivery.active {
             if let Err(error) = self.start_delivery() {
                 output.done = true;
-                return Some(self.fail(error, true));
+                return Some(self.fail(error));
             }
         }
         let chunk = match self.encoder.append(input) {
             Ok(chunk) => chunk,
             Err(error) => {
                 output.done = true;
-                return Some(self.fail(
-                    ProcessorError::ProcessingError(format!("encoder append error: {error}")),
-                    began,
-                ));
+                return Some(self.fail(ProcessorError::ProcessingError(format!(
+                    "encoder append error: {error}"
+                ))));
             }
         };
         self.delivery.row_count += input.num_rows();
@@ -209,7 +201,7 @@ impl EncoderStage {
                 .count_threshold()
                 .is_some_and(|count| self.delivery.row_count >= count)
         {
-            self.finish_delivery(chunk, began)
+            self.finish_delivery(chunk)
         } else {
             let chunk = if self.delivery.emitted_chunk {
                 chunk
@@ -224,7 +216,7 @@ impl EncoderStage {
                     StreamData::encoded_delivery_start(chunk)
                 }
             });
-            EncodingStep::frame(began, frame)
+            EncodingStep::frame(frame)
         };
         if step.error.is_some() {
             output.done = true;
@@ -245,7 +237,7 @@ impl EncoderStage {
         Ok(())
     }
 
-    fn fail(&mut self, error: ProcessorError, began: bool) -> EncodingStep {
+    fn fail(&mut self, error: ProcessorError) -> EncodingStep {
         let aborted = self.delivery.active;
         let emit_abort = self.delivery.emitted_chunk;
         if aborted {
@@ -253,24 +245,22 @@ impl EncoderStage {
             self.delivery = DeliveryEncoding::default();
         }
         EncodingStep {
-            began,
             aborted,
             frame: emit_abort.then(StreamData::encoded_delivery_abort),
             error: Some(error),
         }
     }
 
-    fn finish_delivery(&mut self, prefix: Option<bytes::Bytes>, began: bool) -> EncodingStep {
+    fn finish_delivery(&mut self, prefix: Option<bytes::Bytes>) -> EncodingStep {
         if !self.delivery.active {
-            return EncodingStep::frame(began, None);
+            return EncodingStep::frame(None);
         }
         let end = match self.encoder.finish_delivery() {
             Ok(chunk) => chunk,
             Err(error) => {
-                return self.fail(
-                    ProcessorError::ProcessingError(format!("encoder finish error: {error}")),
-                    began,
-                )
+                return self.fail(ProcessorError::ProcessingError(format!(
+                    "encoder finish error: {error}"
+                )))
             }
         };
         let chunk = Self::combine_chunks([
@@ -289,7 +279,7 @@ impl EncoderStage {
             StreamData::encoded_delivery_single(chunk)
         };
         self.delivery = DeliveryEncoding::default();
-        EncodingStep::frame(began, Some(frame))
+        EncodingStep::frame(Some(frame))
     }
 
     fn combine_chunks(chunks: [Option<bytes::Bytes>; 3]) -> Option<bytes::Bytes> {

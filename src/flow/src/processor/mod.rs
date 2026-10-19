@@ -1,11 +1,6 @@
-//! Stream processing operators
-//!
-//! New architecture with tokio mspc channels:
-//! - Multi-input, multi-output processors
-//! - ControlSourceProcessor as data flow starting point
-//! - DataSourceProcessor for data generation
-//! - ResultCollectProcessor as final destination
-//! - All processors communicate via StreamData through tokio mspc channels
+//! Synchronous semantic stages and channel-based execution boundaries.
+//! Regions execute stage chains; source, sink, lookup, shared-stream and
+//! coordination drivers retain the external data/control channels.
 
 pub mod aggregation_processor;
 pub mod barrier;
@@ -13,26 +8,33 @@ pub mod barrier_processor;
 pub mod base;
 pub mod batch_function_compute_processor;
 pub(crate) mod batch_policy;
-pub mod batch_processor;
+#[cfg(test)]
+#[path = "region_processor/batch_tests.rs"]
+mod batch_tests;
 pub mod byte_stage;
 pub(crate) mod checkpoint_coordinator;
 pub mod collection_layout_normalize_processor;
+#[cfg(test)]
+#[path = "region_processor/compress_tests.rs"]
+mod compress_tests;
 pub mod compute_processor;
 pub mod control_source_processor;
 pub(crate) mod count_window_stage;
 pub(crate) mod data_metrics;
 pub mod datasource_processor;
 pub mod decoder_processor;
-pub(crate) mod delivery_output;
 pub(crate) mod delivery_transform;
 pub mod empty_suppress_processor;
-pub(crate) mod encoder_driver;
 pub(crate) mod encoder_stage;
+#[cfg(test)]
+#[path = "region_processor/encoder_tests.rs"]
+mod encoder_tests;
+#[cfg(test)]
+#[path = "region_processor/encrypt_tests.rs"]
+mod encrypt_tests;
 pub mod eos_window_processor;
 pub mod eventtime;
 pub mod filter_processor;
-#[cfg(test)]
-pub(crate) mod inline_delivery;
 pub mod lookup_join_processor;
 pub mod memory_collection_materialize_processor;
 pub(crate) mod native_batch_stage;
@@ -43,19 +45,16 @@ pub mod processor_builder;
 pub mod processor_state;
 pub mod project_processor;
 pub(crate) mod region_processor;
-#[cfg(test)]
-mod region_reference_tests;
 pub mod result_collect_processor;
 pub mod row_diff_processor;
 pub mod sampler_processor;
 pub mod shared_stream_processor;
-pub mod sink_compress_processor;
-pub mod sink_encoder_processor;
-pub mod sink_encrypt_processor;
 pub mod sink_processor;
-pub mod sliding_window_processor;
 pub(crate) mod sliding_window_runtime;
 pub(crate) mod sliding_window_stage;
+#[cfg(test)]
+#[path = "region_processor/sliding_window_tests.rs"]
+mod sliding_window_tests;
 pub mod source_change_gate_processor;
 pub(crate) mod stage_clock;
 mod stage_metrics;
@@ -71,43 +70,22 @@ pub mod watermark_processor;
 pub(crate) mod window_metadata;
 pub(crate) mod window_partition;
 
-pub use aggregation_processor::AggregationProcessor;
-pub use barrier_processor::BarrierProcessor;
 pub use base::ProcessorError;
 pub(crate) use base::{Processor, ProcessorStart};
-pub use batch_function_compute_processor::BatchFunctionComputeProcessor;
-pub use batch_processor::BatchProcessor;
 pub(crate) use checkpoint_coordinator::{CheckpointCoordinator, CheckpointTrigger};
-pub use collection_layout_normalize_processor::CollectionLayoutNormalizeProcessor;
-pub use compute_processor::ComputeProcessor;
 pub use control_source_processor::{ControlSourceProcessor, Ingress, IngressTarget};
 pub use datasource_processor::DataSourceProcessor;
-pub use decoder_processor::DecoderProcessor;
-pub use empty_suppress_processor::EmptySuppressProcessor;
-pub use eos_window_processor::EosWindowProcessor;
 pub use eventtime::EventtimePipelineContext;
-pub use filter_processor::FilterProcessor;
 pub use lookup_join_processor::LookupJoinProcessor;
-pub use memory_collection_materialize_processor::MemoryCollectionMaterializeProcessor;
-pub use order_processor::OrderProcessor;
 pub use processor_builder::ProcessorPipeline;
 pub(crate) use processor_builder::{
     create_processor_pipeline, ProcessorPipelineDependencies, ProcessorPipelineOptions,
 };
 pub use processor_state::ProcessorState;
-pub use project_processor::ProjectProcessor;
 pub use result_collect_processor::ResultCollectProcessor;
-pub use row_diff_processor::RowDiffProcessor;
-pub use sampler_processor::{SamplerConfig, SamplerProcessor, SamplingStrategy};
+pub use sampler_processor::{SamplerConfig, SamplingStrategy};
 pub use shared_stream_processor::SharedStreamProcessor;
-pub use sink_compress_processor::SinkCompressProcessor;
-pub use sink_encoder_processor::SinkEncoderProcessor;
-pub use sink_encrypt_processor::SinkEncryptProcessor;
 pub use sink_processor::SinkProcessor;
-pub use sliding_window_processor::SlidingWindowProcessor;
-pub use source_change_gate_processor::SourceChangeGateProcessor;
-pub use state_window_processor::StateWindowProcessor;
-pub use stateful_function_processor::StatefulFunctionProcessor;
 pub use stats::{
     set_stage_handling_time_enabled, CounterHandle, GaugeHandle, MetricKind, MetricSpec,
     ProcessorStats, ProcessorStatsEntry, ProcessorStatsHandle, ProcessorStatsSnapshot,
@@ -116,10 +94,7 @@ pub use stream_data::{
     BarrierControlSignal, BarrierControlSignalKind, ControlSignal, EncodedDeliveryFlags,
     InstantControlSignal, StreamData, StreamError,
 };
-pub use streaming_aggregation_processor::{
-    StreamingAggregationProcessor, StreamingCountAggregationProcessor,
-    StreamingTumblingAggregationProcessor,
-};
 pub use table_scan_processor::TableScanProcessor;
-pub use tumbling_window_processor::TumblingWindowProcessor;
-pub use watermark_processor::WatermarkProcessor;
+
+#[cfg(test)]
+mod test_support;

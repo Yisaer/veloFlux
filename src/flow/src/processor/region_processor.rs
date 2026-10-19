@@ -8,7 +8,7 @@ use crate::codec::encrypt::{AesGcmStreamWriter, SinkEncryptionConfig};
 use crate::model::Collection;
 use crate::planner::physical::DataDomain;
 use crate::planner::physical::{PhysicalAggregation, PhysicalPlan, StreamingWindowSpec};
-use crate::processor::aggregation_processor::AggregationProcessor;
+use crate::processor::aggregation_processor::AggregationStage;
 use crate::processor::barrier_processor::{BarrierAction, BarrierStage};
 use crate::processor::base::{
     fan_in_control_streams, fan_in_streams, fan_in_streams_indexed, log_broadcast_lagged,
@@ -18,6 +18,7 @@ use crate::processor::base::{
 use crate::processor::batch_function_compute_processor::{
     apply_compute as apply_batch_compute, bind_evaluations, BoundBatchEvaluation,
 };
+use crate::processor::batch_policy::BatchPolicy;
 use crate::processor::byte_stage::{ByteTransformStage, CompressDriver, EncryptDriver};
 use crate::processor::collection_layout_normalize_processor::normalize_collection;
 use crate::processor::compute_processor::{apply_compute, compute_fields, ComputeExpr};
@@ -59,6 +60,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+#[cfg(test)]
+mod lifecycle_tests;
 mod opaque;
 
 enum CollectionStage {
@@ -352,10 +355,7 @@ impl Stage {
                     })?,
             ),
             PhysicalPlan::Batch(p) => {
-                crate::processor::BatchProcessor::validate_batch_config(
-                    p.common.batch_count,
-                    p.common.batch_duration,
-                )?;
+                BatchPolicy::validate_batch_config(p.common.batch_count, p.common.batch_duration)?;
                 match (p.common.batch_count, p.common.batch_duration) {
                     (count, Some(duration)) => {
                         CollectionStage::TimedBatch(TimedBatchStage::new(count, duration)?)
@@ -1071,17 +1071,12 @@ impl Stage {
                 Ok((!suppressed).then_some(input))
             }
             CollectionStage::Aggregation(plan, registry) => {
-                AggregationProcessor::process_batch_with_grouping(
-                    plan,
-                    registry,
-                    input.as_ref(),
-                    stats,
-                )
-                .map_err(|error| {
-                    ProcessorError::ProcessingError(format!(
-                        "Failed to process aggregation: {error}"
-                    ))
-                })
+                AggregationStage::process_batch_with_grouping(plan, registry, input.as_ref(), stats)
+                    .map_err(|error| {
+                        ProcessorError::ProcessingError(format!(
+                            "Failed to process aggregation: {error}"
+                        ))
+                    })
             }
             CollectionStage::Encoder(_)
             | CollectionStage::ByteTransform(_)
@@ -1569,12 +1564,19 @@ impl Processor for RegionProcessor {
 
 #[cfg(test)]
 mod tests {
+
+    use crate::planner::physical::*;
+    use crate::processor::base::*;
+    use crate::processor::data_metrics::*;
+    use crate::processor::*;
+    use crate::runtime::*;
+
     use super::*;
     use crate::expr::ScalarExpr;
     use crate::model::{Message, RecordBatch, Tuple};
     use crate::planner::physical::{PhysicalCompute, PhysicalFilter};
     use crate::processor::base::{LinkKind, ProcessorChannelCapacities};
-    use crate::processor::{BarrierControlSignalKind, ComputeProcessor, FilterProcessor};
+    use crate::processor::BarrierControlSignalKind;
     use datatypes::{BooleanType, ConcreteDatatype, Value};
     use sqlparser::ast::{Expr, Value as SqlValue};
     use tokio::sync::mpsc;
@@ -1626,11 +1628,11 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn encoder_regions_match_standalone_batching_clocks_framing_and_terminal_lanes() {
+    async fn encoder_regions_match_singletons_batching_clocks_framing_and_terminal_lanes() {
         use crate::planner::physical::PhysicalSinkEncoder;
         use crate::planner::sink::{CommonSinkProps, SinkEncoderConfig};
-        use crate::processor::processor_builder::PlanProcessor;
-        use crate::processor::{EncodedDeliveryFlags, SinkCompressProcessor, SinkEncoderProcessor};
+
+        use crate::processor::EncodedDeliveryFlags;
         let rows = |values: &[i64]| {
             StreamData::collection(Box::new(
                 crate::model::batch_from_columns_simple(vec![(
@@ -1667,87 +1669,52 @@ mod tests {
                         }
                         let capacities =
                             ProcessorChannelCapacities::new(1, 1).with_link_kind(LinkKind::Mpsc);
-                        let encoder = json_encoder_runtime();
-                        let mut standalone = SinkEncoderProcessor::new_with_channel_capacities(
-                            "encoder",
-                            encoder,
-                            common.batch_count,
-                            common.batch_duration,
-                            capacities,
-                        );
                         let own = Arc::new(ProcessorStats::default());
                         let boundary = Arc::new(ProcessorStats::default());
-                        standalone.set_stats(Arc::clone(&own));
-                        let mut processors = if fused {
-                            let prefix =
-                                PhysicalPlan::Compute(PhysicalCompute::new(vec![], vec![], 1));
-                            let encoder_plan = PhysicalPlan::SinkEncoder(PhysicalSinkEncoder::new(
-                                vec![Arc::new(prefix.clone())],
-                                2,
-                                "test".into(),
-                                SinkEncoderConfig::json(),
-                                common.clone(),
-                            ));
-                            let mut specs = if isolated {
-                                vec![encoder_plan.clone()]
-                            } else {
-                                vec![prefix, encoder_plan.clone()]
-                            };
-                            if compress {
-                                specs.push(PhysicalPlan::SinkCompress(
-                                    crate::planner::physical::PhysicalSinkCompress::new(
-                                        Arc::new(encoder_plan),
-                                        3,
-                                        crate::codec::CompressionCodec::gzip(),
-                                    ),
-                                ));
-                            }
-                            let mut resources = RegionResources {
-                                isolate_opaque: isolated,
-                                ..Default::default()
-                            };
-                            resources
-                                .encoders
-                                .insert(2, standalone.into_stage().unwrap());
-                            let mut region = RegionProcessor::new(
-                                "encoder".into(),
-                                &specs,
-                                resources,
-                                capacities,
-                            )
-                            .unwrap();
-
-                            region
-                                .stages
-                                .get_mut()
-                                .unwrap()
-                                .iter_mut()
-                                .find(|stage| matches!(stage.engine, CollectionStage::Encoder(_)))
-                                .unwrap()
-                                .set_stats(Arc::clone(&own));
-                            region
-                                .stages
-                                .get_mut()
-                                .unwrap()
-                                .last_mut()
-                                .unwrap()
-                                .set_stats(Arc::clone(&boundary));
-                            vec![PlanProcessor::Region(Box::new(region))]
+                        let prefix = PhysicalPlan::Compute(PhysicalCompute::new(vec![], vec![], 1));
+                        let encoder_plan = PhysicalPlan::SinkEncoder(PhysicalSinkEncoder::new(
+                            vec![Arc::new(prefix.clone())],
+                            2,
+                            "test".into(),
+                            SinkEncoderConfig::json(),
+                            common.clone(),
+                        ));
+                        let mut specs = if isolated {
+                            vec![encoder_plan.clone()]
                         } else {
-                            let mut processors = vec![PlanProcessor::SinkEncoder(standalone)];
-                            if compress {
-                                processors.push(PlanProcessor::SinkCompress(
-                                    SinkCompressProcessor::new_with_channel_capacities(
-                                        "gzip",
-                                        crate::codec::CompressionCodec::gzip()
-                                            .build_writer()
-                                            .unwrap(),
-                                        capacities,
-                                    ),
-                                ));
-                            }
-                            processors
+                            vec![prefix, encoder_plan.clone()]
                         };
+                        if compress {
+                            specs.push(PhysicalPlan::SinkCompress(
+                                crate::planner::physical::PhysicalSinkCompress::new(
+                                    Arc::new(encoder_plan),
+                                    3,
+                                    crate::codec::CompressionCodec::gzip(),
+                                ),
+                            ));
+                        }
+                        let mut resources = RegionResources {
+                            isolate_opaque: isolated,
+                            ..Default::default()
+                        };
+                        resources.encoders.insert(
+                            2,
+                            EncoderStage::new(
+                                json_encoder_runtime(),
+                                BatchPolicy::new(common.batch_count, common.batch_duration),
+                            ),
+                        );
+                        resources.stage_stats.insert(
+                            2,
+                            Arc::clone(if compress || !fused { &own } else { &boundary }),
+                        );
+                        if compress {
+                            resources.stage_stats.insert(3, Arc::clone(&boundary));
+                        }
+                        let mut processors = crate::processor::test_support::region_chain(
+                            &specs, resources, capacities, fused,
+                        );
+
                         let (tx, rx) = mpsc::channel(1);
                         let (control_tx, control_rx) = mpsc::channel(1);
                         processors[0].add_input(rx.into());
@@ -2326,8 +2293,8 @@ mod tests {
     async fn byte_regions_preserve_delivery_framing_metrics_and_exit_lanes() {
         use crate::codec::{CompressionCodec, EncryptionAlgorithm, SecretBytes};
         use crate::planner::physical::{PhysicalSinkCompress, PhysicalSinkEncrypt};
-        use crate::processor::processor_builder::PlanProcessor;
-        use crate::processor::{EncodedDeliveryFlags, SinkCompressProcessor, SinkEncryptProcessor};
+
+        use crate::processor::EncodedDeliveryFlags;
         use std::io::Read;
         for encrypt in [false, true] {
             for mode in 0..8 {
@@ -2360,60 +2327,21 @@ mod tests {
                     let (tx, rx) = mpsc::channel(1);
                     let (control_tx, control_rx) = mpsc::channel(1);
                     let spawner = TaskSpawner::from_handle(tokio::runtime::Handle::current());
-                    let mut stage_stats = Vec::new();
-                    let mut processors = if fused {
-                        let mut region = RegionProcessor::new(
-                            "bytes".into(),
-                            &specs,
-                            RegionResources::default(),
-                            capacities,
-                        )
-                        .unwrap();
-                        for stage in region.stages.get_mut().unwrap().iter_mut() {
+                    let mut resources = RegionResources::default();
+                    let stage_stats: Vec<_> = specs
+                        .iter()
+                        .map(|plan| {
                             let stats = Arc::new(ProcessorStats::default());
-                            stage_stats.push(Arc::clone(&stats));
-                            stage.set_stats(stats);
-                        }
-                        vec![PlanProcessor::Region(Box::new(region))]
-                    } else {
-                        specs
-                            .iter()
-                            .map(|plan| {
-                                let mut processor = match plan {
-                                    PhysicalPlan::SinkCompress(p) => PlanProcessor::SinkCompress(
-                                        SinkCompressProcessor::new_with_channel_capacities(
-                                            "compress",
-                                            p.codec.build_writer().unwrap(),
-                                            capacities,
-                                        ),
-                                    ),
-                                    PhysicalPlan::SinkEncrypt(p) => {
-                                        let writer = AesGcmStreamWriter::from_config(
-                                            &SinkEncryptionConfig {
-                                                algorithm: p.algorithm,
-                                                key_id: p.key_id.clone(),
-                                                key_bits: p.key_bits,
-                                                key: Arc::clone(&p.key),
-                                            },
-                                        )
-                                        .unwrap();
-                                        PlanProcessor::SinkEncrypt(
-                                            SinkEncryptProcessor::new_with_channel_capacities(
-                                                "encrypt",
-                                                Box::new(writer),
-                                                capacities,
-                                            ),
-                                        )
-                                    }
-                                    _ => unreachable!(),
-                                };
-                                let stats = Arc::new(ProcessorStats::default());
-                                processor.set_stats(Arc::clone(&stats));
-                                stage_stats.push(stats);
-                                processor
-                            })
-                            .collect::<Vec<_>>()
-                    };
+                            resources
+                                .stage_stats
+                                .insert(plan.get_plan_index(), Arc::clone(&stats));
+                            stats
+                        })
+                        .collect();
+                    let mut processors = crate::processor::test_support::region_chain(
+                        &specs, resources, capacities, fused,
+                    );
+
                     processors[0].add_input(rx.into());
                     processors[0].add_control_input(control_rx);
                     for index in 1..processors.len() {
@@ -2584,7 +2512,7 @@ mod tests {
     async fn stage_timer_and_lifecycle_metrics_include_synchronous_callbacks() {
         use crate::codec::{CodecError, Merger, MergerOutputKind, MergerRegistry};
         use crate::processor::sampler_processor::{MergerConfig, PackerProps};
-        use crate::processor::{SamplerConfig, SamplerProcessor, SamplingStrategy};
+        use crate::processor::{SamplerConfig, SamplingStrategy};
 
         struct SlowMerger {
             pending: bool,
@@ -2632,15 +2560,20 @@ mod tests {
                         },
                     },
                 };
-                let mut sampler = SamplerProcessor::new("sampler", config.clone());
-                sampler.set_merger_registry(registry);
-                sampler.set_merger_schema(Arc::new(datatypes::Schema::new(vec![])));
+                let sampler = SamplerStage::new(
+                    config.clone(),
+                    Some(registry),
+                    Some(Arc::new(datatypes::Schema::new(vec![]))),
+                    None,
+                    None,
+                )
+                .unwrap();
                 let mut resources = RegionResources {
                     input_domain: DataDomain::Message,
                     stage_default_domains: DataMetricDomains::NONE.passthrough(DataDomain::Message),
                     ..Default::default()
                 };
-                resources.samplers.insert(1, sampler.into_stage().unwrap());
+                resources.samplers.insert(1, sampler);
                 let plan = PhysicalPlan::Sampler(crate::planner::physical::PhysicalSampler::new(
                     config.interval,
                     config.strategy,
@@ -2946,7 +2879,7 @@ mod tests {
         use crate::model::batch_from_columns_simple;
         use crate::planner::physical::PhysicalBatch;
         use crate::planner::sink::CommonSinkProps;
-        use crate::processor::{BarrierControlSignal, BatchProcessor, InstantControlSignal};
+        use crate::processor::{BarrierControlSignal, InstantControlSignal};
         let rows = |values: &[i64]| {
             StreamData::collection(Box::new(
                 batch_from_columns_simple(vec![(
@@ -2995,12 +2928,24 @@ mod tests {
                             region.start(&spawner).handle,
                         )
                     } else {
-                        let mut processor = BatchProcessor::new_with_channel_capacities(
-                            "batch",
-                            count,
-                            Some(Duration::from_millis(100)),
-                            capacities,
-                        );
+                        let mut processor =
+                            crate::processor::region_processor::RegionProcessor::new(
+                                ("batch").into(),
+                                &[crate::planner::physical::PhysicalPlan::Batch(
+                                    crate::planner::physical::PhysicalBatch::new(
+                                        vec![],
+                                        0,
+                                        "test".into(),
+                                        crate::planner::sink::CommonSinkProps {
+                                            batch_count: count,
+                                            batch_duration: Some(Duration::from_millis(100)),
+                                        },
+                                    ),
+                                )],
+                                crate::processor::region_processor::RegionResources::default(),
+                                capacities,
+                            )
+                            .unwrap();
                         processor.add_input(rx);
                         processor.add_control_input(control_rx);
                         (
@@ -3496,18 +3441,26 @@ mod tests {
                     let PhysicalPlan::Compute(compute) = &specs[1] else {
                         unreachable!()
                     };
-                    let mut filter = FilterProcessor::new_with_channel_capacities(
-                        "filter",
-                        Arc::new(filter.clone()),
+                    let mut filter = crate::processor::region_processor::RegionProcessor::new(
+                        ("filter").into(),
+                        &[crate::planner::physical::PhysicalPlan::Filter(
+                            (Arc::new(filter.clone())).as_ref().clone(),
+                        )],
+                        crate::processor::region_processor::RegionResources::default(),
                         capacities,
-                    );
-                    let mut compute = ComputeProcessor::new_with_channel_capacities(
-                        "compute",
-                        Arc::new(compute.clone()),
+                    )
+                    .unwrap();
+                    let mut compute = crate::processor::region_processor::RegionProcessor::new(
+                        ("compute").into(),
+                        &[crate::planner::physical::PhysicalPlan::Compute(
+                            (Arc::new(compute.clone())).as_ref().clone(),
+                        )],
+                        crate::processor::region_processor::RegionResources::default(),
                         capacities,
-                    );
+                    )
+                    .unwrap();
                     filter_stats = Arc::new(ProcessorStats::collection_in_out());
-                    filter.set_stats(Arc::clone(&filter_stats));
+                    filter.stages.get_mut().unwrap()[0].set_stats(Arc::clone(&filter_stats));
                     filter.add_input(rx);
                     compute.add_input(filter.subscribe_output().unwrap());
                     compute.add_control_input(filter.subscribe_control_output().unwrap());
@@ -3790,8 +3743,6 @@ mod tests {
 
     #[tokio::test]
     async fn tumbling_regions_match_standalone_partitions_metadata_and_terminal_lanes() {
-        use crate::processor::streaming_aggregation_processor::StreamingTumblingAggregationProcessor;
-        use crate::processor::tumbling_window_processor::TumblingWindowProcessor;
         use crate::processor::{BarrierControlSignal, InstantControlSignal};
         for aggregate in [false, true] {
             // Watermark + graceful data end, quick data end, graceful control end.
@@ -3825,22 +3776,13 @@ mod tests {
                     } else {
                         match plan {
                             PhysicalPlan::TumblingWindow(p) => connect_window(
-                                TumblingWindowProcessor::new_with_channel_capacities(
-                                    "window",
-                                    Arc::new(p),
-                                    capacities,
-                                ),
+                                crate::processor::region_processor::RegionProcessor::new(("window").into(), &[crate::planner::physical::PhysicalPlan::TumblingWindow((Arc::new(p)).as_ref().clone())], crate::processor::region_processor::RegionResources::default(), capacities).unwrap(),
                                 rx,
                                 ctrl_rx,
                                 &spawner,
                             ),
                             PhysicalPlan::StreamingAggregation(p) => connect_window(
-                                StreamingTumblingAggregationProcessor::new_with_channel_capacities(
-                                    "aggregation",
-                                    Arc::new(p),
-                                    AggregateFunctionRegistry::with_builtins(),
-                                    capacities,
-                                )
+                                crate::processor::region_processor::RegionProcessor::new(("aggregation").into(), &[crate::planner::physical::PhysicalPlan::StreamingAggregation((Arc::new(p)).as_ref().clone())], crate::processor::region_processor::RegionResources { aggregate_registry: Some(AggregateFunctionRegistry::with_builtins()), ..Default::default() }, capacities)
                                 .unwrap(),
                                 rx,
                                 ctrl_rx,
@@ -4074,8 +4016,7 @@ mod tests {
 
     #[tokio::test]
     async fn count_regions_match_standalone_partitions_and_lifecycle() {
-        use crate::processor::streaming_aggregation_processor::StreamingCountAggregationProcessor;
-        use crate::processor::{BarrierControlSignal, BatchProcessor, InstantControlSignal};
+        use crate::processor::{BarrierControlSignal, InstantControlSignal};
         for aggregate in [false, true] {
             for mode in 0..4 {
                 let mut results = Vec::new();
@@ -4107,25 +4048,13 @@ mod tests {
                     } else {
                         match plan {
                             PhysicalPlan::CountWindow(p) => connect_window(
-                                BatchProcessor::new_partitioned_with_channel_capacities(
-                                    "count",
-                                    Some(2),
-                                    None,
-                                    p.partition_by_scalars,
-                                    capacities,
-                                ),
+                                crate::processor::region_processor::RegionProcessor::new(("count").into(), &[crate::planner::physical::PhysicalPlan::CountWindow(crate::planner::physical::PhysicalCountWindow::new_partitioned(2, vec![], p.partition_by_scalars, vec![], 0))], crate::processor::region_processor::RegionResources::default(), capacities).unwrap(),
                                 rx,
                                 ctrl_rx,
                                 &spawner,
                             ),
                             PhysicalPlan::StreamingAggregation(p) => connect_window(
-                                StreamingCountAggregationProcessor::new_with_channel_capacities(
-                                    "count",
-                                    Arc::new(p),
-                                    AggregateFunctionRegistry::with_builtins(),
-                                    2,
-                                    capacities,
-                                ),
+                                crate::processor::region_processor::RegionProcessor::new(("count").into(), &[crate::planner::physical::PhysicalPlan::StreamingAggregation((Arc::new(p)).as_ref().clone())], crate::processor::region_processor::RegionResources { aggregate_registry: Some(AggregateFunctionRegistry::with_builtins()), ..Default::default() }, capacities).unwrap(),
                                 rx,
                                 ctrl_rx,
                                 &spawner,
@@ -4399,12 +4328,7 @@ mod tests {
                     )
                 } else {
                     connect_window(
-                        AggregationProcessor::new_with_channel_capacities(
-                            "aggregation",
-                            Arc::new(p),
-                            AggregateFunctionRegistry::with_builtins(),
-                            capacities,
-                        ),
+                        crate::processor::region_processor::RegionProcessor::new(("aggregation").into(), &[crate::planner::physical::PhysicalPlan::Aggregation((Arc::new(p)).as_ref().clone())], crate::processor::region_processor::RegionResources { aggregate_registry: Some(AggregateFunctionRegistry::with_builtins()), ..Default::default() }, capacities).unwrap(),
                         rx,
                         ctrl_rx,
                         &spawner,
@@ -4457,11 +4381,7 @@ mod tests {
     #[tokio::test]
     async fn buffered_window_regions_match_standalone_lifecycle_and_metadata() {
         use crate::planner::physical::{PhysicalEosWindow, PhysicalStateWindow};
-        use crate::processor::eos_window_processor::EosWindowProcessor;
-        use crate::processor::state_window_processor::StateWindowProcessor;
-        use crate::processor::streaming_aggregation_processor::{
-            StreamingEosAggregationProcessor, StreamingStateAggregationProcessor,
-        };
+
         use crate::processor::{BarrierControlSignal, InstantControlSignal};
         for state_window in [false, true] {
             for aggregate in [false, true] {
@@ -4554,10 +4474,10 @@ mod tests {
                             )
                         } else {
                             match plan {
-                                PhysicalPlan::EosWindow(_) => connect_window(EosWindowProcessor::new_with_channel_capacities("window", capacities), rx, ctrl_rx, &spawner),
-                                PhysicalPlan::StateWindow(p) => connect_window(StateWindowProcessor::new_with_channel_capacities("window", Arc::new(*p), capacities), rx, ctrl_rx, &spawner),
-                                PhysicalPlan::StreamingAggregation(p) if state_window => connect_window(StreamingStateAggregationProcessor::new_with_channel_capacities("window", Arc::new(p), AggregateFunctionRegistry::with_builtins(), capacities).unwrap(), rx, ctrl_rx, &spawner),
-                                PhysicalPlan::StreamingAggregation(p) => connect_window(StreamingEosAggregationProcessor::new_with_channel_capacities("window", Arc::new(p), AggregateFunctionRegistry::with_builtins(), capacities), rx, ctrl_rx, &spawner),
+                                PhysicalPlan::EosWindow(_) => connect_window(crate::processor::region_processor::RegionProcessor::new(("window").into(), &[crate::planner::physical::PhysicalPlan::EosWindow(crate::planner::physical::PhysicalEosWindow::new(vec![], 0))], crate::processor::region_processor::RegionResources::default(), capacities).unwrap(), rx, ctrl_rx, &spawner),
+                                PhysicalPlan::StateWindow(p) => connect_window(crate::processor::region_processor::RegionProcessor::new(("window").into(), &[crate::planner::physical::PhysicalPlan::StateWindow(Box::new((Arc::new(*p)).as_ref().clone()))], crate::processor::region_processor::RegionResources::default(), capacities).unwrap(), rx, ctrl_rx, &spawner),
+                                PhysicalPlan::StreamingAggregation(p) if state_window => connect_window(crate::processor::region_processor::RegionProcessor::new(("window").into(), &[crate::planner::physical::PhysicalPlan::StreamingAggregation((Arc::new(p)).as_ref().clone())], crate::processor::region_processor::RegionResources { aggregate_registry: Some(AggregateFunctionRegistry::with_builtins()), ..Default::default() }, capacities).unwrap(), rx, ctrl_rx, &spawner),
+                                PhysicalPlan::StreamingAggregation(p) => connect_window(crate::processor::region_processor::RegionProcessor::new(("window").into(), &[crate::planner::physical::PhysicalPlan::StreamingAggregation((Arc::new(p)).as_ref().clone())], crate::processor::region_processor::RegionResources { aggregate_registry: Some(AggregateFunctionRegistry::with_builtins()), ..Default::default() }, capacities).unwrap(), rx, ctrl_rx, &spawner),
                                 _ => unreachable!(),
                             }
                         };
@@ -4743,8 +4663,6 @@ mod tests {
 
     #[tokio::test]
     async fn sliding_regions_match_standalone_partition_bounds_triggers_and_lifecycle() {
-        use crate::processor::sliding_window_processor::SlidingWindowProcessor;
-        use crate::processor::streaming_aggregation_processor::StreamingSlidingAggregationProcessor;
         use crate::processor::{BarrierControlSignal, InstantControlSignal};
         for aggregate in [false, true] {
             for lookahead in [None, Some(50)] {
@@ -4785,8 +4703,8 @@ mod tests {
                                 )
                             } else {
                                 match plan {
-                                    PhysicalPlan::SlidingWindow(p) => connect_window(SlidingWindowProcessor::new_with_channel_capacities("sliding", Arc::new(p), capacities), rx, ctrl_rx, &spawner),
-                                    PhysicalPlan::StreamingAggregation(p) => connect_window(StreamingSlidingAggregationProcessor::new_with_channel_capacities("sliding", Arc::new(p), AggregateFunctionRegistry::with_builtins(), capacities).unwrap(), rx, ctrl_rx, &spawner),
+                                    PhysicalPlan::SlidingWindow(p) => connect_window(crate::processor::region_processor::RegionProcessor::new(("sliding").into(), &[crate::planner::physical::PhysicalPlan::SlidingWindow((Arc::new(p)).as_ref().clone())], crate::processor::region_processor::RegionResources::default(), capacities).unwrap(), rx, ctrl_rx, &spawner),
+                                    PhysicalPlan::StreamingAggregation(p) => connect_window(crate::processor::region_processor::RegionProcessor::new(("sliding").into(), &[crate::planner::physical::PhysicalPlan::StreamingAggregation((Arc::new(p)).as_ref().clone())], crate::processor::region_processor::RegionResources { aggregate_registry: Some(AggregateFunctionRegistry::with_builtins()), ..Default::default() }, capacities).unwrap(), rx, ctrl_rx, &spawner),
                                     _ => unreachable!(),
                                 }
                             };

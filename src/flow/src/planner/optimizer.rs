@@ -60,7 +60,7 @@ struct InsertBarrierForFanIn;
 
 /// Rule: fuse `PhysicalBatch -> PhysicalSinkEncoder` into `PhysicalIncSinkEncoder`.
 ///
-/// This eliminates one data-pass between BatchProcessor and SinkEncoderProcessor
+/// This eliminates one data-pass between batch and encoder stages
 /// for registered `SinkEncoder` implementations.
 struct StreamingEncoderRewrite;
 

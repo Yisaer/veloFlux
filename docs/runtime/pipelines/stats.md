@@ -87,7 +87,7 @@ change settings. When disabled, stage callbacks skip clock reads and histogram u
 and no handling-time series is bound for that stage. Counters, errors, and gauges remain
 enabled. Existing standalone source/sink adapter timing is unaffected.
 
-Shared synchronous engines receive that stage's stats handle in both standalone and fused execution. Handling durations include process,
+Synchronous engines receive their owning stage's stats handle in singleton and fused regions. Handling durations include process,
 incremental extraction, timer, control flush, terminal, EOF, and Barrier alignment work.
 They exclude downstream stages, output-channel waits, and cooperative executor yields.
 Callbacks returning no output or an error still contribute handling time. No per-stage
@@ -105,12 +105,11 @@ For mpsc, a wait counts an attempted send to a full queue; for broadcast it coun
 cooperative backoff tick. A failed send is counted per failed attempt, including a later
 terminal forwarding attempt. Inline edges have no channel and no transport metrics.
 `pipeline_transport` exposes the build-time `mpsc_links` and `broadcast_links` gauges.
-Standalone adapters retain their existing send-helper instrumentation; region drivers
+Source, sink, and other retained boundary drivers keep their send-helper instrumentation; region drivers
 pass no processor stats to transport helpers and never update stage counters themselves.
 
 See [Fixed Execution Regions](../../planner/optimize/physical/execution_regions.md).
-A [planned semantic-metrics follow-up](../../planner/optimize/physical/execution_regions.md#planned-follow-up-selective-semantic-stage-metrics)
-describes additional effect/reason counters beyond the restored stage input/output metrics.
+
 
 Every sink declares message output. A collection-native sink declares collection/row input and
 message output; retaining a collection as the payload representation does not turn the sink output

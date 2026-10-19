@@ -1,7 +1,7 @@
 # Fixed Execution Regions
 
 Status: implemented for the current physical stages under the fixed strategy. Existing
-snapshot coverage and retained public adapters are described below.
+snapshot coverage and execution boundaries are described below.
 
 ## Planning and execution
 
@@ -23,7 +23,7 @@ StateWindow, SlidingWindow, EosWindow, Aggregation, ProcessTimeWatermark,
 EventtimeWatermark, Barrier, Batch, Sampler, SinkEncoder, IncSinkEncoder,
 SinkCompress, SinkEncrypt, and StreamingAggregation with any supported window spec. Consecutive supported stages fuse in arbitrary valid order,
 including repeated stages, fragments without Project, and fragments away from a sink. Supported engine singletons use the same region executor as multi-stage regions.
-Nodes still missing an adapter retain their standalone processor during migration.
+All current engine stages have adapters. A future stage must provide an adapter before region construction can accept it; there is no standalone engine fallback.
 
 Fan-out output edges and fan-in input edges remain external. Shared stages are counted
 by physical plan index and execute once. Repeated graph traversal does not create a
@@ -31,7 +31,7 @@ second region for a shared stage. Collection input/output metrics measure semant
 boundaries; eliminated internal links do not contribute to pipeline link counts.
 
 `RegionProcessor` drives synchronous engines and awaits only its external input/output
-and control channels and timed-stage clocks. Filter, Project, Order, and Compute reuse their standalone handler
+and control channels and timed-stage clocks. Filter, Project, Order, and Compute reuse their synchronous handler
 implementations. No stage suspend/resume framework, internal mailbox, or per-stage future
 is introduced. Data-lane checkpoint barriers pass through the data output. Window stages
 consume or forward watermarks with the same behavior as standalone execution. Out-of-band control remains on the control output.
@@ -72,17 +72,17 @@ remain recoverable; finalization errors remain fatal. In region execution, the p
 stage records each extracted collection before transport waits. Stage handling duration
 excludes external sends; backpressure is recorded by the shared transport helper.
 
-CountWindow and count-only BatchProcessor share `CountWindowStage`. It moves owned rows
+CountWindow and count-only Batch share `CountWindowStage`. It moves owned rows
 into per-partition deques, preserving partition insertion order across the whole input,
 and extracts one completed batch per send. The unpartitioned path avoids partition hashing;
 deque prefix drains avoid repeatedly shifting the remaining rows. As in the existing
-BatchProcessor, these batches do not add window metadata. Data-lane terminal events flush
+Batch, these batches do not add window metadata. Data-lane terminal events flush
 partial batches before forwarding the event. Control-lane terminal events are forwarded
 on the control lane first, then buffered data is flushed on the data lane. Input EOF also
 flushes partial batches. Timed/combined batching shares the synchronous TimedBatchStage
 with region execution.
 
-Streaming count aggregation shares `StreamingCountStage` with its standalone processor.
+Streaming count aggregation executes through `StreamingCountStage`.
 It retains the current input and a row offset, updating groups only until the next complete
 window. External send/backpressure precedes evaluation of the remaining input rows. Output
 metadata retains the first/last timestamps of each completed count window. Partial windows
@@ -91,13 +91,12 @@ existing distinction from CountWindow. It no longer constructs a vector of every
 window before sending the first output. Partition workers and their metadata are allocated
 only when a partition is first encountered.
 
-Plain Aggregation reuses `AggregationProcessor::process_batch_with_grouping` for grouping,
+Plain Aggregation reuses `AggregationStage::process_batch_with_grouping` for grouping,
 empty input, row-error recovery, metadata propagation, and finalization. Configuration and
 finalization errors remain fatal in both execution placements. Region error handling
 separates these fatal errors from recoverable collection-transform errors.
 
-EOS window and EOS streaming aggregation share synchronous engines with standalone
-execution. Only data-lane graceful termination emits the final window before the terminal
+EOS window and EOS streaming aggregation use synchronous stage engines. Only data-lane graceful termination emits the final window before the terminal
 signal; quick/control termination and input EOF discard buffered state. Stateful functions
 share `StatefulStage`, including partition-local instances, transactional prepare/commit,
 pending origin ordering, `lead` resolutions, and data-terminal `finish` output. Control
@@ -174,8 +173,7 @@ A missing adapter is explicit migration debt, not a permanent semantic boundary.
 
 ## Sliding windows and watermark clocks
 
-Plain and aggregating sliding windows share their synchronous engines with standalone
-execution. Logical bounds remain inclusive `[t - lookback, t + lookahead]`; triggers,
+Plain and aggregating sliding windows use synchronous stage engines. Logical bounds remain inclusive `[t - lookback, t + lookahead]`; triggers,
 partition order, retained history, and millisecond metadata do not depend on region
 placement. Each extraction produces one window; downstream backpressure stops further
 row evaluation and window extraction. Graceful data end drains pending windows; control,
@@ -229,25 +227,11 @@ remain enabled. Stages capture the process-wide setting at construction; disable
 callbacks perform no metric clock reads or histogram observations. Histogram handles
 are bound only when a duration is actually recorded.
 
-### Planned follow-up: selective semantic stage metrics
-
-Normal stage input/output, errors, buffer gauges and handling durations are implemented.
-Further semantic counters remain follow-up work: distinguish predicate rejection from
-error drops, sampler replacement from merging, and aggregation reduction from loss.
-Publish these effects through the existing stage stats rather than adding region metrics
-or another snapshot hierarchy. Define row/message/window/byte units explicitly.
-
-Derive effects at the existing decision point without reevaluating predicates/UDFs,
-rescanning rows, copying collections, or advancing incremental cursors for observation.
-Batch updates at collection or actual output boundaries using cached handles. Shared DAG
-owners publish once. Stats remain synchronous snapshots with existing reset/replay
-semantics; adding counters introduces no checkpoint/exactly-once guarantee.
-
 ## Fan-in alignment
 
 Barrier is the first stage of a region and may fuse with its exclusive downstream
 computation. Incoming edges remain external and ordered by input port. The synchronous
-`BarrierStage` is shared with the standalone adapter; the region pauses a checkpointed
+`BarrierStage` owns alignment state; the region pauses a checkpointed
 input until every input reaches that checkpoint. It drains the aligned checkpoint through
 the suffix before resuming inputs, so post-checkpoint rows cannot overtake the barrier.
 Data and control alignment retain separate state and their original channel lanes.
@@ -256,7 +240,7 @@ indexed, pausable input stream. Fan-out still creates independent external conne
 
 ## Timed batches and sampling
 
-Timed/combined Batch uses `TimedBatchStage` in standalone and region execution. The
+Timed/combined Batch uses the synchronous `TimedBatchStage`. The
 stage owns buffered rows and an absolute monotonic deadline; the driver owns the sleep.
 The grid origin is captured when the task starts. Input preparation is followed by a
 deadline check before appending new rows, so a boundary row starts the next grid cell.
@@ -280,8 +264,7 @@ projection state when a consumer attaches or releases columns.
 
 ## Delivery transforms
 
-SinkCompress and SinkEncrypt use the same synchronous delivery steps as their
-standalone adapters. Consecutive transforms, including repeated codecs, share a region;
+SinkCompress and SinkEncrypt use synchronous delivery steps. Consecutive transforms, including repeated codecs, share a region;
 each step returns at most one frame before its recoverable error. The driver delivers
 that frame before reporting the error and processing another input. No completed delivery
 or vector of output frames is assembled between transforms. Sink connectors remain
@@ -298,9 +281,8 @@ Each encoder and byte transform measures its own generated bytes and delivery ou
 Abort counts are local to the stage's delivery lifecycle; regions do not aggregate them.
 Writer ownership moves into the task once; the ownership mutex adds no per-frame locks.
 
-SinkEncoder and IncSinkEncoder share the synchronous EncoderStage with standalone
-execution. EncoderDriver contains the compatibility transport waits; no encoder stage
-method awaits. One count segment is encoded and sent before remaining input advances.
+SinkEncoder and IncSinkEncoder use the synchronous EncoderStage. The region owns all
+transport waits; no encoder stage method awaits. One count segment is encoded and sent before remaining input advances.
 Lifecycle notifications precede its frame, and a recoverable error follows that frame's
 successful send. Count/duration policies retain the same fixed grid and check a due
 deadline after input preparation. A recoverable due-flush failure does not discard the
@@ -321,17 +303,17 @@ retain standalone recovery, including timer/control flush handling; regions cont
 byte transforms stop on ChannelClosed. Stage output metrics count production, while
 transport counts send failures and sinks count successful external delivery.
 
-## Retained adapters and recovery boundaries
+## Execution and recovery boundaries
 
-- All adapter-backed Engine and OpaqueFunction stages built from SQL use region transport,
-  including singleton regions. Public standalone processor wrappers remain as compatibility
-  adapters and test references over shared stage engines; retiring their APIs/channel loops
-  is not required to remove internal channels from production region execution.
-- The fixed sink-template rule, physical variant, and production runtime entry have
-  been removed. Semantic physical stages remain visible in EXPLAIN; task placement is
-  reported separately as regions. The historical executor is compiled only under cfg(test)
-  as an equivalence reference. HTTP/MQTT/custom branches retain independent sink
-  connectors and incremental delivery checks while their eligible stages share regions.
+- All Engine and OpaqueFunction stages built from SQL use region transport, including
+  singleton regions. Retired standalone processor structs, channel loops, and builder
+  variants are removed. Decoder, sampler, and encoder resources are constructed directly
+  as synchronous stages, without allocating temporary channel wrappers.
+- The fixed sink-template rule, physical variant, production entry, and historical test
+  executor are removed. Semantic physical stages remain visible in EXPLAIN; task placement
+  is reported separately as regions. Tests compare singleton-region chains with fused
+  regions, exercise synchronous engines directly, and retain SQL input/output assertions.
+  HTTP/MQTT/custom sink connectors retain independent tasks and incremental delivery checks.
 - The only current snapshot owners are datasource and sink processors, both isolated by
   the fixed strategy. Their semantic keys are assigned before runtime grouping and routed
   through the existing validate/staged-restore/rollback path. Region numbers are never
@@ -365,7 +347,7 @@ unexpected processor error; it does not automatically restart it.
 Planner SQL cases assert structured execution EXPLAIN for ordinary chains, ordering,
 HTTP sink isolation, and opaque function placement. Graph-level cases cover fragments
 across timed batch/sampler stages and shared fan-out/fan-in identities. Runtime
-cases compare real standalone processors against region execution, suppression, data/control
+cases compare singleton-region chains against fused execution, suppression, data/control
 lane routing, and bounded output backpressure. Tumbling cases cover partitioned
 millisecond windows, metadata, watermark boundaries, graceful/quick/control termination,
 and retention of undrained windows while the output channel is full. Existing planner
@@ -378,13 +360,13 @@ Opaque aggregate SQL cases cover ordinary and incremental implementations overri
 builtin name, while asserting that downstream Filter/Project stages continue to fuse.
 
 EOS SQL placement cases use table scans, the supported SQL source for `eoswindow()`.
-Runtime buffered-window cases compare standalone and region execution across EOS/state
+Runtime buffered-window cases compare singleton and multi-stage region execution across EOS/state
 windows, aggregation, partitions, metadata, data graceful/quick termination, control
 termination, and EOF. Existing stateful and lead SQL cases exercise pending-row behavior.
 
 Encoder runtime cases compare Immediate/count/duration/combined policies, optional
 compression, empty input, data/control graceful and quick termination, and EOF against
-standalone execution. Fault injection wraps the real JSON encoder to verify begin cleanup,
+singleton-region execution. Fault injection wraps the real JSON encoder to verify begin cleanup,
 ABORT-after-START ordering, once-per-delivery accounting, skipped remaining rows on a
 failed input, and recovery on following inputs. Closed-output cases distinguish encoder-only
 recovery from fatal byte-transform transport failure across feed, timer, control, data end,
@@ -411,7 +393,7 @@ without changing Collection/delivery boundaries or publishing partial outputs. H
 excludes the yield wait. This addresses the loss of scheduling opportunities when internal
 channels are removed; it does not impose a new bound on an individual semantic handler.
 Sorting, aggregation, codecs, and large collection handlers already execute synchronously
-in standalone tasks. Their possible segmentation is a separate kernel optimization, not a
+before region fusion as well. Their possible segmentation is a separate kernel optimization, not a
 VF-107 completion requirement. The previously added row-segmentation path has been removed.
 
 A current-thread runtime case observes progress midway through a 1,024-stage chain, verifies

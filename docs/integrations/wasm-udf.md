@@ -444,10 +444,10 @@ Pipeline B
 ```
 
 `WasmUdfDefinition` contains immutable, shareable data: the `Engine`, compiled `Module`,
-`InstancePre`, execution mode, and validated metadata. Each processor creates one private
-bound runtime for each distinct UDF definition used by that processor. The runtime owns
-the mutable execution state and is reused for all collections processed by
-that processor. Different processors do not share a mutable `Instance`.
+`InstancePre`, execution mode, and validated metadata. Each expression stage creates one private
+bound runtime for each distinct UDF definition it uses. The runtime owns mutable execution
+state and is reused for all collections processed by that stage. Different stages do not
+share a mutable `Instance`.
 
 For a stateless batch UDF, multiple call sites of the same function inside one processor
 share the same processor-owned bound runtime. For example, both
@@ -595,20 +595,21 @@ The WASM function receives vectors for all scalar arguments and returns a vector
 must preserve row alignment: output element `i` depends only on input elements at
 index `i`. This is vectorized scalar evaluation, not cross-row aggregation.
 
-The `BatchFunctionComputeProcessor` receives one `Collection` and passes the complete collection
-to each batch evaluation. The collection is the batch boundary; the processor does not
-split it into smaller batches. Evaluations are ordered by their temporary-column
-dependencies, and all results preserve the input row count and row order. The processor
-creates and binds its runtime set when it is built; no mutable runtime is acquired from the
-global registry during scalar evaluation.
+The region executor runs the batch-compute stage using the synchronous
+`batch_function_compute_processor::apply_compute` handler. It passes the complete input
+`Collection` to each batch evaluation; the collection is the batch boundary and is not split
+into smaller batches. Evaluations are ordered by their temporary-column dependencies, and
+all results preserve the input row count and row order. The stage binds its runtime set
+at construction; no mutable runtime is acquired from the global registry during scalar evaluation.
+Opaque batch functions retain an isolated singleton region and execute on its blocking worker.
 
-Processor construction follows this sequence:
+Stage construction follows this sequence:
 
 1. Inspect the physical expressions and collect referenced batch-function definition IDs.
-2. Create one processor-owned runtime set and instantiate one runtime per distinct function
-   definition and runtime binding configuration used by that processor.
+2. Create one stage-owned runtime set and instantiate one runtime per distinct function
+   definition and runtime binding configuration used by that stage.
 3. Associate each batch-function evaluation with its bound runtime instance.
-4. Reuse those runtimes for all collections handled by the processor.
+4. Reuse those runtimes for all collections handled by the stage.
 
 Built-in `CustomFunc` calls can continue through the existing scalar evaluator. A WASM
 call is resolved through its definition ID and runtime set entry, so the global registry

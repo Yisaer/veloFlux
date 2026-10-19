@@ -137,7 +137,7 @@ The mux value is decoded from the payload using the DBC multiplexer signal defin
 - [x] Extend `StreamDefinition` with `sampler.interval` and `sampler.strategy`.
 - [x] Implement `PhysicalSampler` node in physical planner.
 - [x] Ensure `PhysicalSampler` wraps `PhysicalSource` and is wrapped by `PhysicalDecoder` (bytes-first).
-- [x] Implement `SamplerProcessor` with `latest` strategy logic.
-- [x] Implement `SamplerProcessor` with `packer` strategy logic.
+- [x] Implement `SamplerStage` with `latest` strategy logic.
+- [x] Implement `SamplerStage` with `packer` strategy logic.
 - [x] Verify shutdown handling (emit buffered value).
 - [x] Verify with integration tests (stats: 5-in/1-out for latest, merger tests for packer).

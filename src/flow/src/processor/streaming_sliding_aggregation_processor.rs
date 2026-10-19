@@ -5,46 +5,22 @@ use crate::aggregation::AggregateFunctionRegistry;
 use crate::planner::physical::{
     PhysicalStreamingAggregation, PipelineStateUsage, StreamingWindowSpec,
 };
-use crate::processor::base::{
-    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    send_control_with_backpressure, send_with_backpressure, LinkOutput, LinkReceiver,
-    ProcessorChannelCapacities,
-};
 use crate::processor::pipeline_state_runtime::update_row_hit_state;
 use crate::processor::processor_state::ProcessorState;
 use crate::processor::sliding_window_stage::{sliding_window_output, SlidingWindowOutput};
 use crate::processor::window_metadata;
-use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
-};
-use crate::runtime::TaskSpawner;
+use crate::processor::{ProcessorError, ProcessorStats, StreamData};
+
 use datatypes::Value;
-use futures::stream::StreamExt;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 #[cfg(test)]
 use tokio::sync::broadcast;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::processor::sliding_window_runtime::evaluate_trigger_condition;
 use crate::processor::window_partition::{eval_partition_key, PartitionKey};
-
-/// Incremental sliding aggregation over inclusive logical bounds
-/// `[trigger_timestamp - lookback, trigger_timestamp + lookahead]`.
-/// Each triggering row opens a window containing retained history. With no
-/// lookahead, emit immediately; otherwise upstream watermarks close windows.
-pub struct StreamingSlidingAggregationProcessor {
-    id: String,
-    stage: Option<StreamingSlidingStage>,
-    inputs: Vec<LinkReceiver<StreamData>>,
-    control_inputs: Vec<LinkReceiver<ControlSignal>>,
-    output: LinkOutput<StreamData>,
-    control_output: LinkOutput<ControlSignal>,
-    channel_capacities: ProcessorChannelCapacities,
-    stats: Arc<ProcessorStats>,
-}
 
 struct WindowGroupState {
     accumulators: Vec<Box<dyn crate::aggregation::AggregateAccumulator>>,
@@ -71,45 +47,7 @@ impl SlidingWindowBounds {
     }
 }
 
-impl StreamingSlidingAggregationProcessor {
-    pub fn new(
-        id: impl Into<String>,
-        physical: Arc<PhysicalStreamingAggregation>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Result<Self, ProcessorError> {
-        Self::new_with_channel_capacities(
-            id,
-            physical,
-            aggregate_registry,
-            default_channel_capacities(),
-        )
-    }
-
-    pub(crate) fn new_with_channel_capacities(
-        id: impl Into<String>,
-        physical: Arc<PhysicalStreamingAggregation>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-        channel_capacities: ProcessorChannelCapacities,
-    ) -> Result<Self, ProcessorError> {
-        let stage = StreamingSlidingStage::new(physical, aggregate_registry)?;
-        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
-        let control_output = LinkOutput::new(
-            channel_capacities.control_link_kind,
-            channel_capacities.control,
-        );
-
-        Ok(Self {
-            id: id.into(),
-            stage: Some(stage),
-            inputs: Vec::new(),
-            control_inputs: Vec::new(),
-            output,
-            control_output,
-            channel_capacities,
-            stats: Arc::new(ProcessorStats::collection_in_out()),
-        })
-    }
-
+impl StreamingSlidingStage {
     fn extract_window_spec(
         physical: &PhysicalStreamingAggregation,
     ) -> Result<(Duration, Duration), ProcessorError> {
@@ -127,115 +65,6 @@ impl StreamingSlidingAggregationProcessor {
                 "streaming sliding aggregation requires sliding window spec, got {other:?}",
             ))),
         }
-    }
-
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-        stats.declare_collection_in_out();
-        self.stats = stats;
-    }
-}
-
-impl Processor for StreamingSlidingAggregationProcessor {
-    fn id(&self) -> &str {
-        self.id()
-    }
-
-    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-        let Some(mut stage) = self.stage.take() else {
-            return ProcessorStart::failed(
-                spawner,
-                ProcessorError::InvalidConfiguration(
-                    "sliding aggregation processor was already started".into(),
-                ),
-            );
-        };
-        if let Err(error) = stage.validate_supported_aggregates() {
-            return ProcessorStart::failed(spawner, error);
-        }
-        let id = self.id.clone();
-        let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
-        let control_receivers = std::mem::take(&mut self.control_inputs);
-        let control_active = !control_receivers.is_empty();
-        let mut control_streams = fan_in_control_streams(control_receivers);
-        let output = self.output.clone();
-        let control_output = self.control_output.clone();
-        let channel_capacities = self.channel_capacities;
-        let stats = Arc::clone(&self.stats);
-
-        let processor_span = stats.processor_span();
-        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    Some(ctrl) = control_streams.next(), if control_active => {
-                        if let Ok(control_signal) = ctrl {
-                            let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(
-                                &control_output,
-                                channel_capacities.control,
-                                control_signal,
-                            )
-                            .await?;
-                            if is_terminal {
-                                break;
-                            }
-                        }
-                    }
-                    data_item = input_streams.next() => {
-                        match data_item {
-                            Some(Ok(data)) => {
-                                if let Some(rows) = data.row_count() { stats.record_collection_in(rows); }
-                                let terminal = data.is_terminal();
-                                let started = std::time::Instant::now();
-                                let mut outputs = stage.process(data, &stats)?;
-                                while let Some(data) = stage.next_output(&mut outputs, &stats)? {
-                                    let rows = data.row_count();
-                                    send_with_backpressure(&output, channel_capacities.data, data, Some(&stats)).await?;
-                                    if let Some(rows) = rows { stats.record_collection_out(rows); }
-                                }
-                                stats.record_handle_duration(started.elapsed());
-                                if terminal { break; }
-                            }
-                            Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
-                                log_broadcast_lagged(&id, n, "data input");
-                            }
-                            None => {
-                                tracing::info!(processor_id = %id, "all input streams ended");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            Ok(())
-        }, processor_span)))
-    }
-
-    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
-        self.output.subscribe()
-    }
-
-    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
-        self.control_output.subscribe()
-    }
-
-    fn add_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<StreamData>>,
-    {
-        self.inputs.push(receiver.into());
-    }
-
-    fn add_control_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<ControlSignal>>,
-    {
-        self.control_inputs.push(receiver.into());
     }
 }
 
@@ -320,7 +149,7 @@ impl StreamingSlidingStage {
             } => (trigger_processor_state.clone(), *trigger_state_usage),
             _ => (None, PipelineStateUsage::default()),
         };
-        let (length, delay) = StreamingSlidingAggregationProcessor::extract_window_spec(&physical)?;
+        let (length, delay) = StreamingSlidingStage::extract_window_spec(&physical)?;
         Ok(Self {
             physical,
             registry: aggregate_registry,
@@ -686,6 +515,11 @@ fn build_triggered_window_from_rows(
 
 #[cfg(test)]
 mod tests {
+    use crate::processor::base::*;
+    use crate::processor::*;
+
+    use crate::planner::physical::*;
+
     use super::*;
     use crate::aggregation::AggregateFunctionRegistry;
     use crate::expr::func::BinaryFunc;
@@ -847,10 +681,18 @@ mod tests {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let physical = make_physical();
 
-        let mut processor = StreamingSlidingAggregationProcessor::new(
-            "sliding",
-            Arc::clone(&physical),
-            Arc::clone(&aggregate_registry),
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "sliding".into(),
+            &[
+                crate::planner::physical::PhysicalPlan::StreamingAggregation(
+                    (Arc::clone(&physical)).as_ref().clone(),
+                ),
+            ],
+            crate::processor::region_processor::RegionResources {
+                aggregate_registry: Some(Arc::clone(&aggregate_registry)),
+                ..Default::default()
+            },
+            crate::processor::base::default_channel_capacities(),
         )
         .expect("sliding processor");
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
@@ -901,10 +743,18 @@ mod tests {
         let physical =
             make_physical_with_lookahead_and_trigger(None, Some(trigger), Some(Arc::clone(&state)));
 
-        let mut processor = StreamingSlidingAggregationProcessor::new(
-            "sliding",
-            Arc::clone(&physical),
-            Arc::clone(&aggregate_registry),
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "sliding".into(),
+            &[
+                crate::planner::physical::PhysicalPlan::StreamingAggregation(
+                    (Arc::clone(&physical)).as_ref().clone(),
+                ),
+            ],
+            crate::processor::region_processor::RegionResources {
+                aggregate_registry: Some(Arc::clone(&aggregate_registry)),
+                ..Default::default()
+            },
+            crate::processor::base::default_channel_capacities(),
         )
         .expect("sliding processor");
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
@@ -941,10 +791,18 @@ mod tests {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let physical = make_physical_with_lookahead(Some(2));
 
-        let mut processor = StreamingSlidingAggregationProcessor::new(
-            "sliding",
-            Arc::clone(&physical),
-            Arc::clone(&aggregate_registry),
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "sliding".into(),
+            &[
+                crate::planner::physical::PhysicalPlan::StreamingAggregation(
+                    (Arc::clone(&physical)).as_ref().clone(),
+                ),
+            ],
+            crate::processor::region_processor::RegionResources {
+                aggregate_registry: Some(Arc::clone(&aggregate_registry)),
+                ..Default::default()
+            },
+            crate::processor::base::default_channel_capacities(),
         )
         .expect("sliding processor");
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
@@ -997,14 +855,22 @@ mod tests {
                 Some(a_greater_than_five()),
                 None,
             );
-            let mut processor = StreamingSlidingAggregationProcessor::new(
-                "sliding",
-                Arc::clone(&physical),
-                Arc::clone(&aggregate_registry),
+            let mut processor = crate::processor::region_processor::RegionProcessor::new(
+                "sliding".into(),
+                &[
+                    crate::planner::physical::PhysicalPlan::StreamingAggregation(
+                        (Arc::clone(&physical)).as_ref().clone(),
+                    ),
+                ],
+                crate::processor::region_processor::RegionResources {
+                    aggregate_registry: Some(Arc::clone(&aggregate_registry)),
+                    ..Default::default()
+                },
+                crate::processor::base::default_channel_capacities(),
             )
             .expect("sliding processor");
-            let stats = Arc::new(ProcessorStats::collection_in_out());
-            processor.set_stats(Arc::clone(&stats));
+
+            let stats = Arc::clone(&processor.stage_stats()[0].stats);
             let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);
             processor.add_input(input.subscribe());
             let mut output_rx = processor.subscribe_output().unwrap();
@@ -1039,10 +905,18 @@ mod tests {
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let physical = make_physical_with_window(TimeUnit::Milliseconds, 100, Some(50), None, None);
 
-        let mut processor = StreamingSlidingAggregationProcessor::new(
-            "sliding",
-            Arc::clone(&physical),
-            Arc::clone(&aggregate_registry),
+        let mut processor = crate::processor::region_processor::RegionProcessor::new(
+            "sliding".into(),
+            &[
+                crate::planner::physical::PhysicalPlan::StreamingAggregation(
+                    (Arc::clone(&physical)).as_ref().clone(),
+                ),
+            ],
+            crate::processor::region_processor::RegionResources {
+                aggregate_registry: Some(Arc::clone(&aggregate_registry)),
+                ..Default::default()
+            },
+            crate::processor::base::default_channel_capacities(),
         )
         .expect("sliding processor");
         let (input, _) = broadcast::channel(DEFAULT_DATA_CHANNEL_CAPACITY);

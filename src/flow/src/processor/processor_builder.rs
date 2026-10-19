@@ -9,10 +9,7 @@ use crate::checkpoint::{
     CheckpointError, CheckpointManifest, CheckpointSnapshotCollector, CheckpointStore,
     OperatorSnapshot, CHECKPOINT_FORMAT_VERSION,
 };
-use crate::codec::{
-    AesGcmStreamWriter, DecoderRegistry, EncoderRegistry, MergerRegistry, RecordDecoder,
-    SinkEncryptionConfig,
-};
+use crate::codec::{DecoderRegistry, EncoderRegistry, MergerRegistry, RecordDecoder};
 use crate::connector::{ConnectorRegistry, MqttClientManager};
 use crate::expr::custom_func::{CustomFuncBindings, CustomFuncRegistry};
 use crate::pipeline::PipelineRuntimeFailure;
@@ -24,23 +21,19 @@ use crate::processor::base::{
     normalize_channel_capacity, LinkKind, LinkReceiver, ProcessorChannelCapacities,
     DEFAULT_CONTROL_CHANNEL_CAPACITY, DEFAULT_DATA_CHANNEL_CAPACITY,
 };
+use crate::processor::batch_policy::BatchPolicy;
 use crate::processor::data_metrics::DataMetricDomains;
-use crate::processor::decoder_processor::EventtimeDecodeConfig;
+use crate::processor::decoder_processor::{DecoderStage, EventtimeDecodeConfig};
+use crate::processor::encoder_stage::EncoderStage;
 use crate::processor::region_processor::{RegionProcessor, RegionResources};
 use crate::processor::result_collect_processor::{AckHook, AckManager, ErrorLoggingHook};
+use crate::processor::sampler_processor::SamplerStage;
 use crate::processor::EventtimePipelineContext;
 use crate::processor::{
-    AggregationProcessor, BarrierControlSignalKind, BarrierProcessor,
-    BatchFunctionComputeProcessor, BatchProcessor, CheckpointCoordinator, CheckpointTrigger,
-    CollectionLayoutNormalizeProcessor, ComputeProcessor, ControlSignal, ControlSourceProcessor,
-    DataSourceProcessor, DecoderProcessor, EmptySuppressProcessor, EosWindowProcessor,
-    FilterProcessor, Ingress, InstantControlSignal, LookupJoinProcessor,
-    MemoryCollectionMaterializeProcessor, OrderProcessor, Processor, ProcessorError,
-    ProcessorStart, ProjectProcessor, ResultCollectProcessor, RowDiffProcessor, SamplerProcessor,
-    SharedStreamProcessor, SinkCompressProcessor, SinkEncoderProcessor, SinkEncryptProcessor,
-    SinkProcessor, SlidingWindowProcessor, SourceChangeGateProcessor, StateWindowProcessor,
-    StatefulFunctionProcessor, StreamData, StreamingAggregationProcessor, TableScanProcessor,
-    TumblingWindowProcessor, WatermarkProcessor,
+    BarrierControlSignalKind, CheckpointCoordinator, CheckpointTrigger, ControlSignal,
+    ControlSourceProcessor, DataSourceProcessor, Ingress, InstantControlSignal,
+    LookupJoinProcessor, Processor, ProcessorError, ProcessorStart, ResultCollectProcessor,
+    SharedStreamProcessor, SinkProcessor, StreamData, TableScanProcessor,
 };
 use crate::processor::{MetricKind, MetricSpec, ProcessorStats, ProcessorStatsHandle};
 use crate::runtime::TaskSpawner;
@@ -107,72 +100,21 @@ pub(crate) struct SharedStreamPipelineOptions {
 /// This enum allows storing different types of processors in a unified way.
 /// All processors are created through PhysicalPlan.
 pub(crate) enum PlanProcessor {
-    /// AggregationProcessor created from PhysicalAggregation
-    Aggregation(AggregationProcessor),
     /// DataSourceProcessor created from PhysicalDatasource
     DataSource(DataSourceProcessor),
     /// TableScanProcessor created from PhysicalTableScan
     TableScan(TableScanProcessor),
     /// LookupJoinProcessor created from PhysicalLookupJoin
     LookupJoin(LookupJoinProcessor),
-    /// DecoderProcessor created from PhysicalDecoder
-    Decoder(DecoderProcessor),
-    /// CollectionLayoutNormalizeProcessor inserted for collection sources that must preserve full schema.
-    CollectionLayoutNormalize(CollectionLayoutNormalizeProcessor),
-    /// MemoryCollectionMaterializeProcessor inserted before direct collection sinks.
-    MemoryCollectionMaterialize(MemoryCollectionMaterializeProcessor),
     /// SharedStreamProcessor created from PhysicalSharedStream
     SharedSource(SharedStreamProcessor),
-    /// SourceChangeGateProcessor created from PhysicalSourceChangeGate
-    SourceChangeGate(SourceChangeGateProcessor),
-    /// ComputeProcessor created from PhysicalCompute
-    Compute(ComputeProcessor),
-    /// BatchFunctionComputeProcessor created from PhysicalBatchFunctionCompute
-    BatchFunctionCompute(BatchFunctionComputeProcessor),
-    /// OrderProcessor created from PhysicalOrder
-    Order(OrderProcessor),
-    /// ProjectProcessor created from PhysicalProject
-    Project(ProjectProcessor),
-    /// RowDiffProcessor created from PhysicalRowDiff
-    RowDiff(RowDiffProcessor),
-    /// EmptySuppressProcessor created from PhysicalEmptySuppress
-    EmptySuppress(EmptySuppressProcessor),
-    /// StatefulFunctionProcessor created from PhysicalStatefulFunction
-    StatefulFunction(StatefulFunctionProcessor),
-    /// FilterProcessor created from PhysicalFilter
-    Filter(FilterProcessor),
-    /// BatchProcessor used by standalone batch/window nodes
-    Batch(BatchProcessor),
-    /// Sink encoder processor combining batch + encoder
-    SinkEncoder(SinkEncoderProcessor),
-    /// Sink compress processor applying delivery-boundary compression
-    SinkCompress(SinkCompressProcessor),
-    /// Sink encrypt processor applying delivery-boundary encryption
-    SinkEncrypt(SinkEncryptProcessor),
-    /// Streaming aggregation combining window + aggregation
-    StreamingAggregation(StreamingAggregationProcessor),
-    /// Watermark processor used to drive time progression
-    Watermark(WatermarkProcessor),
-    /// Tumbling window processor driven by watermarks
-    TumblingWindow(TumblingWindowProcessor),
-    /// Sliding window processor driven by watermarks (for lookahead windows)
-    SlidingWindow(SlidingWindowProcessor),
-    /// State window processor driven by open/emit conditions
-    StateWindow(StateWindowProcessor),
-    /// EOS window processor driven by data-path graceful end
-    EosWindow(EosWindowProcessor),
     /// SinkProcessor created from PhysicalDataSink
     Sink(SinkProcessor),
     /// A serial sequence of shared synchronous stage engines.
     Region(Box<RegionProcessor>),
     /// ResultCollectProcessor created from PhysicalResultCollect
     ResultCollect(ResultCollectProcessor),
-    /// BarrierProcessor created from PhysicalBarrier
-    Barrier(BarrierProcessor),
-    /// SamplerProcessor for rate limiting
-    Sampler(SamplerProcessor),
 }
-
 #[derive(Clone)]
 pub(crate) struct ProcessorPipelineDependencies {
     catalog: Arc<Catalog>,
@@ -381,28 +323,6 @@ impl ProcessorBuilderContext {
             })
     }
 
-    fn aggregate_registry(&self) -> Result<Arc<AggregateFunctionRegistry>, ProcessorError> {
-        self.aggregate_registry
-            .as_ref()
-            .map(Arc::clone)
-            .ok_or_else(|| {
-                ProcessorError::InvalidConfiguration(
-                    "aggregate function registry unavailable".into(),
-                )
-            })
-    }
-
-    fn stateful_registry(&self) -> Result<Arc<StatefulFunctionRegistry>, ProcessorError> {
-        self.stateful_registry
-            .as_ref()
-            .map(Arc::clone)
-            .ok_or_else(|| {
-                ProcessorError::InvalidConfiguration(
-                    "stateful function registry unavailable".into(),
-                )
-            })
-    }
-
     fn shared_stream_registry(&self) -> Result<Arc<SharedStreamRegistry>, ProcessorError> {
         self.shared_stream_registry
             .as_ref()
@@ -443,112 +363,37 @@ impl PlanProcessor {
     /// Get the processor ID
     pub fn id(&self) -> &str {
         match self {
-            PlanProcessor::Aggregation(p) => p.id(),
             PlanProcessor::DataSource(p) => p.id(),
             PlanProcessor::TableScan(p) => p.id(),
             PlanProcessor::LookupJoin(p) => p.id(),
-            PlanProcessor::Decoder(p) => p.id(),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.id(),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.id(),
             PlanProcessor::SharedSource(p) => p.id(),
-            PlanProcessor::SourceChangeGate(p) => p.id(),
-            PlanProcessor::Compute(p) => p.id(),
-            PlanProcessor::BatchFunctionCompute(p) => p.id(),
-            PlanProcessor::Order(p) => p.id(),
-            PlanProcessor::Project(p) => p.id(),
-            PlanProcessor::RowDiff(p) => p.id(),
-            PlanProcessor::EmptySuppress(p) => p.id(),
-            PlanProcessor::StatefulFunction(p) => p.id(),
-            PlanProcessor::Filter(p) => p.id(),
-            PlanProcessor::Batch(p) => p.id(),
-            PlanProcessor::SinkEncoder(p) => p.id(),
-            PlanProcessor::SinkCompress(p) => p.id(),
-            PlanProcessor::SinkEncrypt(p) => p.id(),
-            PlanProcessor::StreamingAggregation(p) => p.id(),
-            PlanProcessor::Watermark(p) => p.id(),
-            PlanProcessor::TumblingWindow(p) => p.id(),
-            PlanProcessor::SlidingWindow(p) => p.id(),
-            PlanProcessor::StateWindow(p) => p.id(),
-            PlanProcessor::EosWindow(p) => p.id(),
             PlanProcessor::Sink(p) => p.id(),
             PlanProcessor::Region(p) => p.id(),
             PlanProcessor::ResultCollect(p) => p.id(),
-            PlanProcessor::Barrier(p) => p.id(),
-            PlanProcessor::Sampler(p) => p.id(),
         }
     }
 
     pub fn checkpoint_key(&self) -> &str {
         match self {
-            PlanProcessor::Aggregation(p) => p.checkpoint_key(),
             PlanProcessor::DataSource(p) => p.checkpoint_key(),
             PlanProcessor::TableScan(p) => p.checkpoint_key(),
             PlanProcessor::LookupJoin(p) => p.checkpoint_key(),
-            PlanProcessor::Decoder(p) => p.checkpoint_key(),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.checkpoint_key(),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.checkpoint_key(),
             PlanProcessor::SharedSource(p) => p.checkpoint_key(),
-            PlanProcessor::SourceChangeGate(p) => p.checkpoint_key(),
-            PlanProcessor::Compute(p) => p.checkpoint_key(),
-            PlanProcessor::BatchFunctionCompute(p) => p.checkpoint_key(),
-            PlanProcessor::Order(p) => p.checkpoint_key(),
-            PlanProcessor::Project(p) => p.checkpoint_key(),
-            PlanProcessor::RowDiff(p) => p.checkpoint_key(),
-            PlanProcessor::EmptySuppress(p) => p.checkpoint_key(),
-            PlanProcessor::StatefulFunction(p) => p.checkpoint_key(),
-            PlanProcessor::Filter(p) => p.checkpoint_key(),
-            PlanProcessor::Batch(p) => p.checkpoint_key(),
-            PlanProcessor::SinkEncoder(p) => p.checkpoint_key(),
-            PlanProcessor::SinkCompress(p) => p.checkpoint_key(),
-            PlanProcessor::SinkEncrypt(p) => p.checkpoint_key(),
-            PlanProcessor::StreamingAggregation(p) => p.checkpoint_key(),
-            PlanProcessor::Watermark(p) => p.checkpoint_key(),
-            PlanProcessor::TumblingWindow(p) => p.checkpoint_key(),
-            PlanProcessor::SlidingWindow(p) => p.checkpoint_key(),
-            PlanProcessor::StateWindow(p) => p.checkpoint_key(),
-            PlanProcessor::EosWindow(p) => p.checkpoint_key(),
             PlanProcessor::Sink(p) => p.checkpoint_key(),
             PlanProcessor::Region(p) => p.checkpoint_key(),
             PlanProcessor::ResultCollect(p) => p.checkpoint_key(),
-            PlanProcessor::Barrier(p) => p.checkpoint_key(),
-            PlanProcessor::Sampler(p) => p.checkpoint_key(),
         }
     }
 
     pub fn kind(&self) -> &'static str {
         match self {
-            PlanProcessor::Aggregation(_) => "aggregation",
             PlanProcessor::DataSource(_) => "datasource",
             PlanProcessor::TableScan(_) => "table_scan",
             PlanProcessor::LookupJoin(_) => "lookup_join",
-            PlanProcessor::Decoder(_) => "decoder",
-            PlanProcessor::CollectionLayoutNormalize(_) => "collection_layout_normalize",
-            PlanProcessor::MemoryCollectionMaterialize(_) => "memory_collection_materialize",
             PlanProcessor::SharedSource(_) => "shared_source",
-            PlanProcessor::SourceChangeGate(_) => "source_change_gate",
-            PlanProcessor::Compute(_) => "compute",
-            PlanProcessor::BatchFunctionCompute(_) => "batch_function_compute",
-            PlanProcessor::Order(_) => "order",
-            PlanProcessor::Project(_) => "project",
-            PlanProcessor::RowDiff(_) => "row_diff",
-            PlanProcessor::EmptySuppress(_) => "empty_suppress",
-            PlanProcessor::StatefulFunction(_) => "stateful_function",
-            PlanProcessor::Filter(_) => "filter",
-            PlanProcessor::Batch(_) => "batch",
-            PlanProcessor::SinkEncoder(_) => "sink_encoder",
-            PlanProcessor::SinkCompress(_) => "sink_compress",
-            PlanProcessor::SinkEncrypt(_) => "sink_encrypt",
-            PlanProcessor::StreamingAggregation(_) => "streaming_aggregation",
-            PlanProcessor::Watermark(_) => "watermark",
-            PlanProcessor::TumblingWindow(_) => "tumbling_window",
-            PlanProcessor::SlidingWindow(_) => "sliding_window",
-            PlanProcessor::StateWindow(_) => "state_window",
-            PlanProcessor::EosWindow(_) => "eos_window",
             PlanProcessor::Sink(_) => "sink",
             PlanProcessor::Region(_) => "region",
             PlanProcessor::ResultCollect(_) => "result_collect",
-            PlanProcessor::Barrier(_) => "barrier",
-            PlanProcessor::Sampler(_) => "sampler",
         }
     }
 
@@ -557,46 +402,13 @@ impl PlanProcessor {
         collector: Option<Arc<CheckpointSnapshotCollector>>,
     ) {
         match self {
-            PlanProcessor::Aggregation(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::DataSource(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::TableScan(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::LookupJoin(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::Decoder(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::CollectionLayoutNormalize(p) => {
-                p.set_checkpoint_snapshot_collector(collector)
-            }
-            PlanProcessor::MemoryCollectionMaterialize(p) => {
-                p.set_checkpoint_snapshot_collector(collector)
-            }
             PlanProcessor::SharedSource(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::SourceChangeGate(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::Compute(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::BatchFunctionCompute(p) => {
-                p.set_checkpoint_snapshot_collector(collector)
-            }
-            PlanProcessor::Order(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::Project(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::RowDiff(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::EmptySuppress(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::StatefulFunction(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::Filter(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::Batch(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::SinkEncoder(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::SinkCompress(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::SinkEncrypt(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::StreamingAggregation(p) => {
-                p.set_checkpoint_snapshot_collector(collector)
-            }
-            PlanProcessor::Watermark(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::TumblingWindow(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::SlidingWindow(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::StateWindow(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::EosWindow(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Sink(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::Region(p) => p.set_checkpoint_snapshot_collector(collector),
             PlanProcessor::ResultCollect(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::Barrier(p) => p.set_checkpoint_snapshot_collector(collector),
-            PlanProcessor::Sampler(p) => p.set_checkpoint_snapshot_collector(collector),
         }
     }
 
@@ -605,149 +417,49 @@ impl PlanProcessor {
         snapshot: &OperatorSnapshot,
     ) -> Result<(), ProcessorError> {
         match self {
-            PlanProcessor::Aggregation(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::DataSource(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::TableScan(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::LookupJoin(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::Decoder(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::SharedSource(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::SourceChangeGate(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::Compute(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::BatchFunctionCompute(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::Order(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::Project(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::RowDiff(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::EmptySuppress(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::StatefulFunction(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::Filter(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::Batch(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::SinkEncoder(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::SinkCompress(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::SinkEncrypt(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::StreamingAggregation(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::Watermark(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::TumblingWindow(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::SlidingWindow(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::StateWindow(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::EosWindow(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Sink(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::Region(p) => p.restore_checkpoint(snapshot),
             PlanProcessor::ResultCollect(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::Barrier(p) => p.restore_checkpoint(snapshot),
-            PlanProcessor::Sampler(p) => p.restore_checkpoint(snapshot),
         }
     }
 
     pub fn validate_checkpoint(&self, snapshot: &OperatorSnapshot) -> Result<(), ProcessorError> {
         match self {
-            PlanProcessor::Aggregation(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::DataSource(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::TableScan(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::LookupJoin(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::Decoder(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::SharedSource(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::SourceChangeGate(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::Compute(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::BatchFunctionCompute(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::Order(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::Project(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::RowDiff(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::EmptySuppress(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::StatefulFunction(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::Filter(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::Batch(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::SinkEncoder(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::SinkCompress(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::SinkEncrypt(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::StreamingAggregation(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::Watermark(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::TumblingWindow(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::SlidingWindow(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::StateWindow(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::EosWindow(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Sink(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::Region(p) => p.validate_checkpoint(snapshot),
             PlanProcessor::ResultCollect(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::Barrier(p) => p.validate_checkpoint(snapshot),
-            PlanProcessor::Sampler(p) => p.validate_checkpoint(snapshot),
         }
     }
 
     pub fn clear_checkpoint_restore(&mut self) {
         match self {
-            PlanProcessor::Aggregation(p) => p.clear_checkpoint_restore(),
             PlanProcessor::DataSource(p) => p.clear_checkpoint_restore(),
             PlanProcessor::TableScan(p) => p.clear_checkpoint_restore(),
             PlanProcessor::LookupJoin(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::Decoder(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.clear_checkpoint_restore(),
             PlanProcessor::SharedSource(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::SourceChangeGate(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::Compute(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::BatchFunctionCompute(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::Order(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::Project(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::RowDiff(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::EmptySuppress(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::StatefulFunction(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::Filter(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::Batch(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::SinkEncoder(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::SinkCompress(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::SinkEncrypt(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::StreamingAggregation(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::Watermark(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::TumblingWindow(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::SlidingWindow(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::StateWindow(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::EosWindow(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Sink(p) => p.clear_checkpoint_restore(),
             PlanProcessor::Region(p) => p.clear_checkpoint_restore(),
             PlanProcessor::ResultCollect(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::Barrier(p) => p.clear_checkpoint_restore(),
-            PlanProcessor::Sampler(p) => p.clear_checkpoint_restore(),
         }
     }
 
     pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
         match self {
-            PlanProcessor::Aggregation(p) => p.set_stats(stats),
             PlanProcessor::DataSource(p) => p.set_stats(stats),
             PlanProcessor::TableScan(p) => p.set_stats(stats),
             PlanProcessor::LookupJoin(p) => p.set_stats(stats),
-            PlanProcessor::Decoder(p) => p.set_stats(stats),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.set_stats(stats),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.set_stats(stats),
             PlanProcessor::SharedSource(p) => p.set_stats(stats),
-            PlanProcessor::SourceChangeGate(p) => p.set_stats(stats),
-            PlanProcessor::Compute(p) => p.set_stats(stats),
-            PlanProcessor::BatchFunctionCompute(p) => p.set_stats(stats),
-            PlanProcessor::Order(p) => p.set_stats(stats),
-            PlanProcessor::Project(p) => p.set_stats(stats),
-            PlanProcessor::RowDiff(p) => p.set_stats(stats),
-            PlanProcessor::EmptySuppress(p) => p.set_stats(stats),
-            PlanProcessor::StatefulFunction(p) => p.set_stats(stats),
-            PlanProcessor::Filter(p) => p.set_stats(stats),
-            PlanProcessor::Batch(p) => p.set_stats(stats),
-            PlanProcessor::SinkEncoder(p) => p.set_stats(stats),
-            PlanProcessor::SinkCompress(p) => p.set_stats(stats),
-            PlanProcessor::SinkEncrypt(p) => p.set_stats(stats),
-            PlanProcessor::StreamingAggregation(p) => p.set_stats(stats),
-            PlanProcessor::Watermark(p) => p.set_stats(stats),
-            PlanProcessor::TumblingWindow(p) => p.set_stats(stats),
-            PlanProcessor::SlidingWindow(p) => p.set_stats(stats),
-            PlanProcessor::StateWindow(p) => p.set_stats(stats),
-            PlanProcessor::EosWindow(p) => p.set_stats(stats),
             PlanProcessor::Sink(p) => p.set_stats(stats),
             PlanProcessor::Region(_) => {} // Stage and transport handles are configured by the builder.
             PlanProcessor::ResultCollect(p) => p.set_stats(stats),
-            PlanProcessor::Barrier(p) => p.set_stats(stats),
-            PlanProcessor::Sampler(p) => p.set_stats(stats),
         }
     }
 
@@ -760,152 +472,52 @@ impl PlanProcessor {
     /// Start the processor
     pub fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
         match self {
-            PlanProcessor::Aggregation(p) => p.start(spawner),
             PlanProcessor::DataSource(p) => p.start(spawner),
             PlanProcessor::TableScan(p) => p.start(spawner),
             PlanProcessor::LookupJoin(p) => p.start(spawner),
-            PlanProcessor::Decoder(p) => p.start(spawner),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.start(spawner),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.start(spawner),
             PlanProcessor::SharedSource(p) => p.start(spawner),
-            PlanProcessor::SourceChangeGate(p) => p.start(spawner),
-            PlanProcessor::Compute(p) => p.start(spawner),
-            PlanProcessor::BatchFunctionCompute(p) => p.start(spawner),
-            PlanProcessor::Order(p) => p.start(spawner),
-            PlanProcessor::Project(p) => p.start(spawner),
-            PlanProcessor::RowDiff(p) => p.start(spawner),
-            PlanProcessor::EmptySuppress(p) => p.start(spawner),
-            PlanProcessor::StatefulFunction(p) => p.start(spawner),
-            PlanProcessor::Filter(p) => p.start(spawner),
-            PlanProcessor::Batch(p) => p.start(spawner),
-            PlanProcessor::SinkEncoder(p) => p.start(spawner),
-            PlanProcessor::SinkCompress(p) => p.start(spawner),
-            PlanProcessor::SinkEncrypt(p) => p.start(spawner),
-            PlanProcessor::StreamingAggregation(p) => p.start(spawner),
-            PlanProcessor::Watermark(p) => p.start(spawner),
-            PlanProcessor::TumblingWindow(p) => p.start(spawner),
-            PlanProcessor::SlidingWindow(p) => p.start(spawner),
-            PlanProcessor::StateWindow(p) => p.start(spawner),
-            PlanProcessor::EosWindow(p) => p.start(spawner),
             PlanProcessor::Sink(p) => p.start(spawner),
             PlanProcessor::Region(p) => p.start(spawner),
             PlanProcessor::ResultCollect(p) => p.start(spawner),
-            PlanProcessor::Barrier(p) => p.start(spawner),
-            PlanProcessor::Sampler(p) => p.start(spawner),
         }
     }
 
     /// Subscribe to the processor's output stream
     pub fn subscribe_output(&self) -> Option<LinkReceiver<crate::processor::StreamData>> {
         match self {
-            PlanProcessor::Aggregation(p) => p.subscribe_output(),
             PlanProcessor::DataSource(p) => p.subscribe_output(),
             PlanProcessor::TableScan(p) => p.subscribe_output(),
             PlanProcessor::LookupJoin(p) => p.subscribe_output(),
-            PlanProcessor::Decoder(p) => p.subscribe_output(),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.subscribe_output(),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.subscribe_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_output(),
-            PlanProcessor::SourceChangeGate(p) => p.subscribe_output(),
-            PlanProcessor::Compute(p) => p.subscribe_output(),
-            PlanProcessor::BatchFunctionCompute(p) => p.subscribe_output(),
-            PlanProcessor::Order(p) => p.subscribe_output(),
-            PlanProcessor::Project(p) => p.subscribe_output(),
-            PlanProcessor::RowDiff(p) => p.subscribe_output(),
-            PlanProcessor::EmptySuppress(p) => p.subscribe_output(),
-            PlanProcessor::StatefulFunction(p) => p.subscribe_output(),
-            PlanProcessor::Filter(p) => p.subscribe_output(),
-            PlanProcessor::Batch(p) => p.subscribe_output(),
-            PlanProcessor::SinkEncoder(p) => p.subscribe_output(),
-            PlanProcessor::SinkCompress(p) => p.subscribe_output(),
-            PlanProcessor::SinkEncrypt(p) => p.subscribe_output(),
-            PlanProcessor::StreamingAggregation(p) => p.subscribe_output(),
-            PlanProcessor::Watermark(p) => p.subscribe_output(),
-            PlanProcessor::TumblingWindow(p) => p.subscribe_output(),
-            PlanProcessor::SlidingWindow(p) => p.subscribe_output(),
-            PlanProcessor::StateWindow(p) => p.subscribe_output(),
-            PlanProcessor::EosWindow(p) => p.subscribe_output(),
             PlanProcessor::Sink(p) => p.subscribe_output(),
             PlanProcessor::Region(p) => p.subscribe_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_output(),
-            PlanProcessor::Barrier(p) => p.subscribe_output(),
-            PlanProcessor::Sampler(p) => p.subscribe_output(),
         }
     }
 
     /// Subscribe to the processor's control output stream
     pub fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
         match self {
-            PlanProcessor::Aggregation(p) => p.subscribe_control_output(),
             PlanProcessor::DataSource(p) => p.subscribe_control_output(),
             PlanProcessor::TableScan(p) => p.subscribe_control_output(),
             PlanProcessor::LookupJoin(p) => p.subscribe_control_output(),
-            PlanProcessor::Decoder(p) => p.subscribe_control_output(),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.subscribe_control_output(),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.subscribe_control_output(),
             PlanProcessor::SharedSource(p) => p.subscribe_control_output(),
-            PlanProcessor::SourceChangeGate(p) => p.subscribe_control_output(),
-            PlanProcessor::Compute(p) => p.subscribe_control_output(),
-            PlanProcessor::BatchFunctionCompute(p) => p.subscribe_control_output(),
-            PlanProcessor::Order(p) => p.subscribe_control_output(),
-            PlanProcessor::Project(p) => p.subscribe_control_output(),
-            PlanProcessor::RowDiff(p) => p.subscribe_control_output(),
-            PlanProcessor::EmptySuppress(p) => p.subscribe_control_output(),
-            PlanProcessor::StatefulFunction(p) => p.subscribe_control_output(),
-            PlanProcessor::Filter(p) => p.subscribe_control_output(),
-            PlanProcessor::Batch(p) => p.subscribe_control_output(),
-            PlanProcessor::SinkEncoder(p) => p.subscribe_control_output(),
-            PlanProcessor::SinkCompress(p) => p.subscribe_control_output(),
-            PlanProcessor::SinkEncrypt(p) => p.subscribe_control_output(),
-            PlanProcessor::StreamingAggregation(p) => p.subscribe_control_output(),
-            PlanProcessor::Watermark(p) => p.subscribe_control_output(),
-            PlanProcessor::TumblingWindow(p) => p.subscribe_control_output(),
-            PlanProcessor::SlidingWindow(p) => p.subscribe_control_output(),
-            PlanProcessor::StateWindow(p) => p.subscribe_control_output(),
-            PlanProcessor::EosWindow(p) => p.subscribe_control_output(),
             PlanProcessor::Sink(p) => p.subscribe_control_output(),
             PlanProcessor::Region(p) => p.subscribe_control_output(),
             PlanProcessor::ResultCollect(p) => p.subscribe_control_output(),
-            PlanProcessor::Barrier(p) => p.subscribe_control_output(),
-            PlanProcessor::Sampler(p) => p.subscribe_control_output(),
         }
     }
 
     /// Add an input channel
     pub fn add_input(&mut self, receiver: LinkReceiver<crate::processor::StreamData>) {
         match self {
-            PlanProcessor::Aggregation(p) => p.add_input(receiver),
             PlanProcessor::DataSource(p) => p.add_input(receiver),
             PlanProcessor::TableScan(p) => p.add_input(receiver),
             PlanProcessor::LookupJoin(p) => p.add_input(receiver),
-            PlanProcessor::Decoder(p) => p.add_input(receiver),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.add_input(receiver),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.add_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_input(receiver),
-            PlanProcessor::SourceChangeGate(p) => p.add_input(receiver),
-            PlanProcessor::Compute(p) => p.add_input(receiver),
-            PlanProcessor::BatchFunctionCompute(p) => p.add_input(receiver),
-            PlanProcessor::Order(p) => p.add_input(receiver),
-            PlanProcessor::Project(p) => p.add_input(receiver),
-            PlanProcessor::RowDiff(p) => p.add_input(receiver),
-            PlanProcessor::EmptySuppress(p) => p.add_input(receiver),
-            PlanProcessor::StatefulFunction(p) => p.add_input(receiver),
-            PlanProcessor::Filter(p) => p.add_input(receiver),
-            PlanProcessor::Batch(p) => p.add_input(receiver),
-            PlanProcessor::SinkEncoder(p) => p.add_input(receiver),
-            PlanProcessor::SinkCompress(p) => p.add_input(receiver),
-            PlanProcessor::SinkEncrypt(p) => p.add_input(receiver),
-            PlanProcessor::StreamingAggregation(p) => p.add_input(receiver),
-            PlanProcessor::Watermark(p) => p.add_input(receiver),
-            PlanProcessor::TumblingWindow(p) => p.add_input(receiver),
-            PlanProcessor::SlidingWindow(p) => p.add_input(receiver),
-            PlanProcessor::StateWindow(p) => p.add_input(receiver),
-            PlanProcessor::EosWindow(p) => p.add_input(receiver),
             PlanProcessor::Sink(p) => p.add_input(receiver),
             PlanProcessor::Region(p) => p.add_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_input(receiver),
-            PlanProcessor::Barrier(p) => p.add_input(receiver),
-            PlanProcessor::Sampler(p) => p.add_input(receiver),
         }
     }
 
@@ -915,38 +527,13 @@ impl PlanProcessor {
         R: Into<LinkReceiver<ControlSignal>>,
     {
         match self {
-            PlanProcessor::Aggregation(p) => p.add_control_input(receiver),
             PlanProcessor::DataSource(p) => p.add_control_input(receiver),
             PlanProcessor::TableScan(p) => p.add_control_input(receiver),
             PlanProcessor::LookupJoin(p) => p.add_control_input(receiver),
-            PlanProcessor::Decoder(p) => p.add_control_input(receiver),
-            PlanProcessor::CollectionLayoutNormalize(p) => p.add_control_input(receiver),
-            PlanProcessor::MemoryCollectionMaterialize(p) => p.add_control_input(receiver),
             PlanProcessor::SharedSource(p) => p.add_control_input(receiver),
-            PlanProcessor::SourceChangeGate(p) => p.add_control_input(receiver),
-            PlanProcessor::Compute(p) => p.add_control_input(receiver),
-            PlanProcessor::BatchFunctionCompute(p) => p.add_control_input(receiver),
-            PlanProcessor::Order(p) => p.add_control_input(receiver),
-            PlanProcessor::Project(p) => p.add_control_input(receiver),
-            PlanProcessor::RowDiff(p) => p.add_control_input(receiver),
-            PlanProcessor::EmptySuppress(p) => p.add_control_input(receiver),
-            PlanProcessor::StatefulFunction(p) => p.add_control_input(receiver),
-            PlanProcessor::Filter(p) => p.add_control_input(receiver),
-            PlanProcessor::Batch(p) => p.add_control_input(receiver),
-            PlanProcessor::SinkEncoder(p) => p.add_control_input(receiver),
-            PlanProcessor::SinkCompress(p) => p.add_control_input(receiver),
-            PlanProcessor::SinkEncrypt(p) => p.add_control_input(receiver),
-            PlanProcessor::StreamingAggregation(p) => p.add_control_input(receiver),
-            PlanProcessor::Watermark(p) => p.add_control_input(receiver),
-            PlanProcessor::TumblingWindow(p) => p.add_control_input(receiver),
-            PlanProcessor::SlidingWindow(p) => p.add_control_input(receiver),
-            PlanProcessor::StateWindow(p) => p.add_control_input(receiver),
-            PlanProcessor::EosWindow(p) => p.add_control_input(receiver),
             PlanProcessor::Sink(p) => p.add_control_input(receiver),
             PlanProcessor::Region(p) => p.add_control_input(receiver),
             PlanProcessor::ResultCollect(p) => p.add_control_input(receiver),
-            PlanProcessor::Barrier(p) => p.add_control_input(receiver),
-            PlanProcessor::Sampler(p) => p.add_control_input(receiver),
         }
     }
 }
@@ -1944,87 +1531,7 @@ fn create_processor_from_plan_node(
                 PlanProcessor::LookupJoin(processor),
             ))
         }
-        PhysicalPlan::Decoder(decoder_plan) => {
-            let schema = decoder_plan.schema();
-            let mut processor = match context.shared_stream() {
-                Some(opts) if opts.stream_name == decoder_plan.source_name() => {
-                    DecoderProcessor::with_custom_id_and_channel_capacities(
-                        processor_id.clone(),
-                        Arc::clone(&opts.decoder),
-                        channel_capacities,
-                    )
-                    .with_shared_decode_state(Arc::clone(&opts.applied_decode_state))
-                }
-                _ => {
-                    let decoder = context
-                        .decoder_registry()?
-                        .instantiate(
-                            decoder_plan.decoder(),
-                            decoder_plan.source_name(),
-                            Arc::clone(&schema),
-                        )
-                        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-                    let mut processor = DecoderProcessor::with_custom_id_and_channel_capacities(
-                        processor_id.clone(),
-                        decoder,
-                        channel_capacities,
-                    );
-                    if let Some(projection) = decoder_plan.decode_projection().cloned() {
-                        processor = processor.with_decode_projection(projection);
-                    }
-                    processor
-                }
-            };
-            if let (Some(eventtime_ctx), Some(eventtime_spec)) =
-                (context.eventtime(), decoder_plan.eventtime())
-            {
-                let parser = eventtime_ctx
-                    .registry
-                    .resolve(eventtime_spec.type_key.as_str())
-                    .map_err(|err| {
-                        ProcessorError::InvalidConfiguration(format!(
-                            "eventtime.type `{}` not registered: {}",
-                            eventtime_spec.type_key, err
-                        ))
-                    })?;
-                processor = processor.with_eventtime(EventtimeDecodeConfig {
-                    source_name: decoder_plan.source_name().to_string(),
-                    column_name: eventtime_spec.column_name.clone(),
-                    column_index: eventtime_spec.column_index,
-                    type_key: eventtime_spec.type_key.clone(),
-                    parser,
-                });
-            }
-            let input_domain = plan_input_domain(plan, context.merger_registry.as_deref())?;
-            processor.set_metric_domains(
-                DataMetricDomains::NONE
-                    .with_input(input_domain)
-                    .with_output(DataDomain::Collection),
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::Decoder(processor),
-            ))
-        }
-        PhysicalPlan::CollectionLayoutNormalize(spec) => {
-            let processor = CollectionLayoutNormalizeProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(spec.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::CollectionLayoutNormalize(processor),
-            ))
-        }
-        PhysicalPlan::MemoryCollectionMaterialize(spec) => {
-            let processor = MemoryCollectionMaterializeProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(spec.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::MemoryCollectionMaterialize(processor),
-            ))
-        }
+
         PhysicalPlan::SharedStream(shared) => {
             let shared_stream_registry = context.shared_stream_registry()?;
             let mut processor = SharedStreamProcessor::new_with_channel_capacities(
@@ -2040,297 +1547,11 @@ fn create_processor_from_plan_node(
                 PlanProcessor::SharedSource(processor),
             ))
         }
-        PhysicalPlan::SourceChangeGate(gate) => {
-            let processor = SourceChangeGateProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(gate.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::SourceChangeGate(processor),
-            ))
-        }
-        PhysicalPlan::Compute(compute) => {
-            let processor = ComputeProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(compute.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::Compute(processor),
-            ))
-        }
-        PhysicalPlan::BatchFunctionCompute(compute) => {
-            let processor = BatchFunctionComputeProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(compute.clone()),
-                channel_capacities,
-            )?;
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::BatchFunctionCompute(processor),
-            ))
-        }
-        PhysicalPlan::Order(order) => {
-            let processor = OrderProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(order.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Order(
-                processor,
-            )))
-        }
-        PhysicalPlan::Project(project) => {
-            let processor = ProjectProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(project.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::Project(processor),
-            ))
-        }
-        PhysicalPlan::RowDiff(spec) => {
-            let processor = RowDiffProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(spec.clone()),
-                channel_capacities,
-            )?;
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::RowDiff(processor),
-            ))
-        }
+
         PhysicalPlan::ColumnFilter(_) => Err(ProcessorError::InvalidConfiguration(
             "optimized physical plan still contains planner-only PhysicalColumnFilter".to_string(),
         )),
-        PhysicalPlan::EmptySuppress(spec) => {
-            let processor = EmptySuppressProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(spec.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::EmptySuppress(processor),
-            ))
-        }
-        PhysicalPlan::StatefulFunction(stateful) => {
-            let processor = StatefulFunctionProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(stateful.clone()),
-                context.stateful_registry()?,
-                channel_capacities,
-            )?;
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::StatefulFunction(processor),
-            ))
-        }
-        PhysicalPlan::Aggregation(aggregation) => {
-            let processor = AggregationProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(aggregation.clone()),
-                context.aggregate_registry()?,
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::Aggregation(processor),
-            ))
-        }
-        PhysicalPlan::Filter(filter) => {
-            let processor = FilterProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(filter.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Filter(
-                processor,
-            )))
-        }
-        PhysicalPlan::Batch(batch) => {
-            BatchProcessor::validate_batch_config(
-                batch.common.batch_count,
-                batch.common.batch_duration,
-            )?;
-            let processor = BatchProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                batch.common.batch_count,
-                batch.common.batch_duration,
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Batch(
-                processor,
-            )))
-        }
-        PhysicalPlan::SinkCompress(compress) => {
-            let writer = compress
-                .codec
-                .build_writer()
-                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-            let processor = SinkCompressProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                writer,
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::SinkCompress(processor),
-            ))
-        }
-        PhysicalPlan::SinkEncrypt(encrypt) => {
-            let config = SinkEncryptionConfig {
-                algorithm: encrypt.algorithm,
-                key_id: encrypt.key_id.clone(),
-                key_bits: encrypt.key_bits,
-                key: Arc::clone(&encrypt.key),
-            };
-            let writer = AesGcmStreamWriter::from_config(&config)
-                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-            if writer.key_bits() != encrypt.key_bits {
-                return Err(ProcessorError::InvalidConfiguration(format!(
-                    "sink encrypt key_bits mismatch for key_id `{}`",
-                    encrypt.key_id
-                )));
-            }
-            let processor = SinkEncryptProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Box::new(writer),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::SinkEncrypt(processor),
-            ))
-        }
-        PhysicalPlan::SinkEncoder(encoder) => {
-            validate_encoder_input_child(encoder.base.children.len())?;
-            let encoder_impl = context
-                .encoder_registry()?
-                .instantiate(&encoder.encoder)
-                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-            let encoder_impl =
-                attach_encoder_output_layout(encoder.output_layout.as_ref(), encoder_impl)?;
-            SinkEncoderProcessor::validate_batch_config(
-                encoder.common.batch_count,
-                encoder.common.batch_duration,
-            )?;
-            let encoder_runtime = encoder_impl
-                .start_encoder()
-                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-            let processor = SinkEncoderProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                encoder_runtime,
-                encoder.common.batch_count,
-                encoder.common.batch_duration,
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::SinkEncoder(processor),
-            ))
-        }
-        PhysicalPlan::IncSinkEncoder(encoder) => {
-            validate_encoder_input_child(encoder.base.children.len())?;
-            let encoder_impl = context
-                .encoder_registry()?
-                .instantiate(&encoder.encoder)
-                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-            let encoder_impl =
-                attach_encoder_output_layout(encoder.output_layout.as_ref(), encoder_impl)?;
-            // PhysicalIncSinkEncoder (fused) uses batch params from the original PhysicalBatch.
-            SinkEncoderProcessor::validate_batch_config(
-                encoder.common.batch_count,
-                encoder.common.batch_duration,
-            )?;
-            let encoder_runtime = encoder_impl
-                .start_encoder()
-                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
-            let processor = SinkEncoderProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                encoder_runtime,
-                encoder.common.batch_count,
-                encoder.common.batch_duration,
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::SinkEncoder(processor),
-            ))
-        }
-        PhysicalPlan::StreamingAggregation(agg) => {
-            let processor = StreamingAggregationProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(agg.clone()),
-                context.aggregate_registry()?,
-                channel_capacities,
-            )?;
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::StreamingAggregation(processor),
-            ))
-        }
-        PhysicalPlan::ProcessTimeWatermark(_)
-        | PhysicalPlan::EventtimeWatermark(_)
-        | PhysicalPlan::Watermark(_) => {
-            let processor = WatermarkProcessor::from_physical_plan_with_channel_capacities(
-                processor_id.clone(),
-                Arc::clone(plan),
-                channel_capacities,
-            )?
-            .ok_or_else(|| {
-                ProcessorError::InvalidConfiguration(
-                    "Unsupported watermark configuration".to_string(),
-                )
-            })?;
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::Watermark(processor),
-            ))
-        }
-        PhysicalPlan::CountWindow(count_window) => {
-            BatchProcessor::validate_batch_config(Some(count_window.count as usize), None)?;
-            let processor = BatchProcessor::new_partitioned_with_channel_capacities(
-                processor_id.clone(),
-                Some(count_window.count as usize),
-                None,
-                count_window.partition_by_scalars.clone(),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(PlanProcessor::Batch(
-                processor,
-            )))
-        }
-        PhysicalPlan::TumblingWindow(window) => {
-            let processor = TumblingWindowProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(window.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::TumblingWindow(processor),
-            ))
-        }
-        PhysicalPlan::SlidingWindow(window) => {
-            let processor = SlidingWindowProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(window.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::SlidingWindow(processor),
-            ))
-        }
-        PhysicalPlan::StateWindow(window) => {
-            let processor = StateWindowProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                Arc::new(*window.clone()),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::StateWindow(processor),
-            ))
-        }
-        PhysicalPlan::EosWindow(_) => {
-            let processor = EosWindowProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                channel_capacities,
-            );
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::EosWindow(processor),
-            ))
-        }
+
         PhysicalPlan::DataSink(sink_plan) | PhysicalPlan::SinkConnector(sink_plan) => {
             let processor_id = format!("{}_{}", processor_id, sink_plan.connector.sink_id);
             let mut processor = SinkProcessor::new_with_channel_capacities(
@@ -2381,64 +1602,11 @@ fn create_processor_from_plan_node(
                 PlanProcessor::ResultCollect(processor),
             ))
         }
-        PhysicalPlan::Barrier(barrier) => {
-            let expected_upstreams = barrier.base.children.len();
-            let mut processor = BarrierProcessor::new_with_channel_capacities(
-                processor_id.clone(),
-                expected_upstreams,
-                channel_capacities,
-            );
-            processor
-                .set_input_domain(plan_input_domain(plan, context.merger_registry.as_deref())?);
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::Barrier(processor),
-            ))
-        }
-        PhysicalPlan::Sampler(sampler) => {
-            let mut processor = SamplerProcessor::new_with_channel_capacities(
-                plan_name.clone(),
-                crate::processor::SamplerConfig {
-                    interval: sampler.interval,
-                    strategy: sampler.strategy.clone(),
-                },
-                channel_capacities,
-            );
-            let merger_registry = context.merger_registry()?;
-            processor.set_metric_domains(
-                DataMetricDomains::NONE
-                    .with_input(plan_input_domain(plan, Some(merger_registry.as_ref()))?)
-                    .with_output(plan_output_domain(plan, Some(merger_registry.as_ref()))?),
-            );
-            if let crate::processor::SamplingStrategy::Packer { .. } = &sampler.strategy {
-                processor.set_merger_registry(merger_registry);
-                // The Packer merger may build an embedded decoder for the fused
-                // decode path, which needs the stream's output schema. Derive it
-                // from the sampler's input (the datasource/decoder child).
-                let schema = sampler
-                    .base
-                    .children
-                    .first()
-                    .and_then(sampler_input_schema)
-                    .ok_or_else(|| {
-                        ProcessorError::InvalidConfiguration(
-                            "Packer sampler requires a schema-bearing input".to_string(),
-                        )
-                    })?;
-                processor.set_merger_schema(schema);
-                if let Some(artifact) = sampler.schema_artifact() {
-                    processor.set_merger_schema_artifact(artifact);
-                }
-                // Share decode state for projection pushdown into fused decode.
-                if let Some(opts) = context.shared_stream() {
-                    processor.set_applied_decode_state(Arc::clone(&opts.applied_decode_state));
-                }
-            } else if let Ok(registry) = context.merger_registry() {
-                processor.set_merger_registry(registry);
-            }
-            Ok(ProcessorBuildOutput::with_processor(
-                PlanProcessor::Sampler(processor),
-            ))
-        }
+
+        _ => Err(ProcessorError::InvalidConfiguration(format!(
+            "stage {} must be built through its execution region",
+            plan.get_plan_type()
+        ))),
     }
 }
 
@@ -2526,6 +1694,135 @@ fn plan_output_domain(
         | PhysicalPlan::EventtimeWatermark(_)
         | PhysicalPlan::Watermark(_) => Ok(DataDomain::Collection),
     }
+}
+
+fn create_decoder_stage(
+    decoder_plan: &crate::planner::physical::PhysicalDecoder,
+    context: &ProcessorBuilderContext,
+) -> Result<DecoderStage, ProcessorError> {
+    let schema = decoder_plan.schema();
+    let mut stage = match context.shared_stream() {
+        Some(opts) if opts.stream_name == decoder_plan.source_name() => {
+            DecoderStage::new(Arc::clone(&opts.decoder))
+                .with_shared_decode_state(Arc::clone(&opts.applied_decode_state))
+        }
+        _ => {
+            let decoder = context
+                .decoder_registry()?
+                .instantiate(
+                    decoder_plan.decoder(),
+                    decoder_plan.source_name(),
+                    Arc::clone(&schema),
+                )
+                .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+            let mut stage = DecoderStage::new(decoder);
+            if let Some(projection) = decoder_plan.decode_projection().cloned() {
+                stage = stage.with_decode_projection(projection);
+            }
+            stage
+        }
+    };
+    if let (Some(eventtime_ctx), Some(eventtime_spec)) =
+        (context.eventtime(), decoder_plan.eventtime())
+    {
+        let parser = eventtime_ctx
+            .registry
+            .resolve(eventtime_spec.type_key.as_str())
+            .map_err(|err| {
+                ProcessorError::InvalidConfiguration(format!(
+                    "eventtime.type `{}` not registered: {}",
+                    eventtime_spec.type_key, err
+                ))
+            })?;
+        stage = stage.with_eventtime(EventtimeDecodeConfig {
+            source_name: decoder_plan.source_name().to_string(),
+            column_name: eventtime_spec.column_name.clone(),
+            column_index: eventtime_spec.column_index,
+            type_key: eventtime_spec.type_key.clone(),
+            parser,
+        });
+    }
+
+    Ok(stage)
+}
+fn create_encoder_stage(
+    plan: &PhysicalPlan,
+    context: &ProcessorBuilderContext,
+) -> Result<EncoderStage, ProcessorError> {
+    let (encoder, common, layout, child_count) = match plan {
+        PhysicalPlan::SinkEncoder(p) => (
+            &p.encoder,
+            &p.common,
+            p.output_layout.as_ref(),
+            p.base.children.len(),
+        ),
+        PhysicalPlan::IncSinkEncoder(p) => (
+            &p.encoder,
+            &p.common,
+            p.output_layout.as_ref(),
+            p.base.children.len(),
+        ),
+        _ => {
+            return Err(ProcessorError::InvalidConfiguration(
+                "expected an encoder stage".into(),
+            ))
+        }
+    };
+    validate_encoder_input_child(child_count)?;
+    BatchPolicy::validate(
+        common.batch_count,
+        common.batch_duration,
+        "encoder processor",
+    )?;
+    let factory = context
+        .encoder_registry()?
+        .instantiate(encoder)
+        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+    let factory = attach_encoder_output_layout(layout, factory)?;
+    let encoder = factory
+        .start_encoder()
+        .map_err(|err| ProcessorError::InvalidConfiguration(err.to_string()))?;
+    Ok(EncoderStage::new(
+        encoder,
+        BatchPolicy::new(common.batch_count, common.batch_duration),
+    ))
+}
+fn create_sampler_stage(
+    sampler: &crate::planner::physical::PhysicalSampler,
+    context: &ProcessorBuilderContext,
+) -> Result<SamplerStage, ProcessorError> {
+    let registry = context.merger_registry()?;
+    let schema = if matches!(
+        sampler.strategy,
+        crate::processor::SamplingStrategy::Packer { .. }
+    ) {
+        Some(
+            sampler
+                .base
+                .children
+                .first()
+                .and_then(sampler_input_schema)
+                .ok_or_else(|| {
+                    ProcessorError::InvalidConfiguration(
+                        "Packer sampler requires a schema-bearing input".into(),
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    SamplerStage::new(
+        crate::processor::SamplerConfig {
+            interval: sampler.interval,
+            strategy: sampler.strategy.clone(),
+        },
+        Some(registry),
+        schema,
+        sampler.schema_artifact(),
+        context
+            .shared_stream()
+            .map(|opts| Arc::clone(&opts.applied_decode_state)),
+    )
 }
 
 /// Return the `datatypes::Schema` produced by a sampler input node, if the node
@@ -2668,40 +1965,21 @@ fn build_processors_recursive(
                             context.merger_registry.as_deref(),
                         )?),
                 );
-                if matches!(
-                    node,
-                    PhysicalPlan::SinkEncoder(_) | PhysicalPlan::IncSinkEncoder(_)
-                ) {
-                    let creation =
-                        create_processor_from_plan_node(&Arc::new(node.clone()), context)?;
-                    let Some(PlanProcessor::SinkEncoder(encoder)) = creation.processor else {
-                        return Err(ProcessorError::InvalidConfiguration(
-                            "encoder stage binding failed".into(),
-                        ));
-                    };
-                    encoders.insert(node.get_plan_index(), encoder.into_stage()?);
-                }
-                if matches!(node, PhysicalPlan::Sampler(_)) {
-                    let creation =
-                        create_processor_from_plan_node(&Arc::new(node.clone()), context)?;
-                    let Some(PlanProcessor::Sampler(sampler)) = creation.processor else {
-                        return Err(ProcessorError::InvalidConfiguration(
-                            "sampler stage binding failed".into(),
-                        ));
-                    };
-                    samplers.insert(node.get_plan_index(), sampler.into_stage()?);
-                }
-                if matches!(node, PhysicalPlan::Decoder(_)) {
-                    let creation =
-                        create_processor_from_plan_node(&Arc::new(node.clone()), context)?;
-                    let Some(PlanProcessor::Decoder(decoder)) = creation.processor else {
-                        return Err(ProcessorError::InvalidConfiguration(
-                            "decoder stage binding failed".into(),
-                        ));
-                    };
-                    decoders.insert(node.get_plan_index(), decoder.into_stage());
+                match node {
+                    PhysicalPlan::SinkEncoder(_) | PhysicalPlan::IncSinkEncoder(_) => {
+                        encoders
+                            .insert(node.get_plan_index(), create_encoder_stage(node, context)?);
+                    }
+                    PhysicalPlan::Sampler(p) => {
+                        samplers.insert(node.get_plan_index(), create_sampler_stage(p, context)?);
+                    }
+                    PhysicalPlan::Decoder(p) => {
+                        decoders.insert(node.get_plan_index(), create_decoder_stage(p, context)?);
+                    }
+                    _ => {}
                 }
             }
+
             let input_domain = plan_input_domain(&plans[0], context.merger_registry.as_deref())?;
             let processor = RegionProcessor::new(
                 id,
@@ -3295,6 +2573,7 @@ pub(crate) fn create_processor_pipeline(
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::catalog::StreamDecoderConfig;
     use crate::expr::ScalarExpr;
@@ -3614,7 +2893,7 @@ mod tests {
         let decoder_registry = DecoderRegistry::with_builtin_decoders();
         let aggregate_registry = AggregateFunctionRegistry::with_builtins();
         let stateful_registry = StatefulFunctionRegistry::with_builtins();
-        let context = ProcessorBuilderContext {
+        let mut context = ProcessorBuilderContext {
             catalog: None,
             flow_instance_id: Arc::<str>::from("default"),
             pipeline_id: Arc::<str>::from("test_pipe"),
@@ -3645,17 +2924,30 @@ mod tests {
             spawner,
             property_registry: PropertyRegistry::default(),
         };
-        let result = create_processor_from_plan_node(&physical_project, &context)
-            .expect("processor creation failed");
-
-        let processor = result
-            .processor
-            .expect("expected processor for physical project node");
-        assert_eq!(processor.id(), "PhysicalProject_2");
-        tracing::info!(
-            processor_id = %processor.id(),
-            "PhysicalProject processor created successfully"
-        );
+        context.checkpoint_keys = build_checkpoint_keys(&physical_project);
+        let execution = ExecutionPlan::build(&physical_project).expect("execution plan");
+        let mut refs = HashMap::new();
+        collect_plan_refs_by_index(&physical_project, &mut refs, &mut HashSet::new());
+        let mut processors = ProcessorMap::new();
+        build_processors_recursive(
+            Arc::clone(&physical_project),
+            &mut processors,
+            &context,
+            &execution,
+            &refs,
+        )
+        .expect("region construction");
+        let processor = processors
+            .get_processor("PhysicalProject_2")
+            .expect("project region");
+        assert_eq!(processor.id(), "Region_2");
+        let PlanProcessor::Region(region) = processor else {
+            panic!("expected a region");
+        };
+        assert!(region
+            .stage_stats()
+            .iter()
+            .any(|handle| handle.processor_id == "PhysicalProject_2"));
     }
 
     #[test]

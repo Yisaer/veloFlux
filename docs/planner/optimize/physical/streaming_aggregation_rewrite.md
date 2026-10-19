@@ -36,8 +36,9 @@ The rewrite is applied only when **all aggregate calls are incremental**:
 - `PhysicalAggregation::all_calls_incremental(&agg.aggregate_calls, &AggregateFunctionRegistry)`
 
 If any call is non-incremental, the plan is left unchanged.
-For EOS windows, the unfused fallback is executed by `EosWindowProcessor` followed by
-`AggregationProcessor`.
+For EOS windows, the semantic fallback remains `EosWindowStage` followed by
+`AggregationStage`. These stages may still share an execution region: this aggregation
+rewrite and task/channel placement are separate decisions.
 
 ## Outputs (What It Produces)
 
@@ -60,14 +61,14 @@ When the match and preconditions hold, the rule replaces the `Window -> Aggregat
 
 ## Runtime Mapping
 
-At runtime, `PhysicalStreamingAggregation` is executed by `StreamingAggregationProcessor` and
+At runtime, `PhysicalStreamingAggregation` is executed by the region executor and
 dispatched by `StreamingWindowSpec`:
 
-- `Count` → `StreamingCountAggregationProcessor`
-- `Tumbling` → `StreamingTumblingAggregationProcessor`
-- `Sliding` → `StreamingSlidingAggregationProcessor`
-- `State` → `StreamingStateAggregationProcessor`
-- `Eos` → `StreamingEosAggregationProcessor`
+- `Count` → `StreamingCountStage`
+- `Tumbling` → `StreamingTumblingStage`
+- `Sliding` → `StreamingSlidingStage`
+- `State` → `StreamingStateStage`
+- `Eos` → `StreamingEosStage`
 
 See `src/flow/src/processor/streaming_aggregation_processor.rs` and the concrete processor
 implementations under `src/flow/src/processor/`.

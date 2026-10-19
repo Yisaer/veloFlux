@@ -1,14 +1,6 @@
-//! Channel-free byte-transform drivers shared by the standalone sink
-//! transform processors and general execution regions.
-//!
-//! The writer lifecycle (`begin`/`write`/`finish`/`abort`) and delivery
-//! framing are identical in both topologies. Standalone stages exchange
-//! delivery events through channels; fused stages exchange them directly.
-//!
-//! Codec drivers are used by the shared delivery handlers. Framing and
-//! recovery live in `delivery_transform`, and execution connections live
-//! in `delivery_output` and `region_processor`. Historical `inline_delivery`
-//! is compiled only for the equivalence-test reference executor.
+//! Channel-free byte-transform drivers for execution regions.
+//! Codec lifecycle and framing live in `delivery_transform`; region transport
+//! forwards returned frames and owns all external channel waits.
 
 use crate::codec::compress::{CompressError, CompressWriter};
 use crate::codec::encrypt::EncryptError;

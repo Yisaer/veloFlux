@@ -1,11 +1,8 @@
-//! Synchronous delivery framing shared by region and standalone byte transforms.
-//! Compatibility transport adapters below await only the returned frame.
+//! Synchronous delivery framing for region byte-transform stages.
 use crate::processor::byte_stage::{CompressDriver, EncryptDriver};
 use crate::processor::data_metrics::TransformMetrics;
-use crate::processor::delivery_output::DeliveryOutput;
-use crate::processor::{EncodedDeliveryFlags, ProcessorError, ProcessorStats, StreamData};
+use crate::processor::{EncodedDeliveryFlags, ProcessorError, StreamData};
 use bytes::Bytes;
-use std::sync::Arc;
 
 #[derive(Default)]
 pub(crate) struct CompressDelivery {
@@ -223,124 +220,4 @@ pub(crate) fn encrypt_delivery_step(
     } else {
         StreamData::encoded_delivery_chunk(out)
     }))
-}
-
-fn record_transform_output(
-    metrics: Option<&TransformMetrics>,
-    flags: EncodedDeliveryFlags,
-    bytes: usize,
-) {
-    if let Some(metrics) = metrics {
-        if !flags.contains(EncodedDeliveryFlags::ABORT) {
-            metrics.record_output_bytes(bytes);
-            if flags.contains(EncodedDeliveryFlags::END) {
-                metrics.record_message_out();
-            }
-        }
-    }
-}
-
-async fn send_delivery_step(
-    step: DeliveryStep,
-    output: &mut impl DeliveryOutput,
-    metrics: Option<&TransformMetrics>,
-) -> Result<(), ProcessorError> {
-    if let Some(data) = step.output {
-        let measurement = match &data {
-            StreamData::EncodedDelivery { flags, bytes } => Some((*flags, bytes.len())),
-            _ => None,
-        };
-        output.send(data).await?;
-        if let Some((flags, bytes)) = measurement {
-            record_transform_output(metrics, flags, bytes);
-        }
-    }
-    step.error.map_or(Ok(()), Err)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_compress_delivery(
-    driver: &mut CompressDriver,
-    delivery: &mut CompressDelivery,
-    flags: EncodedDeliveryFlags,
-    bytes: Bytes,
-    output: &mut impl DeliveryOutput,
-    _stats: &Arc<ProcessorStats>,
-    metrics: Option<&TransformMetrics>,
-) -> Result<(), ProcessorError> {
-    let step = compress_delivery_step(driver, delivery, flags, bytes, metrics);
-    let starts = matches!(&step.output, Some(StreamData::EncodedDelivery { flags, .. }) if flags.contains(EncodedDeliveryFlags::START) && !flags.contains(EncodedDeliveryFlags::END));
-    let result = send_delivery_step(step, output, metrics).await;
-    if starts && result.is_err() {
-        delivery.emitted_chunk = false;
-    }
-    result
-}
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_encrypt_delivery(
-    driver: &mut EncryptDriver,
-    delivery: &mut EncryptDelivery,
-    flags: EncodedDeliveryFlags,
-    bytes: Bytes,
-    output: &mut impl DeliveryOutput,
-    _stats: &Arc<ProcessorStats>,
-    metrics: Option<&TransformMetrics>,
-) -> Result<(), ProcessorError> {
-    let step = encrypt_delivery_step(driver, delivery, flags, bytes, metrics);
-    let starts = matches!(&step.output, Some(StreamData::EncodedDelivery { flags, .. }) if flags.contains(EncodedDeliveryFlags::START) && !flags.contains(EncodedDeliveryFlags::END));
-    let result = send_delivery_step(step, output, metrics).await;
-    if starts && result.is_err() {
-        delivery.active = false;
-        delivery.emitted_chunk = false;
-    }
-    result
-}
-
-async fn send_terminal_abort(
-    frame: Option<StreamData>,
-    output: &mut impl DeliveryOutput,
-    stats: &ProcessorStats,
-    processor_id: &str,
-) {
-    if let Some(frame) = frame {
-        if let Err(error) = output.send(frame).await {
-            tracing::error!(processor_id, %error, "failed to forward ABORT during in-flight abort");
-        }
-    }
-    stats.record_error_logged(
-        "terminal delivery abort",
-        "terminal signal received mid-delivery",
-    );
-}
-pub(crate) async fn abort_compress_in_flight(
-    driver: &mut CompressDriver,
-    delivery: &mut CompressDelivery,
-    output: &mut impl DeliveryOutput,
-    stats: &Arc<ProcessorStats>,
-    metrics: Option<&TransformMetrics>,
-    processor_id: &str,
-) {
-    send_terminal_abort(
-        abort_compress(driver, delivery, metrics),
-        output,
-        stats,
-        processor_id,
-    )
-    .await;
-}
-pub(crate) async fn abort_encrypt_in_flight(
-    driver: &mut EncryptDriver,
-    delivery: &mut EncryptDelivery,
-    output: &mut impl DeliveryOutput,
-    stats: &Arc<ProcessorStats>,
-    metrics: Option<&TransformMetrics>,
-    processor_id: &str,
-) {
-    send_terminal_abort(
-        abort_encrypt(driver, delivery, metrics),
-        output,
-        stats,
-        processor_id,
-    )
-    .await;
 }

@@ -1252,7 +1252,7 @@ mod tests {
 
     /// The fused path must honor the decode projection: only requested columns
     /// are decoded; columns from other messages stay null. This exercises the
-    /// projection plumbing the SamplerProcessor passes from the shared decode
+    /// projection plumbing the SamplerStage passes from the shared decode
     /// state on each tick.
     #[test]
     fn test_fused_projection_restricts_decoded_columns() {

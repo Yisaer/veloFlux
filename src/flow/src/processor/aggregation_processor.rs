@@ -1,28 +1,12 @@
-//! AggregationProcessor - processes aggregation operations
-//!
-//! This processor:
-//! - Takes input data (Collection) and aggregation calls
-//! - Creates accumulators for each aggregate function
-//! - Updates accumulators with each incoming row
-//! - Finalizes aggregates and outputs results when stream ends
+//! Synchronous grouped aggregation evaluation.
 
 use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry, AggregateUpdate};
 use crate::model::Collection;
-use crate::planner::physical::{PhysicalAggregation, PhysicalPlan};
-use crate::processor::base::{
-    default_channel_capacities, fan_in_control_streams, fan_in_streams, log_broadcast_lagged,
-    log_received_data, send_control_with_backpressure, send_with_backpressure, LinkOutput,
-    LinkReceiver, ProcessorChannelCapacities,
-};
-use crate::processor::{
-    ControlSignal, Processor, ProcessorError, ProcessorStart, ProcessorStats, StreamData,
-};
-use crate::runtime::TaskSpawner;
+use crate::planner::physical::PhysicalAggregation;
+use crate::processor::ProcessorStats;
 use datatypes::Value;
-use futures::stream::StreamExt;
 use sqlparser::ast::Expr;
 use std::sync::Arc;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 /// Group-by metadata bundled for evaluation and output decoration.
 struct GroupByMeta {
@@ -30,34 +14,9 @@ struct GroupByMeta {
     output_name: String,
 }
 
-/// AggregationProcessor - evaluates aggregation expressions
-///
-/// This processor:
-/// - Takes input data (Collection) and aggregation configuration
-/// - Creates accumulators for each aggregate call
-/// - Updates accumulators with each incoming row
-/// - Finalizes aggregates and outputs results when stream ends
-pub struct AggregationProcessor {
-    /// Processor identifier
-    id: String,
-    /// Physical aggregation configuration
-    physical_aggregation: Arc<PhysicalAggregation>,
-    /// Aggregate function registry for creating accumulators
-    aggregate_registry: Arc<AggregateFunctionRegistry>,
-    /// Input channels for receiving data
-    inputs: Vec<LinkReceiver<StreamData>>,
-    /// Control input channels
-    control_inputs: Vec<LinkReceiver<ControlSignal>>,
-    /// Broadcast channel for downstream processors
-    output: LinkOutput<StreamData>,
-    /// Dedicated control output channel
-    control_output: LinkOutput<ControlSignal>,
-    channel_capacities: ProcessorChannelCapacities,
-    stats: Arc<ProcessorStats>,
-}
+pub(crate) struct AggregationStage;
 
-impl AggregationProcessor {
-    /// Process a collection with optional grouping (group_by_scalars in PhysicalAggregation).
+impl AggregationStage {
     pub(crate) fn process_batch_with_grouping(
         physical_aggregation: &PhysicalAggregation,
         aggregate_registry: &Arc<AggregateFunctionRegistry>,
@@ -170,235 +129,9 @@ impl AggregationProcessor {
             .map_err(|e| format!("Failed to create RecordBatch: {}", e))?;
         Ok(Some(Box::new(collection)))
     }
-
-    /// Create a new AggregationProcessor from PhysicalAggregation
-    pub fn new(
-        id: impl Into<String>,
-        physical_aggregation: Arc<PhysicalAggregation>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Self {
-        Self::new_with_channel_capacities(
-            id,
-            physical_aggregation,
-            aggregate_registry,
-            default_channel_capacities(),
-        )
-    }
-
-    pub(crate) fn new_with_channel_capacities(
-        id: impl Into<String>,
-        physical_aggregation: Arc<PhysicalAggregation>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-        channel_capacities: ProcessorChannelCapacities,
-    ) -> Self {
-        let output = LinkOutput::new(channel_capacities.data_link_kind, channel_capacities.data);
-        let control_output = LinkOutput::new(
-            channel_capacities.control_link_kind,
-            channel_capacities.control,
-        );
-        Self {
-            id: id.into(),
-            physical_aggregation,
-            aggregate_registry,
-            inputs: Vec::new(),
-            control_inputs: Vec::new(),
-            output,
-            control_output,
-            channel_capacities,
-            stats: Arc::new(ProcessorStats::collection_in_out()),
-        }
-    }
-
-    pub fn set_stats(&mut self, stats: Arc<ProcessorStats>) {
-        stats.declare_collection_in_out();
-        self.stats = stats;
-    }
-
-    /// Create an AggregationProcessor from a PhysicalPlan
-    /// Returns None if the plan is not a PhysicalAggregation
-    pub fn from_physical_plan(
-        id: impl Into<String>,
-        plan: Arc<PhysicalPlan>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-    ) -> Option<Self> {
-        match plan.as_ref() {
-            PhysicalPlan::Aggregation(aggregation) => Some(Self::new(
-                id,
-                Arc::new(aggregation.clone()),
-                aggregate_registry,
-            )),
-            _ => None,
-        }
-    }
 }
 
-impl Processor for AggregationProcessor {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn start(&mut self, spawner: &TaskSpawner) -> ProcessorStart {
-        let id = self.id.clone();
-        let mut input_streams = fan_in_streams(std::mem::take(&mut self.inputs));
-        let control_receivers = std::mem::take(&mut self.control_inputs);
-        let control_active = !control_receivers.is_empty();
-        let output = self.output.clone();
-        let control_output = self.control_output.clone();
-        let channel_capacities = self.channel_capacities;
-        let physical_aggregation = self.physical_aggregation.clone();
-        let aggregate_registry = self.aggregate_registry.clone();
-        let stats = Arc::clone(&self.stats);
-        tracing::info!(processor_id = %id, "aggregation processor starting");
-
-        let processor_span = stats.processor_span();
-        ProcessorStart::ready(spawner.spawn(tracing::Instrument::instrument(async move {
-            let mut control_streams = fan_in_control_streams(control_receivers);
-            let mut stream_ended = false;
-
-            loop {
-                tokio::select! {
-                    biased;
-                    control_item = control_streams.next(), if control_active => {
-                        if let Some(Ok(control_signal)) = control_item {
-                            let is_terminal = control_signal.is_terminal();
-                            send_control_with_backpressure(
-                                &control_output,
-                                channel_capacities.control,
-                                control_signal,
-                            )
-                            .await?;
-                            if is_terminal {
-                                tracing::info!(processor_id = %id, "received StreamEnd (control)");
-                                stream_ended = true;
-                                break;
-                            }
-                        }
-                    }
-                    data_item = input_streams.next() => {
-                        match data_item {
-                            Some(Ok(data)) => {
-                                log_received_data(&id, &data);
-                                if let Some(rows) = data.row_count() {
-                                    stats.record_collection_in(rows);
-                                }
-                                match data {
-                                    StreamData::Collection(collection) => {
-                                        let handle_start = std::time::Instant::now();
-                                        match Self::process_batch_with_grouping(
-                                            &physical_aggregation,
-                                            &aggregate_registry,
-                                            collection.as_ref(),
-                                            stats.as_ref(),
-                                        ) {
-                                            Ok(Some(result_collection)) => {
-                                                let result_data = StreamData::Collection(result_collection);
-                                                let out_rows = result_data.row_count();
-                                                let send_res = send_with_backpressure(
-                                                    &output,
-                                                    channel_capacities.data,
-                                                    result_data,
-                                                    Some(stats.as_ref()),
-                                                )
-                                                .await;
-                                                // For synchronous processors, handle duration includes downstream send/backpressure time.
-                                                stats.record_handle_duration(handle_start.elapsed());
-                                                if let Err(e) = send_res {
-                                                    tracing::error!(processor_id = %id, error = %e, "failed to send result");
-                                                    return Err(e);
-                                                };
-                                                if let Some(rows) = out_rows {
-                                                    stats.record_collection_out(rows);
-                                                }
-                                                tracing::debug!(processor_id = %id, "processed batch and sent grouped results");
-                                            }
-                                            Ok(None) => {
-                                                stats.record_handle_duration(handle_start.elapsed());
-                                            }
-                                            Err(e) => {
-                                                stats.record_handle_duration(handle_start.elapsed());
-                                                return Err(ProcessorError::ProcessingError(
-                                                    format!(
-                                                        "Failed to process aggregation: {}",
-                                                        e
-                                                    ),
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    StreamData::Control(control_signal) => {
-                                        let is_terminal = control_signal.is_terminal();
-                                        let out = StreamData::control(control_signal);
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            out,
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                        if is_terminal {
-                                            tracing::info!(processor_id = %id, "received StreamEnd (data)");
-                                            stream_ended = true;
-                                            break;
-                                        }
-                                    }
-                                    other_data => {
-                                        // Forward non-collection data (like Encoded, Bytes) as-is
-                                        send_with_backpressure(
-                                            &output,
-                                            channel_capacities.data,
-                                            other_data,
-                                            Some(stats.as_ref()),
-                                        )
-                                        .await?;
-                                    }
-                                }
-                            }
-                            Some(Err(BroadcastStreamRecvError::Lagged(n))) => {
-                                log_broadcast_lagged(&id, n, "data input");
-                            }
-                            None => {
-                                tracing::info!(processor_id = %id, "all input streams ended");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if stream_ended {
-                tracing::info!(processor_id = %id, "aggregation processing completed");
-            }
-
-            tracing::info!(processor_id = %id, "stopped");
-            Ok(())
-        }, processor_span)))
-    }
-
-    fn subscribe_output(&self) -> Option<LinkReceiver<StreamData>> {
-        self.output.subscribe()
-    }
-
-    fn subscribe_control_output(&self) -> Option<LinkReceiver<ControlSignal>> {
-        self.control_output.subscribe()
-    }
-
-    fn add_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<StreamData>>,
-    {
-        self.inputs.push(receiver.into());
-    }
-
-    fn add_control_input<R>(&mut self, receiver: R)
-    where
-        R: Into<LinkReceiver<ControlSignal>>,
-    {
-        self.control_inputs.push(receiver.into());
-    }
-}
-
-impl AggregationProcessor {
-    /// Static version of create_accumulators for use in async context
+impl AggregationStage {
     fn create_accumulators_static(
         physical_aggregation: &PhysicalAggregation,
         aggregate_registry: &Arc<AggregateFunctionRegistry>,
@@ -423,7 +156,6 @@ impl AggregationProcessor {
 
         Ok(accumulators)
     }
-
     fn evaluate_aggregate_args_for_tuple(
         physical_aggregation: &PhysicalAggregation,
         tuple: &crate::model::Tuple,
@@ -442,7 +174,6 @@ impl AggregationProcessor {
         }
         Ok(all_args)
     }
-
     fn finalize_group(
         physical_aggregation: &PhysicalAggregation,
         accumulators: &mut [Box<dyn AggregateAccumulator>],
@@ -523,7 +254,7 @@ fn build_group_by_meta(exprs: &[Expr]) -> Vec<GroupByMeta> {
         .collect()
 }
 
-impl AggregationProcessor {
+impl AggregationStage {
     fn evaluate_group_by_for_tuple(
         physical_aggregation: &PhysicalAggregation,
         tuple: &crate::model::Tuple,

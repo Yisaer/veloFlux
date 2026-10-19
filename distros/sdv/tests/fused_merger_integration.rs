@@ -1,5 +1,5 @@
 //! Integration test for the fused GBF merger as wired through the production
-//! `MergerRegistry` path (the same path `SamplerProcessor`'s Packer strategy
+//! `MergerRegistry` path (the same path `SamplerStage`'s Packer strategy
 //! uses). Verifies that the decoder and merger can share the same compiled DBC
 //! artifact while the merger emits a decoded collection directly.
 

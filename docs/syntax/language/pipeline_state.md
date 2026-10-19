@@ -330,7 +330,7 @@ detects `ScalarExpr::PipelineState` in the Filter predicate or Project expressio
 
 ### 4. Processor Layer
 
-#### 4.1 FilterProcessor
+#### 4.1 FilterStage
 
 When the filter predicate references `last_hit_count()`, switch from bulk
 `collection.apply_filter()` to row-by-row iteration and increment after each accepted row:
@@ -372,7 +372,7 @@ if !kept.is_empty() {
 All rows in the same aggregate result collection read the same pre-collection value. The counter is
 updated only after the filtered collection is known to be non-empty.
 
-#### 4.2 ProjectProcessor
+#### 4.2 ProjectStage
 
 When `processor_state` is `Some`, increment the counter after each row is projected.
 
@@ -395,7 +395,7 @@ DataSource
 
 **Input:** batch of 4 rows. Both counters start at `0`.
 
-**FilterProcessor:**
+**FilterStage:**
 
 ```
 Row 1: state A.load() = 0, 0 < 3 → pass → A.fetch_add(1) → A = 1, kept
@@ -406,7 +406,7 @@ Row 4: state A.load() = 3, 3 < 3 → fail → dropped
 
 Output: 3 rows.
 
-**ProjectProcessor:**
+**ProjectStage:**
 
 ```
 Row 1: state B.load() = 0 → output 0 → B.fetch_add(1) → B = 1
@@ -422,9 +422,9 @@ Both counters converge to `3` after the batch completes.
 the previous hit timestamp as Unix milliseconds. The expression reads the old
 timestamp first, then the owning operator updates it after a hit:
 
-- `ProjectProcessor`: every projected row is a hit, so the state is updated
+- `ProjectStage`: every projected row is a hit, so the state is updated
   after the row's `SELECT` fields are evaluated.
-- `FilterProcessor`: only accepted rows are hits, so the state is updated after
+- `FilterStage`: only accepted rows are hits, so the state is updated after
   the `WHERE` predicate returns `true`.
 - `slidingwindow OVER (WHEN ...)`: only trigger rows are hits, so the state is
   updated after the trigger condition returns `true`.

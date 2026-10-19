@@ -134,7 +134,7 @@ node is inserted before the `PhysicalDataSink`:
 PhysicalBatch(batch_count=10) → PhysicalMemoryCollectionMaterialize → PhysicalDataSink(connector=kura)
 ```
 
-The `PhysicalBatch` node creates a `BatchProcessor` that accumulates rows into
+The `PhysicalBatch` node executes a batch stage in a region that accumulates rows into
 `RecordBatch` payloads before delivering them to the sink.
 
 This avoids any passthrough/encoding step and ensures the sink receives
