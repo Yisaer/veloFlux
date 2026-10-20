@@ -24,8 +24,8 @@ from perf_daily import Client, wait_for_manager, wait_for_tcp
 
 
 RATE = 5_000
-DURATION = 30
-PROFILE_SECONDS = 20
+DURATION = 120
+PROFILE_SECONDS = 30
 METRIC_NAMES = (
     "veloflux_runtime_cpu_usage_percent",
     "veloflux_runtime_memory_usage_bytes",
@@ -199,7 +199,8 @@ def run(args: argparse.Namespace) -> dict:
     errors: list[str] = []
     result = {"case": args.case, "mode": args.mode, "rep": args.rep,
               "pipeline": pipeline, "sink": "nop", "window_seconds": 1,
-              "target_rate": args.rate, "target_duration": args.duration}
+              "target_rate": args.rate, "target_duration": args.duration,
+              "profile_seconds": PROFILE_SECONDS if args.mode == "profile" else 0}
     with log_file.open("wb") as log:
         process = subprocess.Popen(
             [str(args.binary.resolve()), "--config", str(args.config.resolve()),
