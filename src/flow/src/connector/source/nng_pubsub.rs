@@ -14,6 +14,28 @@ use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep, sleep_until, Instant};
 use tokio_stream::wrappers::ReceiverStream;
+use veloflux_metrics::ChildCounter;
+
+/// Fixed-label handles owned by one NNG source subscription.
+struct SourceNngCounters {
+    messages_in: ChildCounter,
+    messages_out: ChildCounter,
+}
+
+impl SourceNngCounters {
+    fn bind(flow_instance_id: &str, connector_id: &str) -> Self {
+        Self {
+            messages_in: ChildCounter::bind(
+                veloflux_metrics::nng_pubsub_source_messages_in_total(),
+                &[flow_instance_id, connector_id],
+            ),
+            messages_out: ChildCounter::bind(
+                veloflux_metrics::nng_pubsub_source_messages_out_total(),
+                &[flow_instance_id, connector_id],
+            ),
+        }
+    }
+}
 
 pub(crate) struct NngPubSubSourceConnector {
     id: String,
@@ -63,10 +85,10 @@ impl SourceConnector for NngPubSubSourceConnector {
         self.shutdown_tx = Some(shutdown_tx);
 
         let connector_id = self.id.clone();
-        let flow_instance_id = Arc::clone(&self.flow_instance_id);
+        let counters = SourceNngCounters::bind(self.flow_instance_id.as_ref(), &self.id);
         let config = self.config.clone();
         self.spawner.spawn(async move {
-            run_nng_source_loop(connector_id, flow_instance_id, config, sender, shutdown_rx).await;
+            run_nng_source_loop(connector_id, counters, config, sender, shutdown_rx).await;
         });
 
         tracing::info!(connector_id = %self.id, "nng pubsub source starting");
@@ -84,7 +106,7 @@ impl SourceConnector for NngPubSubSourceConnector {
 
 async fn run_nng_source_loop(
     connector_id: String,
-    flow_instance_id: Arc<str>,
+    counters: SourceNngCounters,
     config: NngPubSubSourceConfig,
     sender: mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -189,7 +211,7 @@ async fn run_nng_source_loop(
                         Ok(message) => {
                             if !forward_message(
                                 &sender,
-                                &flow_instance_id,
+                                &counters,
                                 &connector_id,
                                 &delimiter,
                                 &topic,
@@ -220,15 +242,13 @@ async fn run_nng_source_loop(
 
 async fn forward_message(
     sender: &mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
-    flow_instance_id: &str,
+    counters: &SourceNngCounters,
     connector_id: &str,
     delimiter: &[u8],
     topic: &[u8],
     message: Message,
 ) -> bool {
-    veloflux_metrics::nng_pubsub_source_messages_in_total()
-        .with_label_values(&[flow_instance_id, connector_id])
-        .inc();
+    counters.messages_in.inc();
     let Some(payload) = strip_topic_prefix(message.as_slice(), delimiter, topic) else {
         tracing::warn!(
             connector_id,
@@ -244,9 +264,7 @@ async fn forward_message(
         .await
     {
         Ok(_) => {
-            veloflux_metrics::nng_pubsub_source_messages_out_total()
-                .with_label_values(&[flow_instance_id, connector_id])
-                .inc();
+            counters.messages_out.inc();
             true
         }
         Err(_) => false,

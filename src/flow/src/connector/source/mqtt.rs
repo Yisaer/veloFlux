@@ -16,6 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
+use veloflux_metrics::ChildCounter;
 
 /// Basic MQTT configuration for sources.
 #[derive(Debug, Clone)]
@@ -113,22 +114,41 @@ enum SharedEventForwardOutcome {
     Break,
 }
 
+/// Pre-bound MQTT source message counters (one label set per connector).
+/// Bound once per subscription; the hot path increments these directly
+/// instead of looking the series up per message.
+#[derive(Debug, Clone)]
+pub(crate) struct SourceMqttCounters {
+    messages_in: ChildCounter,
+    messages_out: ChildCounter,
+}
+
+impl SourceMqttCounters {
+    pub(crate) fn bind(flow_instance_id: &str, connector_id: &str) -> Self {
+        Self {
+            messages_in: ChildCounter::bind(
+                veloflux_metrics::mqtt_source_messages_in_total(),
+                &[flow_instance_id, connector_id],
+            ),
+            messages_out: ChildCounter::bind(
+                veloflux_metrics::mqtt_source_messages_out_total(),
+                &[flow_instance_id, connector_id],
+            ),
+        }
+    }
+}
+
 async fn forward_shared_mqtt_event(
     sender: &mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
-    flow_instance_id: &Arc<str>,
-    metrics_id: &str,
+    counters: &SourceMqttCounters,
     event: Option<Result<SharedMqttEvent, ConnectorError>>,
 ) -> SharedEventForwardOutcome {
     match event {
         Some(Ok(SharedMqttEvent::Payload(payload))) => {
-            veloflux_metrics::mqtt_source_messages_in_total()
-                .with_label_values(&[flow_instance_id.as_ref(), metrics_id])
-                .inc();
+            counters.messages_in.inc();
             match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                 Ok(_) => {
-                    veloflux_metrics::mqtt_source_messages_out_total()
-                        .with_label_values(&[flow_instance_id.as_ref(), metrics_id])
-                        .inc();
+                    counters.messages_out.inc();
                     SharedEventForwardOutcome::Continue
                 }
                 Err(_) => SharedEventForwardOutcome::Break,
@@ -165,13 +185,12 @@ impl SourceConnector for MqttSourceConnector {
         let (sender, receiver) = mpsc::channel(self.channel_capacity);
         let config = self.config.clone();
         let connector_id = self.id.clone();
-        let flow_instance_id = Arc::clone(&self.flow_instance_id);
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         self.shutdown_tx = Some(shutdown_tx);
 
         let spawner = self.spawner.clone();
+        let counters = SourceMqttCounters::bind(self.flow_instance_id.as_ref(), self.id.as_str());
         if let Some(connector_key) = config.connector_key.clone() {
-            let metrics_id = connector_id.clone();
             let manager = self.mqtt_clients.clone();
             spawner.spawn(async move {
                 let mut shutdown_rx = shutdown_rx;
@@ -191,8 +210,7 @@ impl SourceConnector for MqttSourceConnector {
                                     if matches!(
                                         forward_shared_mqtt_event(
                                             &sender,
-                                            &flow_instance_id,
-                                            metrics_id.as_str(),
+                                            &counters,
                                             event,
                                         )
                                         .await,
@@ -213,8 +231,8 @@ impl SourceConnector for MqttSourceConnector {
             spawner.spawn(async move {
                 if let Err(err) = run_standalone_loop(
                     connector_id.clone(),
-                    Arc::clone(&flow_instance_id),
                     config,
+                    counters,
                     sender.clone(),
                     shutdown_rx,
                 )
@@ -241,8 +259,8 @@ impl SourceConnector for MqttSourceConnector {
 
 async fn run_standalone_loop(
     connector_id: String,
-    flow_instance_id: Arc<str>,
     config: MqttSourceConfig,
+    counters: SourceMqttCounters,
     sender: mpsc::Sender<Result<ConnectorEvent, ConnectorError>>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), ConnectorError> {
@@ -268,20 +286,10 @@ async fn run_standalone_loop(
             event = event_loop.poll() => {
                 match event {
                     Ok(MqttEvent::Publish { payload, .. }) => {
-                        veloflux_metrics::mqtt_source_messages_in_total()
-                            .with_label_values(&[
-                                flow_instance_id.as_ref(),
-                                connector_id.as_str(),
-                            ])
-                            .inc();
+                        counters.messages_in.inc();
                         match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                             Ok(_) => {
-                                veloflux_metrics::mqtt_source_messages_out_total()
-                                    .with_label_values(&[
-                                        flow_instance_id.as_ref(),
-                                        connector_id.as_str(),
-                                    ])
-                                    .inc();
+                                counters.messages_out.inc();
                             }
                             Err(_) => break,
                         }
@@ -380,7 +388,7 @@ fn normalize_broker_url(url: &str) -> String {
 mod tests {
     use super::{
         build_mqtt_options, forward_shared_mqtt_event, MqttSourceConfig, MqttSourceConnector,
-        SharedEventForwardOutcome,
+        SharedEventForwardOutcome, SourceMqttCounters,
     };
     use crate::connector::mqtt_client::{MqttClientManager, SharedMqttEvent};
     use crate::connector::{
@@ -436,11 +444,11 @@ mod tests {
     async fn shared_client_backed_source_forwards_errors_without_ending_stream() {
         let flow_instance_id = Arc::<str>::from("default");
         let (sender, mut receiver) = mpsc::channel(4);
+        let counters = SourceMqttCounters::bind(&flow_instance_id, "shared_source_connector");
 
         let first = forward_shared_mqtt_event(
             &sender,
-            &flow_instance_id,
-            "shared_source_connector",
+            &counters,
             Some(Err(ConnectorError::Connection(
                 "injected source runtime error".to_string(),
             ))),
@@ -448,8 +456,7 @@ mod tests {
         .await;
         let second = forward_shared_mqtt_event(
             &sender,
-            &flow_instance_id,
-            "shared_source_connector",
+            &counters,
             Some(Ok(SharedMqttEvent::Payload(bytes::Bytes::from_static(
                 b"after-error",
             )))),

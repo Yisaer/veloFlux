@@ -18,6 +18,7 @@ use crate::connector::mask_url_userinfo;
 use crate::connector::mqtt_client::{MqttClientManager, SharedMqttClient};
 use crate::runtime::TaskSpawner;
 use crate::template::ConnectorString;
+use veloflux_metrics::ChildCounter;
 
 /// Basic MQTT configuration for sinks.
 #[derive(Debug, Clone)]
@@ -100,7 +101,6 @@ impl MqttSinkConfig {
 
 pub(crate) struct MqttSinkConnector {
     id: String,
-    flow_instance_id: Arc<str>,
     config: MqttSinkConfig,
     client: Option<SinkClient>,
     buffer: Option<Vec<u8>>,
@@ -108,6 +108,11 @@ pub(crate) struct MqttSinkConnector {
     delivery_user_properties: Vec<crate::connector::MqttUserProperty>,
     mqtt_clients: MqttClientManager,
     spawner: TaskSpawner,
+    /// Pre-bound message counters (one label set per connector): the hot
+    /// path increments these directly instead of looking the series up
+    /// per message.
+    messages_in: ChildCounter,
+    messages_out: ChildCounter,
 }
 
 enum SinkClient {
@@ -314,9 +319,18 @@ impl MqttSinkConnector {
         mqtt_clients: MqttClientManager,
         spawner: TaskSpawner,
     ) -> Self {
+        let id = id.into();
+        let flow_instance_id: Arc<str> = flow_instance_id.into();
+        let messages_in = ChildCounter::bind(
+            veloflux_metrics::mqtt_sink_messages_in_total(),
+            &[flow_instance_id.as_ref(), id.as_str()],
+        );
+        let messages_out = ChildCounter::bind(
+            veloflux_metrics::mqtt_sink_messages_out_total(),
+            &[flow_instance_id.as_ref(), id.as_str()],
+        );
         Self {
-            id: id.into(),
-            flow_instance_id: flow_instance_id.into(),
+            id,
             config,
             client: None,
             buffer: None,
@@ -324,6 +338,8 @@ impl MqttSinkConnector {
             delivery_user_properties: Vec::new(),
             mqtt_clients,
             spawner,
+            messages_in,
+            messages_out,
         }
     }
 
@@ -388,15 +404,11 @@ impl SinkConnector for MqttSinkConnector {
     }
 
     fn record_message_in(&self) {
-        veloflux_metrics::mqtt_sink_messages_in_total()
-            .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
-            .inc();
+        self.messages_in.inc();
     }
 
     fn record_message_out(&self) {
-        veloflux_metrics::mqtt_sink_messages_out_total()
-            .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
-            .inc();
+        self.messages_out.inc();
     }
 
     fn max_delivery_bytes(&self) -> Option<usize> {

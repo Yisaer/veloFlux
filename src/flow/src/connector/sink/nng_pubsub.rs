@@ -11,10 +11,12 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::sleep;
+use veloflux_metrics::ChildCounter;
 
 pub(crate) struct NngPubSubSinkConnector {
     id: String,
-    flow_instance_id: Arc<str>,
+    messages_in: ChildCounter,
+    messages_out: ChildCounter,
     config: NngPubSubSinkConfig,
     socket: Option<Socket<pubsub0::Pub0>>,
     buffer: Option<Vec<u8>>,
@@ -26,9 +28,18 @@ impl NngPubSubSinkConnector {
         config: NngPubSubSinkConfig,
         flow_instance_id: impl Into<Arc<str>>,
     ) -> Self {
+        let id = id.into();
+        let flow_instance_id: Arc<str> = flow_instance_id.into();
         Self {
-            id: id.into(),
-            flow_instance_id: flow_instance_id.into(),
+            messages_in: ChildCounter::bind(
+                veloflux_metrics::nng_pubsub_sink_messages_in_total(),
+                &[flow_instance_id.as_ref(), id.as_str()],
+            ),
+            messages_out: ChildCounter::bind(
+                veloflux_metrics::nng_pubsub_sink_messages_out_total(),
+                &[flow_instance_id.as_ref(), id.as_str()],
+            ),
+            id,
             config,
             socket: None,
             buffer: None,
@@ -84,15 +95,11 @@ impl SinkConnector for NngPubSubSinkConnector {
     }
 
     fn record_message_in(&self) {
-        veloflux_metrics::nng_pubsub_sink_messages_in_total()
-            .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
-            .inc();
+        self.messages_in.inc();
     }
 
     fn record_message_out(&self) {
-        veloflux_metrics::nng_pubsub_sink_messages_out_total()
-            .with_label_values(&[self.flow_instance_id.as_ref(), self.id.as_str()])
-            .inc();
+        self.messages_out.inc();
     }
 
     async fn ready(&mut self) -> Result<(), SinkConnectorError> {
