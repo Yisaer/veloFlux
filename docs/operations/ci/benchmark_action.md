@@ -77,9 +77,15 @@ A renderer script parses `target/criterion/**/new/estimates.json` and prints a m
   120 seconds, one QoS 0 publisher connection, and a native nop sink with no encoder.
 - Each case runs two unprofiled CPU rounds and one CPU profile round. A fresh VeloFlux
   process is started for each round. The profile request covers 30 seconds of traffic.
-- The workflow records process CPU time, VeloFlux runtime and processor metrics once
-  per second, the raw pprof file, call graph, host details, and server logs. Results
-  appear in the Job Summary and in a downloadable artifact.
+- The workflow records one-second process CPU, RSS, and anonymous memory samples
+  from `/proc`, plus VeloFlux MQTT source, streaming aggregation input/output, and
+  nop sink input counters from `/metrics`. The Job Summary matches the rekuiper
+  report structure: a CPU/throughput comparison table, CPU chart, per-second
+  operator tables, flamegraph previews, and CPU hotspots. The downloadable artifact
+  includes an HTML report with CPU, memory, throughput, and progress charts; raw
+  metrics, pprof profiles, flamegraphs, call graphs, host details, and server logs.
+- CPU and memory values use the VeloFlux process, while the rekuiper report uses
+  the engine cgroup. Sink outputs count rows entering the nop sink.
 - Completion checks the publisher schedule, MQTT source receive count, processor
   activity, zero processor errors, metrics samples, and profile availability. Since
   both sinks discard output, the check does not validate aggregate values or exact

@@ -36,6 +36,12 @@ METRIC_NAMES = (
 )
 SAMPLE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{([^}]*)\})?\s+([-+\d.eE]+)")
 LABEL = re.compile(r'([a-zA-Z_][a-zA-Z_0-9]*)="((?:\\.|[^"\\])*)"')
+ROLE_METRICS = {
+    "source_in": ("veloflux_mqtt_source_messages_in_total", None),
+    "window_in": ("veloflux_processor_records_in_total", "PhysicalStreamingAggregation_"),
+    "window_out": ("veloflux_processor_records_out_total", "PhysicalStreamingAggregation_"),
+    "sink_out": ("veloflux_processor_records_in_total", "PhysicalDataSink_"),
+}
 
 
 def arguments() -> argparse.Namespace:
@@ -51,9 +57,11 @@ def arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def metrics() -> list[dict]:
+def metrics(raw_path: Path | None = None) -> list[dict]:
     with urllib.request.urlopen("http://127.0.0.1:8080/metrics", timeout=5) as response:
         body = response.read().decode("utf-8")
+    if raw_path is not None:
+        raw_path.write_text(body)
     result = []
     for line in body.splitlines():
         match = SAMPLE.match(line)
@@ -75,10 +83,53 @@ def total(samples: list[dict], name: str, pipeline: str | None = None) -> float:
     )
 
 
+def role_total(samples: list[dict], role: str, pipeline: str) -> float:
+    name, processor_prefix = ROLE_METRICS[role]
+    return sum(
+        sample["value"]
+        for sample in samples
+        if sample["name"] == name
+        and (
+            processor_prefix is None
+            or (
+                sample["labels"].get("pipeline_id") == pipeline
+                and sample["labels"].get("processor_id", "").startswith(processor_prefix)
+            )
+        )
+    )
+
+
 def process_ticks(pid: int) -> int:
     stat = Path(f"/proc/{pid}/stat").read_text()
     fields = stat.rsplit(") ", 1)[1].split()
     return int(fields[11]) + int(fields[12])
+
+
+def process_memory_mb(pid: int) -> tuple[float, float]:
+    values = {}
+    for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+        name, _, value = line.partition(":")
+        if name in ("VmRSS", "RssAnon"):
+            values[name] = int(value.strip().split()[0]) / 1024
+    return values.get("VmRSS", 0.0), values.get("RssAnon", 0.0)
+
+
+def sample_process(pid: int, stop: threading.Event, cpu: dict, errors: list[str]) -> None:
+    try:
+        ticks_per_second = os.sysconf("SC_CLK_TCK")
+        last_ticks = process_ticks(pid)
+        last_time = time.monotonic()
+        while not stop.wait(1):
+            now = time.monotonic()
+            ticks = process_ticks(pid)
+            elapsed = now - last_time
+            cpu["cpu_per_sec"].append(round((ticks - last_ticks) / ticks_per_second / elapsed * 100, 1))
+            rss, anon = process_memory_mb(pid)
+            cpu["rss_per_sec_mb"].append(round(rss, 1))
+            cpu["anon_per_sec_mb"].append(round(anon, 1))
+            last_ticks, last_time = ticks, now
+    except Exception as error:
+        errors.append(f"process sampling: {error}")
 
 
 def capture_profile(path: Path, errors: list[str], seconds: int) -> None:
@@ -195,6 +246,8 @@ def run(args: argparse.Namespace) -> dict:
     result_file = output / f"{tag}.json"
     profile_file = output / f"{tag}.pb"
     metrics_file = output / f"{tag}.openmetrics"
+    before_file = output / f"{tag}-before.prom"
+    after_file = output / f"{tag}-after.prom"
     data_dir = output / f"{tag}.data"
     errors: list[str] = []
     result = {"case": args.case, "mode": args.mode, "rep": args.rep,
@@ -212,14 +265,20 @@ def run(args: argparse.Namespace) -> dict:
             wait_for_manager("http://127.0.0.1:8080", timeout_secs=5, wait_secs=60)
             provision(args.case, pipeline)
             time.sleep(2)
-            before = metrics()
+            before = metrics(before_file)
             ticks_before = process_ticks(process.pid)
             started = time.monotonic()
             stop_sampling = threading.Event()
+            cpu = {"cpu_source": "process-procfs", "cpu_per_sec": [],
+                   "rss_per_sec_mb": [], "anon_per_sec_mb": []}
             metrics_thread = threading.Thread(
                 target=sample_metrics, args=(metrics_file, stop_sampling, errors)
             )
+            process_thread = threading.Thread(
+                target=sample_process, args=(process.pid, stop_sampling, cpu, errors)
+            )
             metrics_thread.start()
+            process_thread.start()
             profile_thread = None
             try:
                 if args.mode == "profile":
@@ -228,11 +287,14 @@ def run(args: argparse.Namespace) -> dict:
                         args=(profile_file, errors, PROFILE_SECONDS),
                     )
                     profile_thread.start()
+                result["send_start_ms"] = int(time.time() * 1000)
                 result["publisher"] = publish(args.case, args.rate, args.duration)
+                result["send_end_ms"] = int(time.time() * 1000)
                 ticks_after = process_ticks(process.pid)
             finally:
                 stop_sampling.set()
                 metrics_thread.join(timeout=10)
+                process_thread.join(timeout=10)
             elapsed = time.monotonic() - started
             if profile_thread:
                 profile_thread.join(timeout=PROFILE_SECONDS + 25)
@@ -240,13 +302,30 @@ def run(args: argparse.Namespace) -> dict:
                     errors.append("profile capture did not finish")
             # One additional window boundary allows the final aggregate to flush.
             time.sleep(3)
-            after = metrics()
+            after = metrics(after_file)
             clock_ticks = os.sysconf("SC_CLK_TCK")
             result["cpu_mean_cores"] = (ticks_after - ticks_before) / clock_ticks / elapsed
+            samples = cpu["cpu_per_sec"][:args.duration]
+            cpu["cpu_mean_send_window"] = round(sum(samples) / len(samples), 1) if samples else 0.0
+            cpu["cpu_mean_all"] = round(sum(cpu["cpu_per_sec"]) / len(cpu["cpu_per_sec"]), 1) if cpu["cpu_per_sec"] else 0.0
+            cpu["cpu_max"] = max(cpu["cpu_per_sec"], default=0.0)
+            cpu["peak_rss_mb"] = max(cpu["rss_per_sec_mb"], default=0.0)
+            cpu["peak_anon_mb"] = max(cpu["anon_per_sec_mb"], default=0.0)
+            result["cpu"] = cpu
             result["metrics_before"] = before
             result["metrics_after"] = after
+            result["metrics_series_path"] = metrics_file.name
+            result["profile_path"] = profile_file.name if args.mode == "profile" else None
+            result["metrics_before_ok"] = before_file.is_file()
+            result["metrics_after_ok"] = after_file.is_file()
             result["source_received"] = total(after, "veloflux_mqtt_source_messages_in_total") - total(
                 before, "veloflux_mqtt_source_messages_in_total")
+            result["window_input"] = role_total(after, "window_in", pipeline) - role_total(
+                before, "window_in", pipeline)
+            result["window_output"] = role_total(after, "window_out", pipeline) - role_total(
+                before, "window_out", pipeline)
+            result["sink_outputs"] = role_total(after, "sink_out", pipeline) - role_total(
+                before, "sink_out", pipeline)
             result["processor_input"] = total(after, "veloflux_processor_records_in_total", pipeline) - total(
                 before, "veloflux_processor_records_in_total", pipeline)
             result["processor_output"] = total(after, "veloflux_processor_records_out_total", pipeline) - total(
@@ -258,6 +337,8 @@ def run(args: argparse.Namespace) -> dict:
                 1 for line in metrics_file.read_text().splitlines()
                 if line.startswith("veloflux_runtime_cpu_usage_percent")
             )
+            result["metrics_series_samples"] = result["metrics_samples"]
+            result["metrics_series_errors"] = sum(error.startswith("metrics sampling:") for error in errors)
             result["complete"] = (
                 process.poll() is None
                 and result["publisher"]["sent"] == args.rate * args.duration
@@ -265,8 +346,12 @@ def run(args: argparse.Namespace) -> dict:
                 and result["source_received"] >= result["publisher"]["sent"] * 0.99
                 and result["processor_input"] > 0
                 and result["processor_output"] > 0
+                and result["window_input"] > 0
+                and result["window_output"] > 0
+                and result["sink_outputs"] > 0
                 and result["processor_errors"] == 0
                 and result["metrics_samples"] >= 2
+                and len(cpu["cpu_per_sec"]) >= 2
                 and result["profile_ok"] and not errors
             )
         except Exception as error:

@@ -65,18 +65,26 @@ jobs:
           done
           exit "$failed"
 
-      - name: Render profile call graphs
+      - name: Render profile call graphs and flamegraphs
         if: always()
         run: |
+          set -euo pipefail
           shopt -s nullglob
           for profile in tmp/w2_w4/*.pb; do
             go tool pprof -top "$profile" > "${profile%.pb}.top.txt"
             go tool pprof -svg "$profile" > "${profile%.pb}.svg"
+            python3 tests/perf_daily/render_pprof_flamegraph.py "$profile" \
+              --svg "${profile%.pb}.flame.svg" \
+              --text "${profile%.pb}.flame.txt"
           done
 
-      - name: Summarize results
+      - name: Render metrics and CPU report
         if: always()
-        run: python3 tests/perf_daily/w2_w4_report.py --input tmp/w2_w4 --summary "$GITHUB_STEP_SUMMARY"
+        run: |
+          python3 tests/perf_daily/w2_w4_report.py \
+            --input tmp/w2_w4 \
+            --html tmp/w2_w4/w2-w4-report.html \
+            --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Upload metrics and profiles
         if: always()
