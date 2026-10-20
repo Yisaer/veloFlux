@@ -1,0 +1,88 @@
+name: W2 W4 CPU and profile
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: w2-w4-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  NO_PROXY: 127.0.0.1,localhost
+  no_proxy: 127.0.0.1,localhost
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    services:
+      emqx:
+        image: emqx/emqx:5.6.1
+        ports:
+          - 1883:1883
+        env:
+          EMQX_ALLOW_ANONYMOUS: "true"
+          EMQX_LISTENER__TCP__DEFAULT__BIND: "0.0.0.0:1883"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler graphviz
+
+      - name: Build VeloFlux
+        run: cargo build --release
+
+      - name: Record host and commit
+        run: |
+          mkdir -p tmp/w2_w4
+          git rev-parse HEAD > tmp/w2_w4/commit.txt
+          uname -a > tmp/w2_w4/host.txt
+          lscpu >> tmp/w2_w4/host.txt
+
+      - name: Run W2 and W4 CPU and profile rounds
+        run: |
+          set -uo pipefail
+          failed=0
+          for case in w2 w4; do
+            for rep in 1 2; do
+              python3 tests/perf_daily/w2_w4_benchmark.py \
+                --case "$case" --mode cpu --rep "$rep" \
+                --binary target/release/veloflux --output tmp/w2_w4 \
+                || failed=1
+            done
+            python3 tests/perf_daily/w2_w4_benchmark.py \
+              --case "$case" --mode profile --rep 1 \
+              --binary target/release/veloflux --output tmp/w2_w4 \
+              || failed=1
+          done
+          exit "$failed"
+
+      - name: Render profile call graphs
+        if: always()
+        run: |
+          shopt -s nullglob
+          for profile in tmp/w2_w4/*.pb; do
+            go tool pprof -top "$profile" > "${profile%.pb}.top.txt"
+            go tool pprof -svg "$profile" > "${profile%.pb}.svg"
+          done
+
+      - name: Summarize results
+        if: always()
+        run: python3 tests/perf_daily/w2_w4_report.py --input tmp/w2_w4 --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload metrics and profiles
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w2-w4-cpu-profile-${{ github.run_id }}
+          if-no-files-found: warn
+          path: tmp/w2_w4/

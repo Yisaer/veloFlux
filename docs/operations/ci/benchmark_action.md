@@ -67,6 +67,24 @@ A renderer script parses `target/criterion/**/new/estimates.json` and prints a m
 
 ## GitHub Actions workflows
 
+### W2/W4 MQTT CPU and profile workflow
+
+- Workflow: `.github/workflows/w2-w4-profile.yml`.
+- Trigger: pull requests or manual dispatch. Other pull request workflows are temporarily
+  disabled while this benchmark is evaluated.
+- W2 uses 1,000 device values on one topic. W4 uses 10,000 vehicle values across
+  wildcard MQTT topics. Both use a one-second tumbling window, 5,000 messages/s for
+  30 seconds, one QoS 0 publisher connection, and a native nop sink with no encoder.
+- Each case runs two unprofiled CPU rounds and one CPU profile round. A fresh VeloFlux
+  process is started for each round. The profile request covers 20 seconds of traffic.
+- The workflow records process CPU time, VeloFlux runtime and processor metrics once
+  per second, the raw pprof file, call graph, host details, and server logs. Results
+  appear in the Job Summary and in a downloadable artifact.
+- Completion checks the publisher schedule, MQTT source receive count, processor
+  activity, zero processor errors, metrics samples, and profile availability. Since
+  both sinks discard output, the check does not validate aggregate values or exact
+  per-device completeness. Profiled CPU values include sampling overhead.
+
 ### Wide MQTT perf workflow
 
 - Workflow: `.github/workflows/perf-daily-wide-mqtt.yml`
