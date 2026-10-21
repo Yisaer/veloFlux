@@ -3,6 +3,12 @@
 The **File sink** writes already encoded sink delivery units to local files. It is a byte sink:
 the connector does not inspect rows, schema, output mode, or encoder format.
 
+Complete payloads use one blocking task for temporary-file creation, writing, sync, finalization,
+and retention. The task owns the immutable payload without copying it into a second byte buffer.
+Cancellation is checked before creation, after creation, and after writing; temporary-file state
+owns cleanup when the task exits. Cancellation during finalization can have an uncertain outcome,
+so checkpoint replay may produce duplicates under the existing at-least-once contract.
+
 ## Configuration
 
 ```json

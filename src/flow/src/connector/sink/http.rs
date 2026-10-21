@@ -279,6 +279,30 @@ impl HttpSinkConnector {
             })
     }
 
+    async fn send_payload(
+        &self,
+        config: &HttpSinkConfig,
+        body: bytes::Bytes,
+    ) -> Result<DeliveryResult, SinkConnectorError> {
+        if body.len() > config.max_body_size {
+            return Err(SinkConnectorError::Permanent(format!(
+                "http sink `{}` body size {} exceeds max_body_size {}",
+                self.id,
+                body.len(),
+                config.max_body_size
+            )));
+        }
+        let client = self.client.as_ref().ok_or_else(|| {
+            SinkConnectorError::Uncertain(format!(
+                "http sink `{}` client is not initialized; call ready() first",
+                self.id
+            ))
+        })?;
+        let bytes_written = body.len() as u64;
+        Self::send_single_request(&self.id, client, config, body).await?;
+        Ok(DeliveryResult { bytes_written })
+    }
+
     /// Send a single HTTP request. Returns `Ok(())` on 2xx.
     /// HTTP responses are transient only for 408/429/502/503/504; other
     /// non-success responses are uncertain because the remote state can change.
@@ -416,15 +440,7 @@ impl SinkConnector for HttpSinkConnector {
         }
         self.delivery_active = false;
 
-        let client = self.client.as_ref().ok_or_else(|| {
-            SinkConnectorError::Uncertain(format!(
-                "http sink `{}` client is not initialized; call ready() first",
-                self.id
-            ))
-        })?;
-
         let body_bytes: bytes::Bytes = std::mem::take(&mut self.buffer).into();
-        let bytes_written = body_bytes.len() as u64;
         let delivery_config = self.delivery_config.take().ok_or_else(|| {
             SinkConnectorError::Uncertain(format!(
                 "http sink `{}` has no config for active delivery",
@@ -432,10 +448,22 @@ impl SinkConnector for HttpSinkConnector {
             ))
         })?;
 
-        // Single attempt — retry is managed by the SinkProcessor.
-        Self::send_single_request(&self.id, client, &delivery_config, body_bytes).await?;
+        self.send_payload(&delivery_config, body_bytes).await
+    }
 
-        Ok(DeliveryResult { bytes_written })
+    async fn publish_single(
+        &mut self,
+        payload: bytes::Bytes,
+        properties: &crate::PropertyContext,
+    ) -> Result<DeliveryResult, SinkConnectorError> {
+        if self.delivery_active {
+            return Err(SinkConnectorError::Uncertain(format!(
+                "http sink `{}` already has an active delivery",
+                self.id
+            )));
+        }
+        let config = self.resolve_delivery_config(properties)?;
+        self.send_payload(&config, payload).await
     }
 
     async fn abort_delivery(&mut self) {
@@ -464,6 +492,77 @@ mod tests {
         Router,
     };
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn complete_and_staged_raw_requests_share_properties_and_limits() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (sender, mut received) = tokio::sync::mpsc::channel(1);
+        let app = Router::new().route(
+            "/",
+            post(move |headers: HeaderMap, body: bytes::Bytes| {
+                let sender = sender.clone();
+                async move {
+                    sender.send((headers, body)).await.expect("record request");
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let registry = crate::PropertyRegistry::new(
+            BTreeMap::from([("vin".into(), crate::secret::SecretString::new("initial"))]),
+            true,
+        );
+        let header = registry.bind(r#"{{ prop("vin") }}"#).expect("bind header");
+        let mut config =
+            HttpSinkConfig::new(format!("http://{address}/")).with_header("x-vin", header);
+        config.max_body_size = 3;
+        let mut connector = HttpSinkConnector::new("raw-modes", config);
+        connector.ready().await.expect("ready");
+        for (single, vin) in [(false, "first"), (true, "second")] {
+            registry
+                .apply_override("vin", crate::secret::SecretString::new(vin))
+                .expect("update");
+            let properties = registry.snapshot();
+            let result = if single {
+                connector
+                    .publish_single(bytes::Bytes::from_static(b"abc"), &properties)
+                    .await
+            } else {
+                connector.start_delivery(&properties).await.expect("start");
+                connector.write_chunk(b"a").await.expect("first chunk");
+                connector.write_chunk(b"bc").await.expect("second chunk");
+                connector.finish_delivery().await
+            }
+            .expect("publish");
+            assert_eq!(result.bytes_written, 3);
+            let (headers, body) = received.recv().await.expect("recorded request");
+            assert_eq!(headers["x-vin"].to_str().expect("header"), vin);
+            assert_eq!(body.as_ref(), b"abc");
+            let error = if single {
+                connector
+                    .publish_single(bytes::Bytes::from_static(b"abcd"), &properties)
+                    .await
+            } else {
+                connector
+                    .start_delivery(&properties)
+                    .await
+                    .expect("start oversize");
+                connector
+                    .write_chunk(b"abcd")
+                    .await
+                    .map(|_| DeliveryResult::default())
+            }
+            .expect_err("oversize");
+            assert!(matches!(error, SinkConnectorError::Permanent(_)));
+            connector.abort_delivery().await;
+        }
+        server.abort();
+    }
 
     #[test]
     fn config_new_sets_sensible_defaults() {
@@ -751,6 +850,14 @@ mod tests {
         connector.write_chunk(b"payload").await.unwrap();
         let result = connector.finish_delivery().await.unwrap();
 
+        assert_eq!(result.bytes_written, 15);
+        let result = connector
+            .publish_single(
+                bytes::Bytes::from_static(b"encoded-payload"),
+                &crate::PropertyContext::default(),
+            )
+            .await
+            .expect("complete multipart delivery");
         assert_eq!(result.bytes_written, 15);
         server.abort();
     }

@@ -54,6 +54,62 @@ mod tests {
         abort_count: Arc<AtomicUsize>,
     }
 
+    struct PendingAbortConnector {
+        abort_started: mpsc::UnboundedSender<()>,
+        abort_count: Arc<AtomicUsize>,
+        cleaned: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl SinkConnector for PendingAbortConnector {
+        fn id(&self) -> &str {
+            "pending_abort"
+        }
+
+        async fn start_delivery(
+            &mut self,
+            _properties: &crate::PropertyContext,
+        ) -> Result<(), SinkConnectorError> {
+            Err(transient("injected publish failure"))
+        }
+
+        async fn abort_delivery(&mut self) {
+            if self.abort_count.fetch_add(1, Ordering::Relaxed) == 0 {
+                self.abort_started.send(()).expect("report abort");
+                std::future::pending::<()>().await;
+            }
+            self.cleaned.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_error_cleanup_is_retried_by_capture() {
+        let (abort_started, mut abort_rx) = mpsc::unbounded_channel();
+        let abort_count = Arc::new(AtomicUsize::new(0));
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let mut binding = ConnectorBinding {
+            connector: Box::new(PendingAbortConnector {
+                abort_started,
+                abort_count: Arc::clone(&abort_count),
+                cleaned: Arc::clone(&cleaned),
+            }),
+            active_delivery: false,
+        };
+        let properties = crate::PropertyContext::default();
+        let mut attempt =
+            Box::pin(binding.attempt_delivery(bytes::Bytes::from_static(b"payload"), &properties));
+        tokio::select! {
+            result = &mut attempt => panic!("cleanup unexpectedly completed: {result:?}"),
+            started = abort_rx.recv() => assert_eq!(started, Some(())),
+        }
+        drop(attempt);
+        assert!(binding.active_delivery);
+        binding.abort_active_delivery().await;
+        assert_eq!(abort_count.load(Ordering::Relaxed), 2);
+        assert_eq!(cleaned.load(Ordering::Relaxed), 1);
+        assert!(!binding.active_delivery);
+    }
+
     impl RetryMockConnector {
         fn new(fail_count: usize, fail_with_kind: &'static str) -> (Self, RetryMockHandle) {
             let (sender, receiver) = mpsc::channel(16);
@@ -132,7 +188,8 @@ mod tests {
         };
 
         let properties = crate::PropertyContext::default();
-        let mut attempt = Box::pin(binding.attempt_delivery(b"payload", &properties));
+        let mut attempt =
+            Box::pin(binding.attempt_delivery(bytes::Bytes::from_static(b"payload"), &properties));
         tokio::select! {
             result = &mut attempt => panic!("delivery start unexpectedly completed: {result:?}"),
             started = started_rx.recv() => assert_eq!(started, Some(())),
@@ -584,5 +641,113 @@ mod tests {
                 .expect("fresh delivery"),
             AccumulatorAction::Completed(_)
         ));
+    }
+
+    #[test]
+    fn single_chunk_delivery_bypasses_staging_buffer() {
+        use super::super::{AccumulatorAction, DeliveryAccumulator};
+        use bytes::Bytes;
+        let mut accumulator = DeliveryAccumulator::new();
+        match accumulator
+            .push(
+                EncodedDeliveryFlags::START | EncodedDeliveryFlags::END,
+                Bytes::from_static(b"single"),
+                false,
+                Some(64),
+            )
+            .expect("single chunk completes")
+        {
+            AccumulatorAction::Completed(completed) => {
+                assert_eq!(completed.payload.as_ref(), b"single");
+                assert!(completed.forward_events.is_empty());
+            }
+            _ => panic!("expected Completed"),
+        }
+        assert!(!accumulator.is_active());
+        assert!(accumulator.buffer.is_empty());
+
+        // Forwarded variant records the single event.
+        match accumulator
+            .push(
+                EncodedDeliveryFlags::START | EncodedDeliveryFlags::END,
+                Bytes::from_static(b"fwd"),
+                true,
+                Some(64),
+            )
+            .expect("forwarded single chunk completes")
+        {
+            AccumulatorAction::Completed(completed) => {
+                assert_eq!(completed.payload.as_ref(), b"fwd");
+                assert_eq!(completed.forward_events.len(), 1);
+                assert_eq!(completed.forward_events[0].1.as_ref(), b"fwd");
+            }
+            _ => panic!("expected Completed"),
+        }
+
+        // Active accumulator still rejects a new START|END.
+        accumulator
+            .push(
+                EncodedDeliveryFlags::START,
+                Bytes::from_static(b"a"),
+                false,
+                Some(64),
+            )
+            .expect("start");
+        let error = accumulator
+            .push(
+                EncodedDeliveryFlags::START | EncodedDeliveryFlags::END,
+                Bytes::from_static(b"b"),
+                false,
+                Some(64),
+            )
+            .err()
+            .expect("START while active errors");
+        assert!(error
+            .to_string()
+            .contains("START received while delivery is active"));
+
+        // Oversize single chunk errors without staging anything.
+        let mut fresh = DeliveryAccumulator::new();
+        let error = fresh
+            .push(
+                EncodedDeliveryFlags::START | EncodedDeliveryFlags::END,
+                Bytes::from_static(b"toolong"),
+                false,
+                Some(4),
+            )
+            .err()
+            .expect("oversize single chunk errors");
+        assert!(error.to_string().contains("exceeds connector limit 4"));
+        assert!(fresh.buffer.is_empty());
+
+        // ABORT takes precedence over the fast path.
+        let mut aborting = DeliveryAccumulator::new();
+        assert!(matches!(
+            aborting
+                .push(
+                    EncodedDeliveryFlags::ABORT
+                        | EncodedDeliveryFlags::START
+                        | EncodedDeliveryFlags::END,
+                    Bytes::from_static(b"x"),
+                    false,
+                    Some(64),
+                )
+                .expect("abort"),
+            AccumulatorAction::Aborted(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn publish_single_default_path_preserves_staged_semantics() {
+        use crate::connector::sink::mock::MockSinkConnector;
+        use crate::connector::sink::SinkConnector;
+        let (mut connector, mut handle) = MockSinkConnector::new("mock-single");
+        let properties = crate::PropertyContext::default();
+        let result = connector
+            .publish_single(bytes::Bytes::from_static(b"abc"), &properties)
+            .await
+            .expect("default publish single");
+        assert_eq!(result.bytes_written, 3);
+        assert_eq!(handle.recv().await.expect("payload").as_slice(), b"abc");
     }
 }

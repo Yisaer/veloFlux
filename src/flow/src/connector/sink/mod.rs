@@ -59,6 +59,27 @@ pub trait SinkConnector: Send + Sync + 'static {
         )))
     }
 
+    /// Publish one complete encoded payload in a single call.
+    ///
+    /// The default implementation preserves the start → write → finish
+    /// sequence, so connectors without a single-shot path behave exactly as
+    /// before. Connectors with static per-delivery setup (e.g. MQTT topic
+    /// resolution) should override this to skip the intermediate staging.
+    /// The processor retains the same immutable bytes for retries and checkpoints.
+    /// On failure or cancellation the caller invokes abort; implementations must
+    /// also own cleanup for any detached work that outlives this future.
+    async fn publish_single(
+        &mut self,
+        payload: bytes::Bytes,
+        properties: &crate::PropertyContext,
+    ) -> Result<DeliveryResult, SinkConnectorError> {
+        // Error cleanup (abort) stays with the caller, matching the
+        // previous start/write/finish call sites.
+        self.start_delivery(properties).await?;
+        self.write_chunk(&payload).await?;
+        self.finish_delivery().await
+    }
+
     /// Abort the active encoded delivery best-effort.
     async fn abort_delivery(&mut self) {}
 

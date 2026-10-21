@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use parking_lot::{Mutex, RwLock};
 use rumqttc::Transport;
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
@@ -151,7 +152,7 @@ impl SharedMqttClient {
         retain: bool,
         payload: Vec<u8>,
     ) -> Result<(), ConnectorError> {
-        self.publish_with_user_properties(topic, qos.into(), retain, payload, &[])
+        self.publish_with_user_properties(topic, qos.into(), retain, payload.into(), &[])
             .await
     }
 
@@ -160,7 +161,7 @@ impl SharedMqttClient {
         topic: String,
         qos: MqttQos,
         retain: bool,
-        payload: Vec<u8>,
+        payload: Bytes,
         user_properties: &[crate::connector::MqttUserProperty],
     ) -> Result<(), ConnectorError> {
         if !self.is_connected() {
@@ -952,7 +953,7 @@ mod tests {
             broker.scoped_topic("fleet/device_b/telemetry"),
             MqttQos::Qos1,
             false,
-            b"through-shared-mqtt-v5".to_vec(),
+            bytes::Bytes::from_static(b"through-shared-mqtt-v5"),
             &user_properties,
         )
         .await

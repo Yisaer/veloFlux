@@ -43,11 +43,17 @@ new data input, and waits for the retry timer until `max_attempts` is exhausted.
 remains active. If a terminal control signal arrives while a delivery is pending, the processor
 parks the terminal signal and finishes the pending delivery path before closing the connector.
 
-Each attempt replays the full connector protocol:
+Each attempt passes a shared immutable payload to the complete-delivery connector entry:
 
 ```text
-start_delivery() -> write_chunk(full_payload) -> finish_delivery()
+publish_single(Bytes, property_snapshot)
 ```
+
+The default implementation adapts this to `start_delivery -> write_chunk -> finish_delivery`.
+MQTT, HTTP, Memory bytes, NNG pub/sub, and File override it to bypass redundant staging.
+Staged and complete deliveries share protocol validation and external send operations. Retries
+retain the original payload allocation and property snapshot. Connectors may still need protocol
+framing allocations, such as NNG's topic-prefixed message.
 
 Retries replay the same logical message. `messages_in` increments once when `SinkProcessor`
 assembles the complete message, and `messages_out` increments once only after confirmed success.
@@ -102,3 +108,7 @@ the control channel. It stops starting connector attempts, retains its pending d
 in-memory capture cache, and forwards the barrier only after entering capture mode. A connector
 attempt that is interrupted by capture has an uncertain outcome and its payload remains cached for
 the sink checkpoint path.
+
+An attempt remains active until error cleanup finishes. If capture interrupts an asynchronous
+abort, the capture path invokes abort again. Connector abort handling must therefore support
+repeated cleanup after cancellation.

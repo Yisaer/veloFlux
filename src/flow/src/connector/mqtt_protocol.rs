@@ -353,7 +353,7 @@ impl MqttClient {
         topic: String,
         qos: MqttQos,
         retain: bool,
-        payload: Vec<u8>,
+        payload: Bytes,
     ) -> Result<(), String> {
         match self {
             Self::V3(client) => client
@@ -372,7 +372,7 @@ impl MqttClient {
         topic: String,
         qos: MqttQos,
         retain: bool,
-        payload: Vec<u8>,
+        payload: Bytes,
         user_properties: &[MqttUserProperty],
     ) -> Result<(), String> {
         match self {

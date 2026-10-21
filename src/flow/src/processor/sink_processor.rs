@@ -103,6 +103,29 @@ impl DeliveryAccumulator {
             return Ok(AccumulatorAction::Aborted(event));
         }
 
+        // Fast path: an idle accumulator receiving a single-chunk delivery
+        // (START|END in one item, the common single-row case) completes
+        // without touching the staging buffer: no extend/memcpy, no buffer
+        // take/realloc. Multi-chunk deliveries use the staged path below.
+        if !self.active
+            && flags.contains(EncodedDeliveryFlags::START)
+            && flags.contains(EncodedDeliveryFlags::END)
+        {
+            if let Some(max_delivery_bytes) = max_delivery_bytes {
+                if bytes.len() > max_delivery_bytes {
+                    return Err(ProcessorError::ProcessingError(format!(
+                        "encoded delivery size {} exceeds connector limit {max_delivery_bytes}",
+                        bytes.len()
+                    )));
+                }
+            }
+            let forward_events = forward_data.then_some((flags, bytes.clone()));
+            return Ok(AccumulatorAction::Completed(CompletedDelivery {
+                payload: bytes,
+                forward_events: forward_events.into_iter().collect(),
+            }));
+        }
+
         if flags.contains(EncodedDeliveryFlags::START) {
             if self.active {
                 self.clear();
@@ -261,25 +284,17 @@ impl ConnectorBinding {
             .map_err(|err| ProcessorError::ProcessingError(err.to_string()))
     }
 
-    /// Attempt a full single-shot delivery: start → write_chunk(payload) → finish.
-    /// On any error, aborts the delivery and returns the classified error.
+    /// Attempt a full single-shot delivery via the connector's single-shot
+    /// path (default: start → write_chunk(payload) → finish). On any error,
+    /// aborts the delivery and returns the classified error.
     async fn attempt_delivery(
         &mut self,
-        payload: &[u8],
+        payload: Bytes,
         properties: &PropertyContext,
     ) -> Result<u64, SinkConnectorError> {
         self.active_delivery = true;
-        if let Err(err) = self.connector.start_delivery(properties).await {
-            self.connector.abort_delivery().await;
-            self.active_delivery = false;
-            return Err(err);
-        }
-        if let Err(err) = self.connector.write_chunk(payload).await {
-            self.connector.abort_delivery().await;
-            self.active_delivery = false;
-            return Err(err);
-        }
-        match self.connector.finish_delivery().await {
+        let result = self.connector.publish_single(payload, properties).await;
+        match result {
             Ok(result) => {
                 self.active_delivery = false;
                 Ok(result.bytes_written)
@@ -888,7 +903,7 @@ impl Processor for SinkProcessor {
                         // Disabled select branches must not read clocks or build
                         // connector futures for native collection traffic.
                         let attempt_start = Instant::now();
-                        let result = connector.attempt_delivery(attempt.payload.as_ref(), &attempt.properties).await;
+                        let result = connector.attempt_delivery(attempt.payload.clone(), &attempt.properties).await;
                         (result, attempt_start.elapsed())
                     }, if attempt.is_some() => {
                         stats.record_handle_duration(attempt_duration);

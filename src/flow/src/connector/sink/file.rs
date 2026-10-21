@@ -553,13 +553,7 @@ impl FileSinkConnector {
         after_start: impl FnOnce(&Path) + Send + 'static,
     ) -> Result<(), SinkConnectorError> {
         let connector_id = self.id.clone();
-        let mut connector = self.blocking_view();
-        connector.config.filename_pattern =
-            connector
-                .config
-                .filename_pattern
-                .resolve(properties)
-                .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
+        let mut connector = self.resolved_blocking_view(properties)?;
         let state = Self::run_blocking(connector_id.clone(), move || {
             connector.start_delivery_blocking()?;
             let state = connector.current.take().ok_or_else(|| {
@@ -574,10 +568,58 @@ impl FileSinkConnector {
         self.current = Some(state);
         Ok(())
     }
+
+    fn resolved_blocking_view(
+        &self,
+        properties: &crate::PropertyContext,
+    ) -> Result<Self, SinkConnectorError> {
+        let mut connector = self.blocking_view();
+        connector.config.filename_pattern =
+            connector
+                .config
+                .filename_pattern
+                .resolve(properties)
+                .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
+        Ok(connector)
+    }
 }
 
 #[async_trait]
 impl SinkConnector for FileSinkConnector {
+    async fn publish_single(
+        &mut self,
+        payload: bytes::Bytes,
+        properties: &crate::PropertyContext,
+    ) -> Result<DeliveryResult, SinkConnectorError> {
+        if self.current.is_some() {
+            return Err(SinkConnectorError::Other(format!(
+                "file sink `{}` already has an active delivery",
+                self.id
+            )));
+        }
+        let mut connector = self.resolved_blocking_view(properties)?;
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        // Cancelling the async attempt also cancels queued/blocking work.
+        // FileDeliveryState owns temporary-file cleanup if the worker exits.
+        let _cancel_on_drop = cancelled.clone().drop_guard();
+        Self::run_blocking(self.id.clone(), move || {
+            let check_cancelled = || {
+                if cancelled.is_cancelled() {
+                    Err(SinkConnectorError::Other("file delivery cancelled".into()))
+                } else {
+                    Ok(())
+                }
+            };
+            check_cancelled()?;
+            connector.start_delivery_blocking()?;
+            check_cancelled()?;
+            connector.write_chunk_blocking(&payload)?;
+            check_cancelled()?;
+            connector.finish_delivery_blocking()
+        })
+        .await
+    }
+
     fn id(&self) -> &str {
         &self.id
     }
@@ -965,6 +1007,43 @@ mod tests {
         connector.finish_delivery().await.expect("finish delivery");
     }
 
+    #[test]
+    fn cancelled_queued_complete_delivery_does_not_create_a_file() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut connector = FileSinkConnector::new("queued", config(dir.path()));
+            connector.ready().await.expect("ready");
+            let (started, ready) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                started.send(()).expect("started");
+                wait.recv().expect("release");
+            });
+            ready.await.expect("worker occupied");
+            let properties = crate::PropertyContext::default();
+            let mut publish = Box::pin(
+                connector.publish_single(bytes::Bytes::from_static(b"cancelled"), &properties),
+            );
+            assert!(futures::poll!(&mut publish).is_pending());
+            drop(publish);
+            release.send(()).expect("release worker");
+            blocker.await.expect("blocker");
+            tokio::task::spawn_blocking(|| {})
+                .await
+                .expect("drain queued work");
+            assert!(final_files(dir.path()).is_empty());
+            assert_eq!(
+                fs::read_dir(connector.tmp_dir()).expect("tmp dir").count(),
+                0
+            );
+        });
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_start_delivery_cleans_temporary_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1055,6 +1134,18 @@ mod tests {
         assert_eq!(
             files[0].file_name().and_then(|name| name.to_str()),
             Some("VIN-UPDATED_000001.json")
+        );
+        registry
+            .apply_override("vin", crate::secret::SecretString::new("VIN-SINGLE"))
+            .expect("update complete delivery pattern");
+        let result = connector
+            .publish_single(bytes::Bytes::from_static(b"complete"), &registry.snapshot())
+            .await
+            .expect("complete file delivery");
+        assert_eq!(result.bytes_written, 8);
+        assert_eq!(
+            fs::read(dir.path().join("VIN-SINGLE_000001.json")).expect("file"),
+            b"complete"
         );
     }
 

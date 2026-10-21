@@ -6,6 +6,7 @@ use crate::connector::mqtt_protocol::{
     MqttOutgoingPacketLimit, MqttProtocolVersion, MqttQos, DEFAULT_MQTT_MAX_PACKET_SIZE,
 };
 use async_trait::async_trait;
+use bytes::Bytes;
 use parking_lot::RwLock;
 use rumqttc::Transport;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -104,8 +105,11 @@ pub(crate) struct MqttSinkConnector {
     config: MqttSinkConfig,
     client: Option<SinkClient>,
     buffer: Option<Vec<u8>>,
-    delivery_topic: Option<ConnectorString>,
-    delivery_user_properties: Vec<crate::connector::MqttUserProperty>,
+    delivery_route: Option<ResolvedMqttRoute>,
+    /// Cached per-revision publish route (resolved topic + user properties).
+    /// Static routes resolve once and skip per-message resolve/validate work;
+    /// a property revision change refreshes the entry.
+    route_cache: Option<ResolvedMqttRoute>,
     mqtt_clients: MqttClientManager,
     spawner: TaskSpawner,
     /// Pre-bound message counters (one label set per connector): the hot
@@ -113,6 +117,13 @@ pub(crate) struct MqttSinkConnector {
     /// per message.
     messages_in: ChildCounter,
     messages_out: ChildCounter,
+}
+
+#[derive(Clone)]
+struct ResolvedMqttRoute {
+    revision: u64,
+    topic: ConnectorString,
+    user_properties: Vec<crate::connector::MqttUserProperty>,
 }
 
 enum SinkClient {
@@ -140,7 +151,7 @@ impl SinkClient {
         topic: &str,
         qos: MqttQos,
         retain: bool,
-        payload: Vec<u8>,
+        payload: Bytes,
         user_properties: &[crate::connector::MqttUserProperty],
     ) -> Result<(), SinkConnectorError> {
         match self {
@@ -240,7 +251,7 @@ impl StandaloneMqttClient {
         topic: &str,
         qos: MqttQos,
         retain: bool,
-        payload: Vec<u8>,
+        payload: Bytes,
         user_properties: &[crate::connector::MqttUserProperty],
     ) -> Result<(), SinkConnectorError> {
         if !self.state.is_connected() {
@@ -334,8 +345,8 @@ impl MqttSinkConnector {
             config,
             client: None,
             buffer: None,
-            delivery_topic: None,
-            delivery_user_properties: Vec::new(),
+            delivery_route: None,
+            route_cache: None,
             mqtt_clients,
             spawner,
             messages_in,
@@ -395,6 +406,93 @@ impl MqttSinkConnector {
     fn publish_qos(&self) -> Result<MqttQos, SinkConnectorError> {
         MqttQos::try_from(self.config.qos).map_err(SinkConnectorError::Permanent)
     }
+
+    fn cached_route(&self, revision: u64) -> Option<&ResolvedMqttRoute> {
+        self.route_cache
+            .as_ref()
+            .filter(|route| route.revision == revision)
+    }
+
+    /// Resolve and validate the publish route, caching it per property revision.
+    fn refresh_route(
+        &mut self,
+        properties: &crate::PropertyContext,
+    ) -> Result<(), SinkConnectorError> {
+        let topic = self
+            .config
+            .topic
+            .resolve(properties)
+            .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
+        crate::validate_mqtt_publish_topic(&topic).map_err(SinkConnectorError::Permanent)?;
+        let user_properties = self
+            .config
+            .user_properties
+            .iter()
+            .map(|property| {
+                property
+                    .value
+                    .resolve(properties)
+                    .map(|value| crate::connector::MqttUserProperty::new(&property.key, value))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
+        crate::connector::validate_mqtt_user_properties(&user_properties)
+            .map_err(SinkConnectorError::Permanent)?;
+        self.route_cache = Some(ResolvedMqttRoute {
+            revision: properties.revision(),
+            topic,
+            user_properties,
+        });
+        Ok(())
+    }
+
+    /// All MQTT delivery modes share packet validation and one publish attempt.
+    async fn send_payload(
+        &self,
+        payload: Bytes,
+        route: &ResolvedMqttRoute,
+    ) -> Result<DeliveryResult, SinkConnectorError> {
+        let bytes_written = payload.len() as u64;
+        let qos = self.publish_qos()?;
+        if let Some(client) = &self.client {
+            let packet_size = mqtt_publish_packet_size(
+                client.protocol_version(),
+                route.topic.expose(),
+                qos,
+                payload.len(),
+                &route.user_properties,
+            )?;
+            match client.outgoing_packet_limit() {
+                MqttOutgoingPacketLimit::Unknown => {
+                    return Err(SinkConnectorError::Transient(
+                        "mqtt not connected: outgoing packet limit unavailable before CONNACK"
+                            .to_string(),
+                    ));
+                }
+                MqttOutgoingPacketLimit::Limited(limit) if packet_size > limit => {
+                    return Err(SinkConnectorError::Permanent(format!(
+                        "mqtt publish packet size {packet_size} exceeds connection limit {limit}"
+                    )));
+                }
+                MqttOutgoingPacketLimit::Unlimited | MqttOutgoingPacketLimit::Limited(_) => {}
+            }
+            client
+                .publish(
+                    route.topic.expose(),
+                    qos,
+                    self.config.retain,
+                    payload,
+                    &route.user_properties,
+                )
+                .await?;
+            Ok(DeliveryResult { bytes_written })
+        } else {
+            Err(SinkConnectorError::Transient(format!(
+                "mqtt sink `{}` not connected",
+                self.id
+            )))
+        }
+    }
 }
 
 #[async_trait]
@@ -430,28 +528,11 @@ impl SinkConnector for MqttSinkConnector {
         properties: &crate::PropertyContext,
     ) -> Result<(), SinkConnectorError> {
         self.ensure_client().await?;
-        let topic = self
-            .config
-            .topic
-            .resolve(properties)
-            .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
-        crate::validate_mqtt_publish_topic(&topic).map_err(SinkConnectorError::Permanent)?;
-        let user_properties = self
-            .config
-            .user_properties
-            .iter()
-            .map(|property| {
-                property
-                    .value
-                    .resolve(properties)
-                    .map(|value| crate::connector::MqttUserProperty::new(&property.key, value))
-            })
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|err| SinkConnectorError::Permanent(err.to_string()))?;
-        crate::connector::validate_mqtt_user_properties(&user_properties)
-            .map_err(SinkConnectorError::Permanent)?;
-        self.delivery_topic = Some(topic);
-        self.delivery_user_properties = user_properties;
+        let revision = properties.revision();
+        if self.cached_route(revision).is_none() {
+            self.refresh_route(properties)?;
+        }
+        self.delivery_route = self.cached_route(revision).cloned();
         self.buffer = Some(Vec::new());
         Ok(())
     }
@@ -474,59 +555,37 @@ impl SinkConnector for MqttSinkConnector {
                 self.id
             ))
         })?;
-        let bytes_written = payload.len() as u64;
-        let qos = self.publish_qos()?;
-        let topic = self.delivery_topic.take().ok_or_else(|| {
+        let route = self.delivery_route.take().ok_or_else(|| {
             SinkConnectorError::Permanent(format!(
-                "mqtt sink `{}` has no topic for active delivery",
+                "mqtt sink `{}` has no route for active delivery",
                 self.id
             ))
         })?;
-        let user_properties = std::mem::take(&mut self.delivery_user_properties);
-        if let Some(client) = &self.client {
-            let packet_size = mqtt_publish_packet_size(
-                client.protocol_version(),
-                topic.expose(),
-                qos,
-                payload.len(),
-                &user_properties,
-            )?;
-            match client.outgoing_packet_limit() {
-                MqttOutgoingPacketLimit::Unknown => {
-                    return Err(SinkConnectorError::Transient(
-                        "mqtt not connected: outgoing packet limit unavailable before CONNACK"
-                            .to_string(),
-                    ));
-                }
-                MqttOutgoingPacketLimit::Limited(limit) if packet_size > limit => {
-                    return Err(SinkConnectorError::Permanent(format!(
-                        "mqtt publish packet size {packet_size} exceeds connection limit {limit}"
-                    )));
-                }
-                MqttOutgoingPacketLimit::Unlimited | MqttOutgoingPacketLimit::Limited(_) => {}
-            }
-            client
-                .publish(
-                    topic.expose(),
-                    qos,
-                    self.config.retain,
-                    payload,
-                    &user_properties,
-                )
-                .await?;
-            Ok(DeliveryResult { bytes_written })
-        } else {
-            Err(SinkConnectorError::Transient(format!(
-                "mqtt sink `{}` not connected",
-                self.id
-            )))
+        self.send_payload(payload.into(), &route).await
+    }
+
+    /// Single-shot publish: resolve the (cached) route and publish the
+    /// payload directly, skipping the staging buffer and the intermediate
+    /// start/write/finish awaits. Error classes match the staged path.
+    async fn publish_single(
+        &mut self,
+        payload: Bytes,
+        properties: &crate::PropertyContext,
+    ) -> Result<DeliveryResult, SinkConnectorError> {
+        self.ensure_client().await?;
+        let revision = properties.revision();
+        if self.cached_route(revision).is_none() {
+            self.refresh_route(properties)?;
         }
+        let route = self
+            .cached_route(revision)
+            .expect("publish route cached after refresh");
+        self.send_payload(payload, route).await
     }
 
     async fn abort_delivery(&mut self) {
         self.buffer = None;
-        self.delivery_topic = None;
-        self.delivery_user_properties.clear();
+        self.delivery_route = None;
     }
 
     async fn ready(&mut self) -> Result<(), SinkConnectorError> {
@@ -802,6 +861,15 @@ mod tests {
                 .expect_err("full publish packet exceeds connection limit");
             assert!(matches!(error, SinkConnectorError::Permanent(_)));
             assert!(error.to_string().contains("exceeds connection limit 256"));
+            let error = connector
+                .publish_single(
+                    Bytes::from(vec![b'x'; 256]),
+                    &crate::PropertyContext::default(),
+                )
+                .await
+                .expect_err("complete packet exceeds connection limit");
+            assert!(matches!(error, SinkConnectorError::Permanent(_)));
+            assert!(error.to_string().contains("exceeds connection limit 256"));
             connector.close().await.expect("close mqtt sink");
         }
     }
@@ -875,6 +943,138 @@ mod tests {
         assert!(matches!(error, SinkConnectorError::Permanent(_)));
         assert!(error.to_string().contains("exceeds connection limit 64"));
         connector.close().await.expect("close mqtt sink");
+    }
+
+    async fn wait_for_standalone_connected(connector: &MqttSinkConnector) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !matches!(
+            connector.client.as_ref(),
+            Some(SinkClient::Standalone(client)) if client.state.is_connected()
+        ) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "MQTT did not connect"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn mqtt_sink_publish_single_caches_static_route() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let spawner = TaskSpawner::from_handle(Handle::current());
+        let topic = broker.scoped_topic("sink/single-shot");
+        let mut connector = MqttSinkConnector::new(
+            "single-shot",
+            MqttSinkConfig::new("single-shot", broker.broker_url(), topic.clone(), 0),
+            Arc::<str>::from("default"),
+            MqttClientManager::new("default", spawner.clone()),
+            spawner,
+        );
+        connector.ready().await.expect("mqtt sink ready");
+        wait_for_standalone_connected(&connector).await;
+
+        let properties = crate::PropertyContext::default();
+        for _ in 0..2 {
+            let result = connector
+                .publish_single(Bytes::from_static(b"hello"), &properties)
+                .await
+                .expect("single-shot publish");
+            assert_eq!(result.bytes_written, 5);
+        }
+        // Static route resolved once: same revision still cached, staging
+        // buffer never touched.
+        let route = connector
+            .cached_route(properties.revision())
+            .expect("route cached");
+        assert_eq!(route.topic.expose(), topic);
+        assert!(route.user_properties.is_empty());
+        assert!(connector.buffer.is_none());
+        assert!(connector.delivery_route.is_none());
+        connector.close().await.expect("close mqtt sink");
+    }
+
+    #[tokio::test]
+    async fn mqtt_sink_publish_single_rejects_oversized_packet() {
+        let broker = EmbeddedMqttBroker::start().await;
+        let spawner = TaskSpawner::from_handle(Handle::current());
+        let mut connector = MqttSinkConnector::new(
+            "single-shot-limit",
+            MqttSinkConfig::new(
+                "single-shot-limit",
+                broker.broker_url(),
+                broker.scoped_topic("sink/single-shot-limit"),
+                1,
+            )
+            .with_max_packet_size(256),
+            Arc::<str>::from("default"),
+            MqttClientManager::new("default", spawner.clone()),
+            spawner,
+        );
+        connector.ready().await.expect("mqtt sink ready");
+        wait_for_standalone_connected(&connector).await;
+
+        let error = connector
+            .publish_single(
+                Bytes::from(vec![b'x'; 256]),
+                &crate::PropertyContext::default(),
+            )
+            .await
+            .expect_err("oversized single-shot publish fails");
+        assert!(matches!(error, SinkConnectorError::Permanent(_)));
+        assert!(error.to_string().contains("exceeds connection limit"));
+        connector.close().await.expect("close mqtt sink");
+    }
+
+    #[tokio::test]
+    async fn mqtt_sink_route_cache_refreshes_on_revision_change() {
+        let spawner = TaskSpawner::from_handle(Handle::current());
+        let registry = crate::PropertyRegistry::new(
+            std::collections::BTreeMap::from([(
+                "vin".to_string(),
+                crate::secret::SecretString::new("short"),
+            )]),
+            true,
+        );
+        let topic = registry
+            .bind(r#"out/{{ prop("vin") }}"#)
+            .expect("bind dynamic MQTT topic");
+        let mut connector = MqttSinkConnector::new(
+            "route-cache",
+            MqttSinkConfig::new("route-cache", "mqtt://127.0.0.1:1", topic, 0),
+            Arc::<str>::from("default"),
+            MqttClientManager::new("default", spawner.clone()),
+            spawner,
+        );
+        let snapshot = registry.snapshot();
+        assert!(connector.cached_route(snapshot.revision()).is_none());
+        connector
+            .refresh_route(&snapshot)
+            .expect("refresh dynamic route");
+        assert_eq!(
+            connector
+                .cached_route(snapshot.revision())
+                .expect("route cached")
+                .topic
+                .expose(),
+            "out/short"
+        );
+
+        registry
+            .apply_override("vin", crate::secret::SecretString::new("longer"))
+            .expect("update vin");
+        let updated = registry.snapshot();
+        assert_ne!(updated.revision(), snapshot.revision());
+        assert!(connector.cached_route(updated.revision()).is_none());
+        connector.refresh_route(&updated).expect("refresh route");
+        assert_eq!(
+            connector
+                .cached_route(updated.revision())
+                .expect("route cached")
+                .topic
+                .expose(),
+            "out/longer"
+        );
     }
 
     #[tokio::test]
@@ -1029,6 +1229,15 @@ mod tests {
                 .expect_err("packet exceeds broker limit");
             assert!(matches!(error, SinkConnectorError::Permanent(_)));
             assert!(error.to_string().contains("exceeds connection limit 128"));
+            let error = connector
+                .publish_single(
+                    Bytes::from(vec![b'x'; 90]),
+                    &crate::PropertyContext::default(),
+                )
+                .await
+                .expect_err("complete MQTT 5 packet exceeds broker limit");
+            assert!(matches!(error, SinkConnectorError::Permanent(_)));
+            assert!(error.to_string().contains("exceeds connection limit 128"));
             connector.close().await.expect("close MQTT 5 sink");
         }
         broker.abort();
@@ -1179,6 +1388,18 @@ mod tests {
             .await
             .expect("mqtt sink output payload timeout")
             .expect("mqtt sink output payload");
+        assert_eq!(received_topic, expected_topic);
+        assert_eq!(received_payload, expected_payload);
+
+        // The complete-payload entry shares the same resolved dynamic route.
+        connector
+            .publish_single(Bytes::from_static(expected_payload), &properties)
+            .await
+            .expect("complete dynamic-topic publish");
+        let (received_topic, received_payload) = timeout(Duration::from_secs(5), publish_rx.recv())
+            .await
+            .expect("complete publish timeout")
+            .expect("complete publish");
         assert_eq!(received_topic, expected_topic);
         assert_eq!(received_payload, expected_payload);
 

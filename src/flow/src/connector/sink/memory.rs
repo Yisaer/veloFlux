@@ -61,6 +61,14 @@ pub struct MemoryBytesSinkConnector {
 }
 
 impl MemoryBytesSinkConnector {
+    fn send_payload(&mut self, payload: Bytes) -> Result<DeliveryResult, SinkConnectorError> {
+        let bytes_written = payload.len() as u64;
+        self.ensure_publisher()?
+            .publish_bytes(payload)
+            .map_err(|err| SinkConnectorError::Other(err.to_string()))?;
+        Ok(DeliveryResult { bytes_written })
+    }
+
     fn new(
         id: impl Into<String>,
         topic: impl Into<String>,
@@ -129,12 +137,15 @@ impl SinkConnector for MemoryBytesSinkConnector {
                 self.id
             ))
         })?;
-        let bytes_written = payload.len() as u64;
-        let publisher = self.ensure_publisher()?;
-        publisher
-            .publish_bytes(Bytes::from(payload))
-            .map_err(|err| SinkConnectorError::Other(err.to_string()))?;
-        Ok(DeliveryResult { bytes_written })
+        self.send_payload(payload.into())
+    }
+
+    async fn publish_single(
+        &mut self,
+        payload: Bytes,
+        _properties: &crate::PropertyContext,
+    ) -> Result<DeliveryResult, SinkConnectorError> {
+        self.send_payload(payload)
     }
 
     async fn abort_delivery(&mut self) {
@@ -221,6 +232,17 @@ impl SinkConnector for MemoryCollectionSinkConnector {
 
 #[async_trait]
 impl SinkConnector for MemorySinkConnector {
+    async fn publish_single(
+        &mut self,
+        payload: Bytes,
+        properties: &crate::PropertyContext,
+    ) -> Result<DeliveryResult, SinkConnectorError> {
+        match self {
+            Self::Bytes(inner) => inner.publish_single(payload, properties).await,
+            Self::Collection(inner) => inner.publish_single(payload, properties).await,
+        }
+    }
+
     fn id(&self) -> &str {
         match self {
             MemorySinkConnector::Bytes(inner) => inner.id(),
@@ -355,6 +377,26 @@ mod tests {
             MemoryData::Bytes(bytes) => assert_eq!(bytes.as_ref(), b"hello_bytes"),
             MemoryData::Collection(_) => panic!("expected bytes payload"),
         }
+        let payload = Bytes::from(vec![42; 1024]);
+        let original = payload.clone();
+        let result = connector
+            .publish_single(payload, &crate::PropertyContext::default())
+            .await
+            .expect("complete payload publish");
+        assert_eq!(result.bytes_written, original.len() as u64);
+        let received = timeout(Duration::from_secs(2), output.recv())
+            .await
+            .expect("receive timeout")
+            .expect("payload");
+        let MemoryData::Bytes(received) = received else {
+            panic!("expected bytes");
+        };
+        assert_eq!(received, original);
+        assert_eq!(
+            received.as_ptr(),
+            original.as_ptr(),
+            "payload must remain shared"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -86,6 +86,26 @@ impl NngPubSubSinkConnector {
         self.socket = Some(socket);
         Ok(())
     }
+    async fn send_payload(
+        &mut self,
+        payload: bytes::Bytes,
+    ) -> Result<DeliveryResult, SinkConnectorError> {
+        let bytes_written = payload.len() as u64;
+        let message = build_message(&self.config.topic, &self.config.topic_delimiter, &payload)?;
+        let socket = self.socket.as_mut().ok_or_else(|| {
+            SinkConnectorError::Unavailable(format!("nng pubsub sink `{}` not connected", self.id))
+        })?;
+        match socket.publish(message).await {
+            Ok(()) => Ok(DeliveryResult { bytes_written }),
+            Err((err, _message)) => {
+                self.socket = None;
+                Err(SinkConnectorError::Unavailable(format!(
+                    "nng pubsub sink `{}` publish failed: {err}",
+                    self.id
+                )))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -133,21 +153,16 @@ impl SinkConnector for NngPubSubSinkConnector {
                 self.id
             ))
         })?;
-        let bytes_written = payload.len() as u64;
-        let message = build_message(&self.config.topic, &self.config.topic_delimiter, &payload)?;
-        let socket = self.socket.as_mut().ok_or_else(|| {
-            SinkConnectorError::Unavailable(format!("nng pubsub sink `{}` not connected", self.id))
-        })?;
-        match socket.publish(message).await {
-            Ok(()) => Ok(DeliveryResult { bytes_written }),
-            Err((err, _message)) => {
-                self.socket = None;
-                Err(SinkConnectorError::Unavailable(format!(
-                    "nng pubsub sink `{}` publish failed: {err}",
-                    self.id
-                )))
-            }
-        }
+        self.send_payload(payload.into()).await
+    }
+
+    async fn publish_single(
+        &mut self,
+        payload: bytes::Bytes,
+        _properties: &crate::PropertyContext,
+    ) -> Result<DeliveryResult, SinkConnectorError> {
+        self.ensure_socket().await?;
+        self.send_payload(payload).await
     }
 
     async fn abort_delivery(&mut self) {
@@ -216,6 +231,19 @@ mod tests {
             .expect("receive timeout")
             .expect("receive frame");
         assert_eq!(message.as_slice(), b"topic/can:{\"v\":1}");
+
+        connector
+            .publish_single(
+                bytes::Bytes::from_static(br#"{"v":2}"#),
+                &crate::PropertyContext::default(),
+            )
+            .await
+            .expect("complete delivery");
+        let message = timeout(Duration::from_secs(2), sub.next())
+            .await
+            .expect("receive timeout")
+            .expect("receive complete frame");
+        assert_eq!(message.as_slice(), br#"topic/can:{"v":2}"#);
 
         connector.close().await.expect("close sink");
     }
