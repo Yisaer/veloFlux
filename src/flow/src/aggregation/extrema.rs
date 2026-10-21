@@ -170,23 +170,24 @@ impl AggregateFunction for MinFunction {
 }
 
 #[derive(Debug, Default, Clone)]
-struct MaxAccumulator {
+pub(super) struct MaxAccumulator {
     value: Option<Value>,
 }
 
 #[derive(Debug, Default, Clone)]
-struct MinAccumulator {
+pub(super) struct MinAccumulator {
     value: Option<Value>,
 }
 
-impl AggregateAccumulator for MaxAccumulator {
-    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
+impl MaxAccumulator {
+    #[inline(always)]
+    pub(super) fn prepare(&self, args: &[Value]) -> Result<ExtremaUpdate, String> {
         let Some(value) = args.first() else {
             return Err("max expects one argument".to_string());
         };
 
         if value.is_null() {
-            return Ok(Box::new(ExtremaUpdate { value: None }));
+            return Ok(ExtremaUpdate { value: None });
         }
 
         let next = match self.value.as_ref() {
@@ -202,17 +203,29 @@ impl AggregateAccumulator for MaxAccumulator {
             }
         };
 
-        Ok(Box::new(ExtremaUpdate { value: next }))
+        Ok(ExtremaUpdate { value: next })
+    }
+
+    #[inline]
+    pub(super) fn commit(&mut self, update: ExtremaUpdate) {
+        if let Some(value) = update.value {
+            self.value = Some(value);
+        }
+    }
+}
+
+impl AggregateAccumulator for MaxAccumulator {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
+        Ok(Box::new(self.prepare(args)?))
     }
 
     fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
-        let update = update
-            .as_any()
-            .downcast_ref::<ExtremaUpdate>()
-            .expect("max accumulator received incompatible update");
-        if let Some(value) = &update.value {
-            self.value = Some(value.clone());
-        }
+        self.commit(
+            *update
+                .into_any()
+                .downcast::<ExtremaUpdate>()
+                .expect("max accumulator received incompatible update"),
+        );
     }
 
     fn finalize(&self) -> Value {
@@ -220,14 +233,15 @@ impl AggregateAccumulator for MaxAccumulator {
     }
 }
 
-impl AggregateAccumulator for MinAccumulator {
-    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
+impl MinAccumulator {
+    #[inline(always)]
+    pub(super) fn prepare(&self, args: &[Value]) -> Result<ExtremaUpdate, String> {
         let Some(value) = args.first() else {
             return Err("min expects one argument".to_string());
         };
 
         if value.is_null() {
-            return Ok(Box::new(ExtremaUpdate { value: None }));
+            return Ok(ExtremaUpdate { value: None });
         }
 
         let next = match self.value.as_ref() {
@@ -243,17 +257,29 @@ impl AggregateAccumulator for MinAccumulator {
             }
         };
 
-        Ok(Box::new(ExtremaUpdate { value: next }))
+        Ok(ExtremaUpdate { value: next })
+    }
+
+    #[inline]
+    pub(super) fn commit(&mut self, update: ExtremaUpdate) {
+        if let Some(value) = update.value {
+            self.value = Some(value);
+        }
+    }
+}
+
+impl AggregateAccumulator for MinAccumulator {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
+        Ok(Box::new(self.prepare(args)?))
     }
 
     fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
-        let update = update
-            .as_any()
-            .downcast_ref::<ExtremaUpdate>()
-            .expect("min accumulator received incompatible update");
-        if let Some(value) = &update.value {
-            self.value = Some(value.clone());
-        }
+        self.commit(
+            *update
+                .into_any()
+                .downcast::<ExtremaUpdate>()
+                .expect("min accumulator received incompatible update"),
+        );
     }
 
     fn finalize(&self) -> Value {
@@ -261,7 +287,7 @@ impl AggregateAccumulator for MinAccumulator {
     }
 }
 
-struct ExtremaUpdate {
+pub(super) struct ExtremaUpdate {
     value: Option<Value>,
 }
 

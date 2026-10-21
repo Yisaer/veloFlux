@@ -86,28 +86,41 @@ impl AggregateFunction for CountFunction {
 }
 
 #[derive(Debug, Default, Clone)]
-struct CountAccumulator {
+pub(super) struct CountAccumulator {
     count: i64,
+}
+
+impl CountAccumulator {
+    #[inline]
+    pub(super) fn prepare(&self, args: &[Value]) -> Result<CountUpdate, String> {
+        let Some(value) = args.first() else {
+            return Err("COUNT expects one argument".to_string());
+        };
+        Ok(CountUpdate {
+            increment: !value.is_null(),
+        })
+    }
+
+    #[inline]
+    pub(super) fn commit(&mut self, update: CountUpdate) {
+        if update.increment {
+            self.count = self.count.saturating_add(1);
+        }
+    }
 }
 
 impl AggregateAccumulator for CountAccumulator {
     fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
-        let Some(value) = args.first() else {
-            return Err("COUNT expects one argument".to_string());
-        };
-        Ok(Box::new(CountUpdate {
-            increment: !value.is_null(),
-        }))
+        Ok(Box::new(self.prepare(args)?))
     }
 
     fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
-        let update = update
-            .as_any()
-            .downcast_ref::<CountUpdate>()
-            .expect("count accumulator received incompatible update");
-        if update.increment {
-            self.count = self.count.saturating_add(1);
-        }
+        self.commit(
+            *update
+                .into_any()
+                .downcast::<CountUpdate>()
+                .expect("count accumulator received incompatible update"),
+        );
     }
 
     fn finalize(&self) -> Value {
@@ -115,7 +128,7 @@ impl AggregateAccumulator for CountAccumulator {
     }
 }
 
-struct CountUpdate {
+pub(super) struct CountUpdate {
     increment: bool,
 }
 

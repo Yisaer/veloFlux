@@ -309,6 +309,18 @@ fn columns_from_rows(rows: Vec<JsonValue>) -> Vec<(String, Vec<Value>)> {
 async fn count_window_group_and_partition_pipeline_table_driven() {
     let cases = vec![
         CollectionWindowPartitionCase {
+            name: "count_mixed_aggregation_arguments",
+            sql: "SELECT sum(a + 1) AS s, avg(a) AS mean, min(a) AS lo, max(a) AS hi, count(a) AS n, count(*) AS rows, last_row(a) AS last FROM stream GROUP BY countwindow(4), k",
+            input_data: vec![
+                ("k".into(), vec![Value::Int64(1); 4]),
+                ("a".into(), vec![Value::Int64(1), Value::Null, Value::Int64(3), Value::Int64(5)]),
+            ],
+            expected_outputs: vec![serde_json::json!([
+                {"s": 12, "mean": 3.0, "lo": 1, "hi": 5, "n": 3, "rows": 4, "last": 5}
+            ])],
+            assert_no_extra_output: true,
+        },
+        CollectionWindowPartitionCase {
             name: "count_group_by_key",
             sql: "SELECT k2, sum(a) AS s FROM stream GROUP BY countwindow(4), k2 ORDER BY k2",
             input_data: columns_from_rows(base_rows()),

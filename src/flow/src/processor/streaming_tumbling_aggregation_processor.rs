@@ -36,21 +36,11 @@ struct WindowAggState {
 }
 
 impl WindowAggState {
-    fn new(
-        start: SystemTime,
-        end: SystemTime,
-        physical: Arc<PhysicalStreamingAggregation>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-        group_by_meta: Vec<GroupByMeta>,
-    ) -> Self {
+    fn new(start: SystemTime, end: SystemTime, template: &AggregationWorker) -> Self {
         Self {
             start,
             end,
-            worker: AggregationWorker::new(
-                Arc::clone(&physical),
-                Arc::clone(&aggregate_registry),
-                group_by_meta,
-            ),
+            worker: template.empty(),
         }
     }
 }
@@ -59,24 +49,15 @@ impl WindowAggState {
 struct ProcessingWindowState {
     windows: VecDeque<WindowAggState>,
     window_length: Duration,
-    physical: Arc<PhysicalStreamingAggregation>,
-    aggregate_registry: Arc<AggregateFunctionRegistry>,
-    group_by_meta: Vec<GroupByMeta>,
+    template: AggregationWorker,
 }
 
 impl ProcessingWindowState {
-    fn new(
-        window_length: Duration,
-        physical: Arc<PhysicalStreamingAggregation>,
-        aggregate_registry: Arc<AggregateFunctionRegistry>,
-        group_by_meta: Vec<GroupByMeta>,
-    ) -> Self {
+    fn new(window_length: Duration, template: AggregationWorker) -> Self {
         Self {
             windows: VecDeque::new(),
             window_length,
-            physical,
-            aggregate_registry,
-            group_by_meta,
+            template,
         }
     }
 
@@ -89,13 +70,7 @@ impl ProcessingWindowState {
                 return back.worker.update_groups(row);
             }
         }
-        let mut new_state = WindowAggState::new(
-            start,
-            end,
-            Arc::clone(&self.physical),
-            Arc::clone(&self.aggregate_registry),
-            self.group_by_meta.clone(),
-        );
+        let mut new_state = WindowAggState::new(start, end, &self.template);
         new_state.worker.update_groups(row)?;
         self.windows.push_back(new_state);
         Ok(())
@@ -127,9 +102,7 @@ struct PartitionedProcessingWindowState {
     state_ids: HashMap<PartitionKey, usize>,
     states: Vec<ProcessingWindowState>,
     window_length: Duration,
-    physical: Arc<PhysicalStreamingAggregation>,
-    aggregate_registry: Arc<AggregateFunctionRegistry>,
-    group_by_meta: Vec<GroupByMeta>,
+    template: AggregationWorker,
     partition_by_scalars: Vec<crate::expr::ScalarExpr>,
 }
 
@@ -150,9 +123,7 @@ impl PartitionedProcessingWindowState {
             state_ids: HashMap::new(),
             states: Vec::new(),
             window_length,
-            physical,
-            aggregate_registry,
-            group_by_meta,
+            template: AggregationWorker::new(physical, aggregate_registry, group_by_meta),
             partition_by_scalars,
         }
     }
@@ -198,9 +169,7 @@ impl PartitionedProcessingWindowState {
         self.state_ids.insert(key, id);
         self.states.push(ProcessingWindowState::new(
             self.window_length,
-            Arc::clone(&self.physical),
-            Arc::clone(&self.aggregate_registry),
-            self.group_by_meta.clone(),
+            self.template.empty(),
         ));
         &mut self.states[id]
     }

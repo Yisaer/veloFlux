@@ -1,4 +1,4 @@
-use super::{build_group_by_meta, AggregationWorker, GroupByMeta};
+use super::{build_group_by_meta, AggregationWorker};
 use crate::aggregation::AggregateFunctionRegistry;
 use crate::expr::ScalarExpr;
 use crate::planner::physical::{PhysicalStreamingAggregation, StreamingWindowSpec};
@@ -58,9 +58,7 @@ impl StreamingStateStage {
 
 /// Shared synchronous state-window aggregation. Outputs follow row completion order.
 pub(crate) struct StreamingStateStage {
-    physical: Arc<PhysicalStreamingAggregation>,
-    registry: Arc<AggregateFunctionRegistry>,
-    group_by: Vec<GroupByMeta>,
+    template: AggregationWorker,
     config: Arc<StateWindowConfig>,
     ids: HashMap<PartitionKey, usize>,
     states: Vec<PartitionAggState>,
@@ -74,9 +72,7 @@ impl StreamingStateStage {
         let group_by = build_group_by_meta(&physical.group_by_exprs, &physical.group_by_scalars);
         let config = Arc::new(StreamingStateStage::extract_window_spec(&physical)?);
         Ok(Self {
-            physical,
-            registry,
-            group_by,
+            template: AggregationWorker::new(physical, registry, group_by),
             config,
             ids: HashMap::new(),
             states: Vec::new(),
@@ -172,11 +168,7 @@ impl StreamingStateStage {
                             active: false,
                             opened_at: None,
                             last_seen_at: None,
-                            worker: AggregationWorker::new(
-                                Arc::clone(&self.physical),
-                                Arc::clone(&self.registry),
-                                self.group_by.clone(),
-                            ),
+                            worker: self.template.empty(),
                         });
                         next
                     });

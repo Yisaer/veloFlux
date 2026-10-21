@@ -1,6 +1,9 @@
 //! Synchronous incremental aggregation engines.
 
-use crate::aggregation::{AggregateAccumulator, AggregateFunctionRegistry, AggregateUpdate};
+use crate::aggregation::{
+    AccumulatorFactory, AccumulatorState, AccumulatorUpdate, AggregateAccumulator,
+    AggregateFunctionRegistry, AggregateUpdate,
+};
 use crate::expr::ScalarExpr;
 use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{AggregateCall, PhysicalStreamingAggregation};
@@ -27,6 +30,10 @@ pub(crate) use streaming_state_aggregation_processor::StreamingStateStage;
 pub(crate) use streaming_count_aggregation_processor::{StreamingCountOutput, StreamingCountStage};
 pub(crate) use streaming_tumbling_aggregation_processor::StreamingTumblingStage;
 
+#[cfg(test)]
+#[path = "streaming_aggregation_tests.rs"]
+mod tests;
+
 /// Group-by metadata bundled for evaluation and output.
 #[derive(Clone)]
 struct GroupByMeta {
@@ -35,22 +42,176 @@ struct GroupByMeta {
     output_name: String,
 }
 
-/// Tracks aggregation state for a single group key.
+/// All calls share the same row transaction and group lifecycle.
 struct GroupState {
-    accumulators: Vec<Box<dyn AggregateAccumulator>>,
-    last_tuple: crate::model::Tuple,
+    accumulators: Vec<AccumulatorState>,
+    last_tuple: LastRow,
     key_values: Vec<Value>,
 }
 
-/// Shared aggregation logic reused by count and tumbling windows.
+/// Aggregation output only inherits source messages and the last timestamp.
+/// Do not retain discarded affiliate columns or output masks in every group.
+struct LastRow {
+    messages: Arc<[Arc<crate::model::Message>]>,
+    timestamp: std::time::SystemTime,
+}
+
+impl LastRow {
+    fn capture(tuple: &crate::model::Tuple) -> Self {
+        Self {
+            messages: Arc::clone(&tuple.messages),
+            timestamp: tuple.timestamp,
+        }
+    }
+}
+
+/// Binding is per argument/call, not a whole-statement fast-path decision.
+enum BoundArguments {
+    Column { source: String, index: usize },
+    CountWildcard(Option<String>),
+    Expressions(Vec<ScalarExpr>),
+}
+
+struct BoundCall {
+    arguments: BoundArguments,
+    factory: AccumulatorFactory,
+}
+
+impl BoundCall {
+    fn new(call: &AggregateCall, registry: &AggregateFunctionRegistry) -> Result<Self, String> {
+        use crate::expr::scalar::ColumnRef;
+        if call.distinct {
+            return Err("DISTINCT aggregates are not supported yet".to_string());
+        }
+        let factory = registry
+            .accumulator_factory(&call.func_name)
+            .ok_or_else(|| format!("Aggregate function '{}' not found", call.func_name))?;
+        let arguments = match call.args.as_slice() {
+            [ScalarExpr::Column(ColumnRef::ByIndex {
+                source_name,
+                column_index,
+            })] => BoundArguments::Column {
+                source: source_name.clone(),
+                index: *column_index,
+            },
+            [ScalarExpr::Wildcard { source_name }] if factory.uses_non_null_wildcard_sentinel() => {
+                BoundArguments::CountWildcard(source_name.clone())
+            }
+            _ => BoundArguments::Expressions(call.args.clone()),
+        };
+        Ok(Self { arguments, factory })
+    }
+
+    fn prepare(
+        &self,
+        tuple: &crate::model::Tuple,
+        accumulator: &AccumulatorState,
+        arguments: &mut Vec<Value>,
+    ) -> Result<AccumulatorUpdate, String> {
+        use crate::expr::scalar::ColumnRef;
+        static COUNT_ROW: [Value; 1] = [Value::Bool(true)];
+        let eval_error = |error| format!("Failed to evaluate aggregate argument: {error}");
+        let values = match &self.arguments {
+            BoundArguments::Column { source, index } => {
+                if let Some(value) = tuple.value_by_index(source, *index) {
+                    std::slice::from_ref(value)
+                } else {
+                    // Reuse the evaluator's diagnostic on the cold error path.
+                    arguments.clear();
+                    arguments.push(
+                        ScalarExpr::Column(ColumnRef::ByIndex {
+                            source_name: source.clone(),
+                            column_index: *index,
+                        })
+                        .eval_with_tuple(tuple)
+                        .map_err(eval_error)?,
+                    );
+                    arguments.as_slice()
+                }
+            }
+            BoundArguments::CountWildcard(source) => {
+                if let Some(source) = source {
+                    let has_column = tuple.messages.iter().any(|message| {
+                        message.source() == source && message.entries().next().is_some()
+                    }) || (source.is_empty()
+                        && tuple
+                            .affiliate()
+                            .is_some_and(|affiliate| affiliate.entries().next().is_some()));
+                    if !has_column {
+                        arguments.clear();
+                        arguments.push(
+                            ScalarExpr::Wildcard {
+                                source_name: Some(source.clone()),
+                            }
+                            .eval_with_tuple(tuple)
+                            .map_err(eval_error)?,
+                        );
+                    }
+                }
+                // Only a registry-bound builtin COUNT uses a non-null sentinel.
+                &COUNT_ROW
+            }
+            BoundArguments::Expressions(expressions) => {
+                arguments.clear();
+                for expression in expressions {
+                    arguments.push(expression.eval_with_tuple(tuple).map_err(eval_error)?);
+                }
+                arguments.as_slice()
+            }
+        };
+        accumulator.prepare(values)
+    }
+}
+
+struct BoundAggregation {
+    calls: Result<Vec<BoundCall>, String>,
+}
+
+#[derive(Default)]
+struct RowScratch {
+    arguments: Vec<Value>,
+    updates: Vec<AccumulatorUpdate>,
+}
+
+impl RowScratch {
+    fn clear(&mut self) {
+        self.arguments.clear();
+        self.updates.clear();
+    }
+
+    fn apply(
+        &mut self,
+        calls: &[BoundCall],
+        tuple: &crate::model::Tuple,
+        accumulators: &mut [AccumulatorState],
+    ) -> Result<(), String> {
+        debug_assert_eq!(calls.len(), accumulators.len());
+        self.clear();
+        for (call, accumulator) in calls.iter().zip(accumulators.iter()) {
+            match call.prepare(tuple, accumulator, &mut self.arguments) {
+                Ok(update) => self.updates.push(update),
+                Err(error) => {
+                    self.clear();
+                    return Err(error);
+                }
+            }
+        }
+        self.arguments.clear();
+        // No fallible work remains after the first mutation.
+        for (accumulator, update) in accumulators.iter_mut().zip(self.updates.drain(..)) {
+            accumulator.commit(update);
+        }
+        Ok(())
+    }
+}
+
+/// Shared execution for count, tumbling, state and EOS aggregation.
 struct AggregationWorker {
     physical: Arc<PhysicalStreamingAggregation>,
-    aggregate_registry: Arc<AggregateFunctionRegistry>,
-    group_by_meta: Vec<GroupByMeta>,
-    // Structured group keys: Value is Hash + Eq, so the map key is the
-    // evaluated key vector itself. A Debug-formatted String key here was a
-    // measured per-row hotspot (String allocation plus formatting).
+    group_by_meta: Arc<[GroupByMeta]>,
+    bound: Arc<BoundAggregation>,
     groups: HashMap<Vec<Value>, GroupState>,
+    scratch: RowScratch,
 }
 
 impl AggregationWorker {
@@ -59,90 +220,84 @@ impl AggregationWorker {
         aggregate_registry: Arc<AggregateFunctionRegistry>,
         group_by_meta: Vec<GroupByMeta>,
     ) -> Self {
+        let calls = physical
+            .aggregate_calls
+            .iter()
+            .map(|call| BoundCall::new(call, &aggregate_registry))
+            .collect();
         Self {
             physical,
-            aggregate_registry,
-            group_by_meta,
+            group_by_meta: Arc::from(group_by_meta),
+            bound: Arc::new(BoundAggregation { calls }),
             groups: HashMap::new(),
+            scratch: RowScratch::default(),
         }
+    }
+
+    /// New windows/partitions share bindings, never mutable accumulator state.
+    fn empty(&self) -> Self {
+        Self {
+            physical: Arc::clone(&self.physical),
+            group_by_meta: Arc::clone(&self.group_by_meta),
+            bound: Arc::clone(&self.bound),
+            groups: HashMap::new(),
+            scratch: RowScratch::default(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.groups.clear();
+        self.scratch.clear();
     }
 
     fn update_groups(&mut self, tuple: &crate::model::Tuple) -> Result<(), String> {
-        let key_values = self.evaluate_group_by(tuple)?;
-        let row_call_args = self.evaluate_aggregate_args(tuple)?;
-
-        if let Some(entry) = self.groups.get_mut(&key_values) {
-            apply_aggregate_updates(&mut entry.accumulators, &row_call_args)?;
-            entry.last_tuple = tuple.clone();
-            entry.key_values = key_values;
-        } else {
-            let accumulators = create_accumulators_static(
-                &self.physical.aggregate_calls,
-                self.aggregate_registry.as_ref(),
-            )?;
-            let mut state = GroupState {
-                accumulators,
-                last_tuple: tuple.clone(),
-                key_values: key_values.clone(),
-            };
-            apply_aggregate_updates(&mut state.accumulators, &row_call_args)?;
-            self.groups.insert(key_values, state);
-        }
-
-        Ok(())
-    }
-
-    fn evaluate_group_by(&self, tuple: &crate::model::Tuple) -> Result<Vec<Value>, String> {
-        let mut values = Vec::with_capacity(self.group_by_meta.len());
-        for meta in &self.group_by_meta {
-            values.push(
+        let mut key_values = Vec::with_capacity(self.group_by_meta.len());
+        for meta in self.group_by_meta.iter() {
+            key_values.push(
                 meta.scalar
                     .eval_with_tuple(tuple)
-                    .map_err(|e| format!("Failed to evaluate group-by expression: {}", e))?,
+                    .map_err(|error| format!("Failed to evaluate group-by expression: {error}"))?,
             );
         }
-        Ok(values)
-    }
-
-    fn evaluate_aggregate_args(
-        &self,
-        tuple: &crate::model::Tuple,
-    ) -> Result<Vec<(usize, Vec<Value>)>, String> {
-        let mut all_args = Vec::with_capacity(self.physical.aggregate_calls.len());
-        for (idx, call) in self.physical.aggregate_calls.iter().enumerate() {
-            let mut args = Vec::with_capacity(call.args.len());
-            for arg_expr in &call.args {
-                args.push(
-                    arg_expr
-                        .eval_with_tuple(tuple)
-                        .map_err(|e| format!("Failed to evaluate aggregate argument: {}", e))?,
-                );
-            }
-            all_args.push((idx, args));
+        let calls = self.bound.calls.as_ref().map_err(Clone::clone)?;
+        if let Some(state) = self.groups.get_mut(&key_values) {
+            self.scratch.apply(calls, tuple, &mut state.accumulators)?;
+            state.last_tuple = LastRow::capture(tuple);
+            state.key_values = key_values;
+        } else {
+            let mut accumulators = calls
+                .iter()
+                .map(|call| call.factory.create())
+                .collect::<Vec<_>>();
+            self.scratch.apply(calls, tuple, &mut accumulators)?;
+            self.groups.insert(
+                key_values.clone(),
+                GroupState {
+                    accumulators,
+                    last_tuple: LastRow::capture(tuple),
+                    key_values,
+                },
+            );
         }
-        Ok(all_args)
+        Ok(())
     }
 
     fn finalize_current_window(&mut self) -> Result<Option<Box<dyn Collection>>, String> {
         if self.groups.is_empty() {
-            self.groups.clear();
             return Ok(None);
         }
-
         let mut output_tuples = Vec::with_capacity(self.groups.len());
         for (_key, mut state) in self.groups.drain() {
-            let tuple = finalize_group(
+            output_tuples.push(finalize_group(
                 &self.physical.aggregate_calls,
                 &self.group_by_meta,
                 &mut state.accumulators,
                 &state.last_tuple,
                 &state.key_values,
-            )?;
-            output_tuples.push(tuple);
+            )?);
         }
-
         let collection = RecordBatch::new(output_tuples)
-            .map_err(|e| format!("Failed to build RecordBatch: {e}"))?;
+            .map_err(|error| format!("Failed to build RecordBatch: {error}"))?;
         Ok(Some(Box::new(collection)))
     }
 }
@@ -173,8 +328,8 @@ fn apply_aggregate_updates(
 fn finalize_group(
     aggregate_calls: &[AggregateCall],
     group_by_meta: &[GroupByMeta],
-    accumulators: &mut [Box<dyn AggregateAccumulator>],
-    last_tuple: &crate::model::Tuple,
+    accumulators: &mut [AccumulatorState],
+    last_tuple: &LastRow,
     key_values: &[Value],
 ) -> Result<crate::model::Tuple, String> {
     use std::sync::Arc;

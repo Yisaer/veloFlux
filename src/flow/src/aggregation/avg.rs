@@ -108,17 +108,23 @@ impl AggregateFunction for AvgFunction {
 }
 
 #[derive(Debug, Default, Clone)]
-struct AvgAccumulator {
+pub(super) struct AvgAccumulator {
     sum: f64,
     count: u64,
 }
 
 impl AvgAccumulator {
+    #[inline]
     fn cast_to_f64(value: &Value) -> Result<Option<f64>, String> {
         if value.is_null() {
             return Ok(None);
         }
 
+        match value {
+            Value::Float64(value) => return Ok(Some(*value)),
+            Value::Int64(value) => return Ok(Some(*value as f64)),
+            _ => {}
+        }
         let float64 = Float64Type;
         match float64.try_cast(value.clone()) {
             Some(Value::Float64(v)) => Ok(Some(v)),
@@ -127,26 +133,39 @@ impl AvgAccumulator {
     }
 }
 
-impl AggregateAccumulator for AvgAccumulator {
-    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
+impl AvgAccumulator {
+    #[inline(always)]
+    pub(super) fn prepare(&self, args: &[Value]) -> Result<AvgUpdate, String> {
         let Some(value) = args.first() else {
             return Err("AVG expects one argument".to_string());
         };
 
-        Ok(Box::new(AvgUpdate {
+        Ok(AvgUpdate {
             value: Self::cast_to_f64(value)?,
-        }))
+        })
     }
 
-    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
-        let update = update
-            .as_any()
-            .downcast_ref::<AvgUpdate>()
-            .expect("avg accumulator received incompatible update");
+    #[inline]
+    pub(super) fn commit(&mut self, update: AvgUpdate) {
         if let Some(v) = update.value {
             self.sum += v;
             self.count = self.count.saturating_add(1);
         }
+    }
+}
+
+impl AggregateAccumulator for AvgAccumulator {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
+        Ok(Box::new(self.prepare(args)?))
+    }
+
+    fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
+        self.commit(
+            *update
+                .into_any()
+                .downcast::<AvgUpdate>()
+                .expect("avg accumulator received incompatible update"),
+        );
     }
 
     fn finalize(&self) -> Value {
@@ -158,7 +177,7 @@ impl AggregateAccumulator for AvgAccumulator {
     }
 }
 
-struct AvgUpdate {
+pub(super) struct AvgUpdate {
     value: Option<f64>,
 }
 

@@ -107,7 +107,7 @@ impl AggregateFunction for SumFunction {
 }
 
 #[derive(Debug, Default, Clone)]
-struct SumAccumulator {
+pub(super) struct SumAccumulator {
     acc: Option<Value>,
 }
 
@@ -126,22 +126,35 @@ impl SumAccumulator {
     }
 }
 
-impl AggregateAccumulator for SumAccumulator {
-    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
+impl SumAccumulator {
+    #[inline(always)]
+    pub(super) fn prepare(&self, args: &[Value]) -> Result<SumUpdate, String> {
         let Some(value) = args.first() else {
             return Err("SUM expects one argument".to_string());
         };
-        Ok(Box::new(SumUpdate {
+        Ok(SumUpdate {
             next: Self::add_values(self.acc.clone(), value.clone())?,
-        }))
+        })
+    }
+
+    #[inline]
+    pub(super) fn commit(&mut self, update: SumUpdate) {
+        self.acc = update.next;
+    }
+}
+
+impl AggregateAccumulator for SumAccumulator {
+    fn prepare_update(&self, args: &[Value]) -> Result<Box<dyn AggregateUpdate>, String> {
+        Ok(Box::new(self.prepare(args)?))
     }
 
     fn commit_update(&mut self, update: Box<dyn AggregateUpdate>) {
-        let update = update
-            .as_any()
-            .downcast_ref::<SumUpdate>()
-            .expect("sum accumulator received incompatible update");
-        self.acc = update.next.clone();
+        self.commit(
+            *update
+                .into_any()
+                .downcast::<SumUpdate>()
+                .expect("sum accumulator received incompatible update"),
+        );
     }
 
     fn finalize(&self) -> Value {
@@ -149,7 +162,7 @@ impl AggregateAccumulator for SumAccumulator {
     }
 }
 
-struct SumUpdate {
+pub(super) struct SumUpdate {
     next: Option<Value>,
 }
 

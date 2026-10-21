@@ -84,7 +84,7 @@ impl StreamingCountStage {
     }
 
     pub(crate) fn clear(&mut self) {
-        self.template.groups.clear();
+        self.template.clear();
         self.global.reset();
         self.partitions.states.clear();
         self.partitions.state_ids.clear();
@@ -209,11 +209,7 @@ impl PartitionedCountAggregationState {
         self.state_ids.insert(key, id);
         self.states.push(PartitionCountAggregationState {
             window: CountWindowState::new(target),
-            worker: AggregationWorker::new(
-                Arc::clone(&template.physical),
-                Arc::clone(&template.aggregate_registry),
-                template.group_by_meta.clone(),
-            ),
+            worker: template.empty(),
         });
         &mut self.states[id]
     }

@@ -6,6 +6,7 @@ mod last_row;
 mod median;
 mod merge_agg;
 mod ndv;
+mod prepared;
 mod registry;
 mod sum;
 mod variance;
@@ -20,7 +21,9 @@ pub use median::{median_function_def, MedianFunction};
 pub use merge_agg::{merge_agg_function_def, MergeAggFunction};
 pub use ndv::ndv_function_def;
 pub use ndv::NdvFunction;
+pub(crate) use prepared::{AccumulatorState, AccumulatorUpdate};
 pub use registry::builtin_aggregation_defs;
+pub(crate) use registry::AccumulatorFactory;
 pub use registry::{
     AggregateAccumulator, AggregateFunction, AggregateFunctionRegistry, AggregateUpdate,
 };

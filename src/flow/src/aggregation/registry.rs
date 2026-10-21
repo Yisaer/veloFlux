@@ -1,3 +1,5 @@
+use super::prepared::PreparedAccumulatorFactory;
+use super::AccumulatorState;
 use crate::aggregation::{
     avg_function_def, count_function_def, deduplicate_function_def, last_row_function_def,
     max_function_def, median_function_def, merge_agg_function_def, min_function_def,
@@ -47,8 +49,35 @@ pub trait AggregateFunction: Send + Sync {
     }
 }
 
+/// Execution metadata is selected when an implementation is registered.
+#[derive(Clone)]
+pub(crate) enum AccumulatorFactory {
+    Prepared(PreparedAccumulatorFactory),
+    Registered(Arc<dyn AggregateFunction>),
+}
+
+impl AccumulatorFactory {
+    pub(crate) fn create(&self) -> AccumulatorState {
+        match self {
+            Self::Prepared(factory) => factory.create(),
+            Self::Registered(function) => {
+                AccumulatorState::registered(function.create_accumulator())
+            }
+        }
+    }
+
+    pub(crate) fn uses_non_null_wildcard_sentinel(&self) -> bool {
+        matches!(self, Self::Prepared(factory) if factory.is_count())
+    }
+}
+
+struct AggregateRegistration {
+    function: Arc<dyn AggregateFunction>,
+    factory: AccumulatorFactory,
+}
+
 pub struct AggregateFunctionRegistry {
-    functions: RwLock<HashMap<String, Arc<dyn AggregateFunction>>>,
+    functions: RwLock<HashMap<String, AggregateRegistration>>,
 }
 
 impl AggregateFunctionRegistry {
@@ -64,14 +93,28 @@ impl AggregateFunctionRegistry {
         registry
     }
 
+    /// Register through the boxed accumulator interface, replacing any same-name entry.
+    /// Concrete builtin execution is reserved for the registry's builtin registrations.
     pub fn register_function(&self, function: Arc<dyn AggregateFunction>) {
-        self.functions
-            .write()
-            .insert(function.name().to_lowercase(), function);
+        let factory = AccumulatorFactory::Registered(Arc::clone(&function));
+        self.functions.write().insert(
+            function.name().to_lowercase(),
+            AggregateRegistration { function, factory },
+        );
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn AggregateFunction>> {
-        self.functions.read().get(&name.to_lowercase()).cloned()
+        self.functions
+            .read()
+            .get(&name.to_lowercase())
+            .map(|entry| Arc::clone(&entry.function))
+    }
+
+    pub(crate) fn accumulator_factory(&self, name: &str) -> Option<AccumulatorFactory> {
+        self.functions
+            .read()
+            .get(&name.to_lowercase())
+            .map(|entry| entry.factory.clone())
     }
 
     pub fn is_registered(&self, name: &str) -> bool {
@@ -83,17 +126,46 @@ impl AggregateFunctionRegistry {
         self.functions
             .read()
             .get(&name.to_lowercase())
-            .map(|f| f.supports_incremental())
+            .map(|entry| entry.function.supports_incremental())
             .unwrap_or(false)
     }
 
+    fn register_prepared_builtin(
+        &self,
+        function: Arc<dyn AggregateFunction>,
+        factory: PreparedAccumulatorFactory,
+    ) {
+        self.functions.write().insert(
+            function.name().to_lowercase(),
+            AggregateRegistration {
+                function,
+                factory: AccumulatorFactory::Prepared(factory),
+            },
+        );
+    }
+
     fn register_builtin_functions(&self) {
-        self.register_function(Arc::new(AvgFunction::new()));
-        self.register_function(Arc::new(CountFunction::new()));
+        self.register_prepared_builtin(
+            Arc::new(AvgFunction::new()),
+            PreparedAccumulatorFactory::avg(),
+        );
+        self.register_prepared_builtin(
+            Arc::new(CountFunction::new()),
+            PreparedAccumulatorFactory::count(),
+        );
         self.register_function(Arc::new(DeduplicateFunction::new()));
-        self.register_function(Arc::new(SumFunction::new()));
-        self.register_function(Arc::new(MaxFunction::new()));
-        self.register_function(Arc::new(MinFunction::new()));
+        self.register_prepared_builtin(
+            Arc::new(SumFunction::new()),
+            PreparedAccumulatorFactory::sum(),
+        );
+        self.register_prepared_builtin(
+            Arc::new(MaxFunction::new()),
+            PreparedAccumulatorFactory::max(),
+        );
+        self.register_prepared_builtin(
+            Arc::new(MinFunction::new()),
+            PreparedAccumulatorFactory::min(),
+        );
         self.register_function(Arc::new(MedianFunction::new()));
         self.register_function(Arc::new(LastRowFunction::new()));
         self.register_function(Arc::new(MergeAggFunction::new()));

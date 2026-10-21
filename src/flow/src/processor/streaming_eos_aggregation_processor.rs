@@ -58,7 +58,7 @@ impl StreamingEosStage {
     }
 
     pub(crate) fn clear(&mut self) {
-        self.worker.groups.clear();
+        self.worker.clear();
         self.opened_at = None;
         self.last_seen_at = None;
     }
