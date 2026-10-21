@@ -6,7 +6,6 @@ use crate::model::{Collection, RecordBatch};
 use crate::planner::physical::{AggregateCall, PhysicalStreamingAggregation};
 use datatypes::Value;
 use sqlparser::ast::Expr;
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -48,7 +47,10 @@ struct AggregationWorker {
     physical: Arc<PhysicalStreamingAggregation>,
     aggregate_registry: Arc<AggregateFunctionRegistry>,
     group_by_meta: Vec<GroupByMeta>,
-    groups: HashMap<String, GroupState>,
+    // Structured group keys: Value is Hash + Eq, so the map key is the
+    // evaluated key vector itself. A Debug-formatted String key here was a
+    // measured per-row hotspot (String allocation plus formatting).
+    groups: HashMap<Vec<Value>, GroupState>,
 }
 
 impl AggregationWorker {
@@ -68,28 +70,23 @@ impl AggregationWorker {
     fn update_groups(&mut self, tuple: &crate::model::Tuple) -> Result<(), String> {
         let key_values = self.evaluate_group_by(tuple)?;
         let row_call_args = self.evaluate_aggregate_args(tuple)?;
-        let key_repr = format!("{:?}", key_values);
 
-        match self.groups.entry(key_repr) {
-            Entry::Occupied(mut o) => {
-                let entry = o.get_mut();
-                apply_aggregate_updates(&mut entry.accumulators, &row_call_args)?;
-                entry.last_tuple = tuple.clone();
-                entry.key_values = key_values;
-            }
-            Entry::Vacant(v) => {
-                let accumulators = create_accumulators_static(
-                    &self.physical.aggregate_calls,
-                    self.aggregate_registry.as_ref(),
-                )?;
-                let mut state = GroupState {
-                    accumulators,
-                    last_tuple: tuple.clone(),
-                    key_values: key_values.clone(),
-                };
-                apply_aggregate_updates(&mut state.accumulators, &row_call_args)?;
-                v.insert(state);
-            }
+        if let Some(entry) = self.groups.get_mut(&key_values) {
+            apply_aggregate_updates(&mut entry.accumulators, &row_call_args)?;
+            entry.last_tuple = tuple.clone();
+            entry.key_values = key_values;
+        } else {
+            let accumulators = create_accumulators_static(
+                &self.physical.aggregate_calls,
+                self.aggregate_registry.as_ref(),
+            )?;
+            let mut state = GroupState {
+                accumulators,
+                last_tuple: tuple.clone(),
+                key_values: key_values.clone(),
+            };
+            apply_aggregate_updates(&mut state.accumulators, &row_call_args)?;
+            self.groups.insert(key_values, state);
         }
 
         Ok(())

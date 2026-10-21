@@ -78,6 +78,19 @@ finalizes exactly once when it receives a graceful terminal signal on the data c
 terminal signals and terminal signals received on the control channel are forwarded without
 finalizing aggregate state.
 
+### Group Key Equality
+
+Ordinary and streaming aggregation both group by the evaluated `Vec<Value>`,
+using `Value` equality and hashing rather than Debug-formatted strings. For
+each floating-point type, positive and negative zero belong to the same group,
+as do all NaN representations. NULL keys also belong to the same group.
+Values of different numeric types remain distinct keys; grouping does not
+implicitly coerce them to a common type.
+
+The rewrite therefore preserves group identity. Structured keys remove Debug
+formatting and its String allocation, but evaluating group keys still builds
+a value vector.
+
 ## Explain / Tests
 
 The rewrite is covered by table-driven planner explain tests in:

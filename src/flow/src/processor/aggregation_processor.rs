@@ -24,7 +24,6 @@ impl AggregationStage {
         stats: &ProcessorStats,
     ) -> Result<Option<Box<dyn Collection>>, String> {
         use crate::model::RecordBatch;
-        use std::collections::hash_map::Entry;
         use std::collections::HashMap;
 
         let num_rows = collection.num_rows();
@@ -38,7 +37,7 @@ impl AggregationStage {
         }
 
         let rows = collection.rows();
-        let mut groups: HashMap<String, GroupState> = HashMap::new();
+        let mut groups: HashMap<Vec<Value>, GroupState> = HashMap::new();
 
         for (row_idx, row) in rows.iter().enumerate() {
             let key_values = match Self::evaluate_group_by_for_tuple(physical_aggregation, row) {
@@ -57,35 +56,30 @@ impl AggregationStage {
                     }
                 };
 
-            let key_repr = format!("{:?}", key_values);
-            match groups.entry(key_repr) {
-                Entry::Occupied(mut o) => {
-                    let entry = o.get_mut();
-                    if let Err(message) =
-                        apply_aggregate_updates(&mut entry.accumulators, &row_call_args)
-                    {
-                        stats.record_error_logged("aggregation processor error", message);
-                        continue;
-                    }
-                    entry.last_row_idx = row_idx;
-                    entry.key_values = key_values;
+            if let Some(entry) = groups.get_mut(&key_values) {
+                if let Err(message) =
+                    apply_aggregate_updates(&mut entry.accumulators, &row_call_args)
+                {
+                    stats.record_error_logged("aggregation processor error", message);
+                    continue;
                 }
-                Entry::Vacant(v) => {
-                    let accumulators =
-                        Self::create_accumulators_static(physical_aggregation, aggregate_registry)?;
-                    let mut state = GroupState {
-                        accumulators,
-                        last_row_idx: row_idx,
-                        key_values: key_values.clone(),
-                    };
-                    if let Err(message) =
-                        apply_aggregate_updates(&mut state.accumulators, &row_call_args)
-                    {
-                        stats.record_error_logged("aggregation processor error", message);
-                        continue;
-                    }
-                    v.insert(state);
+                entry.last_row_idx = row_idx;
+                entry.key_values = key_values;
+            } else {
+                let accumulators =
+                    Self::create_accumulators_static(physical_aggregation, aggregate_registry)?;
+                let mut state = GroupState {
+                    accumulators,
+                    last_row_idx: row_idx,
+                    key_values: key_values.clone(),
+                };
+                if let Err(message) =
+                    apply_aggregate_updates(&mut state.accumulators, &row_call_args)
+                {
+                    stats.record_error_logged("aggregation processor error", message);
+                    continue;
                 }
+                groups.insert(key_values, state);
             }
         }
 

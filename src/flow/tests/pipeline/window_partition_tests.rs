@@ -86,8 +86,11 @@ struct CollectionWindowPartitionCase {
     assert_no_extra_output: bool,
 }
 
-async fn run_collection_window_partition_case(case: CollectionWindowPartitionCase) {
-    println!("Running test: {}", case.name);
+async fn run_collection_window_partition_case(
+    case: CollectionWindowPartitionCase,
+    expected_aggregation: Option<&str>,
+) {
+    println!("Running test: {}\nSQL: {}", case.name, case.sql);
 
     let instance = FlowInstance::new(flow::instance::FlowInstanceOptions::shared_current_runtime(
         "default", None,
@@ -111,6 +114,17 @@ async fn run_collection_window_partition_case(case: CollectionWindowPartitionCas
     instance
         .create_pipeline(CreatePipelineRequest::new(pipeline))
         .expect("create window partition pipeline");
+    if let Some(expected_aggregation) = expected_aggregation {
+        let explain = instance
+            .explain_pipeline(flow::ExplainPipelineTarget::Id(&pipeline_id))
+            .expect("explain window partition pipeline");
+        let plan = explain.to_pretty_string();
+        println!("{plan}");
+        assert!(plan.contains(expected_aggregation), "{plan}");
+        if expected_aggregation == "PhysicalAggregation" {
+            assert!(!plan.contains("PhysicalStreamingAggregation"), "{plan}");
+        }
+    }
     instance
         .start_pipeline(&pipeline_id)
         .await
@@ -344,7 +358,78 @@ async fn count_window_group_and_partition_pipeline_table_driven() {
     ];
 
     for case in cases {
-        run_collection_window_partition_case(case).await;
+        run_collection_window_partition_case(case, None).await;
+    }
+}
+
+#[tokio::test]
+async fn aggregation_float_group_keys_pipeline_table_driven() {
+    let key_cases = [
+        (
+            "float32",
+            vec![
+                Value::Float32(0.0),
+                Value::Float32(-0.0),
+                Value::Float32(f32::NAN),
+                Value::Float32(f32::from_bits(0xffc0_0001)),
+                Value::Null,
+                Value::Null,
+                Value::Float32(1.0),
+                Value::Float32(1.0),
+            ],
+        ),
+        (
+            "float64",
+            vec![
+                Value::Float64(0.0),
+                Value::Float64(-0.0),
+                Value::Float64(f64::NAN),
+                Value::Float64(f64::from_bits(0xfff8_0000_0000_0001)),
+                Value::Null,
+                Value::Null,
+                Value::Float64(1.0),
+                Value::Float64(1.0),
+            ],
+        ),
+    ];
+    for (name, keys) in key_cases {
+        for (sql, expected_aggregation) in [
+            (
+                "SELECT sum(a) AS s, count(*) AS n FROM stream GROUP BY countwindow(8), k ORDER BY sum(a)",
+                "PhysicalStreamingAggregation",
+            ),
+            (
+                // NDV is non-incremental, forcing the ordinary aggregation stage.
+                "SELECT sum(a) AS s, count(*) AS n FROM stream GROUP BY countwindow(8), k HAVING ndv(a) > 0 ORDER BY sum(a)",
+                "PhysicalAggregation",
+            ),
+        ] {
+            run_collection_window_partition_case(
+                CollectionWindowPartitionCase {
+                    name,
+                    sql,
+                    input_data: vec![
+                        ("k".to_string(), keys.clone()),
+                        (
+                            "a".to_string(),
+                            [1, 2, 4, 8, 16, 32, 64, 128]
+                                .into_iter()
+                                .map(Value::Int64)
+                                .collect(),
+                        ),
+                    ],
+                    expected_outputs: vec![serde_json::json!([
+                        {"s": 3, "n": 2},
+                        {"s": 12, "n": 2},
+                        {"s": 48, "n": 2},
+                        {"s": 192, "n": 2},
+                    ])],
+                    assert_no_extra_output: true,
+                },
+                Some(expected_aggregation),
+            )
+            .await;
+        }
     }
 }
 
@@ -530,7 +615,7 @@ async fn state_window_group_and_partition_pipeline_table_driven() {
     ];
 
     for case in cases {
-        run_collection_window_partition_case(case).await;
+        run_collection_window_partition_case(case, None).await;
     }
 }
 
@@ -594,7 +679,7 @@ async fn stateful_window_expression_pipeline_table_driven() {
     ];
 
     for case in cases {
-        run_collection_window_partition_case(case).await;
+        run_collection_window_partition_case(case, None).await;
     }
 }
 
@@ -755,6 +840,6 @@ async fn sliding_window_when_processing_time_pipeline_table_driven() {
     }];
 
     for case in cases {
-        run_collection_window_partition_case(case).await;
+        run_collection_window_partition_case(case, None).await;
     }
 }
