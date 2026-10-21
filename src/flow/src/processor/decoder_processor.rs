@@ -1,6 +1,6 @@
 //! Synchronous decoding from StreamData::Bytes into collections.
 
-use crate::codec::RecordDecoder;
+use crate::codec::{PreparedRecordDecoder, RecordDecoder};
 use crate::eventtime::{EventtimeParseError, EventtimeTypeParser};
 use crate::planner::decode_projection::DecodeProjection;
 use crate::processor::{ProcessorStats, StreamData};
@@ -22,16 +22,19 @@ pub struct EventtimeDecodeConfig {
 pub(crate) struct DecoderStage {
     decoder: Arc<dyn RecordDecoder>,
     shared_decode_state: Option<Arc<parking_lot::RwLock<AppliedDecodeState>>>,
-    decode_projection: Option<DecodeProjection>,
+    decode_projection: Option<Arc<DecodeProjection>>,
+    prepared: Option<Arc<dyn PreparedRecordDecoder>>,
     eventtime: Option<EventtimeDecodeConfig>,
 }
 
 impl DecoderStage {
     pub(crate) fn new(decoder: Arc<dyn RecordDecoder>) -> Self {
+        let prepared = decoder.prepare(None);
         Self {
             decoder,
             shared_decode_state: None,
             decode_projection: None,
+            prepared,
             eventtime: None,
         }
     }
@@ -39,11 +42,16 @@ impl DecoderStage {
         mut self,
         state: Arc<parking_lot::RwLock<AppliedDecodeState>>,
     ) -> Self {
+        let projection = Arc::clone(&state.read().decode_projection);
+        self.prepared = self.decoder.prepare(Some(&projection));
+        self.decode_projection = Some(projection);
         self.shared_decode_state = Some(state);
         self
     }
     pub(crate) fn with_decode_projection(mut self, projection: DecodeProjection) -> Self {
-        self.decode_projection = Some(projection);
+        self.prepared = self.decoder.prepare(Some(&projection));
+        self.decode_projection = Some(Arc::new(projection));
+        self.shared_decode_state = None;
         self
     }
     pub(crate) fn with_eventtime(mut self, eventtime: EventtimeDecodeConfig) -> Self {
@@ -51,18 +59,29 @@ impl DecoderStage {
         self
     }
 
-    pub(crate) fn process(&self, data: StreamData, stats: &ProcessorStats) -> Option<StreamData> {
+    pub(crate) fn process(
+        &mut self,
+        data: StreamData,
+        stats: &ProcessorStats,
+    ) -> Option<StreamData> {
         let batch = match data {
             StreamData::Bytes(payload) => {
-                let decoded = if let Some(projection) = &self.decode_projection {
-                    self.decoder
-                        .decode_with_projection(&payload, Some(projection))
-                } else if let Some(state) = &self.shared_decode_state {
+                if let Some(state) = &self.shared_decode_state {
                     let projection = Arc::clone(&state.read().decode_projection);
-                    self.decoder
-                        .decode_with_projection(&payload, Some(&projection))
+                    if !self
+                        .decode_projection
+                        .as_ref()
+                        .is_some_and(|previous| Arc::ptr_eq(previous, &projection))
+                    {
+                        self.prepared = self.decoder.prepare(Some(&projection));
+                        self.decode_projection = Some(projection);
+                    }
+                }
+                let decoded = if let Some(prepared) = &self.prepared {
+                    prepared.decode(&payload)
                 } else {
-                    self.decoder.decode(&payload)
+                    self.decoder
+                        .decode_with_projection(&payload, self.decode_projection.as_deref())
                 };
                 match decoded {
                     Ok(batch) => batch,
@@ -179,6 +198,85 @@ mod tests {
     use crate::model::{Message, RecordBatch, Tuple};
     use datatypes::Value;
     use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn prepared_json_follows_projection_snapshots_and_reuses_stable_state() {
+        use crate::codec::JsonDecoder;
+        use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema, StringType};
+
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("s".into(), "a".into(), ConcreteDatatype::Int64(Int64Type)),
+            ColumnSchema::new("s".into(), "b".into(), ConcreteDatatype::String(StringType)),
+        ]));
+        let decoder: Arc<dyn RecordDecoder> =
+            Arc::new(JsonDecoder::new("s", schema, Default::default()));
+        let stats = ProcessorStats::new("test", "prepared-json", "decoder");
+        let payload = br#"{"b":"text","a":7}"#;
+        let check = |stage: &mut DecoderStage, projection: Option<&DecodeProjection>| {
+            let expected = decoder
+                .decode_with_projection(payload, projection)
+                .expect("decode");
+            let output = stage
+                .process(StreamData::bytes(payload.to_vec()), &stats)
+                .expect("output");
+            let StreamData::Collection(output) = output else {
+                panic!("expected collection");
+            };
+            assert_eq!(
+                format!("{:?}", output.rows()[0].messages),
+                format!("{:?}", expected.rows()[0].messages),
+            );
+        };
+
+        let mut full = DecoderStage::new(Arc::clone(&decoder));
+        let prepared = full.prepared.clone().expect("prepared JSON");
+        for _ in 0..2 {
+            check(&mut full, None);
+            assert!(Arc::ptr_eq(
+                full.prepared.as_ref().expect("prepared"),
+                &prepared
+            ));
+        }
+
+        let first = DecodeProjection::from_top_level_columns_with_version(&["a".into()], 1);
+        let mut fixed =
+            DecoderStage::new(Arc::clone(&decoder)).with_decode_projection(first.clone());
+        let prepared = fixed.prepared.clone().expect("prepared fixed projection");
+        for _ in 0..2 {
+            check(&mut fixed, Some(&first));
+            assert!(Arc::ptr_eq(
+                fixed.prepared.as_ref().expect("prepared"),
+                &prepared
+            ));
+        }
+
+        let state = Arc::new(parking_lot::RwLock::new(AppliedDecodeState {
+            decoding_columns: vec!["a".into()],
+            decode_projection: Arc::new(first.clone()),
+            slot_version: 0,
+        }));
+        let mut shared =
+            DecoderStage::new(Arc::clone(&decoder)).with_shared_decode_state(Arc::clone(&state));
+        let previous = shared.prepared.clone().expect("prepared initial snapshot");
+        check(&mut shared, Some(&first));
+        assert!(Arc::ptr_eq(
+            shared.prepared.as_ref().expect("prepared"),
+            &previous
+        ));
+
+        // A different snapshot with the same numeric version must replace the plan.
+        let second = DecodeProjection::from_top_level_columns_with_version(&["b".into()], 1)
+            .with_output_slots(Arc::from(vec![Arc::<str>::from("b")]));
+        state.write().decode_projection = Arc::new(second.clone());
+        check(&mut shared, Some(&second));
+        let updated = shared.prepared.clone().expect("prepared updated snapshot");
+        assert!(!Arc::ptr_eq(&previous, &updated));
+        check(&mut shared, Some(&second));
+        assert!(Arc::ptr_eq(
+            shared.prepared.as_ref().expect("prepared"),
+            &updated
+        ));
+    }
 
     #[test]
     fn apply_eventtime_updates_collection_rows() {

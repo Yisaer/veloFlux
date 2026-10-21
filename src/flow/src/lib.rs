@@ -48,8 +48,8 @@ pub use codec::{
     AesGcmStreamWriter, CodecError, CompressError, CompressWriter, CompressionCodec, CsvEncoder,
     DecoderRegistry, EncodeError, EncoderRegistry, EncryptError, EncryptWriter,
     EncryptionAlgorithm, InlineEncryptionKey, JsonDecoder, JsonEncoder, Merger, MergerRegistry,
-    ProtoDescriptorBundle, ProtoFieldInfo, ProtobufDecoder, RecordDecoder, SecretBytes,
-    SecretEncoding, SinkEncoder, SinkEncoderFactory, SinkEncryptionConfig,
+    PreparedRecordDecoder, ProtoDescriptorBundle, ProtoFieldInfo, ProtobufDecoder, RecordDecoder,
+    SecretBytes, SecretEncoding, SinkEncoder, SinkEncoderFactory, SinkEncryptionConfig,
 };
 pub use connector::{MqttProtocolVersion, MqttUserProperty};
 pub use datatypes::{

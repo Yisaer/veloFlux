@@ -10,7 +10,7 @@ pub use compress::{CompressError, CompressWriter, CompressionCodec};
 pub use decoder::{
     proto::ProtobufDecoder,
     proto_bundle::{ProtoDescriptorBundle, ProtoFieldInfo},
-    CodecError, JsonDecoder, RecordDecoder,
+    CodecError, JsonDecoder, PreparedRecordDecoder, RecordDecoder,
 };
 pub use encoder::{
     CsvEncoder, EncodeError, JsonEncoder, ProtobufEncoder, SinkEncoder, SinkEncoderFactory,

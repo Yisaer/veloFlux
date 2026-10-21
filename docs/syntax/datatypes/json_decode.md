@@ -52,6 +52,24 @@ The native conversion path maps JSON values to the closest internal value shape:
 - JSON array -> `list`
 - JSON object -> `struct`
 
+These native conversions also apply to unexpected input shapes. For example, a JSON string in a
+`float64` or `int32` column remains a string value. The flat streaming decoder and the nested
+DOM-based decoder use the same conversion rules.
+
+## Decode Preparation
+
+The JSON decoder prepares immutable execution state for the schema and projection snapshot.
+Fixed projections are prepared during stage setup. Shared streams replace prepared state when
+their projection snapshot changes, including when the numeric version is unchanged. Stable
+snapshots reuse their plan without rebuilding field mappings or allocating plan vectors per
+message. Custom decoders can keep the existing per-call projection interface.
+
+Flat schemas decode directly into slot-ordered row values. Nested schemas and nested projections
+use the DOM path with the same scalar conversion functions.
+
+See [the decode cost comparison](../../runtime/sources/json_decode_performance.md) for a
+reproducible release-mode comparison and its measurement scope.
+
 ## Struct Decode
 
 For a `struct` column:
