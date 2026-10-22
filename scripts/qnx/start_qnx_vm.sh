@@ -165,7 +165,7 @@ if [ "$skip_build" -eq 0 ]; then
     grep -iE 'hypervisor|virtualization|qemu|virtio' "$qsc_output" || echo "<none>"
     rm -f "$qsc_output"
   }
-  qsc -addLicenseKey "$QNX_LICENSE_KEY" -listLicenseKeys \
+  qsc -addLicenseKey "$QNX_LICENSE_KEY" \
     -myqnx.user "${QNX_MYQNX_USER:-}" -myqnx.password "${QNX_MYQNX_PASSWORD:-}"
   qnx_license_active=1
 
@@ -173,7 +173,7 @@ if [ "$skip_build" -eq 0 ]; then
     qsc -setDebugSymbolsEnabled=false -mirrorBaseline "$qnx_mirror_baseline" \
       -myqnx.user "${QNX_MYQNX_USER:-}" -myqnx.password "${QNX_MYQNX_PASSWORD:-}"
     if ! qsc -setDebugSymbolsEnabled=false -destination "$qnx_install_dir" \
-      -installPackage "$qemuvirt_package" -listLicenseKeys \
+      -installPackage "$qemuvirt_package" \
       -myqnx.user "${QNX_MYQNX_USER:-}" -myqnx.password "${QNX_MYQNX_PASSWORD:-}"; then
       list_virtualization_units
       exit 1
@@ -181,7 +181,7 @@ if [ "$skip_build" -eq 0 ]; then
   fi
   if [ "$arch" != "x86_64" ] && ! find "$QNX_TARGET" -type f -path '*/sbin/devb-virtio' | grep -q .; then
     qsc -setDebugSymbolsEnabled=false -destination "$qnx_install_dir" \
-      -installPackage "$virtio_driver_package" -listLicenseKeys \
+      -installPackage "$virtio_driver_package" \
       -myqnx.user "${QNX_MYQNX_USER:-}" -myqnx.password "${QNX_MYQNX_PASSWORD:-}"
   fi
   command -v mkqnximage >/dev/null 2>&1 || export PATH="$(dirname "$(find "$qnx_install_dir" -type f -name mkqnximage -perm -111 | head -n 1)"):$PATH"

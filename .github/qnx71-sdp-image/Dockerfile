@@ -28,7 +28,7 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v2.76.2/gh_2.76.2_li
     && rm -rf /tmp/gh_2.76.2_linux_amd64
 
 RUN --mount=type=secret,id=qnx_installer_token \
-    set -eux; \
+    set -eu; \
     export GH_TOKEN="$(cat /run/secrets/qnx_installer_token)"; \
     installer="/tmp/qnx-setup-linux.run"; \
     gh release download "$QNX_INSTALLER_RELEASE" \
@@ -49,7 +49,7 @@ RUN --mount=type=secret,id=qnx_installer_token \
 RUN --mount=type=secret,id=qnx_license_key \
     --mount=type=secret,id=qnx_myqnx_user \
     --mount=type=secret,id=qnx_myqnx_password \
-    set -eux; \
+    set -eu; \
     qsc_bin="$QNX_QSC_DIR/qnxsoftwarecenter/qnxsoftwarecenter_clt"; \
     if [ ! -x "$qsc_bin" ]; then \
       qsc_bin="$(find "$QNX_QSC_DIR" -type f -name qnxsoftwarecenter_clt -perm -111 | head -n 1)"; \
@@ -61,8 +61,7 @@ RUN --mount=type=secret,id=qnx_license_key \
     "$qsc_bin" \
       -addLicenseKey "$qnx_license_key" \
       -myqnx.user "$qnx_myqnx_user" \
-      -myqnx.password "$qnx_myqnx_password" \
-      -listLicenseKeys; \
+      -myqnx.password "$qnx_myqnx_password"; \
     "$qsc_bin" \
       -setDebugSymbolsEnabled=false \
       -mirrorBaseline "$QNX_MIRROR_BASELINE" \
@@ -73,7 +72,6 @@ RUN --mount=type=secret,id=qnx_license_key \
       -cleanInstall \
       -destination "$QNX_INSTALL_DIR" \
       -installBaseline "$QNX_BASELINE" \
-      -listLicenseKeys \
       -myqnx.user "$qnx_myqnx_user" \
       -myqnx.password "$qnx_myqnx_password"; \
     deactivated=false; \
