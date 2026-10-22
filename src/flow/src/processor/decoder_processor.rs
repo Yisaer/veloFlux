@@ -1,4 +1,4 @@
-//! Synchronous decoding from StreamData::Bytes into collections.
+//! Synchronous decoding from raw byte payloads into collections.
 
 use crate::codec::{PreparedRecordDecoder, RecordDecoder};
 use crate::eventtime::{EventtimeParseError, EventtimeTypeParser};
@@ -28,6 +28,20 @@ pub(crate) struct DecoderStage {
 }
 
 impl DecoderStage {
+    fn refresh_projection(&mut self) {
+        if let Some(state) = &self.shared_decode_state {
+            let projection = Arc::clone(&state.read().decode_projection);
+            if !self
+                .decode_projection
+                .as_ref()
+                .is_some_and(|previous| Arc::ptr_eq(previous, &projection))
+            {
+                self.prepared = self.decoder.prepare(Some(&projection));
+                self.decode_projection = Some(projection);
+            }
+        }
+    }
+
     pub(crate) fn new(decoder: Arc<dyn RecordDecoder>) -> Self {
         let prepared = decoder.prepare(None);
         Self {
@@ -66,17 +80,7 @@ impl DecoderStage {
     ) -> Option<StreamData> {
         let batch = match data {
             StreamData::Bytes(payload) => {
-                if let Some(state) = &self.shared_decode_state {
-                    let projection = Arc::clone(&state.read().decode_projection);
-                    if !self
-                        .decode_projection
-                        .as_ref()
-                        .is_some_and(|previous| Arc::ptr_eq(previous, &projection))
-                    {
-                        self.prepared = self.decoder.prepare(Some(&projection));
-                        self.decode_projection = Some(projection);
-                    }
-                }
+                self.refresh_projection();
                 let decoded = if let Some(prepared) = &self.prepared {
                     prepared.decode(&payload)
                 } else {
@@ -89,6 +93,45 @@ impl DecoderStage {
                         stats.record_error_logged(
                             "decoder processor error",
                             format!("decode error: {error}"),
+                        );
+                        return None;
+                    }
+                }
+            }
+            StreamData::BytesBatch(payloads) => {
+                if payloads.is_empty() {
+                    return None;
+                }
+                self.refresh_projection();
+                let mut rows = Vec::new();
+                let mut decoded_any = false;
+                for payload in payloads {
+                    let decoded = if let Some(prepared) = &self.prepared {
+                        prepared.decode(&payload)
+                    } else {
+                        self.decoder
+                            .decode_with_projection(&payload, self.decode_projection.as_deref())
+                    };
+                    match decoded {
+                        Ok(batch) => {
+                            decoded_any = true;
+                            rows.extend(batch.into_rows());
+                        }
+                        Err(error) => stats.record_error_logged(
+                            "decoder processor error",
+                            format!("decode error: {error}"),
+                        ),
+                    }
+                }
+                if !decoded_any {
+                    return None;
+                }
+                match crate::model::RecordBatch::new(rows) {
+                    Ok(batch) => batch,
+                    Err(error) => {
+                        stats.record_error_logged(
+                            "decoder processor error",
+                            format!("decode batch build error: {error}"),
                         );
                         return None;
                     }
@@ -306,5 +349,76 @@ mod tests {
             batch.rows()[0].timestamp,
             UNIX_EPOCH + Duration::from_millis(1_500)
         );
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+    use crate::codec::JsonDecoder;
+    use datatypes::{ColumnSchema, ConcreteDatatype, Int64Type, Schema, Value};
+
+    #[test]
+    fn batch_decode_preserves_rows_and_recovers_after_invalid_payloads() {
+        let cases = [
+            (
+                vec![
+                    br#"{"v":1}"#.to_vec(),
+                    b"invalid".to_vec(),
+                    br#"[{"v":2},{"v":3}]"#.to_vec(),
+                ],
+                vec![1, 2, 3],
+                1,
+                true,
+            ),
+            (
+                vec![b"invalid".to_vec(), b"also invalid".to_vec()],
+                vec![],
+                2,
+                false,
+            ),
+            (vec![], vec![], 0, false),
+            (
+                vec![serde_json::to_vec(
+                    &(0..1100)
+                        .map(|v| serde_json::json!({"v":v}))
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap()],
+                (0..1100).collect(),
+                0,
+                true,
+            ),
+        ];
+        for (payloads, expected, errors, emits) in cases {
+            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+                "s".into(),
+                "v".into(),
+                ConcreteDatatype::Int64(Int64Type),
+            )]));
+            let mut stage =
+                DecoderStage::new(Arc::new(JsonDecoder::new("s", schema, Default::default())));
+            let stats = ProcessorStats::new("test", "batch-decode", "decoder");
+            let output = stage.process(
+                StreamData::bytes_batch(payloads.into_iter().map(Into::into).collect()),
+                &stats,
+            );
+            assert_eq!(stats.snapshot().error_count, errors);
+            assert_eq!(output.is_some(), emits);
+            if let Some(output) = output {
+                let StreamData::Collection(collection) = output else {
+                    panic!("expected decoded collection");
+                };
+                let values: Vec<_> = collection
+                    .rows()
+                    .iter()
+                    .map(|row| row.value_by_index("s", 0).unwrap().clone())
+                    .collect();
+                assert_eq!(
+                    values,
+                    expected.into_iter().map(Value::Int64).collect::<Vec<_>>()
+                );
+            }
+        }
     }
 }

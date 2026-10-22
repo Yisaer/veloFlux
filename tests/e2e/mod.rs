@@ -1,5 +1,6 @@
 mod file_source_checkpoint;
 mod http_sink_e2e;
+mod mqtt_source_batching;
 #[cfg(feature = "nng_pubsub")]
 mod nng_shared_stream;
 #[cfg(feature = "onnx")]

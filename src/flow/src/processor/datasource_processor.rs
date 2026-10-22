@@ -1,7 +1,8 @@
 //! DataSourceProcessor - reads raw payloads from connectors.
 //!
 //! This processor reads data from a data source and sends it downstream as
-//! `StreamData::Bytes`. Decoding is handled by a dedicated decoder processor.
+//! `StreamData::Bytes` or `StreamData::BytesBatch`. Decoding is handled by a
+//! dedicated decoder processor.
 
 use crate::checkpoint::{
     CheckpointMode, CheckpointSnapshotCollector, CheckpointState, OperatorSnapshot,
@@ -253,6 +254,17 @@ impl DataSourceProcessor {
                                 context.stats,
                                 context.data_metrics,
                                 StreamData::bytes(bytes),
+                            )
+                            .await?;
+                        }
+                        Some(Ok(ConnectorEvent::PayloadBatch(payloads))) => {
+                            Self::forward_data(
+                                context.processor_id,
+                                context.output,
+                                context.channel_capacity,
+                                context.stats,
+                                context.data_metrics,
+                                StreamData::bytes_batch(payloads),
                             )
                             .await?;
                         }
@@ -691,6 +703,17 @@ impl Processor for DataSourceProcessor {
                                                 )
                                                 .await?;
                                             }
+                                            Ok(ConnectorEvent::PayloadBatch(payloads)) => {
+                                                Self::forward_data(
+                                                    &processor_id,
+                                                    &output,
+                                                    channel_capacities.data,
+                                                    stats.as_ref(),
+                                                    &data_metrics,
+                                                    StreamData::bytes_batch(payloads),
+                                                )
+                                                .await?;
+                                            }
                                             Ok(ConnectorEvent::Collection(collection)) => {
                                                 Self::forward_data(
                                                     &processor_id,
@@ -797,6 +820,17 @@ impl Processor for DataSourceProcessor {
                                     stats.as_ref(),
                                     &data_metrics,
                                     StreamData::bytes(bytes),
+                                )
+                                .await?;
+                            }
+                            Some(Ok(ConnectorEvent::PayloadBatch(payloads))) => {
+                                Self::forward_data(
+                                    &processor_id,
+                                    &output,
+                                    channel_capacities.data,
+                                    stats.as_ref(),
+                                    &data_metrics,
+                                    StreamData::bytes_batch(payloads),
                                 )
                                 .await?;
                             }

@@ -37,6 +37,10 @@ pub fn mqtt_source_messages_out_total() -> &'static IntCounterVec {
     mqtt_source::messages_out_total()
 }
 
+pub fn mqtt_source_batches_out_total() -> &'static IntCounterVec {
+    mqtt_source::batches_out_total()
+}
+
 pub fn mqtt_sink_messages_in_total() -> &'static IntCounterVec {
     mqtt_sink::messages_in_total()
 }

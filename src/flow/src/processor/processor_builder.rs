@@ -1571,11 +1571,15 @@ fn create_processor_from_plan_node(
             } else {
                 processor.disable_result_forwarding();
             }
+            let connector_id = format!(
+                "pipeline:{}/{}_sink_connector",
+                context.pipeline_id, sink_plan.connector.sink_id
+            );
             let connector_impl = context
                 .connector_registry()?
                 .instantiate_sink(
                     sink_plan.connector.connector.kind(),
-                    &sink_plan.connector.sink_id,
+                    &connector_id,
                     &sink_plan.connector.connector,
                     context.flow_instance_id(),
                     context.mqtt_clients_ref()?,

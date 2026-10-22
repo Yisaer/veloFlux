@@ -59,6 +59,13 @@ pub fn log_received_data(processor_id: &str, data: &StreamData) {
                 "received bytes"
             );
         }
+        StreamData::BytesBatch(payloads) => {
+            tracing::debug!(
+                processor_id = %processor_id,
+                messages = payloads.len(),
+                "received bytes batch"
+            );
+        }
         StreamData::Control(signal) => {
             tracing::debug!(
                 processor_id = %processor_id,

@@ -207,6 +207,8 @@ pub enum StreamData {
     },
     /// Raw bytes that still need to be decoded into a collection
     Bytes(Bytes),
+    /// Raw payloads decoded in order into a single collection.
+    BytesBatch(Vec<Bytes>),
     /// Control signal for flow management
     Control(ControlSignal),
     /// Watermark for time progression
@@ -278,6 +280,11 @@ impl StreamData {
         StreamData::Bytes(payload.into())
     }
 
+    /// Create a batch of raw byte payloads.
+    pub fn bytes_batch(payloads: Vec<Bytes>) -> Self {
+        StreamData::BytesBatch(payloads)
+    }
+
     /// Create encoded delivery event.
     pub fn encoded_delivery(flags: EncodedDeliveryFlags, bytes: impl Into<Bytes>) -> Self {
         StreamData::EncodedDelivery {
@@ -328,7 +335,10 @@ impl StreamData {
     pub fn is_data(&self) -> bool {
         matches!(
             self,
-            StreamData::Collection(_) | StreamData::Bytes(_) | StreamData::EncodedDelivery { .. }
+            StreamData::Collection(_)
+                | StreamData::Bytes(_)
+                | StreamData::BytesBatch(_)
+                | StreamData::EncodedDelivery { .. }
         )
     }
 
@@ -403,6 +413,7 @@ impl StreamData {
         match self {
             StreamData::Collection(collection) => Some(collection.num_rows() as u64),
             StreamData::Bytes(_)
+            | StreamData::BytesBatch(_)
             | StreamData::EncodedDelivery { .. }
             | StreamData::Control(_)
             | StreamData::Watermark(_)
@@ -424,6 +435,9 @@ impl StreamData {
                 )
             }
             StreamData::Bytes(payload) => format!("Bytes payload ({} bytes)", payload.len()),
+            StreamData::BytesBatch(payloads) => {
+                format!("Bytes batch ({} payloads)", payloads.len())
+            }
             StreamData::Control(signal) => format!("Control signal: {:?}", signal),
             StreamData::Watermark(ts) => format!("Watermark at {:?}", ts),
             StreamData::Error(error) => format!("Error: {}", error),

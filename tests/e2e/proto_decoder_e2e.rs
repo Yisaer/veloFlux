@@ -17,12 +17,12 @@ use tokio::net::TcpStream;
 
 // ── embedded MQTT broker helpers ──────────────────────────────────
 
-struct EmbeddedMqttBroker {
+pub(super) struct EmbeddedMqttBroker {
     port: u16,
 }
 
 impl EmbeddedMqttBroker {
-    async fn start() -> Self {
+    pub(super) async fn start() -> Self {
         let port = reserve_local_port();
         let (startup_tx, startup_rx) = mpsc::channel();
 
@@ -83,7 +83,7 @@ impl EmbeddedMqttBroker {
         }
     }
 
-    fn broker_url(&self) -> String {
+    pub(super) fn broker_url(&self) -> String {
         format!("tcp://127.0.0.1:{}", self.port)
     }
 }

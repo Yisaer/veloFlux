@@ -33,6 +33,24 @@ static MQTT_SOURCE_MESSAGES_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
     )
 });
 
+static MQTT_SOURCE_BATCHES_OUT_TOTAL: Lazy<IntCounterVec> = Lazy::new(|| {
+    register_collector(
+        IntCounterVec::new(
+            opts(
+                "mqtt_source",
+                "batches_out_total",
+                "Number of payload batches successfully emitted downstream by MQTT sources, including singleton batches",
+            ),
+            &[FLOW_INSTANCE_LABEL, CONNECTOR_LABEL],
+        )
+        .expect("create mqtt source batches_out counter vec"),
+    )
+});
+
+pub fn batches_out_total() -> &'static IntCounterVec {
+    &MQTT_SOURCE_BATCHES_OUT_TOTAL
+}
+
 pub fn messages_in_total() -> &'static IntCounterVec {
     &MQTT_SOURCE_MESSAGES_IN_TOTAL
 }

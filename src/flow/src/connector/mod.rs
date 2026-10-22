@@ -43,6 +43,8 @@ pub enum ConnectorEvent {
     /// Kept as shared `Bytes` end to end: MQTT/rumqttc already hands out
     /// `Bytes`, so no per-packet copy happens on ingest.
     Payload(bytes::Bytes),
+    /// Consecutive MQTT payloads already buffered by the client event loop.
+    PayloadBatch(Vec<bytes::Bytes>),
     /// Decoded collection received from the source.
     Collection(Box<dyn Collection>),
     /// The connector has no more data to produce.
@@ -57,6 +59,10 @@ impl std::fmt::Debug for ConnectorEvent {
             ConnectorEvent::Payload(payload) => f
                 .debug_tuple("Payload")
                 .field(&format_args!("len={}", payload.len()))
+                .finish(),
+            ConnectorEvent::PayloadBatch(payloads) => f
+                .debug_tuple("PayloadBatch")
+                .field(&format_args!("messages={}", payloads.len()))
                 .finish(),
             ConnectorEvent::Collection(_) => f.debug_tuple("Collection").finish(),
             ConnectorEvent::EndOfStream => f.write_str("EndOfStream"),

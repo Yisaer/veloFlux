@@ -169,13 +169,30 @@ impl StrategyState {
     fn on_sampled_data(&mut self, data: StreamData) -> Result<(), ProcessorError> {
         match self {
             StrategyState::Latest { latest } => {
-                *latest = Some(data);
+                *latest = Some(match data {
+                    StreamData::BytesBatch(mut payloads) => match payloads.pop() {
+                        Some(payload) => StreamData::Bytes(payload),
+                        None => return Ok(()),
+                    },
+                    other => other,
+                });
                 Ok(())
             }
             StrategyState::Packer { merger, .. } => match data {
                 StreamData::Bytes(bytes) => merger
                     .merge(&bytes)
                     .map_err(|e| ProcessorError::ProcessingError(e.to_string())),
+                StreamData::BytesBatch(payloads) => {
+                    let mut first_error = None;
+                    for payload in payloads {
+                        if let Err(error) = merger.merge(&payload) {
+                            first_error.get_or_insert_with(|| {
+                                ProcessorError::ProcessingError(error.to_string())
+                            });
+                        }
+                    }
+                    first_error.map_or(Ok(()), Err)
+                }
                 _ => {
                     tracing::warn!("Packer received non-bytes data: variant mismatch");
                     Ok(())
@@ -227,7 +244,10 @@ impl StrategyState {
 fn should_sample_data(item: &StreamData) -> bool {
     matches!(
         item,
-        StreamData::Bytes(_) | StreamData::Collection(_) | StreamData::EncodedDelivery { .. }
+        StreamData::Bytes(_)
+            | StreamData::BytesBatch(_)
+            | StreamData::Collection(_)
+            | StreamData::EncodedDelivery { .. }
     )
 }
 
@@ -347,5 +367,74 @@ mod tests {
             }
             _ => panic!("Expected Packer strategy"),
         }
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+    use crate::codec::CodecError;
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingMerger {
+        attempts: Arc<Mutex<Vec<Vec<u8>>>>,
+        successful: Vec<u8>,
+    }
+
+    impl Merger for RecordingMerger {
+        fn merge(&mut self, data: &[u8]) -> Result<(), CodecError> {
+            self.attempts.lock().unwrap().push(data.to_vec());
+            if data == b"bad" {
+                return Err(CodecError::Other("bad frame".into()));
+            }
+            self.successful.extend_from_slice(data);
+            Ok(())
+        }
+        fn trigger(&mut self) -> Result<Option<Vec<u8>>, CodecError> {
+            Ok(Some(std::mem::take(&mut self.successful)))
+        }
+    }
+
+    #[test]
+    fn latest_keeps_last_payload_and_empty_batch_does_not_clear_it() {
+        let mut state = StrategyState::Latest { latest: None };
+        state
+            .on_sampled_data(StreamData::bytes_batch(vec!["first".into(), "last".into()]))
+            .unwrap();
+        state
+            .on_sampled_data(StreamData::bytes_batch(vec![]))
+            .unwrap();
+        let Some(StreamData::Bytes(bytes)) = state.on_tick() else {
+            panic!("expected latest payload")
+        };
+        assert_eq!(bytes.as_ref(), b"last");
+        assert!(state.on_tick().is_none());
+    }
+
+    #[test]
+    fn packer_attempts_every_payload_in_order_and_preserves_successful_merges() {
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let mut state = StrategyState::Packer {
+            merger: Box::new(RecordingMerger {
+                attempts: attempts.clone(),
+                successful: Vec::new(),
+            }),
+            applied_decode_state: None,
+        };
+        assert!(state
+            .on_sampled_data(StreamData::bytes_batch(vec![
+                "a".into(),
+                "bad".into(),
+                "c".into()
+            ]))
+            .is_err());
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            vec![b"a".to_vec(), b"bad".to_vec(), b"c".to_vec()]
+        );
+        let Some(StreamData::Bytes(bytes)) = state.on_tick() else {
+            panic!("expected merged payload")
+        };
+        assert_eq!(bytes.as_ref(), b"ac");
     }
 }

@@ -404,6 +404,40 @@ impl MqttClient {
 }
 
 impl MqttEventLoop {
+    /// Drain only consecutive PUBLISH events from the current network read.
+    /// Never poll the socket or pass a non-PUBLISH event while forming a batch.
+    pub(crate) fn drain_buffered_publishes(&mut self, max_messages: usize) -> Vec<Bytes> {
+        let mut payloads = Vec::new();
+        while payloads.len() + 1 < max_messages {
+            let payload = match self {
+                Self::V3(event_loop) => {
+                    let payload = match event_loop.state.events.front_mut() {
+                        Some(V3Event::Incoming(V3Packet::Publish(publish))) => {
+                            std::mem::take(&mut publish.payload)
+                        }
+                        _ => break,
+                    };
+                    event_loop.state.events.pop_front();
+                    payload
+                }
+                Self::V5(event_loop) => {
+                    let payload = match event_loop.state.events.front_mut() {
+                        Some(V5Event::Incoming(V5Packet::Publish(publish)))
+                            if std::str::from_utf8(&publish.topic).is_ok() =>
+                        {
+                            std::mem::take(&mut publish.payload)
+                        }
+                        _ => break,
+                    };
+                    event_loop.state.events.pop_front();
+                    payload
+                }
+            };
+            payloads.push(payload);
+        }
+        payloads
+    }
+
     pub(crate) async fn poll(&mut self) -> Result<MqttEvent, MqttConnectionError> {
         match self {
             Self::V3(event_loop) => match event_loop.poll().await {
@@ -525,5 +559,161 @@ mod tests {
         .expect("oversized MQTT 5 packet limit must fail");
 
         assert!(error.contains("exceeds"));
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+
+    fn event_loop(protocol: MqttProtocolVersion) -> MqttEventLoop {
+        let options = MqttOptions::new(
+            protocol,
+            "batch-test".into(),
+            "localhost",
+            1883,
+            1024 * 1024,
+        )
+        .unwrap();
+        let (_client, events) = MqttClient::new(options, 4);
+        events
+    }
+
+    fn push(events: &mut MqttEventLoop, payload: Bytes) {
+        match events {
+            MqttEventLoop::V3(events) => {
+                events
+                    .state
+                    .events
+                    .push_back(V3Event::Incoming(V3Packet::Publish(
+                        rumqttc::Publish::from_bytes("test", V3Qos::AtMostOnce, payload),
+                    )))
+            }
+            MqttEventLoop::V5(events) => {
+                events
+                    .state
+                    .events
+                    .push_back(V5Event::Incoming(V5Packet::Publish(
+                        rumqttc::v5::mqttbytes::v5::Publish::new(
+                            "test",
+                            V5Qos::AtMostOnce,
+                            payload,
+                            None,
+                        ),
+                    )))
+            }
+        }
+    }
+
+    fn remaining(events: &MqttEventLoop) -> usize {
+        match events {
+            MqttEventLoop::V3(events) => events.state.events.len(),
+            MqttEventLoop::V5(events) => events.state.events.len(),
+        }
+    }
+
+    #[test]
+    fn drains_in_order_and_counts_first_publish_toward_limit() {
+        for protocol in [MqttProtocolVersion::V3, MqttProtocolVersion::V5] {
+            for (queued, limit) in [(0, 1024), (3, 1024), (3, 1), (1024, 1024)] {
+                let mut events = event_loop(protocol);
+                let payloads: Vec<_> = (0..queued)
+                    .map(|index| Bytes::from(index.to_string()))
+                    .collect();
+                for payload in &payloads {
+                    push(&mut events, payload.clone());
+                }
+                let count = queued.min(limit - 1);
+                assert_eq!(events.drain_buffered_publishes(limit), payloads[..count]);
+                assert_eq!(remaining(&events), queued - count);
+                assert_eq!(events.drain_buffered_publishes(1024), payloads[count..]);
+                assert_eq!(remaining(&events), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_event_stops_drain_without_consuming_or_skipping_it() {
+        for protocol in [MqttProtocolVersion::V3, MqttProtocolVersion::V5] {
+            let mut events = event_loop(protocol);
+            push(&mut events, Bytes::from_static(b"before"));
+            match &mut events {
+                MqttEventLoop::V3(events) => events
+                    .state
+                    .events
+                    .push_back(V3Event::Incoming(V3Packet::PingResp)),
+                MqttEventLoop::V5(events) => {
+                    events
+                        .state
+                        .events
+                        .push_back(V5Event::Incoming(V5Packet::PingResp(
+                            rumqttc::v5::mqttbytes::v5::PingResp,
+                        )))
+                }
+            }
+            push(&mut events, Bytes::from_static(b"after"));
+            assert_eq!(
+                events.drain_buffered_publishes(1024),
+                vec![Bytes::from_static(b"before")]
+            );
+            assert!(events.drain_buffered_publishes(1024).is_empty());
+            assert_eq!(remaining(&events), 2);
+            match &mut events {
+                MqttEventLoop::V3(events) => assert!(matches!(
+                    events.state.events.pop_front(),
+                    Some(V3Event::Incoming(V3Packet::PingResp))
+                )),
+                MqttEventLoop::V5(events) => assert!(matches!(
+                    events.state.events.pop_front(),
+                    Some(V5Event::Incoming(V5Packet::PingResp(_)))
+                )),
+            }
+            assert_eq!(
+                events.drain_buffered_publishes(1024),
+                vec![Bytes::from_static(b"after")]
+            );
+        }
+    }
+
+    #[test]
+    fn large_payloads_are_not_limited_by_aggregate_bytes() {
+        for protocol in [MqttProtocolVersion::V3, MqttProtocolVersion::V5] {
+            let mut events = event_loop(protocol);
+            let payload = Bytes::from(vec![42; 200 * 1024]);
+            push(&mut events, payload.clone());
+            push(&mut events, payload.clone());
+            let drained = events.drain_buffered_publishes(1024);
+            assert_eq!(drained, vec![payload.clone(), payload.clone()]);
+            assert!(drained.iter().all(|item| item.as_ptr() == payload.as_ptr()));
+            assert_eq!(remaining(&events), 0);
+        }
+    }
+
+    #[test]
+    fn invalid_v5_topic_is_left_for_normal_poll_error() {
+        let mut events = event_loop(MqttProtocolVersion::V5);
+        let mut invalid = rumqttc::v5::mqttbytes::v5::Publish::new(
+            "test",
+            V5Qos::AtMostOnce,
+            Bytes::from_static(b"invalid"),
+            None,
+        );
+        invalid.topic = Bytes::from_static(&[0xff]);
+        let MqttEventLoop::V5(inner) = &mut events else {
+            unreachable!()
+        };
+        inner
+            .state
+            .events
+            .push_back(V5Event::Incoming(V5Packet::Publish(invalid)));
+        push(&mut events, Bytes::from_static(b"after"));
+        assert!(events.drain_buffered_publishes(1024).is_empty());
+        assert_eq!(remaining(&events), 2);
+        let MqttEventLoop::V5(inner) = &mut events else {
+            unreachable!()
+        };
+        assert!(
+            matches!(inner.state.events.front(), Some(V5Event::Incoming(V5Packet::Publish(publish))) if publish.topic == Bytes::from_static(&[0xff]))
+        );
     }
 }

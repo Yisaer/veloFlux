@@ -141,11 +141,32 @@ Examples:
 - `veloflux_mqtt_source_messages_out_total`
 - `veloflux_nng_pubsub_source_messages_in_total`
 - `veloflux_nng_pubsub_source_messages_out_total`
+- `veloflux_mqtt_source_batches_out_total`
 
 Expected labels:
 
 - `flow_instance`
 - `connector`
+
+`veloflux_mqtt_source_batches_out_total` counts successful payload-event sends into the
+connector's downstream channel. A singleton counts as one batch, and an event containing N
+payloads also counts as one batch while `messages_out_total` increases by N. Failed sends,
+errors, and control events do not increment this counter. Both standalone and shared-client-backed
+MQTT sources use this convention, including when opportunistic batching is disabled.
+
+The series is initialized to zero when the source subscription binds its counters. Reconnects and
+new subscriptions with the same labels continue accumulating; process restarts reset the counter.
+Sending successfully does not imply that downstream decoding or sink delivery has completed.
+
+Average MQTT messages per emitted batch can be queried with matching label sets:
+
+```promql
+rate(veloflux_mqtt_source_messages_out_total[5m])
+/
+rate(veloflux_mqtt_source_batches_out_total[5m])
+```
+
+An average of one indicates singleton sends. The ratio is undefined when no batches are emitted.
 
 ### `mqtt_sink`
 
@@ -206,6 +227,28 @@ It must not be used to describe:
 - process-wide runtime state
 
 Those concerns belong to `mqtt_source`, `mqtt_sink`, and `runtime` respectively.
+
+### Connector Identity
+
+The `connector` label identifies a runtime connector within a flow instance. Pipeline-owned
+connectors use pipeline-scoped identities:
+
+- source: `pipeline:{pipeline_id}/{stream_id}_source_connector`
+- sink: `pipeline:{pipeline_id}/{sink_id}_sink_connector`
+
+These identities apply to all built-in connector types. Configured sink IDs, processor IDs,
+checkpoint keys, and MQTT client IDs retain their existing meanings.
+
+Source metrics are aggregated by pipeline and stream. Multiple references to the same stream
+within one pipeline share this label value while retaining independent connector instances.
+Different pipelines use different label values even when their stream or sink IDs match.
+
+Shared-stream source connectors retain `{stream_id}_shared_source_connector`, because their
+ingestion runtime belongs to the stream rather than any individual consumer pipeline.
+Shared MQTT client resources continue to use the separate `key` label in `mqtt_shared_client`.
+
+Changing to these pipeline-scoped connector identities creates new Prometheus series. Historical
+series retain their previous labels; dashboards filtering by exact connector values must be updated.
 
 ### `property_registry_mqtt`
 

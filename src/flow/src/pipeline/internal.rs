@@ -1258,6 +1258,7 @@ pub(super) fn attach_sources_from_catalog(
                 format!("stream {stream_name} missing definition when attaching sources")
             })?;
             let processor_id = ds.id().to_string();
+            let connector_id = format!("pipeline:{pipeline_id}/{stream_name}_source_connector");
 
             match definition.props() {
                 StreamProps::Mqtt(stream_props) => {
@@ -1277,7 +1278,7 @@ pub(super) fn attach_sources_from_catalog(
                         config = config.with_connector_key(connector_key.clone());
                     }
                     let connector = MqttSourceConnector::new(
-                        format!("{processor_id}_source_connector"),
+                        connector_id.clone(),
                         config,
                         context.flow_instance_id(),
                         mqtt_client_manager.clone(),
@@ -1288,7 +1289,7 @@ pub(super) fn attach_sources_from_catalog(
                 }
                 StreamProps::Video(stream_props) => {
                     let connector = VideoSourceConnector::new(
-                        format!("{processor_id}_video_source_connector"),
+                        connector_id.clone(),
                         VideoSourceConfig {
                             stream_name: stream_name.clone(),
                             url: stream_props.url.clone(),
@@ -1320,7 +1321,7 @@ pub(super) fn attach_sources_from_catalog(
                     config.send_interval = props.send_interval;
 
                     let connector = HistorySourceConnector::new(
-                        processor_id.clone(),
+                        connector_id.clone(),
                         config,
                         context.spawner().clone(),
                     )
@@ -1331,7 +1332,7 @@ pub(super) fn attach_sources_from_catalog(
                     let config = FileSourceConfig::new(props.path.clone())
                         .with_framing(props.framing.clone());
                     let connector = FileSourceConnector::new(
-                        format!("{processor_id}_file_source_connector"),
+                        connector_id.clone(),
                         config,
                         context.spawner().clone(),
                     )
@@ -1340,7 +1341,7 @@ pub(super) fn attach_sources_from_catalog(
                 }
                 StreamProps::Mock(props) => {
                     let (connector, handle) = MockSourceConnector::new_scripted(
-                        format!("{processor_id}_mock_source_connector"),
+                        connector_id.clone(),
                         props.payloads.clone(),
                     );
                     let key = format!("{pipeline_id}:{stream_name}:{processor_id}");
@@ -1355,7 +1356,7 @@ pub(super) fn attach_sources_from_catalog(
                     };
                     let config = MemorySourceConfig::new(props.topic.clone(), kind);
                     let connector = MemorySourceConnector::new(
-                        format!("{processor_id}_memory_source_connector"),
+                        connector_id.clone(),
                         config,
                         memory_pubsub_registry.clone(),
                     );
@@ -1374,7 +1375,7 @@ pub(super) fn attach_sources_from_catalog(
                     #[cfg(feature = "nng_pubsub")]
                     {
                         let connector = NngPubSubSourceConnector::new(
-                            format!("{processor_id}_nng_pubsub_source_connector"),
+                            connector_id.clone(),
                             config,
                             context.flow_instance_id(),
                             context.spawner().clone(),

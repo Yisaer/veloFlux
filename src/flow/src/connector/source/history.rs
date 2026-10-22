@@ -312,6 +312,9 @@ mod tests {
                 Ok(ConnectorEvent::Collection(_)) => {
                     panic!("history source should not emit collections");
                 }
+                Ok(ConnectorEvent::PayloadBatch(_)) => {
+                    panic!("history source should not emit payload batches");
+                }
                 Ok(ConnectorEvent::EndOfStream) => break,
                 Ok(ConnectorEvent::CheckpointFence { .. }) => {
                     panic!("history source should not emit checkpoint fences")

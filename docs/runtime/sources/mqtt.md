@@ -84,8 +84,18 @@ client config drives broker URL, subscription topic, client id, QoS, and packet-
 
 ## Decode Path
 
-The MQTT source connector itself is byte-only. It forwards raw MQTT payload bytes downstream as
-connector events.
+The MQTT source connector itself is byte-only. Standalone sources opportunistically group
+consecutive PUBLISH payloads already buffered in the MQTT event queue, up to 1024 payloads
+including the first. Grouping does not wait for more data, poll the socket, or cross a
+non-PUBLISH event. There is no aggregate payload-byte limit beyond existing per-packet limits.
+
+Groups reach the decoder as `StreamData::BytesBatch`; singletons may retain the existing
+`StreamData::Bytes` path. Sources using `connector_key` continue to forward individual shared
+client payloads. Set `VELOFLUX_MQTT_SOURCE_BATCHING=off` to bypass standalone batching.
+
+See [Opportunistic MQTT Source Batching](./mqtt_source_batching.md) for the motivation,
+source/decoder boundary, sampler and lifecycle compatibility, existing counter semantics,
+and deferred batch observability.
 
 The current implementation does not expose incoming MQTT 5 User Properties to rows or processors.
 MQTT 5 sources receive the PUBLISH payload exactly as MQTT 3.1.1 sources do; source metadata
@@ -94,6 +104,8 @@ propagation is deferred.
 The later decode boundary is responsible for:
 
 - converting bytes into tuples/collections
+- decoding grouped payloads independently and emitting successfully decoded rows in payload
+  order, while reporting each payload error through the existing decoder error path
 - surfacing decode errors in decoder processor stats
 - attaching event-time extraction when enabled
 

@@ -18,6 +18,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use url::Url;
 use veloflux_metrics::ChildCounter;
 
+const MAX_SOURCE_BATCH_MESSAGES: usize = 1024;
+
 /// Basic MQTT configuration for sources.
 #[derive(Debug, Clone)]
 pub struct MqttSourceConfig {
@@ -114,13 +116,14 @@ enum SharedEventForwardOutcome {
     Break,
 }
 
-/// Pre-bound MQTT source message counters (one label set per connector).
+/// Pre-bound MQTT source message and batch counters (one label set per connector).
 /// Bound once per subscription; the hot path increments these directly
 /// instead of looking the series up per message.
 #[derive(Debug, Clone)]
 pub(crate) struct SourceMqttCounters {
     messages_in: ChildCounter,
     messages_out: ChildCounter,
+    batches_out: ChildCounter,
 }
 
 impl SourceMqttCounters {
@@ -134,7 +137,16 @@ impl SourceMqttCounters {
                 veloflux_metrics::mqtt_source_messages_out_total(),
                 &[flow_instance_id, connector_id],
             ),
+            batches_out: ChildCounter::bind(
+                veloflux_metrics::mqtt_source_batches_out_total(),
+                &[flow_instance_id, connector_id],
+            ),
         }
+    }
+
+    fn record_emitted(&self, message_count: u64) {
+        self.messages_out.inc_by(message_count);
+        self.batches_out.inc();
     }
 }
 
@@ -148,7 +160,7 @@ async fn forward_shared_mqtt_event(
             counters.messages_in.inc();
             match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
                 Ok(_) => {
-                    counters.messages_out.inc();
+                    counters.record_emitted(1);
                     SharedEventForwardOutcome::Continue
                 }
                 Err(_) => SharedEventForwardOutcome::Break,
@@ -279,6 +291,7 @@ async fn run_standalone_loop(
 
     let mut backoff = Duration::from_millis(100);
     let max_backoff = Duration::from_secs(5);
+    let batch_enabled = std::env::var("VELOFLUX_MQTT_SOURCE_BATCHING").as_deref() != Ok("off");
 
     loop {
         tokio::select! {
@@ -286,10 +299,23 @@ async fn run_standalone_loop(
             event = event_loop.poll() => {
                 match event {
                     Ok(MqttEvent::Publish { payload, .. }) => {
-                        counters.messages_in.inc();
-                        match sender.send(Ok(ConnectorEvent::Payload(payload))).await {
+                        let buffered = if batch_enabled {
+                            event_loop.drain_buffered_publishes(MAX_SOURCE_BATCH_MESSAGES)
+                        } else {
+                            Vec::new()
+                        };
+                        let message_count = 1 + buffered.len() as u64;
+                        counters.messages_in.inc_by(message_count);
+                        let event = if buffered.is_empty() {
+                            ConnectorEvent::Payload(payload)
+                        } else {
+                            let mut payloads = buffered;
+                            payloads.insert(0, payload);
+                            ConnectorEvent::PayloadBatch(payloads)
+                        };
+                        match sender.send(Ok(event)).await {
                             Ok(_) => {
-                                counters.messages_out.inc();
+                                counters.record_emitted(message_count);
                             }
                             Err(_) => break,
                         }

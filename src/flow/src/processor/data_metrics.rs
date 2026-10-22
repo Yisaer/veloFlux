@@ -255,7 +255,7 @@ pub(crate) const RESULT_COLLECT_METRICS: DataMetricSpecs = data_specs!("result_c
 
 #[derive(Clone, Copy)]
 pub(crate) enum DataMeasurement {
-    Message { bytes: u64 },
+    Message { messages: u64, bytes: u64 },
     Collection { rows: u64 },
     Other,
 }
@@ -293,7 +293,12 @@ impl DataMetrics {
     pub(crate) fn measure(data: &StreamData) -> DataMeasurement {
         match data {
             StreamData::Bytes(bytes) => DataMeasurement::Message {
+                messages: 1,
                 bytes: bytes.len() as u64,
+            },
+            StreamData::BytesBatch(payloads) => DataMeasurement::Message {
+                messages: payloads.len() as u64,
+                bytes: payloads.iter().map(|payload| payload.len() as u64).sum(),
             },
             StreamData::Collection(collection) => DataMeasurement::Collection {
                 rows: collection.num_rows() as u64,
@@ -309,7 +314,7 @@ impl DataMetrics {
     ) -> Result<DataMeasurement, ProcessorError> {
         let measurement = Self::measure(data);
         match measurement {
-            DataMeasurement::Message { bytes } => {
+            DataMeasurement::Message { messages, bytes } => {
                 let messages_in = self.messages_in.as_ref().ok_or_else(|| {
                     ProcessorError::InvalidConfiguration(
                         "received message outside the planned input domain".to_string(),
@@ -320,7 +325,7 @@ impl DataMetrics {
                         "received bytes outside the planned input domain".to_string(),
                     )
                 })?;
-                messages_in.inc_by(1);
+                messages_in.inc_by(messages);
                 bytes_in.inc_by(bytes);
             }
             DataMeasurement::Collection { rows } => {
@@ -342,7 +347,7 @@ impl DataMetrics {
         measurement: DataMeasurement,
     ) -> Result<(), ProcessorError> {
         match measurement {
-            DataMeasurement::Message { bytes } => {
+            DataMeasurement::Message { messages, bytes } => {
                 let messages_out = self.messages_out.as_ref().ok_or_else(|| {
                     ProcessorError::InvalidConfiguration(
                         "produced message outside the planned output domain".to_string(),
@@ -353,7 +358,7 @@ impl DataMetrics {
                         "produced bytes outside the planned output domain".to_string(),
                     )
                 })?;
-                messages_out.inc_by(1);
+                messages_out.inc_by(messages);
                 bytes_out.inc_by(bytes);
             }
             DataMeasurement::Collection { rows } => {
@@ -372,7 +377,7 @@ impl DataMetrics {
 
 #[derive(Clone, Copy)]
 pub(crate) enum PassthroughMeasurement {
-    Message,
+    Message { messages: u64 },
     Collection { rows: u64 },
     Other,
 }
@@ -419,20 +424,26 @@ impl PassthroughMetrics {
                 })
             }
             (DataDomain::Collection, StreamData::Bytes(_))
+            | (DataDomain::Collection, StreamData::BytesBatch(_))
             | (DataDomain::Collection, StreamData::EncodedDelivery { .. }) => {
                 Err(ProcessorError::InvalidConfiguration(
                     "received message outside the planned collection domain".to_string(),
                 ))
             }
+            (DataDomain::Message, StreamData::BytesBatch(payloads)) => {
+                Ok(PassthroughMeasurement::Message {
+                    messages: payloads.len() as u64,
+                })
+            }
             (DataDomain::Message, StreamData::Bytes(_))
             | (DataDomain::Message, StreamData::Collection(_)) => {
-                Ok(PassthroughMeasurement::Message)
+                Ok(PassthroughMeasurement::Message { messages: 1 })
             }
             (DataDomain::Message, StreamData::EncodedDelivery { flags, bytes: _ })
                 if flags.contains(crate::processor::EncodedDeliveryFlags::END)
                     && !flags.contains(crate::processor::EncodedDeliveryFlags::ABORT) =>
             {
-                Ok(PassthroughMeasurement::Message)
+                Ok(PassthroughMeasurement::Message { messages: 1 })
             }
             (DataDomain::Message, StreamData::EncodedDelivery { .. }) => {
                 Ok(PassthroughMeasurement::Other)
@@ -450,11 +461,11 @@ impl PassthroughMetrics {
     ) -> Result<PassthroughMeasurement, ProcessorError> {
         let measurement = self.measure(data)?;
         match measurement {
-            PassthroughMeasurement::Message => self
+            PassthroughMeasurement::Message { messages } => self
                 .messages_in
                 .as_ref()
                 .expect("message domain must declare messages_in")
-                .inc_by(1),
+                .inc_by(messages),
             PassthroughMeasurement::Collection { rows } => stats.record_collection_in(rows),
             PassthroughMeasurement::Other => {}
         }
@@ -467,13 +478,47 @@ impl PassthroughMetrics {
         measurement: PassthroughMeasurement,
     ) {
         match measurement {
-            PassthroughMeasurement::Message => self
+            PassthroughMeasurement::Message { messages } => self
                 .messages_out
                 .as_ref()
                 .expect("message domain must declare messages_out")
-                .inc_by(1),
+                .inc_by(messages),
             PassthroughMeasurement::Collection { rows } => stats.record_collection_out(rows),
             PassthroughMeasurement::Other => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod batching_tests {
+    use super::*;
+
+    #[test]
+    fn message_and_byte_counters_count_payloads_not_batches() {
+        let stats = ProcessorStats::new("test", "batch-counts", "datasource");
+        let metrics = DataMetrics::new(
+            &stats,
+            DATASOURCE_METRICS,
+            DataMetricDomains::NONE.passthrough(DataDomain::Message),
+        );
+        for payloads in [vec!["ab".into(), "cde".into()], vec![]] {
+            let data = StreamData::bytes_batch(payloads);
+            let measurement = metrics.record_input(&stats, &data).unwrap();
+            metrics.record_output(&stats, measurement).unwrap();
+        }
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.custom.get("messages_in"), Some(&2));
+        assert_eq!(snapshot.custom.get("messages_out"), Some(&2));
+        assert_eq!(snapshot.custom.get("bytes_in"), Some(&5));
+        assert_eq!(snapshot.custom.get("bytes_out"), Some(&5));
+
+        let stats = ProcessorStats::new("test", "batch-passthrough", "sampler");
+        let metrics = PassthroughMetrics::new(&stats, STAGE_METRICS, DataDomain::Message);
+        let data = StreamData::bytes_batch(vec!["ab".into(), "cde".into()]);
+        let measurement = metrics.record_input(&stats, &data).unwrap();
+        metrics.record_output(&stats, measurement);
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.custom.get("messages_in"), Some(&2));
+        assert_eq!(snapshot.custom.get("messages_out"), Some(&2));
     }
 }
