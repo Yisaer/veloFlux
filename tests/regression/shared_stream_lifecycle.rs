@@ -1,7 +1,6 @@
 use super::{
     bind_manager_listener_or_skip, default_flow_instances, make_client, random_suffix,
-    records_value_or_zero, wait_for_pipeline_activity, wait_for_shared_stream_status,
-    ManagerHarness,
+    records_value_or_zero, wait_for_shared_stream_status, ManagerHarness,
 };
 use sdk::PipelineCreateRequest;
 use sdk::StopOptions;
@@ -309,24 +308,61 @@ async fn shared_stream_many_consumers_concurrent_lifecycle_via_rest() {
     .await
     .expect("concurrent starts did not finish");
 
-    for value in 0..5 {
-        harness
-            .injector
-            .send_shared_mock_stream_payload(
-                &stream_name,
-                format!(r#"{{"value":{value}}}"#).as_bytes(),
-            )
-            .await
-            .expect("inject warm-up payload");
-    }
-    for pipeline_id in &pipeline_ids {
-        wait_for_pipeline_activity(
-            &harness.http,
-            &harness.base,
-            pipeline_id,
-            Duration::from_secs(5),
+    // Starting a pipeline can return before its shared-stream subscription is ready.
+    // Keep sending until every consumer has observed data under one shared deadline.
+    let mut pending: Vec<&str> = pipeline_ids.iter().map(String::as_str).collect();
+    let mut last_stats = std::collections::BTreeMap::new();
+    let warm_up = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut value = 0;
+        while !pending.is_empty() {
+            harness
+                .injector
+                .send_shared_mock_stream_payload(
+                    &stream_name,
+                    format!(r#"{{"value":{value}}}"#).as_bytes(),
+                )
+                .await
+                .expect("inject warm-up payload");
+            value += 1;
+
+            for index in (0..pending.len()).rev() {
+                let pipeline_id = pending[index];
+                let response = harness
+                    .http
+                    .get(format!("{}/pipelines/{pipeline_id}/stats", harness.base))
+                    .send()
+                    .await
+                    .expect("collect warm-up pipeline stats");
+                let status = response.status();
+                let body = response.text().await.expect("read warm-up pipeline stats");
+                let active = status.is_success()
+                    && total_records(
+                        &serde_json::from_str::<Vec<JsonValue>>(&body)
+                            .expect("decode warm-up pipeline stats"),
+                    ) > 0;
+                last_stats.insert(pipeline_id, format!("status={status}, body={body}"));
+                if active {
+                    pending.swap_remove(index);
+                }
+            }
+            if !pending.is_empty() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+    })
+    .await;
+    if warm_up.is_err() {
+        let shared_stats = tokio::time::timeout(
+            Duration::from_secs(2),
+            harness
+                .client
+                .shared_stream_stats_in_instance(&stream_name, Some("default")),
         )
         .await;
+        panic!(
+            "warm-up timed out: pending pipelines={pending:?}; \
+             last pipeline stats={last_stats:#?}; shared stream stats={shared_stats:#?}"
+        );
     }
 
     let survivors = &pipeline_ids[2..];

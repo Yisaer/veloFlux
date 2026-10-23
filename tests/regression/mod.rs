@@ -124,39 +124,6 @@ pub fn records_value_or_zero(entry: &JsonValue, field: &str) -> u64 {
     entry["stats"][field].as_u64().unwrap_or(0)
 }
 
-pub async fn wait_for_pipeline_activity(
-    http: &reqwest::Client,
-    base: &str,
-    pipeline_id: &str,
-    timeout_duration: Duration,
-) -> Vec<JsonValue> {
-    let deadline = tokio::time::Instant::now() + timeout_duration;
-    loop {
-        let resp = http
-            .get(format!("{base}/pipelines/{pipeline_id}/stats"))
-            .send()
-            .await
-            .expect("collect pipeline stats request");
-        if resp.status().is_success() {
-            let stats = resp
-                .json::<Vec<JsonValue>>()
-                .await
-                .expect("decode pipeline stats");
-            if stats.iter().any(|entry| {
-                records_value_or_zero(entry, "records_in") > 0
-                    || records_value_or_zero(entry, "records_out") > 0
-            }) {
-                return stats;
-            }
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "pipeline {pipeline_id} did not report runtime activity before timeout"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 pub async fn wait_for_shared_stream_status(
     client: &ManagerClient,
     stream_name: &str,

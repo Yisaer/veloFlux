@@ -60,6 +60,12 @@ There is no runtime name-scan fallback.
 Overwriting a key updates its existing value slot, so every planned affiliate
 index remains stable.
 
+Project inserts computed-column names using the `Arc<str>` already stored in
+`PhysicalProjectField`, through `AffiliateRow::insert_shared`. New affiliate
+slots share the name allocation; overwrites retain the original slot and key.
+This avoids per-row column-name string allocation without changing output
+indexes. Each output row still owns its affiliate index, keys, and values.
+
 ## Value Ownership
 
 A `Message` owns a contiguous `Vec<Value>`. Its constructors accept owned
