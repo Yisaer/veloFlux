@@ -30,6 +30,7 @@ struct KuksaSinkPropsRequest {
 }
 
 fn build_video_sink_props(
+    data_dir: &std::path::Path,
     sink_id: &str,
     req: VideoSinkPropsRequest,
 ) -> Result<VideoSinkProps, String> {
@@ -80,9 +81,10 @@ fn build_video_sink_props(
             ));
         }
     };
-    let mut props = VideoSinkProps::new(path, rolling)
-        .with_codec(codec)
-        .with_container(container);
+    let mut props =
+        VideoSinkProps::new(crate::file_path::resolve_string(data_dir, &path)?, rolling)
+            .with_codec(codec)
+            .with_container(container);
     if let Some(prefix) = req.filename_prefix {
         props = props.with_filename_prefix(prefix);
     }
@@ -90,6 +92,7 @@ fn build_video_sink_props(
 }
 
 fn build_file_sink_props(
+    data_dir: &std::path::Path,
     req: FileSinkPropsRequest,
     properties: &flow::PropertyRegistry,
     pipeline_id: &str,
@@ -113,7 +116,11 @@ fn build_file_sink_props(
         max_file_count: req.retention.max_file_count.unwrap_or(0),
         max_file_age_days: req.retention.max_file_age_days.unwrap_or(0),
     };
-    Ok(FileSinkProps::new(path, filename_pattern).with_retention(retention))
+    Ok(FileSinkProps::new(
+        crate::file_path::resolve_string(data_dir, &path)?,
+        filename_pattern,
+    )
+    .with_retention(retention))
 }
 
 fn normalized_optional_string(value: Option<String>) -> Option<String> {
@@ -390,6 +397,7 @@ pub(crate) fn build_pipeline_definition(
     encoder_registry: &EncoderRegistry,
     instance: &flow::FlowInstance,
     options: PipelineBuildOptions<'_>,
+    data_dir: &std::path::Path,
 ) -> Result<PipelineDefinition, String> {
     let select_stmt = parse_pipeline_select_stmt(req, instance)?;
     let sources = build_source_definitions(req, instance, &select_stmt)?;
@@ -515,7 +523,10 @@ pub(crate) fn build_pipeline_definition(
                 SinkDefinition::new(
                     sink_id.clone(),
                     SinkType::Kuksa,
-                    SinkProps::Kuksa(KuksaSinkProps { addr, vss_path }),
+                    SinkProps::Kuksa(KuksaSinkProps {
+                        addr,
+                        vss_path: crate::file_path::resolve_string(data_dir, &vss_path)?,
+                    }),
                 )
             }
             "kura" => {
@@ -531,7 +542,10 @@ pub(crate) fn build_pipeline_definition(
                 SinkDefinition::new(
                     sink_id.clone(),
                     SinkType::Kura,
-                    SinkProps::Kura(KuraSinkProps { addr, mapping_path }),
+                    SinkProps::Kura(KuraSinkProps {
+                        addr,
+                        mapping_path: crate::file_path::resolve_string(data_dir, &mapping_path)?,
+                    }),
                 )
             }
             "memory" => {
@@ -568,15 +582,20 @@ pub(crate) fn build_pipeline_definition(
                 let file_props: FileSinkPropsRequest =
                     serde_json::from_value(sink_req.props.to_value())
                         .map_err(|err| format!("invalid file sink props: {err}"))?;
-                let props =
-                    build_file_sink_props(file_props, &property_registry, &req.id, &sink_id)?;
+                let props = build_file_sink_props(
+                    data_dir,
+                    file_props,
+                    &property_registry,
+                    &req.id,
+                    &sink_id,
+                )?;
                 SinkDefinition::new(sink_id.clone(), SinkType::File, SinkProps::File(props))
             }
             "video" => {
                 let video_props: VideoSinkPropsRequest =
                     serde_json::from_value(sink_req.props.to_value())
                         .map_err(|err| format!("invalid video sink props: {err}"))?;
-                let props = build_video_sink_props(&sink_id, video_props)?;
+                let props = build_video_sink_props(data_dir, &sink_id, video_props)?;
                 SinkDefinition::new(sink_id.clone(), SinkType::Video, SinkProps::Video(props))
             }
             "nng_pubsub" => {
@@ -919,6 +938,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         let retry = &definition.sinks()[0].retry;
@@ -1040,6 +1060,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
 
@@ -1101,6 +1122,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         let sink = &definition.sinks()[0];
@@ -1155,6 +1177,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("nop sink with explicit none encoder builds");
         assert_eq!(
@@ -1168,6 +1191,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("nop sink default json encoder builds");
         assert_eq!(
@@ -1211,6 +1235,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect_err("invalid output mode should fail");
         assert!(
@@ -1264,6 +1289,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
 
@@ -1313,6 +1339,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect_err("duplicate source stream should fail");
         assert!(
@@ -1354,6 +1381,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         let sink = &definition.sinks()[0];
@@ -1402,6 +1430,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build MQTT 5 pipeline definition");
         let flow::pipeline::SinkProps::Mqtt(mqtt) = &definition.sinks()[0].props else {
@@ -1450,6 +1479,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect_err("missing static property must be rejected");
 
@@ -1492,6 +1522,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect_err("invalid rendered MQTT string must be rejected");
 
@@ -1527,6 +1558,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect_err("MQTT v3 User Properties must be rejected");
         assert!(error.contains("require effective protocol_version `v5`"));
@@ -1560,6 +1592,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect_err("connector-local protocol version must be rejected");
         assert!(error.contains("protocol_version is owned by connector_key"));
@@ -1597,6 +1630,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         let sink = &definition.sinks()[0];
@@ -1650,6 +1684,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         let sink = &definition.sinks()[0];
@@ -1700,6 +1735,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         let SinkProps::File(file) = &definition.sinks()[0].props else {
@@ -1742,6 +1778,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("static name is valid");
         let SinkProps::File(file) = &definition.sinks()[0].props else {
@@ -1815,6 +1852,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         let SinkProps::File(file) = &definition.sinks()[0].props else {
@@ -1863,6 +1901,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect_err("rendered path separator should fail");
 
@@ -1915,6 +1954,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         let sink = &definition.sinks()[0];
@@ -1970,6 +2010,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect_err("invalid key should fail");
         assert!(!err.contains(raw_key), "error leaked raw key: {err}");
@@ -2010,6 +2051,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect_err("file sink should reject encoder none");
         assert!(
@@ -2050,6 +2092,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             &instance,
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect_err("standalone mqtt sink should require broker_url");
         assert_eq!(err, "mqtt sink requires broker_url");

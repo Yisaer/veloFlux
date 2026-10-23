@@ -1,5 +1,15 @@
 # Schema REST API (Manager)
 
+> **File paths.** Relative server-local file paths in resource definitions are
+> relative to `data_dir`; absolute paths use the server filesystem. Relative
+> paths containing `..` are rejected. See the
+> [resource file path contract](../../docs/api/README.md#server-local-resource-file-paths).
+
+> **Trust model.** This API is for trusted administrators in a single trust
+> domain. Server-local file access uses the service process's permissions;
+> access control is supplied by the deployment environment. Read the
+> [API trust and deployment model](../../docs/api/README.md#trust-and-deployment-model).
+
 This document describes the **Manager** REST API for managing named schemas.
 
 For the design of the schema registry and proto parser, see `docs/api/schema_registry.md`.
@@ -29,7 +39,7 @@ Request body:
   "revision": 1721797200000,
   "type": "proto",
   "props": {
-    "proto_path": "schemas/sensor-schema.zip",
+    "proto_path": "uploads/sensor-schema.zip",
     "message_type": "com.example.Sensor"
   }
 }
@@ -71,7 +81,7 @@ curl -s -XPOST http://127.0.0.1:8080/schemas \
     "revision": 1721797200000,
     "type": "proto",
     "props": {
-      "proto_path": "schemas/sensor-schema.zip",
+      "proto_path": "uploads/sensor-schema.zip",
       "message_type": "com.example.Sensor"
     }
   }' | jq .
@@ -257,7 +267,7 @@ not accepted for installed schemas.
 {
   "type": "proto",
   "props": {
-    "proto_path": "schemas/sensor-schema.zip",
+    "proto_path": "uploads/sensor-schema.zip",
     "message_type": "com.example.Sensor"
   }
 }

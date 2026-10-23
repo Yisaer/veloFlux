@@ -364,6 +364,7 @@ pub async fn create_pipeline_handler(
         encoder_registry.as_ref(),
         instance.as_ref(),
         Default::default(),
+        state.storage.base_dir(),
     ) {
         Ok(def) => def,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -671,6 +672,7 @@ pub async fn upsert_pipeline_handler(
         encoder_registry.as_ref(),
         instance.as_ref(),
         Default::default(),
+        state.storage.base_dir(),
     ) {
         Ok(definition) => definition,
         Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
@@ -1728,9 +1730,12 @@ mod tests {
             .storage
             .create_stream(stored_stream.clone())
             .expect("persist memory stream");
-        let definition =
-            stream_definition_from_stored(&stored_stream, instance.decoder_registry().as_ref())
-                .expect("build stream definition");
+        let definition = stream_definition_from_stored(
+            &stored_stream,
+            instance.decoder_registry().as_ref(),
+            std::path::Path::new("."),
+        )
+        .expect("build stream definition");
         instance
             .create_stream(definition, false)
             .await
@@ -1781,6 +1786,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("definition");
         instance
@@ -1837,6 +1843,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         instance
@@ -1892,6 +1899,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         instance

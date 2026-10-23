@@ -937,9 +937,88 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_schema_creates_from_zip_and_cleans_temporary_file() {
-        let temp_dir = tempfile::tempdir().expect("create temp dir");
+    async fn uploaded_relative_schema_paths_support_create_update_and_restore() {
+        let temp_dir = tempfile::tempdir().expect("data directory");
         let state = build_state(&temp_dir);
+        let name = "RelativeUploadedSchema";
+        let app = crate::build_app(state.clone());
+        let zip = proto_zip();
+        let mut body = b"--files\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nproto/sensor.zip\r\n--files\r\nContent-Disposition: form-data; name=\"file\"; filename=\"sensor.zip\"\r\n\r\n".to_vec();
+        body.extend_from_slice(&zip);
+        body.extend_from_slice(b"\r\n--files--\r\n");
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/files/upload")
+                    .header("content-type", "multipart/form-data; boundary=files")
+                    .body(axum::body::Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        for (method, uri, revision, expected) in [
+            ("POST", "/schemas".to_string(), 1, StatusCode::CREATED),
+            ("PUT", format!("/schemas/{name}"), 2, StatusCode::OK),
+        ] {
+            let response = app.clone().oneshot(
+                axum::http::Request::builder().method(method).uri(uri)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(serde_json::json!({
+                        "name": name, "revision": revision, "type": "proto",
+                        "props": {"proto_path": "uploads/proto/sensor.zip", "message_type": "Sensor"}
+                    }).to_string())).unwrap()
+            ).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            assert_eq!(status, expected, "{}", String::from_utf8_lossy(&body));
+        }
+        state.storage.delete_upload("proto/sensor.zip").unwrap();
+        named_schema_store()
+            .remove(name)
+            .expect("remove cached schema");
+        assert!(named_schema_store().get_resolved(name).is_none());
+        crate::storage_bridge::hydrate_schemas_from_storage(&state.storage).unwrap();
+        let restored = named_schema_store()
+            .get_resolved(name)
+            .expect("restore schema from managed files without the uploaded ZIP");
+        assert_eq!(restored.schema_version, Some(2));
+        let columns = restored.logical_schema.column_schemas();
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, "value");
+        assert!(matches!(
+            columns[0].data_type,
+            flow::ConcreteDatatype::Int64(_)
+        ));
+        assert!(restored.proto_bundle.is_some());
+        let stored = state.storage.get_schema(name).unwrap().unwrap();
+        let props: JsonValue = serde_json::from_str(&stored.props_json).unwrap();
+        assert_eq!(props["proto_path"], "sensor.proto");
+    }
+
+    #[tokio::test]
+    async fn upload_schema_creates_from_zip_and_cleans_temporary_file() {
+        let temp_dir = tempfile::Builder::new()
+            .prefix(".schema-upload-test-")
+            .tempdir_in(".")
+            .expect("create relative data dir");
+        let relative_dir = std::path::Path::new(".").join(temp_dir.path().file_name().unwrap());
+        let state = AppState::new(
+            crate::new_default_flow_instance(),
+            StorageManager::new(&relative_dir).expect("create storage with relative root"),
+            vec![crate::FlowInstanceSpec {
+                id: "default".to_string(),
+                ..crate::FlowInstanceSpec::default()
+            }],
+            0,
+        )
+        .expect("build app state");
+        assert!(state.storage.base_dir().is_relative());
         let name = "UploadedSchema";
 
         let response = crate::build_app(state.clone())
@@ -1081,6 +1160,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         state
@@ -1224,6 +1304,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         state

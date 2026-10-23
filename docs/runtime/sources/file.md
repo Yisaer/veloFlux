@@ -1,5 +1,9 @@
 # File Source Stream
 
+When configured through the Manager API, relative `props.path` values are
+resolved against `data_dir`; absolute paths are used as given. See the
+[resource file path contract](../../api/README.md#server-local-resource-file-paths).
+
 The `file` source stream watches a local file or one directory level of local files and emits stream
 rows from appended file content. It is intended for log tailing and append-only ingestion workloads.
 

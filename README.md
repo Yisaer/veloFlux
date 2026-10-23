@@ -95,6 +95,7 @@ List and remove resources:
 - `GET /pipelines` / `DELETE /pipelines/:id`
 
 REST API docs:
+- [API overview and trust model](user_docs/api/README.md)
 - Streams: `user_docs/api/stream.md`
 - Tables: `user_docs/api/table.md` (runtime catalog; manager REST endpoints pending)
 - Pipelines: `user_docs/api/pipeline.md`

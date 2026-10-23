@@ -1,5 +1,10 @@
 # Stream REST API (Manager)
 
+> **File paths.** Relative server-local file paths in resource definitions are
+> relative to `data_dir`; absolute paths use the server filesystem. Relative
+> paths containing `..` are rejected. See the
+> [resource file path contract](../../docs/api/README.md#server-local-resource-file-paths).
+
 This document describes the **Manager** REST API for managing streams.
 
 For named schema management and the proto schema parser, see `user_docs/api/schema.md`.
@@ -102,6 +107,11 @@ curl -s http://127.0.0.1:8080/streams | jq .
 `GET /streams/describe/:name`
 
 Returns a single stream’s persisted spec and schema.
+
+For file streams, `spec.props` preserves the stored path and framing properties,
+including omitted defaults. Relative paths remain relative in this response;
+runtime execution uses the resolved absolute path. Reusing the returned props
+does not change the specification for same-revision updates.
 
 Response:
 

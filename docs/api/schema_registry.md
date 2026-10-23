@@ -209,7 +209,7 @@ curl -s -XPOST http://127.0.0.1:8080/schemas \
     "revision": 1,
     "type": "proto",
     "props": {
-      "proto_path": "schemas/sensor-schema.zip",
+      "proto_path": "uploads/sensor-schema.zip",
       "message_type": "com.example.Sensor"
     }
   }'
@@ -303,6 +303,9 @@ storage          delete       │
 
 - **Persistence:** Schema metadata is persisted in redb. File-backed entry and
   companion files are installed under `<data_dir>/schemas/<type>/<name>/`.
+- **Source paths:** Installation ZIP paths follow the
+  [resource file path contract](README.md#server-local-resource-file-paths):
+  relative to `data_dir`, or explicit server-local absolute paths.
 - **Installation:** File-backed schemas are accepted only as ZIP packages whose
   root contains one entry file and, optionally, its same-stem companion
   directory. The installer never scans beside the ZIP or falls back to uploads.

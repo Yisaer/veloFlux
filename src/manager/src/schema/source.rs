@@ -265,11 +265,11 @@ impl PreparedSchemaSource {
             .map(str::trim)
             .filter(|path| !path.is_empty())
             .ok_or_else(|| format!("`{path_key}` must be a non-empty zip path"))?;
-        let archive_path = Path::new(archive_path);
+        let archive_path = crate::file_path::resolve(storage.base_dir(), archive_path)?;
         if archive_path.extension().and_then(|ext| ext.to_str()) != Some("zip") {
             return Err(format!("`{path_key}` must point to a .zip schema source"));
         }
-        let metadata = fs::symlink_metadata(archive_path)
+        let metadata = fs::symlink_metadata(&archive_path)
             .map_err(|err| format!("inspect schema archive `{}`: {err}", archive_path.display()))?;
         if !metadata.file_type().is_file() {
             return Err(format!(
@@ -288,7 +288,7 @@ impl PreparedSchemaSource {
         }
         fs::create_dir_all(&staging_dir)
             .map_err(|err| format!("create schema staging directory: {err}"))?;
-        let entry_name = match extract_schema_archive(archive_path, &staging_dir) {
+        let entry_name = match extract_schema_archive(&archive_path, &staging_dir) {
             Ok(entry) => entry,
             Err(err) => {
                 return match fs::remove_dir_all(&staging_dir) {
@@ -992,7 +992,8 @@ mod tests {
     fn prepared_source_update_replaces_existing_installation() {
         let temp = TempDir::new().expect("temp dir");
         let storage = StorageManager::new(temp.path()).expect("storage");
-        let archive = temp.path().join("schema.zip");
+        let archive = storage.uploads_dir().join("nested/schema.zip");
+        fs::create_dir_all(archive.parent().unwrap()).expect("create upload directory");
         let installed = storage.schemas_dir().join("gbf/vehicle/vehicle.json");
         fs::create_dir_all(installed.parent().expect("installed parent"))
             .expect("create installed parent");
@@ -1003,7 +1004,7 @@ mod tests {
             &storage,
             "vehicle",
             "gbf",
-            &schema_props(&archive),
+            &schema_props(Path::new("uploads/nested/schema.zip")),
         )
         .expect("prepare schema update");
         source.commit().expect("commit schema update");

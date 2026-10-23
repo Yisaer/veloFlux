@@ -661,10 +661,15 @@ async fn validate_online_definitions(
             storage_bridge::stream_definition_from_stored(
                 &stored,
                 view.decoder_registry().as_ref(),
+                state.storage.base_dir(),
             )?
         } else {
             let schema = resolve_schema(&stream.schema, &stream.name, candidate, &files.schemas)?;
-            let props = crate::stream::build_stream_props(&stream.stream_type, &stream.props)?;
+            let props = crate::stream::build_stream_props(
+                &stream.stream_type,
+                &stream.props,
+                state.storage.base_dir(),
+            )?;
             let decoder = crate::stream::build_stream_decoder(
                 stream,
                 view.decoder_registry().as_ref(),
@@ -747,6 +752,7 @@ async fn validate_online_definitions(
             crate::pipeline::PipelineBuildOptions {
                 shared_mqtt_clients: Some(&mqtt_clients),
             },
+            state.storage.base_dir(),
         )?;
         view.explain_pipeline(flow::ExplainPipelineTarget::Definition(&definition))
             .map_err(|err| format!("pipeline {}: {err}", pipeline.definition.id))?;
@@ -1701,6 +1707,7 @@ pub(crate) async fn install_pipeline(
         stored,
         instance.encoder_registry().as_ref(),
         &instance,
+        state.storage.base_dir(),
     )?;
     instance
         .create_pipeline(flow::CreatePipelineRequest::new(definition))

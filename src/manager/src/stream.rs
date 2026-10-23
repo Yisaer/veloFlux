@@ -248,6 +248,7 @@ async fn rebuild_affected_pipeline(
         instance.encoder_registry().as_ref(),
         instance.as_ref(),
         Default::default(),
+        state.storage.base_dir(),
     )?;
     instance
         .explain_pipeline(flow::ExplainPipelineTarget::Definition(&definition))
@@ -362,8 +363,11 @@ impl PreparedStreamRuntimeRefresh {
         let request = storage_bridge::stream_request_from_stored(&stored)?;
         let mut definitions = Vec::new();
         for (_, instance) in state.instances.instances_snapshot() {
-            let definition =
-                stream_definition_from_stored(&stored, instance.decoder_registry().as_ref())?;
+            let definition = stream_definition_from_stored(
+                &stored,
+                instance.decoder_registry().as_ref(),
+                state.storage.base_dir(),
+            )?;
             definitions.push((instance, definition));
         }
         Ok(Self {
@@ -906,13 +910,14 @@ pub async fn create_stream_handler(
         }
     };
 
-    let stream_props = match build_stream_props(&req.stream_type, &req.props) {
-        Ok(props) => props,
-        Err(err) => {
-            audit.log_failure(&err);
-            return (StatusCode::BAD_REQUEST, err).into_response();
-        }
-    };
+    let stream_props =
+        match build_stream_props(&req.stream_type, &req.props, state.storage.base_dir()) {
+            Ok(props) => props,
+            Err(err) => {
+                audit.log_failure(&err);
+                return (StatusCode::BAD_REQUEST, err).into_response();
+            }
+        };
 
     let decoder_registry = state.instances.default_instance().decoder_registry();
     let decoder = match build_stream_decoder(&req, decoder_registry.as_ref(), &resolved_schema) {
@@ -1111,17 +1116,20 @@ pub async fn describe_stream_handler(
     };
 
     let decoder_registry = state.instances.default_instance().decoder_registry();
-    let definition =
-        match storage_bridge::stream_definition_from_stored(&stored, decoder_registry.as_ref()) {
-            Ok(definition) => definition,
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("rebuild stream definition {name}: {err}"),
-                )
-                    .into_response();
-            }
-        };
+    let definition = match storage_bridge::stream_definition_from_stored(
+        &stored,
+        decoder_registry.as_ref(),
+        state.storage.base_dir(),
+    ) {
+        Ok(definition) => definition,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("rebuild stream definition {name}: {err}"),
+            )
+                .into_response();
+        }
+    };
 
     let schema_status = if let Some(reference) = request.schema.r#ref.as_deref() {
         let stored_schema_revision = match state.storage.get_schema(reference) {
@@ -1187,7 +1195,7 @@ pub async fn describe_stream_handler(
     let spec = StreamDefinitionSpec {
         stream_type: stream_type_label(definition.stream_type()).to_string(),
         schema: StreamSchemaInfo { columns },
-        props: stream_props_value(definition.props()),
+        props: stream_props_value(definition.props(), &request.props),
         shared: request.shared,
         decoder: DecoderConfigRequest {
             decode_type: definition.decoder().kind().to_string(),
@@ -1435,7 +1443,11 @@ pub async fn upsert_stream_handler(
         }
     };
 
-    let stream_props = match build_stream_props(&new_req.stream_type, &new_req.props) {
+    let stream_props = match build_stream_props(
+        &new_req.stream_type,
+        &new_req.props,
+        state.storage.base_dir(),
+    ) {
         Ok(props) => props,
         Err(err) => {
             audit.log_failure(&err);
@@ -1572,9 +1584,11 @@ pub async fn upsert_stream_handler(
                 // Best-effort rollback: restore the old definition on instances
                 // that already accepted the replacement.
                 let decoder_registry = state.instances.default_instance().decoder_registry();
-                if let Ok(old_def) =
-                    stream_definition_from_stored(&old_stored, decoder_registry.as_ref())
-                {
+                if let Ok(old_def) = stream_definition_from_stored(
+                    &old_stored,
+                    decoder_registry.as_ref(),
+                    state.storage.base_dir(),
+                ) {
                     for instance in replaced_instances {
                         let _ = instance
                             .replace_stream(old_def.clone(), old_req.shared)
@@ -1806,7 +1820,7 @@ fn normalized_optional_string(value: Option<String>) -> Option<String> {
     })
 }
 
-fn stream_props_value(props: &StreamProps) -> JsonValue {
+fn stream_props_value(props: &StreamProps, stored_props: &StreamPropsRequest) -> JsonValue {
     match props {
         StreamProps::Mqtt(mqtt) => {
             let mut map = JsonMap::new();
@@ -1854,37 +1868,9 @@ fn stream_props_value(props: &StreamProps) -> JsonValue {
             JsonValue::Object(map)
         }
         StreamProps::Video(video) => video_props_value(video),
-        StreamProps::File(file) => {
-            let mut map = JsonMap::new();
-            map.insert("path".to_string(), JsonValue::String(file.path.clone()));
-            let mut framing = JsonMap::new();
-            match &file.framing {
-                FileSourceFraming::AppendBatch => {
-                    framing.insert(
-                        "mode".to_string(),
-                        JsonValue::String("append_batch".to_string()),
-                    );
-                }
-                FileSourceFraming::Delimiter {
-                    delimiter,
-                    include_delimiter,
-                } => {
-                    framing.insert(
-                        "mode".to_string(),
-                        JsonValue::String("delimiter".to_string()),
-                    );
-                    framing.insert(
-                        "delimiter".to_string(),
-                        JsonValue::String(String::from_utf8_lossy(delimiter).into_owned()),
-                    );
-                    if *include_delimiter {
-                        framing.insert("include_delimiter".to_string(), JsonValue::Bool(true));
-                    }
-                }
-            }
-            map.insert("framing".to_string(), JsonValue::Object(framing));
-            JsonValue::Object(map)
-        }
+        // Runtime file props contain an absolute path and materialized defaults.
+        // Describe must retain the persisted spec for revision-safe updates.
+        StreamProps::File(_) => stored_props.to_value(),
         StreamProps::Mock(mock) => {
             let mut map = JsonMap::new();
             map.insert(
@@ -2074,6 +2060,7 @@ pub(crate) fn build_schema_from_request(req: &CreateStreamRequest) -> Result<Sch
 pub(crate) fn build_stream_props(
     stream_type: &str,
     props: &StreamPropsRequest,
+    data_dir: &std::path::Path,
 ) -> Result<StreamProps, String> {
     match stream_type.to_ascii_lowercase().as_str() {
         "mqtt" => {
@@ -2146,6 +2133,7 @@ pub(crate) fn build_stream_props(
                 .path
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| "file stream requires path".to_string())?;
+            let path = crate::file_path::resolve_string(data_dir, &path)?;
             let metadata = std::fs::symlink_metadata(&path).map_err(|err| {
                 format!("file stream path `{path}` does not exist or is not accessible: {err}")
             })?;
@@ -2739,8 +2727,8 @@ mod tests {
     ) -> StreamDefinition {
         let resolved_schema =
             resolve_schema_from_request(req).expect("resolve schema from request");
-        let props =
-            build_stream_props(&req.stream_type, &req.props).expect("build stream props from req");
+        let props = build_stream_props(&req.stream_type, &req.props, std::path::Path::new("."))
+            .expect("build stream props from req");
         let decoder = build_stream_decoder(req, decoder_registry, &resolved_schema)
             .expect("build stream decoder from req");
         validate_stream_decoder_config(req, &decoder)
@@ -2995,7 +2983,8 @@ mod tests {
             .clone(),
         };
 
-        let built = build_stream_props("mqtt", &props).expect("build shared mqtt stream props");
+        let built = build_stream_props("mqtt", &props, std::path::Path::new("."))
+            .expect("build shared mqtt stream props");
         let StreamProps::Mqtt(mqtt) = built else {
             panic!("expected mqtt stream props");
         };
@@ -3017,7 +3006,7 @@ mod tests {
             .clone(),
         };
 
-        let err = build_stream_props("mqtt", &props).unwrap_err();
+        let err = build_stream_props("mqtt", &props, std::path::Path::new(".")).unwrap_err();
         assert_eq!(err, "mqtt stream requires broker_url");
     }
 
@@ -3033,7 +3022,8 @@ mod tests {
             .clone(),
         };
 
-        let built = build_stream_props("nng_pubsub", &props).expect("build nng stream props");
+        let built = build_stream_props("nng_pubsub", &props, std::path::Path::new("."))
+            .expect("build nng stream props");
         let StreamProps::NngPubSub(nng) = built else {
             panic!("expected nng_pubsub stream props");
         };
@@ -3223,6 +3213,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn describe_file_stream_preserves_props_for_same_revision_update() {
+        for props in [
+            json!({"path": "uploads/input.txt"}),
+            json!({
+                "path": "uploads/input.txt",
+                "framing": {"mode": "delimiter", "delimiter": "\n", "include_delimiter": false}
+            }),
+        ] {
+            let temp_dir = tempfile::tempdir().expect("create data directory");
+            let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
+            state.storage.save_upload("input.txt", b"input\n").unwrap();
+            let request: CreateStreamRequest = serde_json::from_value(json!({
+                "name": "relative_file_describe", "revision": 1, "type": "file",
+                "props": props, "decoder": {"type": "file_line"}
+            }))
+            .unwrap();
+            let response = create_stream_handler(State(state.clone()), Json(request.clone()))
+                .await
+                .into_response();
+            assert_eq!(response.status(), StatusCode::CREATED);
+
+            let definition = state
+                .instances
+                .default_instance()
+                .stream_definition(&request.name)
+                .expect("installed stream");
+            let StreamProps::File(file) = definition.props() else {
+                panic!("expected file stream");
+            };
+            assert_eq!(
+                std::path::Path::new(&file.path),
+                temp_dir.path().join("uploads/input.txt")
+            );
+            let stored_before = state.storage.get_stream(&request.name).unwrap().unwrap();
+
+            let response =
+                describe_stream_handler(State(state.clone()), Path(request.name.clone()))
+                    .await
+                    .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            let described: JsonValue = serde_json::from_slice(&body).unwrap();
+            assert_eq!(described["spec"]["props"], props);
+
+            let mut update = serde_json::to_value(&request).unwrap();
+            update["props"] = described["spec"]["props"].clone();
+            update["decoder"] = described["spec"]["decoder"].clone();
+            let response = upsert_stream_handler(
+                State(state.clone()),
+                Path(request.name.clone()),
+                Query(UpsertStreamQuery::default()),
+                Json(serde_json::from_value(update).unwrap()),
+            )
+            .await
+            .into_response();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+            let stored_after = state.storage.get_stream(&request.name).unwrap().unwrap();
+            assert_eq!(stored_after.raw_json, stored_before.raw_json);
+            assert_eq!(stored_after.revision, stored_before.revision);
+        }
+    }
+
+    #[tokio::test]
     async fn describe_stream_returns_eventtime_and_shared_flags_from_stored_spec() {
         let temp_dir = tempfile::tempdir().expect("create temp dir");
         let state = build_state(&temp_dir, vec![sample_default_instance_spec()]);
@@ -3359,6 +3414,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("build pipeline definition");
         instance
@@ -3471,6 +3527,7 @@ mod tests {
             instance.encoder_registry().as_ref(),
             instance.as_ref(),
             Default::default(),
+            std::path::Path::new("."),
         )
         .expect("definition");
         instance

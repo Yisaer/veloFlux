@@ -10,6 +10,7 @@ mod audit;
 mod capabilities;
 mod checkpoint_storage;
 mod export;
+mod file_path;
 mod function;
 mod import;
 mod instances;

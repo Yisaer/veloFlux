@@ -66,10 +66,11 @@ pub fn stored_table_from_request(req: &CreateTableRequest) -> Result<StoredTable
 pub fn stream_definition_from_stored(
     stored: &StoredStream,
     decoder_registry: &DecoderRegistry,
+    data_dir: &std::path::Path,
 ) -> Result<StreamDefinition, String> {
     let req = stream_request_from_stored(stored)?;
     let resolved_schema = resolve_schema_from_request(&req)?;
-    let props = build_stream_props(&req.stream_type, &req.props)?;
+    let props = build_stream_props(&req.stream_type, &req.props, data_dir)?;
     let decoder = build_stream_decoder(&req, decoder_registry, &resolved_schema)?;
     let mut definition = StreamDefinition::new(
         req.name.clone(),
@@ -168,9 +169,16 @@ pub fn pipeline_definition_from_stored(
     stored: &StoredPipeline,
     encoder_registry: &EncoderRegistry,
     instance: &flow::FlowInstance,
+    data_dir: &std::path::Path,
 ) -> Result<PipelineDefinition, String> {
     let req = pipeline_request_from_stored(stored)?;
-    build_pipeline_definition(&req, encoder_registry, instance, Default::default())
+    build_pipeline_definition(
+        &req,
+        encoder_registry,
+        instance,
+        Default::default(),
+        data_dir,
+    )
 }
 
 pub fn pipeline_request_from_stored(
@@ -384,7 +392,8 @@ async fn restore_stream(
     instance: &flow::FlowInstance,
 ) -> Result<(), String> {
     let decoder_registry = instance.decoder_registry();
-    let def = stream_definition_from_stored(&stream, decoder_registry.as_ref())?;
+    let def =
+        stream_definition_from_stored(&stream, decoder_registry.as_ref(), storage.base_dir())?;
     let req = stream_request_from_stored(&stream)?;
     // Defensive: reject historically-invalid resource ids so bad data cannot
     // re-enter the runtime on restart (VF-51 §5.2). The error is propagated to
@@ -428,8 +437,12 @@ async fn restore_pipeline(
     };
 
     let encoder_registry = instance.encoder_registry();
-    let def =
-        pipeline_definition_from_stored(&pipeline, encoder_registry.as_ref(), instance.as_ref())?;
+    let def = pipeline_definition_from_stored(
+        &pipeline,
+        encoder_registry.as_ref(),
+        instance.as_ref(),
+        storage.base_dir(),
+    )?;
     instance
         .create_pipeline(flow::CreatePipelineRequest::new(def))
         .map_err(|e| e.to_string())?;
@@ -630,6 +643,72 @@ mod tests {
     use serde_json::{Map as JsonMap, Value as JsonValue, json};
     use storage::StoredUdf;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn relative_resource_paths_restore_under_the_current_data_directory() {
+        let request: CreateStreamRequest = serde_json::from_value(json!({
+            "name": "relative_file", "revision": 1, "type": "file",
+            "props": {"path": "uploads/input.txt"},
+            "decoder": {"type": "file_line"}
+        }))
+        .unwrap();
+        let stream = stored_stream_from_request(&request).unwrap();
+        let request: CreatePipelineRequest = serde_json::from_value(json!({
+            "id": "relative_output", "revision": 1, "sql": "SELECT 1 AS value",
+            "sinks": [
+                {"type": "file", "props": {"path": "output"}},
+                {"type": "kura", "props": {"addr": "http://localhost:55555", "mapping_path": "uploads/kura.json"}},
+                {"type": "kuksa", "props": {"addr": "http://localhost:55555", "vss_path": "uploads/vss.json"}},
+                {"type": "video", "props": {"path": "video", "rolling": {"type": "duration", "seconds": 60}}}
+            ]
+        })).unwrap();
+        let pipeline = stored_pipeline_from_request(&request).unwrap();
+        for _ in 0..2 {
+            let root = tempdir().unwrap();
+            let storage = StorageManager::new(root.path()).unwrap();
+            storage.save_upload("input.txt", b"input\n").unwrap();
+            let instance = crate::new_default_flow_instance();
+            let definition = stream_definition_from_stored(
+                &stream,
+                instance.decoder_registry().as_ref(),
+                root.path(),
+            )
+            .unwrap();
+            let flow::catalog::StreamProps::File(file) = definition.props() else {
+                panic!("expected file stream");
+            };
+            assert_eq!(
+                std::path::Path::new(&file.path),
+                root.path().join("uploads/input.txt")
+            );
+            let definition = pipeline_definition_from_stored(
+                &pipeline,
+                instance.encoder_registry().as_ref(),
+                &instance,
+                root.path(),
+            )
+            .unwrap();
+            for (sink, expected) in definition.sinks().iter().zip([
+                "output",
+                "uploads/kura.json",
+                "uploads/vss.json",
+                "video",
+            ]) {
+                let path = match &sink.props {
+                    flow::pipeline::SinkProps::File(props) => &props.path,
+                    flow::pipeline::SinkProps::Kura(props) => &props.mapping_path,
+                    flow::pipeline::SinkProps::Kuksa(props) => &props.vss_path,
+                    flow::pipeline::SinkProps::Video(props) => &props.path,
+                    _ => panic!("unexpected sink"),
+                };
+                assert_eq!(std::path::Path::new(path), root.path().join(expected));
+            }
+        }
+        let stored: JsonValue = serde_json::from_str(&stream.raw_json).unwrap();
+        assert_eq!(stored["props"]["path"], "uploads/input.txt");
+        let stored: JsonValue = serde_json::from_str(&pipeline.raw_json).unwrap();
+        assert_eq!(stored["sinks"][0]["props"]["path"], "output");
+    }
 
     #[test]
     fn stored_shared_mqtt_config_without_protocol_defaults_to_v3() {

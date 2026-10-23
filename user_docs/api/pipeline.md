@@ -1,5 +1,10 @@
 # Pipeline REST API (Manager)
 
+> **File paths.** Relative server-local file paths in resource definitions are
+> relative to `data_dir`; absolute paths use the server filesystem. Relative
+> paths containing `..` are rejected. See the
+> [resource file path contract](../../docs/api/README.md#server-local-resource-file-paths).
+
 This document describes the **Manager** REST API for managing pipelines.
 
 Base URL depends on your deployment (examples use `http://127.0.0.1:8080`).

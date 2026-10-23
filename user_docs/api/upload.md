@@ -1,5 +1,10 @@
 # File Upload REST API (Manager)
 
+> **Trust model.** This API is for trusted administrators in a single trust
+> domain. Access control is supplied by the deployment environment. Uploads
+> remain restricted to validated names within the uploads directory. Read the
+> [API trust and deployment model](../../docs/api/README.md#trust-and-deployment-model).
+
 This document describes the **Manager** REST API for uploading, listing, downloading,
 and deleting user files.
 
@@ -130,24 +135,29 @@ Delete a file from the uploads directory.
 curl -X DELETE http://127.0.0.1:8080/files/ca-cert.pem
 ```
 
-## Using Uploaded Files in Pipelines and Streams
+## Referencing Uploaded Files
 
-Uploaded files are referenced by their relative path from the data directory:
+Use `uploads/<name>` in resource file path fields. The manager resolves these
+paths against `data_dir` when constructing runtime resources; see the
+[resource file path contract](../../docs/api/README.md#server-local-resource-file-paths).
+For example, upload `name=sensor-schema.zip`, then create a schema with:
 
 ```json
 {
-  "name": "my-mqtt-stream",
-  "type": "mqtt",
+  "name": "sensor_schema",
+  "revision": 1,
+  "type": "proto",
   "props": {
-    "broker_url": "mqtts://broker.example.com:8883",
-    "topic": "sensors/#",
-    "ca_file": "uploads/ca-cert.pem",
-    "key_file": "uploads/client-key.pem"
+    "proto_path": "uploads/sensor-schema.zip",
+    "message_type": "Sensor"
   }
 }
 ```
 
-The connector resolves the path to `{data_dir}/uploads/{name}` at runtime.
+File streams can reference uploaded input files through `props.path`. Kura and
+Kuksa sinks can reference mapping files through `props.mapping_path` and
+`props.vss_path`, respectively. The generic file API only stores files; it does
+not register schemas, UDFs, or models.
 
 ## File Name Constraints
 
@@ -156,7 +166,8 @@ File names must match `[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}`. This means:
 - Must start with a letter or digit (not a dot or special character)
 - May contain letters, digits, dots, underscores, and hyphens
 - Maximum 255 characters
-- No slashes, backslashes, or path traversal sequences
+- Forward slashes may separate valid segments; backslashes and `..` sequences are rejected
+- The top-level `tmp/` directory is reserved for internal temporary uploads
 
 Examples:
 
@@ -164,7 +175,7 @@ Examples:
 |------|--------|--------|
 | `ca-cert.pem` | Yes | |
 | `.hidden` | No | Starts with `.` |
-| `dir/file` | No | Contains `/` |
+| `dir/file` | Yes | Both segments are valid |
 | `../escape` | No | Path traversal |
 | `my_cert-2026.pem` | Yes | |
 

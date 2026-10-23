@@ -64,7 +64,9 @@ impl TemporaryUpload {
         mut field: Field<'_>,
         extension: Option<&str>,
     ) -> Result<Self, UploadFailure> {
-        let tmp_dir = storage.uploads_tmp_dir();
+        let tmp_dir = std::path::absolute(storage.uploads_tmp_dir()).map_err(|err| {
+            UploadFailure::internal(format!("resolve temporary upload directory: {err}"))
+        })?;
         tokio::fs::create_dir_all(&tmp_dir).await.map_err(|err| {
             UploadFailure::internal(format!("create temporary upload directory: {err}"))
         })?;

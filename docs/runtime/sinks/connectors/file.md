@@ -1,5 +1,9 @@
 # File Sink
 
+When configured through the Manager API, relative `props.path` values are
+resolved against `data_dir`; absolute paths are used as given. See the
+[resource file path contract](../../../api/README.md#server-local-resource-file-paths).
+
 The **File sink** writes already encoded sink delivery units to local files. It is a byte sink:
 the connector does not inspect rows, schema, output mode, or encoder format.
 

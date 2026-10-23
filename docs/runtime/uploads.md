@@ -2,7 +2,8 @@
 
 The file API stores ordinary user uploads under `<data_dir>/uploads/`. Paths are
 validated, nested directories are supported, and writes use temporary files
-before rename.
+before rename. Consumers reference uploads as `uploads/<name>` using the
+[resource file path contract](../api/README.md#server-local-resource-file-paths).
 
 Uploads are runtime data and are intentionally outside the canonical resource
 directory used by export, import, and startup `--init-dir`. Managed schema

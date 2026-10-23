@@ -1,5 +1,9 @@
 # Video Sink
 
+When configured through the Manager API, relative `props.path` values are
+resolved against `data_dir`; absolute paths are used as given. See the
+[resource file path contract](../../../api/README.md#server-local-resource-file-paths).
+
 ## Overview
 
 The video sink records video frame tuples to an external video output. It is a direct

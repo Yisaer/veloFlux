@@ -1125,6 +1125,7 @@ mod tests {
                 instance.encoder_registry().as_ref(),
                 instance.as_ref(),
                 Default::default(),
+                std::path::Path::new("."),
             )
             .expect("definition");
             instance
