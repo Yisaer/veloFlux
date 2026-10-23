@@ -64,8 +64,7 @@ pub(crate) fn apply_project(
                 }
             };
             projected_tuple
-                .affiliate_mut()
-                .insert_shared(&field.field_name, value);
+                .add_affiliate_column(Arc::new(field.field_name.as_ref().to_string()), value);
         }
         if let Some(state) = state {
             if let Err(error) = update_row_hit_state(state, state_usage, tuple.timestamp) {

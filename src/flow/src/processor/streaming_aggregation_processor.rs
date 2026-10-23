@@ -46,7 +46,7 @@ struct GroupByMeta {
 struct GroupState {
     accumulators: Vec<AccumulatorState>,
     last_tuple: LastRow,
-    latest_key: Option<Vec<Value>>,
+    key_values: Vec<Value>,
 }
 
 /// Aggregation output only inherits source messages and the last timestamp.
@@ -165,8 +165,6 @@ impl BoundCall {
 
 struct BoundAggregation {
     calls: Result<Vec<BoundCall>, String>,
-    aggregate_names: Vec<Arc<str>>,
-    group_by_names: Vec<Option<Arc<str>>>,
 }
 
 #[derive(Default)]
@@ -214,7 +212,6 @@ struct AggregationWorker {
     bound: Arc<BoundAggregation>,
     groups: HashMap<Vec<Value>, GroupState>,
     scratch: RowScratch,
-    key_buffer: Vec<Value>,
 }
 
 impl AggregationWorker {
@@ -228,26 +225,12 @@ impl AggregationWorker {
             .iter()
             .map(|call| BoundCall::new(call, &aggregate_registry))
             .collect();
-        let aggregate_names = physical
-            .aggregate_calls
-            .iter()
-            .map(|call| Arc::from(call.output_column.as_str()))
-            .collect();
-        let group_by_names = group_by_meta
-            .iter()
-            .map(|meta| (!meta.is_simple).then(|| Arc::from(meta.output_name.as_str())))
-            .collect();
         Self {
             physical,
             group_by_meta: Arc::from(group_by_meta),
-            bound: Arc::new(BoundAggregation {
-                calls,
-                aggregate_names,
-                group_by_names,
-            }),
+            bound: Arc::new(BoundAggregation { calls }),
             groups: HashMap::new(),
             scratch: RowScratch::default(),
-            key_buffer: Vec::new(),
         }
     }
 
@@ -259,41 +242,28 @@ impl AggregationWorker {
             bound: Arc::clone(&self.bound),
             groups: HashMap::new(),
             scratch: RowScratch::default(),
-            key_buffer: Vec::new(),
         }
     }
 
     fn clear(&mut self) {
         self.groups.clear();
         self.scratch.clear();
-        self.key_buffer.clear();
     }
 
     fn update_groups(&mut self, tuple: &crate::model::Tuple) -> Result<(), String> {
-        // Keep cleanup outside the transaction so every error releases temporary keys.
-        let result = self.update_groups_inner(tuple);
-        self.key_buffer.clear();
-        result
-    }
-
-    fn update_groups_inner(&mut self, tuple: &crate::model::Tuple) -> Result<(), String> {
-        self.key_buffer.clear();
-        self.key_buffer.reserve(self.group_by_meta.len());
+        let mut key_values = Vec::with_capacity(self.group_by_meta.len());
         for meta in self.group_by_meta.iter() {
-            self.key_buffer.push(
+            key_values.push(
                 meta.scalar
                     .eval_with_tuple(tuple)
                     .map_err(|error| format!("Failed to evaluate group-by expression: {error}"))?,
             );
         }
         let calls = self.bound.calls.as_ref().map_err(Clone::clone)?;
-        if let Some(state) = self.groups.get_mut(self.key_buffer.as_slice()) {
+        if let Some(state) = self.groups.get_mut(&key_values) {
             self.scratch.apply(calls, tuple, &mut state.accumulators)?;
             state.last_tuple = LastRow::capture(tuple);
-            std::mem::swap(
-                &mut self.key_buffer,
-                state.latest_key.get_or_insert_with(Vec::new),
-            );
+            state.key_values = key_values;
         } else {
             let mut accumulators = calls
                 .iter()
@@ -301,11 +271,11 @@ impl AggregationWorker {
                 .collect::<Vec<_>>();
             self.scratch.apply(calls, tuple, &mut accumulators)?;
             self.groups.insert(
-                std::mem::take(&mut self.key_buffer),
+                key_values.clone(),
                 GroupState {
                     accumulators,
                     last_tuple: LastRow::capture(tuple),
-                    latest_key: None,
+                    key_values,
                 },
             );
         }
@@ -317,12 +287,13 @@ impl AggregationWorker {
             return Ok(None);
         }
         let mut output_tuples = Vec::with_capacity(self.groups.len());
-        for (key, mut state) in self.groups.drain() {
+        for (_key, mut state) in self.groups.drain() {
             output_tuples.push(finalize_group(
-                &self.bound,
+                &self.physical.aggregate_calls,
+                &self.group_by_meta,
                 &mut state.accumulators,
                 &state.last_tuple,
-                state.latest_key.as_deref().unwrap_or(&key),
+                &state.key_values,
             )?);
         }
         let collection = RecordBatch::new(output_tuples)
@@ -355,24 +326,30 @@ fn apply_aggregate_updates(
 }
 
 fn finalize_group(
-    bound: &BoundAggregation,
+    aggregate_calls: &[AggregateCall],
+    group_by_meta: &[GroupByMeta],
     accumulators: &mut [AccumulatorState],
     last_tuple: &LastRow,
     key_values: &[Value],
 ) -> Result<crate::model::Tuple, String> {
-    let mut tuple =
-        crate::model::Tuple::with_timestamp(last_tuple.messages.clone(), last_tuple.timestamp);
-    let affiliate = tuple.affiliate_mut();
-    for (name, accumulator) in bound.aggregate_names.iter().zip(accumulators.iter_mut()) {
-        affiliate.insert_shared(name, accumulator.finalize());
+    use std::sync::Arc;
+
+    let mut affiliate_entries = Vec::new();
+    for (call, accumulator) in aggregate_calls.iter().zip(accumulators.iter_mut()) {
+        affiliate_entries.push((Arc::new(call.output_column.clone()), accumulator.finalize()));
     }
 
     for (idx, value) in key_values.iter().enumerate() {
-        if let Some(Some(name)) = bound.group_by_names.get(idx) {
-            affiliate.insert_shared(name, value.clone());
+        if let Some(meta) = group_by_meta.get(idx) {
+            if !meta.is_simple {
+                affiliate_entries.push((Arc::new(meta.output_name.clone()), value.clone()));
+            }
         }
     }
 
+    let mut tuple =
+        crate::model::Tuple::with_timestamp(last_tuple.messages.clone(), last_tuple.timestamp);
+    tuple.add_affiliate_columns(affiliate_entries);
     Ok(tuple)
 }
 

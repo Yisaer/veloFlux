@@ -96,22 +96,13 @@ impl AffiliateRow {
 
     /// Insert or overwrite a derived column.
     pub fn insert(&mut self, key: Arc<String>, value: Value) {
-        self.insert_with(key.as_str(), value, || Arc::from(key.as_str()));
-    }
-
-    /// Share a bound column name without allocating a new string.
-    pub(crate) fn insert_shared(&mut self, key: &Arc<str>, value: Value) {
-        self.insert_with(key.as_ref(), value, || Arc::clone(key));
-    }
-
-    fn insert_with(&mut self, key: &str, value: Value, make_key: impl FnOnce() -> Arc<str>) {
         // Avoid allocating for the hot-path lookup (`HashMap<Arc<str>, _>::get(&str)`).
-        if let Some(idx) = self.index.get(key).copied() {
+        if let Some(idx) = self.index.get(key.as_str()).copied() {
             self.values[idx] = value;
         } else {
             let idx = self.values.len();
             self.values.push(value);
-            let key = make_key();
+            let key = Arc::<str>::from(key.as_str());
             self.index.insert(Arc::clone(&key), idx);
             self.keys.push(key);
         }
