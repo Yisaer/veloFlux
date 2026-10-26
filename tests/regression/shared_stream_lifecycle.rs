@@ -309,6 +309,28 @@ async fn shared_stream_many_consumers_concurrent_lifecycle_via_rest() {
     .await
     .expect("concurrent starts did not finish");
 
+    // Starting a pipeline schedules its shared-source subscription asynchronously.
+    // Wait for every receiver before sending this finite warm-up burst.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let stream = harness
+            .injector
+            .get_stream(&stream_name)
+            .await
+            .expect("shared stream runtime");
+        let shared = stream.shared_info.expect("shared stream metadata");
+        if shared.subscriber_count == pipeline_ids.len() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "shared stream {stream_name} has {} subscribers; expected {}",
+            shared.subscriber_count,
+            pipeline_ids.len(),
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
     for value in 0..5 {
         harness
             .injector
