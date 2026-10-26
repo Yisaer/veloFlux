@@ -206,6 +206,8 @@ jobs:
     permissions:
       contents: read
     runs-on: ubuntu-latest
+    env:
+      ANDROID_NDK_VERSION: "28.2.13676358" # NDK r28c defaults to 16 KB ELF alignment.
     steps:
       - uses: actions/checkout@v5
         with:
@@ -224,8 +226,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential protobuf-compiler
-          sdkmanager --install "ndk;26.3.11579264"
-          NDK="$ANDROID_HOME/ndk/26.3.11579264"
+          sdkmanager --install "ndk;$ANDROID_NDK_VERSION"
+          NDK="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           API="24"
           mkdir -p "$RUNNER_TEMP/cross-bin"
@@ -247,7 +249,7 @@ jobs:
           echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C force-frame-pointers=yes" >> "$GITHUB_ENV"
       - name: Prebuild Android GMP cache
         run: |
-          NDK="$ANDROID_HOME/ndk/26.3.11579264"
+          NDK="$ANDROID_NDK_HOME"
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           API="24"
           WRAPPER_DIR="$RUNNER_TEMP/android-gmp-wrapper"
@@ -307,6 +309,11 @@ jobs:
           cargo build --release --target aarch64-linux-android --no-default-features --features "metrics,profiling,allocator-system"
           mkdir -p target/release-artifacts/android-arm64
           cp target/aarch64-linux-android/release/veloflux target/release-artifacts/android-arm64/veloflux
+      - name: Verify Android 16 KB ELF alignment
+        run: |
+          BIN="target/release-artifacts/android-arm64/veloflux"
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -lW "$BIN"
+          python3 scripts/ci/check_elf_16k.py "$BIN"
       - name: Prepare Android arm64 release asset
         run: |
           ASSET_NAME="veloflux-android-arm64"
