@@ -348,7 +348,9 @@ fn extract_zip_file_with_limits(
         let file = archive
             .by_index(index)
             .map_err(|e| format!("read import ZIP entry {index}: {e}"))?;
-        let name = file.name();
+        let name = file
+            .name()
+            .map_err(|err| format!("decode import ZIP entry {index} name: {err}"))?;
         if name.contains('\\') {
             return Err(format!("import ZIP entry `{name}` contains a backslash"));
         }
@@ -404,7 +406,7 @@ fn extract_zip_file_with_limits(
             .map_err(|e| format!("read import ZIP entry {index}: {e}"))?;
         let path = file
             .enclosed_name()
-            .ok_or_else(|| format!("import ZIP entry `{}` has an unsafe path", file.name()))?;
+            .ok_or_else(|| format!("import ZIP entry {index} has an unsafe path"))?;
         let target = dest.join(&path);
         if file.is_dir() {
             std::fs::create_dir_all(&target).map_err(|e| {

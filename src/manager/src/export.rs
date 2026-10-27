@@ -867,7 +867,7 @@ mod tests {
 
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).expect("ZIP entry");
-            let path = entry.name().to_string();
+            let path = entry.name().expect("decode ZIP entry name").into_owned();
             entries.push(path.clone());
             if path == "manifest.json" {
                 let mut buf = Vec::new();

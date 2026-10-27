@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 EMQ Technologies Co., Ltd.
+# SPDX-License-Identifier: Apache-2.0
+
+self-hosted-runner:
+  labels:
+    - infra-emqx-io-4c

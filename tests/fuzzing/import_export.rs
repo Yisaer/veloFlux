@@ -137,7 +137,11 @@ fn metadata_json_from_zip(data: &[u8]) -> Result<JsonValue, String> {
         let mut entry = archive
             .by_index(index)
             .map_err(|e| format!("read ZIP entry: {e}"))?;
-        if entry.name() == "manifest.json" {
+        if entry
+            .name()
+            .map_err(|e| format!("decode ZIP entry name: {e}"))?
+            == "manifest.json"
+        {
             let mut metadata = Vec::new();
             entry
                 .read_to_end(&mut metadata)

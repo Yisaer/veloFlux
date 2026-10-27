@@ -669,14 +669,16 @@ fn extract_schema_archive_with_limits(
         let file = archive
             .by_index(index)
             .map_err(|err| format!("read schema zip entry {index}: {err}"))?;
-        let name = file.name();
+        let name = file
+            .name()
+            .map_err(|err| format!("decode schema zip entry {index} name: {err}"))?;
         if name.contains('\\') {
             return Err(format!("schema zip entry `{name}` contains a backslash"));
         }
         let path = file
             .enclosed_name()
             .ok_or_else(|| format!("schema zip entry `{name}` has an unsafe path"))?;
-        validate_archive_path(&path, name)?;
+        validate_archive_path(&path, &name)?;
         if !paths.insert(path.clone()) {
             return Err(format!(
                 "schema zip contains duplicate entry `{}`",
@@ -747,7 +749,7 @@ fn extract_schema_archive_with_limits(
             .map_err(|err| format!("read schema zip entry {index}: {err}"))?;
         let path = file
             .enclosed_name()
-            .ok_or_else(|| format!("schema zip entry `{}` has an unsafe path", file.name()))?;
+            .ok_or_else(|| format!("schema zip entry {index} has an unsafe path"))?;
         let target = destination.join(path);
         if file.is_dir() {
             fs::create_dir_all(&target)

@@ -1,0 +1,72 @@
+[graph]
+# Include optional features and platform-specific dependencies without building them.
+all-features = true
+
+[advisories]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+# See the bans section for dependency-path restrictions on these exceptions.
+# Re-review on parent upgrades; unused exceptions must be removed.
+unused-ignored-advisory = "deny"
+ignore = [
+    { id = "RUSTSEC-2025-0141", reason = "Bincode 1.3.3 encodes persisted storage and checkpoints; replacing it requires a separately validated format migration. See docs/development/dependency-advisories.md." },
+    { id = "RUSTSEC-2025-0057", reason = "fxhash is transitive through Wasmtime profiling; this maintenance advisory has no patched release. Reassess with the upstream profiling dependency." },
+    { id = "RUSTSEC-2024-0436", reason = "Build-time token-pasting macro required by existing GStreamer, Parquet and jemalloc dependencies; no patched release. Track upstream replacements." },
+    { id = "RUSTSEC-2025-0134", reason = "rumqttc 0.25.1 requires the 2.2.0 compatibility wrapper around rustls-pki-types PEM parsing; no newer rumqttc release is available." },
+    { id = "RUSTSEC-2026-0049", reason = "rumqttc 0.25.1 references webpki 0.102.8 only as an error type; TLS verification uses rustls-webpki 0.103.16. See docs/development/dependency-advisories.md." },
+    { id = "RUSTSEC-2026-0098", reason = "rumqttc 0.25.1 references webpki 0.102.8 only as an error type; TLS verification uses rustls-webpki 0.103.16. See docs/development/dependency-advisories.md." },
+    { id = "RUSTSEC-2026-0099", reason = "rumqttc 0.25.1 references webpki 0.102.8 only as an error type; TLS verification uses rustls-webpki 0.103.16. See docs/development/dependency-advisories.md." },
+    { id = "RUSTSEC-2026-0104", reason = "rumqttc 0.25.1 references webpki 0.102.8 only as an error type; TLS verification uses rustls-webpki 0.103.16. See docs/development/dependency-advisories.md." },
+    { id = "RUSTSEC-2026-0382", reason = "rumqttc 0.25.1 references webpki 0.102.8 only as an error type; TLS verification uses rustls-webpki 0.103.16. See docs/development/dependency-advisories.md." },
+    { id = "RUSTSEC-2024-0449", reason = "serde_yaml requires unsafe-libyaml for configuration and import/export; a safe-Rust parser migration needs YAML compatibility validation. See docs/development/dependency-advisories.md." },
+]
+
+[licenses]
+confidence-threshold = 0.95
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+# Keep uncommon licenses scoped to the existing crates that require them.
+exceptions = [
+    { crate = "notify@6.1.1", allow = ["CC0-1.0"] },
+    { crate = "tiny-keccak@2.0.2", allow = ["CC0-1.0"] },
+    { crate = "webpki-root-certs@1.0.11", allow = ["CDLA-Permissive-2.0"] },
+]
+
+# This check enforces third-party dependency licenses. Local unpublished crates
+# retain their existing licensing; do not infer a license for them here.
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+# Local path dependencies currently omit versions; report these without blocking.
+wildcards = "warn"
+# Advisory ignores in cargo-deny 0.20.2 are global by ID. Restrict the affected
+# dependency paths here so the reviewed exceptions cannot cover new callers.
+deny = [
+    { crate = "bincode", wrappers = ["manager", "storage"], reason = "Only existing persisted formats are covered by the maintenance exception." },
+    { crate = "fxhash", wrappers = ["fxprof-processed-profile"], reason = "Only the upstream profiling dependency is reviewed." },
+    { crate = "paste", wrappers = ["gstreamer", "option-operations", "parquet", "tikv-jemalloc-ctl"], reason = "Only existing macro consumers are reviewed." },
+    { crate = "rustls-pemfile", wrappers = ["rumqttc"], reason = "Only the MQTT compatibility wrapper is reviewed." },
+    { crate = "unsafe-libyaml", wrappers = ["serde_yaml"], reason = "Only the existing YAML serialization dependency is reviewed." },
+    { crate = "rustls-webpki:<0.103.16", wrappers = ["rumqttc"], reason = "Only rumqttc's unused error-type dependency is exempt; TLS verification must use a patched WebPKI." },
+    { crate = "rumqttc:<0.25.1", reason = "The WebPKI exception was reviewed only for rumqttc 0.25.1." },
+    { crate = "rumqttc:>0.25.1", reason = "Re-review and remove the WebPKI exception when upgrading rumqttc." },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Existing ring patch; require an immutable revision for Git dependencies.
+allow-git = ["https://github.com/briansmith/ring.git"]
+required-git-spec = "rev"

@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "manager"
 version = "0.0.1"
 edition = "2024"
@@ -20,12 +21,12 @@ udf = { path = "../udf", optional = true }
 build_info = { path = "../build_info" }
 parking_lot = "0.12"
 sha2 = "0.10"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
 tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 urlencoding = "2"
 base64 = "0.22"
-prometheus = "0.13"
+prometheus = "0.14"
 veloflux_metrics = { path = "../metrics" }
 protox = "0.6"
 prost = "0.12"

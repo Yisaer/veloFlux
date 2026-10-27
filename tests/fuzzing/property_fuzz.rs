@@ -262,7 +262,7 @@ async fn export_bundle(h: &TestHarness) -> JsonValue {
     let mut archive = zip::ZipArchive::new(Cursor::new(body.as_ref())).expect("open export ZIP");
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).expect("ZIP entry");
-        if entry.name() == "manifest.json" {
+        if entry.name().expect("decode ZIP entry name") == "manifest.json" {
             let mut metadata = Vec::new();
             entry
                 .read_to_end(&mut metadata)

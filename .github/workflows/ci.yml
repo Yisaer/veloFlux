@@ -262,6 +262,8 @@ jobs:
       - name: Generate coverage report
         run: |
           (
+            # cargo-llvm-cov generates the environment script dynamically.
+            # shellcheck disable=SC1090
             source <(cargo llvm-cov show-env --sh)
             cargo llvm-cov clean --workspace
             cargo build --bin veloflux --features default --target-dir target/llvm-cov-target

@@ -139,7 +139,7 @@ jobs:
             > /tmp/veloflux.log 2>&1 &
           echo $! > /tmp/veloflux.pid
 
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if curl -sf http://127.0.0.1:9876/pipelines >/dev/null 2>&1; then
               echo "veloFlux server ready"
               exit 0
@@ -270,5 +270,5 @@ jobs:
       - name: Stop services
         if: always()
         run: |
-          kill $(cat /tmp/veloflux.pid) 2>/dev/null || true
+          kill "$(cat /tmp/veloflux.pid)" 2>/dev/null || true
           docker rm -f kura-smoke || true

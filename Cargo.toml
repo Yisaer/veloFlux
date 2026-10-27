@@ -42,7 +42,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 parking_lot = "0.12"
 
 sysinfo = { version = "0.30", optional = true }
-pprof = { version = "0.13.0", features = ["protobuf-codec"], optional = true }
+pprof = { version = "0.15.0", features = ["protobuf-codec"], optional = true }
 tikv-jemallocator = { version = "0.6.0", features = ["profiling"], optional = true }
 tikv-jemalloc-ctl = { version = "0.6.0", features = ["stats"], optional = true }
 manager = { path = "src/manager", default-features = false }
@@ -79,12 +79,12 @@ criterion = "0.5"
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart"] }
 axum = { version = "0.7", features = ["macros", "json"] }
 tempfile = "3"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.0", default-features = false, features = ["deflate"] }
 wat = "1"
 proptest = "1"
 rumqttc = { version = "0.25.1", default-features = false, features = ["use-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rumqttd = "0.20.0"
+rumqttd = { version = "0.20.0", default-features = false }
 hex = "0.4"
 uuid = "1"
 

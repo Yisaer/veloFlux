@@ -1,4 +1,5 @@
 [package]
+publish = false
 name = "veloflux-model-runtime"
 version = "0.0.1"
 edition = "2021"
@@ -6,9 +7,8 @@ edition = "2021"
 [dependencies]
 storage = { path = "../storage" }
 datatypes = { path = "../datatypes" }
-tract = { version = "0.23", optional = true }
 tract-onnx = { version = "0.23", optional = true }
 
 [features]
 default = []
-onnx = ["dep:tract", "dep:tract-onnx"]
+onnx = ["dep:tract-onnx"]
