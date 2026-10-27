@@ -5,8 +5,6 @@ This document describes stream metadata and schema introspection from a **SQL an
 For the schema registry system (named schemas, proto parser), see `docs/api/schema_registry.md`.
 For the schema CRUD REST API, see `user_docs/api/schema.md`.
 
-For agent implementation guidance (workflow, validation loop, do/don't), see `docs/integrations/agents/runtime_playbook.md`.
-
 For stream management (create/delete) REST APIs, see `user_docs/api/stream.md`.
 
 > **Resource IDs.** Stream names and named-schema names must match
