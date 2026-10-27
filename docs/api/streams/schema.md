@@ -99,6 +99,15 @@ For an existing stream:
 
 JSON formatting and object field order do not affect equality.
 
+`PUT /streams/:name` upserts the definition. It returns `201` for creation and
+`200` for replacement or identical replay, following the
+[resource PUT principles](../README.md#resource-write-methods). Its body requires
+connector `type` and otherwise uses the create fields without `name`. The
+existing connector type cannot change. Omitted optional fields use create
+defaults, including `shared=false`; they do not inherit stored values. Creation
+and identical replay do not perform cascade. Identical replay is evaluated
+before restrictions on updating shared streams with running dependants.
+
 `PUT /streams/:name` also accepts the optional `cascade` query parameter. It defaults to
 `false`. When set to `true`, the manager stops running pipelines that reference the stream,
 replaces the stream, rebuilds all affected pipeline runtimes against the updated catalog, and

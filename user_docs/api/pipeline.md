@@ -93,7 +93,11 @@ Response:
 
 `PUT /pipelines/:id`
 
-Replaces pipeline spec by id when the request revision is greater:
+Creates an absent pipeline or replaces its spec by id when the request revision
+is greater, following the [resource PUT principles](../../docs/api/README.md#resource-write-methods).
+New pipelines use the `default` flow instance and start with desired state
+`stopped`. Replacement retains the existing flow instance; placement is not a writable PUT field. Writable configuration is
+replaced completely, with omitted fields using request defaults:
 
 - If present, manager deletes the existing pipeline in runtime and storage.
 - Manager persists the new spec and registers the new pipeline.
@@ -102,11 +106,13 @@ Replaces pipeline spec by id when the request revision is greater:
 - An equal revision is an idempotent success only when the normalized
   definition is unchanged; otherwise it returns `409 Conflict`.
 
-Request body: `UpsertPipelineRequest` (same shape as create but without `id`).
+Request body: `UpsertPipelineRequest` (create fields except `id` and `flow_instance_id`).
 
 Response:
 
-- `200 OK` with `{ id, revision, status }`.
+- `201 Created` with `{ id, revision, status }` for creation.
+- `200 OK` with the same shape for replacement or identical replay.
+- `409 Conflict` for revision conflicts, a stale recreation after revisioned deletion, or a busy resource.
 - `400 Bad Request` for invalid specs or planning failures.
 
 ### Start Pipeline

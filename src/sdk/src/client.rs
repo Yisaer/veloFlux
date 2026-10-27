@@ -119,7 +119,13 @@ impl ManagerClient {
     ) -> Result<serde_json::Value, SdkError> {
         let path = format!("/pipelines/{}", urlencoding::encode(id));
         self.t
-            .expect_json_success(Method::PUT, &path, &[], Some(req), &[StatusCode::OK])
+            .expect_json_success(
+                Method::PUT,
+                &path,
+                &[],
+                Some(req),
+                &[StatusCode::OK, StatusCode::CREATED],
+            )
             .await
     }
 

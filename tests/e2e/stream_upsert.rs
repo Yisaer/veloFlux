@@ -86,16 +86,17 @@ async fn upsert_non_shared_stream_succeeds() {
         resp.text().await.unwrap_or_default()
     );
 
-    // Update schema + decoder (keep non-shared, no shared field in request)
+    // Update schema + decoder while keeping the stream private.
     let upsert = StreamUpsertRequest {
         revision: 2,
+        stream_type: "mock".to_string(),
         schema: serde_json::json!({
             "type": "json",
             "props": { "columns": [{ "name": "x", "data_type": "float64" }] }
         }),
         props: serde_json::json!({}),
         decoder: serde_json::json!({ "type": "json", "props": {} }),
-        shared: None,
+        shared: false,
     };
 
     let resp = http
@@ -347,6 +348,25 @@ async fn upsert_shared_stream_with_running_pipeline_is_rejected() {
         .expect("start pipeline");
     assert_eq!(resp.status(), StatusCode::OK);
 
+    let mut replay = StreamUpsertRequest::from_create(&create);
+    replay.revision = create.revision;
+    for cascade in [false, true] {
+        let resp = http
+            .put(format!(
+                "{manager_base}/streams/{stream_name}?cascade={cascade}"
+            ))
+            .json(&replay)
+            .send()
+            .await
+            .expect("replay stream while pipeline is running");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "{}",
+            resp.text().await.unwrap_or_default()
+        );
+    }
+
     // Try to update shared stream — must be rejected because pipeline is running
     let upsert = StreamUpsertRequest::from_create(&create);
     let resp = http
@@ -423,6 +443,7 @@ async fn upsert_shared_stream_without_running_pipeline_succeeds() {
     // Now update the shared stream — pipeline is stopped, so update should succeed
     let upsert = StreamUpsertRequest {
         revision: 2,
+        stream_type: "mock".to_string(),
         schema: serde_json::json!({
             "type": "json",
             "props": { "columns": [
@@ -432,7 +453,7 @@ async fn upsert_shared_stream_without_running_pipeline_succeeds() {
         }),
         props: serde_json::json!({}),
         decoder: serde_json::json!({ "type": "json", "props": {} }),
-        shared: None,
+        shared: true,
     };
     let resp = http
         .put(format!("{manager_base}/streams/{stream_name}"))

@@ -26,6 +26,42 @@ accepts validated names within the uploads directory; permission to reference a
 server-local file does not permit upload names or archive entries to escape
 their designated directories.
 
+## Resource write methods
+
+Resource-definition PUT endpoints use upsert semantics. The URL identifies the
+resource; a valid request creates it when absent or replaces its writable
+configuration when present. This applies to `/streams/:name`, `/pipelines/:id`,
+`/schemas/:name`, and `/schemas/:type/:name/upload`.
+
+- Creation returns `201 Created`. Replacement and identical replay return
+  `200 OK`.
+- PUT supplies a complete writable definition, not a partial patch. Omitted
+  optional fields use their documented defaults; existing values are not merged
+  into those fields. Endpoint-specific immutable fields remain constrained.
+  For example, stream `type` is required and must match an existing stream;
+  pipeline placement is not a PUT field and is retained on replacement, or
+  defaults to the `default` instance on creation.
+- Every request requires a positive JSON-safe integer `revision`. A greater
+  revision replaces the resource, a lower revision returns `409 Conflict`, and
+  an equal revision returns `200` only for the same normalized definition.
+  Equal revisions with changed content return `409`.
+- An identical replay is observation-only: it does not reinstall files, restart
+  runtimes, reset desired state, or repeat cascade. Running dependants do not
+  prevent such a replay. Creation does not perform update-specific cascade.
+- A revisioned deletion leaves a tombstone. Recreation requires a revision
+  greater than that tombstone; PUT does not bypass dependency validation,
+  immutable-field restrictions, or operation locks.
+
+Resource create POST endpoints remain create-only: an existing identity returns
+`409 Conflict`. Command POST endpoints, such as start/stop, storage import, and
+incremental apply, follow their own contracts. In particular, import replaces a
+complete snapshot and does not invoke the individual PUT handlers.
+
+See the [stream](../../user_docs/api/stream.md),
+[pipeline](../../user_docs/api/pipeline.md), and
+[schema](../../user_docs/api/schema.md) endpoint contracts for request fields,
+response shapes, and runtime effects.
+
 ## Server-local resource file paths
 
 Relative server-local file paths in resource definitions are resolved against

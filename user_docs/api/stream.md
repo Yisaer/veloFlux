@@ -154,19 +154,27 @@ omit `schema_status`. Observations are per instance and may show transitional
 states during an update. There is no separate `stale` flag: callers can compare
 known versions, and different versions are expected after a non-cascading update.
 
-### Update Stream
+### Create or Replace Stream
 
 `PUT /streams/:name`
 
-Updates an existing stream definition. The stream `name` and `type` are immutable and are carried
-forward from the stored definition. A private stream may be converted to a shared stream, but a
-shared stream cannot be converted back to a private stream.
+Creates an absent stream or replaces an existing definition, following the
+[resource PUT principles](../../docs/api/README.md#resource-write-methods).
+The URL supplies `name`; `type` is required in the body and must match the
+connector type of an existing stream (case-insensitive). A private stream may
+be converted to a shared stream, but a shared stream cannot be converted back
+to a private stream.
 
-The request body contains the mutable fields from `CreateStreamRequest`:
+The request body uses the fields from `CreateStreamRequest` except `name`.
+Optional fields use create defaults instead of inheriting stored values;
+`shared` defaults to `false`, so every replacement of a shared stream must
+explicitly supply `shared: true`. This is a complete replacement, not a patch.
+For example:
 
 ```json
 {
   "revision": 1721797200001,
+  "type": "mqtt",
   "schema": {
     "type": "json",
     "props": {
@@ -194,6 +202,13 @@ resolution through installation. Creating or updating such a stream returns
 `409 Conflict` while a cascade or deletion of that schema is active. A concurrent
 non-cascading schema update can leave the stream using its previously resolved
 schema version.
+
+Creation returns `201 Created` with the same `StreamInfo` response as POST.
+Replacement or identical replay returns `200 OK`. An older revision or the same
+revision with a different definition returns `409 Conflict`; recreation after a
+revisioned deletion requires a revision greater than its tombstone. Creation
+ignores update-specific cascade. An identical replay does not rebuild runtimes,
+even when a referencing pipeline is running or `cascade=true`.
 
 The optional `cascade` query parameter controls whether pipelines that reference the
 stream are rebuilt:
@@ -270,8 +285,8 @@ pipeline results report failure. Validation, resource-lock, pipeline-stop, stora
 replacement failures that occur before the stream update completes return the corresponding error
 response instead.
 
-When `cascade` is omitted or `false`, the successful response contains only `name` and
-`revision`. If an equal revision contains the same normalized definition, the request is
+For an existing stream, when `cascade` is omitted or `false`, the successful
+response contains only `name` and `revision`. If an equal revision contains the same normalized definition, the request is
 idempotent and does not restart pipelines even when `cascade=true`.
 
 ### Delete Stream
@@ -338,7 +353,7 @@ curl -s \
 - `name: string` (required, non-empty)
 - `revision: number` (required, positive JSON-safe integer)
 - `type: string` (required)
-  - Supported: `mqtt`, `history`, `file`, `nng_pubsub`
+  - Supported: `mqtt`, `history`, `memory`, `file`, `nng_pubsub`, `video`, `mock`
 - `schema: { type: string, props: object }` (required)
   - Alternatively: `schema: { ref: string }` to reference a named schema.
   - When `ref` is set, `type` and `props` are ignored.

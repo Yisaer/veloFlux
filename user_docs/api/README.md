@@ -17,6 +17,19 @@ and archive entry validation, still apply.
 Read the [full trust and deployment model](../../docs/api/README.md#trust-and-deployment-model)
 before exposing or integrating the API.
 
+## Resource write methods
+
+Resource PUT endpoints create when absent and replace when present: creation
+returns `201`, while replacement or identical replay returns `200`. PUT carries
+the complete writable definition and requires a resource revision. A lower
+revision or the same revision with changed content returns `409`. An identical
+revision has no runtime side effects. Resource create POST endpoints remain
+create-only.
+
+Read the [resource write method principles](../../docs/api/README.md#resource-write-methods)
+for defaults, immutable fields, tombstones, cascade, and the distinction from
+snapshot import.
+
 ## Endpoints
 
 - [Streams](stream.md)

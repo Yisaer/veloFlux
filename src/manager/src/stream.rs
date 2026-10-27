@@ -12,7 +12,7 @@ use axum::{
     Json,
     extract::{Path, Query, State},
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use flow::DecoderRegistry;
 use flow::catalog::{
@@ -99,19 +99,22 @@ impl CreateStreamRequest {
 
 /// Request body for `PUT /streams/:name`.
 ///
-/// Immutable fields (`name`, `type`) are carried forward from the existing
-/// stream definition.  The `shared` flag may be changed from `false` to `true`
-/// (converting a private stream into a shared stream), but the reverse
-/// (`true` → `false`) is not supported.
+/// The path supplies the name. The connector type is required and cannot change
+/// when replacing an existing stream. Omitted optional fields use create defaults.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct UpsertStreamRequest {
     #[serde(deserialize_with = "crate::revision::deserialize_revision")]
     pub revision: u64,
+    #[serde(rename = "type")]
+    pub stream_type: String,
+    #[serde(default)]
     pub schema: SchemaConfigRequest,
+    #[serde(default)]
     pub props: StreamPropsRequest,
+    #[serde(default)]
     pub decoder: DecoderConfigRequest,
     #[serde(default)]
-    pub shared: Option<bool>,
+    pub shared: bool,
     #[serde(default)]
     pub eventtime: Option<EventtimeConfigRequest>,
     #[serde(default)]
@@ -879,10 +882,6 @@ pub async fn create_stream_handler(
         audit.log_failure(&err);
         return (StatusCode::BAD_REQUEST, err).into_response();
     }
-    if let Err(err) = validate_stream_connector_key(&req) {
-        audit.log_failure(&err);
-        return (StatusCode::BAD_REQUEST, err).into_response();
-    }
     let _permit = match state.try_acquire_stream_op(&req.name).await {
         Ok(permit) => permit,
         Err(TryAcquireError::NoPermits) => return stream_busy_response(&req.name),
@@ -894,8 +893,17 @@ pub async fn create_stream_handler(
                 .into_response();
         }
     };
+    create_stream_locked(&state, req).await
+}
+
+async fn create_stream_locked(state: &AppState, req: CreateStreamRequest) -> Response {
+    let audit = ResourceMutationLog::new("stream", "create", req.name.as_str(), Some(req.revision));
+    if let Err(err) = validate_stream_connector_key(&req) {
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
     let _schema_permit = if let Some(reference) = req.schema.r#ref.as_deref() {
-        match crate::schema::operation_guard(&state, reference, false).await {
+        match crate::schema::operation_guard(state, reference, false).await {
             Ok(permit) => Some(permit),
             Err(response) => return *response,
         }
@@ -1312,12 +1320,22 @@ pub async fn upsert_stream_handler(
         }
     };
 
+    let mut new_req = CreateStreamRequest {
+        name: name.clone(),
+        revision: req.revision,
+        stream_type: req.stream_type,
+        shared: req.shared,
+        schema: req.schema,
+        props: req.props,
+        decoder: req.decoder,
+        eventtime: req.eventtime,
+        sampler: req.sampler,
+    };
+    new_req.normalize();
     let old_stored = match state.storage.get_stream(&name) {
         Ok(Some(stored)) => stored,
         Ok(None) => {
-            let err = format!("stream {name} not found");
-            audit.log_failure(&err);
-            return (StatusCode::NOT_FOUND, err).into_response();
+            return create_stream_locked(&state, new_req).await;
         }
         Err(err) => {
             let err = format!("failed to read stream {name} from storage: {err}");
@@ -1335,53 +1353,14 @@ pub async fn upsert_stream_handler(
         }
     };
 
-    // Determine effective shared flag.
-    let new_shared = req.shared.unwrap_or(old_req.shared);
-    if old_req.shared && !new_shared {
-        let err =
-            format!("stream {name}: converting a shared stream to non-shared is not supported");
-        audit.log_failure(&err);
-        return (StatusCode::BAD_REQUEST, err).into_response();
+    if !new_req
+        .stream_type
+        .eq_ignore_ascii_case(&old_req.stream_type)
+    {
+        return (StatusCode::BAD_REQUEST, "stream type cannot change").into_response();
     }
-
-    // For shared streams (existing or newly converted): reject if any running
-    // pipeline references this stream.
-    if new_shared && !query.cascade {
-        let mut running_pipelines = Vec::new();
-        for (_, instance) in state.instances.instances_snapshot() {
-            for snapshot in instance.list_pipelines() {
-                if snapshot.streams.iter().any(|s| s == &name)
-                    && snapshot.status == flow::pipeline::PipelineStatus::Running
-                {
-                    running_pipelines.push(snapshot.definition.id().to_string());
-                }
-            }
-        }
-        if !running_pipelines.is_empty() {
-            running_pipelines.sort();
-            running_pipelines.dedup();
-            let err = format!(
-                "shared stream {name} has running pipelines: {}. Stop them before updating.",
-                running_pipelines.join(", ")
-            );
-            audit.log_failure(&err);
-            return (StatusCode::CONFLICT, err).into_response();
-        }
-    }
-
-    // Build new CreateStreamRequest — keep immutable fields from the old definition.
-    let mut new_req = CreateStreamRequest {
-        name: old_req.name.clone(),
-        revision: req.revision,
-        stream_type: old_req.stream_type.clone(),
-        shared: new_shared,
-        schema: req.schema,
-        props: req.props,
-        decoder: req.decoder,
-        eventtime: req.eventtime,
-        sampler: req.sampler,
-    };
-    new_req.normalize();
+    // Keep the persisted spelling for normalized same-revision comparison.
+    new_req.stream_type = old_req.stream_type.clone();
 
     if new_req.revision < old_stored.revision {
         return (
@@ -1420,6 +1399,38 @@ pub async fn upsert_stream_handler(
             ),
         )
             .into_response();
+    }
+
+    if old_req.shared && !new_req.shared {
+        let err =
+            format!("stream {name}: converting a shared stream to non-shared is not supported");
+        audit.log_failure(&err);
+        return (StatusCode::BAD_REQUEST, err).into_response();
+    }
+
+    // For shared streams (existing or newly converted): reject if any running
+    // pipeline references this stream.
+    if new_req.shared && !query.cascade {
+        let mut running_pipelines = Vec::new();
+        for (_, instance) in state.instances.instances_snapshot() {
+            for snapshot in instance.list_pipelines() {
+                if snapshot.streams.iter().any(|s| s == &name)
+                    && snapshot.status == flow::pipeline::PipelineStatus::Running
+                {
+                    running_pipelines.push(snapshot.definition.id().to_string());
+                }
+            }
+        }
+        if !running_pipelines.is_empty() {
+            running_pipelines.sort();
+            running_pipelines.dedup();
+            let err = format!(
+                "shared stream {name} has running pipelines: {}. Stop them before updating.",
+                running_pipelines.join(", ")
+            );
+            audit.log_failure(&err);
+            return (StatusCode::CONFLICT, err).into_response();
+        }
     }
 
     // ── Full validation (same checks as create) ──
@@ -3209,6 +3220,174 @@ mod tests {
                 .iter()
                 .any(|stream| stream.definition.id() == req.name),
             "pre-existing conflicting stream must remain in the failing instance",
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_put_creates_replaces_replays_and_respects_tombstones() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        for kind in ["streams", "pipelines"] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = build_state(&temp, vec![sample_default_instance_spec()]);
+            let source = mock_stream_request("put_source");
+            assert_eq!(
+                create_stream_handler(State(state.clone()), Json(source))
+                    .await
+                    .into_response()
+                    .status(),
+                StatusCode::CREATED
+            );
+            let app = crate::build_app(state.clone());
+            let name = "put_resource";
+            let spec = if kind == "streams" {
+                let mut value = serde_json::to_value(mock_stream_request(name)).unwrap();
+                value.as_object_mut().unwrap().remove("name");
+                value
+            } else {
+                let mut value = serde_json::to_value(pipeline_request(name, "put_source")).unwrap();
+                value.as_object_mut().unwrap().remove("id");
+                value
+            };
+            let put = |value: &JsonValue| {
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/{kind}/{name}?cascade=true"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(value.to_string()))
+                    .unwrap()
+            };
+            for (revision, changed, expected) in [
+                (1, false, StatusCode::CREATED),
+                (1, false, StatusCode::OK),
+                (1, true, StatusCode::CONFLICT),
+                (2, false, StatusCode::OK),
+                (1, false, StatusCode::CONFLICT),
+            ] {
+                let mut value = spec.clone();
+                value["revision"] = json!(revision);
+                if changed {
+                    if kind == "streams" {
+                        value["props"] = json!({"payloads": ["changed"]});
+                    } else {
+                        value["sql"] = json!("SELECT value + 1 AS value FROM put_source");
+                    }
+                }
+                let response = app.clone().oneshot(put(&value)).await.unwrap();
+                let status = response.status();
+                let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+                assert_eq!(
+                    status,
+                    expected,
+                    "{kind}: {}",
+                    String::from_utf8_lossy(&body)
+                );
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/{kind}/{name}?revision=3"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            for (revision, expected) in [
+                (2, StatusCode::CONFLICT),
+                (3, StatusCode::CONFLICT),
+                (4, StatusCode::CREATED),
+            ] {
+                let mut value = spec.clone();
+                value["revision"] = json!(revision);
+                let response = app.clone().oneshot(put(&value)).await.unwrap();
+                let status = response.status();
+                let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+                assert_eq!(
+                    status,
+                    expected,
+                    "{kind}: {}",
+                    String::from_utf8_lossy(&body)
+                );
+            }
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/{kind}"))
+                        .header("content-type", "application/json")
+                        .body(Body::from({
+                            let mut value = spec;
+                            value[if kind == "streams" { "name" } else { "id" }] = json!(name);
+                            value["revision"] = json!(5);
+                            value.to_string()
+                        }))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_put_requires_type_and_uses_create_defaults_under_operation_lock() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let state = build_state(&temp, vec![sample_default_instance_spec()]);
+        let app = crate::build_app(state.clone());
+        let mut spec = serde_json::to_value(mock_stream_request("put_defaults")).unwrap();
+        for key in ["name", "shared", "props", "decoder"] {
+            spec.as_object_mut().unwrap().remove(key);
+        }
+        let put = |value: &JsonValue| {
+            Request::builder()
+                .method("PUT")
+                .uri("/streams/put_defaults?cascade=true")
+                .header("content-type", "application/json")
+                .body(Body::from(value.to_string()))
+                .unwrap()
+        };
+        let permit = state.try_acquire_stream_op("put_defaults").await.unwrap();
+        assert_eq!(
+            app.clone().oneshot(put(&spec)).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        drop(permit);
+        assert_eq!(
+            app.clone().oneshot(put(&spec)).await.unwrap().status(),
+            StatusCode::CREATED
+        );
+        let stored = state.storage.get_stream("put_defaults").unwrap().unwrap();
+        let stored = storage_bridge::stream_request_from_stored(&stored).unwrap();
+        assert!(!stored.shared);
+        assert_eq!(stored.stream_type, "mock");
+        spec["revision"] = json!(2);
+        spec["type"] = json!("file");
+        assert_eq!(
+            app.clone().oneshot(put(&spec)).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        spec.as_object_mut().unwrap().remove("type");
+        assert_eq!(
+            app.oneshot(put(&spec)).await.unwrap().status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            state
+                .storage
+                .get_stream("put_defaults")
+                .unwrap()
+                .unwrap()
+                .revision,
+            1
         );
     }
 

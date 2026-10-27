@@ -91,6 +91,8 @@ curl -s -XPOST http://127.0.0.1:8080/schemas \
 
 `PUT /schemas/:name?cascade=false`
 
+Follows the [resource PUT principles](../../docs/api/README.md#resource-write-methods).
+
 Uses the same body as create; the body name must match the path. An absent name
 is created with `201 Created` and `{name, revision}`; a deletion tombstone requires
 a greater revision for recreation. An existing name with a newer revision

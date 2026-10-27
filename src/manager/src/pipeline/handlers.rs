@@ -792,12 +792,20 @@ pub async fn upsert_pipeline_handler(
         failure,
     );
     audit.log_success();
-    Json(CreatePipelineResponse {
-        id,
-        revision: create_req.revision,
-        status,
-    })
-    .into_response()
+    let status_code = if old_pipeline.is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::CREATED
+    };
+    (
+        status_code,
+        Json(CreatePipelineResponse {
+            id,
+            revision: create_req.revision,
+            status,
+        }),
+    )
+        .into_response()
 }
 
 pub async fn get_pipeline_handler(
