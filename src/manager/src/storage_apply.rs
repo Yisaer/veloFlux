@@ -335,8 +335,11 @@ pub(crate) async fn apply_manifest(
         let relative = Path::new(&schema.schema_type).join(&schema.name);
         let provided = source.join("schemas").join(&relative);
         if provided.exists()
-            && !attachment_trees_equal(&provided, &state.storage.schemas_dir().join(relative))
-                .map_err(invalid)?
+            && !apply_core::attachment_trees_equal(
+                &provided,
+                &state.storage.schemas_dir().join(relative),
+            )
+            .map_err(invalid)?
         {
             return Err((
                 StatusCode::CONFLICT,
@@ -453,41 +456,6 @@ pub(crate) async fn apply_manifest(
         resources: results,
         affected_resources: affected,
     })
-}
-
-fn attachment_trees_equal(left: &Path, right: &Path) -> Result<bool, String> {
-    let left_meta = std::fs::symlink_metadata(left).map_err(|err| err.to_string())?;
-    let right_meta = match std::fs::symlink_metadata(right) {
-        Ok(meta) => meta,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => return Err(err.to_string()),
-    };
-    if left_meta.is_file() && right_meta.is_file() {
-        return apply_core::files_equal(left, right);
-    }
-    if !left_meta.is_dir() || !right_meta.is_dir() {
-        return Ok(false);
-    }
-    let entries = |path: &Path| -> Result<BTreeSet<std::ffi::OsString>, String> {
-        std::fs::read_dir(path)
-            .map_err(|err| err.to_string())?
-            .map(|entry| {
-                entry
-                    .map(|entry| entry.file_name())
-                    .map_err(|err| err.to_string())
-            })
-            .collect()
-    };
-    let left_entries = entries(left)?;
-    if left_entries != entries(right)? {
-        return Ok(false);
-    }
-    for name in left_entries {
-        if !attachment_trees_equal(&left.join(&name), &right.join(&name))? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 struct PreparedAttachments {

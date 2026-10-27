@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Multipart, Path, Query, State, multipart::MultipartRejection},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -116,10 +116,20 @@ pub async fn update_schema_handler(
         )
             .into_response();
     }
+    upsert_schema_locked(&state, req, query, false).await
+}
+
+async fn upsert_schema_locked(
+    state: &AppState,
+    req: CreateSchemaRequest,
+    query: UpdateSchemaQuery,
+    uploaded: bool,
+) -> Response {
+    let name = req.name.clone();
     let current = match state.storage.get_schema(&name) {
         Ok(Some(schema)) => schema,
         Ok(None) => {
-            return (StatusCode::NOT_FOUND, format!("schema {name} not found")).into_response();
+            return create_schema_locked(state, req, uploaded).await;
         }
         Err(err) => {
             return (
@@ -129,6 +139,13 @@ pub async fn update_schema_handler(
                 .into_response();
         }
     };
+    if uploaded && current.schema_type != req.schema_type {
+        return (
+            StatusCode::BAD_REQUEST,
+            "uploaded schema type must match the existing schema type",
+        )
+            .into_response();
+    }
     if req.revision < current.revision {
         return (
             StatusCode::CONFLICT,
@@ -142,7 +159,38 @@ pub async fn update_schema_handler(
     let current_props: JsonValue = serde_json::from_str(&current.props_json).unwrap_or_default();
     let incoming_props = JsonValue::Object(req.props.clone());
     if req.revision == current.revision {
-        if current.schema_type == req.schema_type && current_props == incoming_props {
+        let unchanged = if current.schema_type != req.schema_type {
+            false
+        } else if current_props == incoming_props {
+            true
+        } else if req
+            .props
+            .get("proto_path")
+            .or_else(|| req.props.get("schema_path"))
+            .and_then(JsonValue::as_str)
+            .is_some_and(|path| {
+                std::path::Path::new(path.trim())
+                    .extension()
+                    .is_some_and(|ext| ext == "zip")
+            })
+        {
+            let source = match PreparedSchemaSource::prepare_for_update(
+                &state.storage,
+                &name,
+                &req.schema_type,
+                &req.props,
+            ) {
+                Ok(source) => source,
+                Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
+            };
+            match source.matches_installed(&current_props) {
+                Ok(matches) => matches,
+                Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
+            }
+        } else {
+            false
+        };
+        if unchanged {
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -160,7 +208,7 @@ pub async fn update_schema_handler(
     }
 
     let _schema_permit = if query.cascade {
-        match super::operation_guard(&state, &name, true).await {
+        match super::operation_guard(state, &name, true).await {
             Ok(permit) => Some(permit),
             Err(response) => return *response,
         }
@@ -168,7 +216,7 @@ pub async fn update_schema_handler(
         None
     };
     let (streams, tables) = if query.cascade {
-        match find_resources_referencing_schema(&state, &name) {
+        match find_resources_referencing_schema(state, &name) {
             Ok(references) => references,
             Err(err) => return (StatusCode::INTERNAL_SERVER_ERROR, err).into_response(),
         }
@@ -229,7 +277,13 @@ pub async fn update_schema_handler(
         schema_type: req.schema_type,
         props_json,
     }) {
-        let _ = source.rollback();
+        if let Err(rollback_err) = source.rollback() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to persist schema {name}: {err}; rollback failed: {rollback_err}"),
+            )
+                .into_response();
+        }
         if let storage::StorageError::RevisionConflict(error) = err {
             return (StatusCode::CONFLICT, error).into_response();
         }
@@ -251,7 +305,7 @@ pub async fn update_schema_handler(
     let mut pipeline_results = Vec::<PipelineRestartResult>::new();
     let mut stream_results = Vec::<ResourceRefreshResult>::new();
     for stream in &streams {
-        match refresh_stream_and_cascade(&state, stream).await {
+        match refresh_stream_and_cascade(state, stream).await {
             Ok(results) => {
                 pipeline_results.extend(results);
                 stream_results.push(ResourceRefreshResult {
@@ -269,7 +323,7 @@ pub async fn update_schema_handler(
     }
     let mut table_results = Vec::<ResourceRefreshResult>::new();
     for table in &tables {
-        if let Err(err) = refresh_table_runtime(&state, table).await {
+        if let Err(err) = refresh_table_runtime(state, table).await {
             table_results.push(ResourceRefreshResult {
                 id: table.clone(),
                 status: "failed",
@@ -374,6 +428,13 @@ async fn create_schema_locked(
     match state.storage.create_schema(stored) {
         Ok(()) => {}
         Err(storage::StorageError::RevisionConflict(error)) => {
+            if let Err(err) = source.rollback() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("{error}; rollback failed: {err}"),
+                )
+                    .into_response();
+            }
             return (StatusCode::CONFLICT, error).into_response();
         }
         Err(StorageError::AlreadyExists(_)) => {
@@ -395,6 +456,7 @@ async fn create_schema_locked(
     }
 
     named_schema_store().insert_resolved(name, req.revision, schema, proto_bundle, artifact);
+    source.finish();
     audit.log_success();
     let body = if include_type {
         serde_json::json!({
@@ -408,9 +470,11 @@ async fn create_schema_locked(
     (StatusCode::CREATED, Json(body)).into_response()
 }
 
-pub async fn upload_create_schema_handler(
+pub async fn upload_schema_handler(
     State(state): State<AppState>,
     Path((schema_type, name)): Path<(String, String)>,
+    Query(query): Query<UpdateSchemaQuery>,
+    method: Method,
     headers: HeaderMap,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Response {
@@ -600,17 +664,17 @@ pub async fn upload_create_schema_handler(
             return (StatusCode::INTERNAL_SERVER_ERROR, "operation guard closed").into_response();
         }
     };
-    create_schema_locked(
-        &state,
-        CreateSchemaRequest {
-            name,
-            revision,
-            schema_type,
-            props,
-        },
-        true,
-    )
-    .await
+    let req = CreateSchemaRequest {
+        name,
+        revision,
+        schema_type,
+        props,
+    };
+    if method == Method::PUT {
+        upsert_schema_locked(&state, req, query, true).await
+    } else {
+        create_schema_locked(&state, req, true).await
+    }
 }
 
 pub async fn list_schemas_handler(State(state): State<AppState>) -> impl IntoResponse {
@@ -906,11 +970,20 @@ mod tests {
         revision: u64,
         zip: Vec<u8>,
     ) -> axum::http::Request<axum::body::Body> {
+        schema_upload_request_with_props(name, revision, zip, r#"{"message_type":"Sensor"}"#)
+    }
+
+    fn schema_upload_request_with_props(
+        name: &str,
+        revision: u64,
+        zip: Vec<u8>,
+        props: &str,
+    ) -> axum::http::Request<axum::body::Body> {
         let boundary = "schema_upload_test_boundary";
         let mut body = Vec::new();
         write!(
             &mut body,
-            "--{boundary}\r\nContent-Disposition: form-data; name=\"props\"\r\n\r\n{{\"message_type\":\"Sensor\"}}\r\n"
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"props\"\r\n\r\n{props}\r\n"
         )
         .expect("write props field");
         write!(
@@ -934,6 +1007,249 @@ mod tests {
             )
             .body(axum::body::Body::from(body))
             .expect("build schema upload request")
+    }
+
+    #[tokio::test]
+    async fn upload_put_upserts_and_preserves_installed_schema_on_failure() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = build_state(&temp_dir);
+        let name = "UploadPutSchema";
+        let app = crate::build_app(state.clone());
+        // Different ZIP encodings of the same files must compare equal.
+        let mut repacked = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        repacked
+            .start_file(
+                "sensor.proto",
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        repacked
+            .write_all(b"syntax = \"proto3\"; message Sensor { int64 updated = 1; }")
+            .unwrap();
+        let repacked = repacked.finish().unwrap().into_inner();
+        assert_ne!(repacked, proto_zip_with_field("updated"));
+        for (revision, zip, props, expected) in [
+            (
+                1,
+                proto_zip(),
+                r#"{"message_type":"Sensor"}"#,
+                StatusCode::CREATED,
+            ),
+            (
+                2,
+                proto_zip_with_field("updated"),
+                r#"{"message_type":"Sensor"}"#,
+                StatusCode::OK,
+            ),
+            (2, repacked, r#"{"message_type":"Sensor"}"#, StatusCode::OK),
+            (
+                1,
+                proto_zip(),
+                r#"{"message_type":"Sensor"}"#,
+                StatusCode::CONFLICT,
+            ),
+            (
+                2,
+                proto_zip(),
+                r#"{"message_type":"Sensor"}"#,
+                StatusCode::CONFLICT,
+            ),
+            (
+                2,
+                proto_zip_with_field("updated"),
+                r#"{"message_type":"Other"}"#,
+                StatusCode::CONFLICT,
+            ),
+            (
+                3,
+                b"invalid zip".to_vec(),
+                r#"{"message_type":"Sensor"}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                3,
+                proto_zip(),
+                r#"{"message_type":"Missing"}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                3,
+                proto_zip(),
+                r#"{"message_type":"Sensor","proto_path":"ignored.zip"}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                3,
+                proto_zip(),
+                r#"{"message_type":"Sensor","schema_path":"ignored.zip"}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let mut request = schema_upload_request_with_props(name, revision, zip, props);
+            *request.method_mut() = Method::PUT;
+            let response = app.clone().oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+            assert_eq!(
+                status,
+                expected,
+                "revision={revision}: {}",
+                String::from_utf8_lossy(&body)
+            );
+        }
+        let mut request = schema_upload_request_with_zip(name, 3, proto_zip());
+        *request.method_mut() = Method::PUT;
+        *request.uri_mut() = format!("/schemas/gbf/{name}/upload").parse().unwrap();
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(schema_upload_request(name))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+
+        let stored = state.storage.get_schema(name).unwrap().unwrap();
+        assert_eq!(stored.revision, 2);
+        assert_eq!(
+            serde_json::from_str::<JsonValue>(&stored.props_json).unwrap()["proto_path"],
+            "sensor.proto"
+        );
+        assert_eq!(
+            std::fs::read_dir(state.storage.uploads_tmp_dir())
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(
+            !state
+                .storage
+                .schemas_dir()
+                .join("proto")
+                .join(format!(".{name}.tmp"))
+                .exists()
+        );
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/schemas/{name}"))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: JsonValue =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap())
+                .unwrap();
+        assert_eq!(body["columns"][0]["name"], "updated");
+        let response = crate::build_app(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("PUT")
+                    .uri(format!("/schemas/{name}"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        named_schema_store().remove(name);
+        crate::storage_bridge::hydrate_schemas_from_storage(&state.storage).unwrap();
+        let restored = named_schema_store().get_resolved(name).unwrap();
+        assert_eq!(restored.schema_version, Some(2));
+        assert_eq!(restored.logical_schema.column_schemas()[0].name, "updated");
+        named_schema_store().remove(name);
+    }
+
+    #[tokio::test]
+    async fn schema_put_respects_revision_and_deletion_for_json_and_upload() {
+        for uploaded in [false, true] {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let state = build_state(&temp_dir);
+            let name = if uploaded {
+                "PutUploadTombstone"
+            } else {
+                "PutJsonTombstone"
+            };
+            let app = crate::build_app(state.clone());
+            let request = |revision, field: &str| {
+                if uploaded {
+                    let mut request =
+                        schema_upload_request_with_zip(name, revision, proto_zip_with_field(field));
+                    *request.method_mut() = Method::PUT;
+                    request
+                } else {
+                    axum::http::Request::builder()
+                        .method("PUT")
+                        .uri(format!("/schemas/{name}"))
+                        .header("content-type", "application/json")
+                        .body(axum::body::Body::from(
+                            serde_json::json!({
+                                "name": name, "revision": revision, "type": "json",
+                                "props": {"columns": [{"name": field, "data_type": "int64"}]}
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap()
+                }
+            };
+            for (revision, field, expected) in [
+                (1, "value", StatusCode::CREATED),
+                (1, "value", StatusCode::OK),
+                (1, "different", StatusCode::CONFLICT),
+                (2, "updated", StatusCode::OK),
+                (1, "value", StatusCode::CONFLICT),
+            ] {
+                let response = app.clone().oneshot(request(revision, field)).await.unwrap();
+                assert_eq!(response.status(), expected);
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/schemas/{name}?revision=3"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            for revision in [2, 3] {
+                let response = app
+                    .clone()
+                    .oneshot(request(revision, "value"))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::CONFLICT);
+                assert!(state.storage.get_schema(name).unwrap().is_none());
+                assert!(named_schema_store().get_resolved(name).is_none());
+                assert!(
+                    !state
+                        .storage
+                        .schemas_dir()
+                        .join("proto")
+                        .join(name)
+                        .exists()
+                );
+            }
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(4, "recreated"))
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::CREATED
+            );
+            named_schema_store().remove(name);
+        }
     }
 
     #[tokio::test]
@@ -961,7 +1277,8 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         for (method, uri, revision, expected) in [
-            ("POST", "/schemas".to_string(), 1, StatusCode::CREATED),
+            ("PUT", format!("/schemas/{name}"), 1, StatusCode::CREATED),
+            ("PUT", format!("/schemas/{name}"), 2, StatusCode::OK),
             ("PUT", format!("/schemas/{name}"), 2, StatusCode::OK),
         ] {
             let response = app.clone().oneshot(
@@ -1329,27 +1646,16 @@ mod tests {
             })
             .expect("persist running desired state");
 
-        let updated_archive = temp_dir.path().join("updated.proto.zip");
-        std::fs::write(&updated_archive, proto_zip_with_field("new_value"))
-            .expect("write updated proto archive");
-        let response = update_schema_handler(
-            State(state.clone()),
-            Path(schema_name.to_string()),
-            Query(UpdateSchemaQuery { cascade: true }),
-            Json(CreateSchemaRequest {
-                name: schema_name.to_string(),
-                revision: 2,
-                schema_type: "proto".to_string(),
-                props: serde_json::json!({
-                    "proto_path": updated_archive,
-                    "message_type": "Sensor"
-                })
-                .as_object()
-                .expect("schema props object")
-                .clone(),
-            }),
-        )
-        .await;
+        let mut request =
+            schema_upload_request_with_zip(schema_name, 2, proto_zip_with_field("new_value"));
+        *request.method_mut() = Method::PUT;
+        *request.uri_mut() = format!("/schemas/proto/{schema_name}/upload?cascade=true")
+            .parse()
+            .unwrap();
+        let response = crate::build_app(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024)
             .await
@@ -1378,6 +1684,22 @@ mod tests {
                 .map(|snapshot| snapshot.status),
             Some(flow::pipeline::PipelineStatus::Running)
         );
+
+        let mut request =
+            schema_upload_request_with_zip(schema_name, 2, proto_zip_with_field("new_value"));
+        *request.method_mut() = Method::PUT;
+        *request.uri_mut() = format!("/schemas/proto/{schema_name}/upload?cascade=true")
+            .parse()
+            .unwrap();
+        let response = crate::build_app(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body: JsonValue = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["dependent_refresh"]["reason"], "same_revision");
+        assert!(body.get("pipeline_restart").is_none());
 
         named_schema_store().remove(schema_name);
     }

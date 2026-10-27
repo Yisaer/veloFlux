@@ -463,9 +463,12 @@ pub(crate) fn cleanup_persisted(
             .and_then(|store| store.clear_pipeline_records(identity))
             .map_err(|error| error.to_string()),
         ResourceKind::Schemas => {
-            for entry in
-                std::fs::read_dir(storage.schemas_dir()).map_err(|error| error.to_string())?
-            {
+            let entries = match std::fs::read_dir(storage.schemas_dir()) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.to_string()),
+            };
+            for entry in entries {
                 let entry = entry.map_err(|error| error.to_string())?;
                 if !entry
                     .file_type()

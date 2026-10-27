@@ -87,14 +87,27 @@ curl -s -XPOST http://127.0.0.1:8080/schemas \
   }' | jq .
 ```
 
-### Update Schema
+### Create or Replace Schema
 
 `PUT /schemas/:name?cascade=false`
 
-Uses the same body as create; the body name must match the path. A newer revision
-updates the stored definition and named-schema cache. An older revision returns
+Uses the same body as create; the body name must match the path. An absent name
+is created with `201 Created` and `{name, revision}`; a deletion tombstone requires
+a greater revision for recreation. An existing name with a newer revision
+replaces the stored definition and named-schema cache. Props are a complete
+replacement, not a partial merge. An older revision returns
 `409 Conflict`. An equal revision is idempotent only when the definition is
 unchanged, otherwise it returns `409 Conflict`.
+
+For file-backed schemas, a newer revision must supply a `.zip` source path.
+GET returns the installed entry filename (for example, `sensor.proto`), which is
+not a ZIP source and cannot be used as the path for a newer revision. To update
+with a local file directly, use multipart PUT below. Equal-revision ZIP requests
+compare props and extracted file paths/content, ignoring ZIP compression,
+timestamps, and entry order. An exact replay of the persisted JSON definition
+at the same revision is also accepted.
+
+Creation does not refresh dependants, even with `cascade=true`.
 
 The optional `cascade` parameter defaults to `false`:
 
@@ -163,6 +176,37 @@ Response:
 - `409 Conflict` if the Schema already exists or a storage operation is active.
 - `413 Content Too Large` if the ZIP exceeds 512 MiB.
 - `415 Unsupported Media Type` if the request is not multipart.
+
+### Upload and Create or Replace Schema
+
+`PUT /schemas/:type/:name/upload?cascade=false`
+
+Uses the same multipart fields, ZIP layout, and 512 MiB limit as upload POST.
+The name is created when absent, or replaced when present. For an existing name,
+`:type` must match the stored type; a mismatch returns `400 Bad Request`.
+`props` is a complete replacement and defaults to `{}`; parser-required properties
+such as `message_type` must be supplied on every request. Neither `proto_path`
+nor `schema_path` may be provided by the client.
+
+```bash
+curl -X PUT \
+  -F 'props={"message_type":"com.example.Sensor"}' \
+  -F 'revision=1721797200001' \
+  -F 'file=@sensor-schema.zip' \
+  'http://127.0.0.1:8080/schemas/proto/sensor_schema/upload?cascade=true'
+```
+
+- `201 Created` with `{name, revision, type}` when creating a schema.
+- `200 OK` on replacement or identical replay, with the same response as JSON PUT.
+- `409 Conflict` for an older revision, equal revision with different props or
+  extracted files, a stale recreation after deletion, or a conflicting operation.
+- `400`, `413`, and `415` use the same validation rules as upload POST.
+
+Cascade applies only to a newer revision replacing an existing schema. An
+identical revision returns `dependent_refresh.reason = "same_revision"` and
+neither reinstalls the ZIP nor repeats cascade, even with `cascade=true`.
+An invalid ZIP or parser failure leaves the previous schema intact. Temporary
+uploads are removed after both success and failure.
 
 ### List Schemas
 
@@ -305,7 +349,7 @@ See `distros/sdv/docs/schema/busmirror.md` for the entry grammar and ZIP layout.
 | `name`    | `string` | Schema identifier.                                       |
 | `revision`| `number` | Persisted resource revision.                             |
 | `type`    | `string` | Parser type.                                             |
-| `props`   | `object` | Parser-specific properties as submitted at creation.     |
+| `props`   | `object` | Persisted properties; file paths contain the installed entry filename.     |
 | `columns` | `Column[]` | Parsed column definitions (see below).                |
 
 ### `Column`
@@ -355,7 +399,7 @@ When `schema.ref` is present:
 
 Inline schema definition (`schema.type` + `schema.props`) continues to work for
 schemas that do not use file-backed properties. File-backed schemas must be
-installed with `POST /schemas` and referenced by ID.
+installed through a schema JSON or multipart endpoint and referenced by ID.
 
 ## Import / Export
 

@@ -1717,30 +1717,65 @@ pub(crate) fn rollback_wasm(paths: &[PathBuf], mut error: String) -> String {
     error
 }
 
+pub(crate) fn attachment_trees_equal(left: &Path, right: &Path) -> Result<bool, String> {
+    let left_meta = std::fs::symlink_metadata(left).map_err(|err| err.to_string())?;
+    let right_meta = match std::fs::symlink_metadata(right) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.to_string()),
+    };
+    if left_meta.is_file() && right_meta.is_file() {
+        return files_equal(left, right);
+    }
+    if !left_meta.is_dir() || !right_meta.is_dir() {
+        return Ok(false);
+    }
+    let entries = |path: &Path| -> Result<std::collections::BTreeSet<std::ffi::OsString>, String> {
+        std::fs::read_dir(path)
+            .map_err(|err| err.to_string())?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.file_name())
+                    .map_err(|err| err.to_string())
+            })
+            .collect()
+    };
+    let left_entries = entries(left)?;
+    if left_entries != entries(right)? {
+        return Ok(false);
+    }
+    for name in left_entries {
+        if !attachment_trees_equal(&left.join(&name), &right.join(&name))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn files_equal(left: &Path, right: &Path) -> Result<bool, String> {
     let left_len = fs::metadata(left)
-        .map_err(|err| format!("inspect staged WASM `{}`: {err}", left.display()))?
+        .map_err(|err| format!("inspect staged file `{}`: {err}", left.display()))?
         .len();
     let right_len = fs::metadata(right)
-        .map_err(|err| format!("inspect managed WASM `{}`: {err}", right.display()))?
+        .map_err(|err| format!("inspect managed file `{}`: {err}", right.display()))?
         .len();
     if left_len != right_len {
         return Ok(false);
     }
 
     let mut left = fs::File::open(left)
-        .map_err(|err| format!("open staged WASM `{}`: {err}", left.display()))?;
+        .map_err(|err| format!("open staged file `{}`: {err}", left.display()))?;
     let mut right = fs::File::open(right)
-        .map_err(|err| format!("open managed WASM `{}`: {err}", right.display()))?;
+        .map_err(|err| format!("open managed file `{}`: {err}", right.display()))?;
     let mut left_buffer = [0_u8; 64 * 1024];
     let mut right_buffer = [0_u8; 64 * 1024];
     loop {
         let left_read = left
             .read(&mut left_buffer)
-            .map_err(|err| format!("read staged WASM: {err}"))?;
+            .map_err(|err| format!("read staged file: {err}"))?;
         let right_read = right
             .read(&mut right_buffer)
-            .map_err(|err| format!("read managed WASM: {err}"))?;
+            .map_err(|err| format!("read managed file: {err}"))?;
         if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
             return Ok(false);
         }

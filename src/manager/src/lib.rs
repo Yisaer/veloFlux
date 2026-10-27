@@ -145,9 +145,11 @@ fn build_app(state: AppState) -> Router {
         )
         .route(
             "/schemas/:type/:name/upload",
-            post(schema::handler::upload_create_schema_handler).layer(
-                axum::extract::DefaultBodyLimit::max(streaming_upload::MAX_MULTIPART_BODY_SIZE),
-            ),
+            post(schema::handler::upload_schema_handler)
+                .put(schema::handler::upload_schema_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    streaming_upload::MAX_MULTIPART_BODY_SIZE,
+                )),
         )
         .route(
             "/memory/topics",

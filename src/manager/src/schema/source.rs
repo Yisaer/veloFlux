@@ -330,6 +330,18 @@ impl PreparedSchemaSource {
         &self.stored_props
     }
 
+    pub fn matches_installed(&self, current_props: &JsonValue) -> Result<bool, String> {
+        if current_props.as_object() != Some(&self.stored_props) {
+            return Ok(false);
+        }
+        match (&self.staging_dir, &self.installed_dir) {
+            (Some(staging), Some(installed)) => {
+                crate::apply_core::attachment_trees_equal(staging, installed)
+            }
+            _ => Ok(true),
+        }
+    }
+
     pub fn commit(&mut self) -> Result<(), String> {
         let (Some(staging), Some(installed)) = (&self.staging_dir, &self.installed_dir) else {
             self.committed = true;
@@ -355,13 +367,14 @@ impl PreparedSchemaSource {
             self.backup_active = true;
         }
         if let Err(err) = fs::rename(staging, installed) {
-            if let Some(backup) = self.backup_dir.take()
-                && let Err(restore_err) = fs::rename(&backup, installed)
+            if let Some(backup) = self.backup_dir.as_ref()
+                && let Err(restore_err) = fs::rename(backup, installed)
             {
                 return Err(format!(
                     "install schema source: {err}; restore previous schema source: {restore_err}"
                 ));
             }
+            self.backup_dir = None;
             self.backup_active = false;
             return Err(format!("install schema source: {err}"));
         }
@@ -456,8 +469,13 @@ impl Drop for PreparedSchemaSource {
                 "failed to remove schema staging directory"
             );
         }
-        if self.committed && self.backup_active {
-            self.finish();
+        // Only the caller can confirm that metadata publication succeeded.
+        if self.backup_active {
+            tracing::error!(
+                backup = ?self.backup_dir,
+                installed = ?self.installed_dir,
+                "schema source operation did not finish; preserving backup for manual recovery"
+            );
         }
     }
 }
@@ -504,14 +522,29 @@ pub fn reconcile_installed_sources(
             remove_orphaned_path(&type_path)?;
             continue;
         }
-        for schema_entry in fs::read_dir(&type_path).map_err(|err| {
-            format!(
-                "read schema type directory `{}`: {err}",
-                type_path.display()
-            )
-        })? {
-            let schema_entry =
-                schema_entry.map_err(|err| format!("read installed schema entry: {err}"))?;
+        let schema_entries = fs::read_dir(&type_path)
+            .map_err(|err| {
+                format!(
+                    "read schema type directory `{}`: {err}",
+                    type_path.display()
+                )
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("read installed schema entry: {err}"))?;
+        // Inspect backups before removing anything from this schema type directory.
+        for schema_entry in &schema_entries {
+            if schema_entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with('.') && name.ends_with(".backup"))
+            {
+                return Err(format!(
+                    "schema source backup `{}` requires manual recovery; preserving backup and installed files",
+                    schema_entry.path().display()
+                ));
+            }
+        }
+        for schema_entry in schema_entries {
             let schema_path = schema_entry.path();
             let is_directory = schema_entry
                 .file_type()
@@ -1017,6 +1050,46 @@ mod tests {
 
         source.finish();
         assert!(!backup.exists());
+    }
+
+    #[test]
+    fn failed_source_rollback_preserves_backup_after_drop_and_reconciliation() {
+        let temp = TempDir::new().expect("temp dir");
+        let storage = StorageManager::new(temp.path()).expect("storage");
+        let installed = storage.schemas_dir().join("gbf/vehicle");
+        fs::create_dir_all(&installed).unwrap();
+        fs::write(installed.join("vehicle.json"), b"old").unwrap();
+        let archive = temp.path().join("schema.zip");
+        write_archive(&archive, &[("vehicle.json", Some(b"new"))]);
+        let mut source = PreparedSchemaSource::prepare_for_update(
+            &storage,
+            "vehicle",
+            "gbf",
+            &schema_props(&archive),
+        )
+        .unwrap();
+        source.commit().unwrap();
+        let backup = installed.with_file_name(".vehicle.backup");
+
+        // A file at the installation path makes remove_dir_all fail deterministically.
+        fs::remove_dir_all(&installed).unwrap();
+        fs::write(&installed, b"obstruction").unwrap();
+        let error = source.rollback().expect_err("rollback must fail");
+        assert!(error.contains("remove installed schema source"));
+        drop(source);
+        assert_eq!(fs::read(backup.join("vehicle.json")).unwrap(), b"old");
+        assert!(
+            reconcile_installed_sources(&storage, &[])
+                .expect_err("backup must require recovery")
+                .contains("manual recovery")
+        );
+        assert_eq!(fs::read(backup.join("vehicle.json")).unwrap(), b"old");
+
+        // The retained backup remains usable once the obstruction is removed.
+        assert_eq!(fs::read(&installed).unwrap(), b"obstruction");
+        fs::remove_file(&installed).unwrap();
+        fs::rename(&backup, &installed).unwrap();
+        assert_eq!(fs::read(installed.join("vehicle.json")).unwrap(), b"old");
     }
 
     #[test]

@@ -9,7 +9,8 @@ same value in a `revision` text field. Schema get/list and resource export retur
 the persisted revision. Revision arbitration is used by both online updates and
 startup init.
 
-`PUT /schemas/:name` updates an existing named schema. An older revision is
+`PUT /schemas/:name` upserts a named schema: creation returns `201`, while
+replacement or identical replay returns `200`. An older revision is
 rejected, an equal revision is idempotent only when the definition is unchanged,
 and a newer revision replaces the stored and in-memory schema. The optional
 `cascade` query parameter defaults to `false`: existing stream/table definitions
@@ -68,9 +69,24 @@ The schema registry decouples schema definition from stream creation:
   reference a named schema by name instead of inline-defining columns.
 
 File-backed named schemas can also be created from a ZIP package with
-`POST /schemas/:type/:name/upload`. The multipart endpoint is create-only and
-feeds its temporary package path into the same `PreparedSchemaSource` and
-Schema parser flow used by `POST /schemas`.
+`POST /schemas/:type/:name/upload` (create-only), or created/replaced with
+`PUT /schemas/:type/:name/upload?cascade=false` (upsert). Upload PUT uses the
+same revision arbitration and cascade flow as JSON PUT. Its path type must
+match an existing schema's type. Multipart props replace the complete props
+object; the server supplies the temporary ZIP path.
+
+Equal-revision file-backed requests compare persisted props, relative extracted
+entry paths, and file bytes against the managed source tree. ZIP compression,
+entry order, timestamps, and temporary upload paths do not affect identity.
+Identical replay does not reinstall files or refresh dependants. Creation and
+replacement validate the package before installation; rejected persistence rolls
+back the installed source, including rejection by a deletion tombstone. A newer
+revision than the tombstone is required to recreate a schema.
+
+GET returns the installed entry filename in file-backed props. That filename is
+not an update source: a newer revision must supply a ZIP path via JSON PUT or
+upload a ZIP via multipart PUT. An exact same-revision replay of the persisted
+JSON definition remains idempotent.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -342,3 +358,14 @@ Registration must happen before any schema of that type is created
 
 Revisioned DELETE accepts `?revision=N`; see [resource deletion](storage_delete.md)
 for the shared version timeline, cleanup, and tombstone behavior.
+
+### Failed source rollback
+
+Only an explicitly completed schema write removes its previous source backup.
+If rollback fails, the API reports the failure and retains the backup at
+`<data_dir>/schemas/<type>/.<name>.backup` for manual recovery. Startup source
+reconciliation rejects unresolved backup paths instead of deleting them. Inspect
+the persisted revision and both source trees, restore the matching source, and
+remove the backup only after recovery has been verified. A retained backup may
+also result from interrupted publication or failed cleanup after a successful
+write; its presence alone does not identify which revision should be restored.
