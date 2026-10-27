@@ -10,6 +10,11 @@ settings. The version-update configuration file is removed to stop scheduled
 ordinary version update PRs. The cargo-deny workflow continues to check the
 full dependency graph against RustSec independently of Dependabot.
 
+Workspace members share the root `Cargo.lock`. The obsolete lockfiles under
+`src/flow` and `src/datatypes` are removed and ignored so dependency scanners
+do not report or update stale dependency graphs. The standalone
+`demo/runtime_thread_cgroup` workspace retains its own lockfile.
+
 ## Updated dependencies
 
 - Wasmtime moves from 24 to the patched 36.0.19 release line. The existing UDF
