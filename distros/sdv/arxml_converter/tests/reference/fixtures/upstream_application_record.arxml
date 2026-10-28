@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AUTOSAR xsi:schemaLocation="http://autosar.org/schema/r4.0 AUTOSAR_00054.xsd" xmlns="http://autosar.org/schema/r4.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <AR-PACKAGES>
+    <AR-PACKAGE>
+      <SHORT-NAME>package</SHORT-NAME>
+      <ELEMENTS>
+        <APPLICATION-RECORD-DATA-TYPE>
+          <SHORT-NAME>ApplicationRecordDataType</SHORT-NAME>
+          <CATEGORY>STRUCTURE</CATEGORY>
+          <ELEMENTS>
+            <APPLICATION-RECORD-ELEMENT>
+              <SHORT-NAME>Element1</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/package/Element_ApplicationPrimitiveDataType</TYPE-TREF>
+            </APPLICATION-RECORD-ELEMENT>
+            <APPLICATION-RECORD-ELEMENT>
+              <SHORT-NAME>Element2</SHORT-NAME>
+              <CATEGORY>STRUCTURE</CATEGORY>
+              <TYPE-TREF DEST="APPLICATION-RECORD-DATA-TYPE">/package/Element_ApplicationRecordDataType</TYPE-TREF>
+            </APPLICATION-RECORD-ELEMENT>
+            <APPLICATION-RECORD-ELEMENT>
+              <SHORT-NAME>Element3</SHORT-NAME>
+              <CATEGORY>ARRAY</CATEGORY>
+              <TYPE-TREF DEST="APPLICATION-ARRAY-DATA-TYPE">/package/Element_ApplicationArrayDataType</TYPE-TREF>
+            </APPLICATION-RECORD-ELEMENT>
+          </ELEMENTS>
+        </APPLICATION-RECORD-DATA-TYPE>
+        <APPLICATION-PRIMITIVE-DATA-TYPE>
+          <SHORT-NAME>Element_ApplicationPrimitiveDataType</SHORT-NAME>
+          <CATEGORY>VALUE</CATEGORY>
+        </APPLICATION-PRIMITIVE-DATA-TYPE>
+        <APPLICATION-RECORD-DATA-TYPE>
+          <SHORT-NAME>Element_ApplicationRecordDataType</SHORT-NAME>
+          <CATEGORY>STRUCTURE</CATEGORY>
+          <ELEMENTS/>
+        </APPLICATION-RECORD-DATA-TYPE>
+        <APPLICATION-ARRAY-DATA-TYPE>
+          <SHORT-NAME>Element_ApplicationArrayDataType</SHORT-NAME>
+          <CATEGORY>ARRAY</CATEGORY>
+          <ELEMENT>
+            <SHORT-NAME>Element</SHORT-NAME>
+            <CATEGORY>VALUE</CATEGORY>
+            <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/package/Element_ApplicationPrimitiveDataType</TYPE-TREF>
+            <ARRAY-SIZE-SEMANTICS>FIXED-SIZE</ARRAY-SIZE-SEMANTICS>
+            <MAX-NUMBER-OF-ELEMENTS>10</MAX-NUMBER-OF-ELEMENTS>
+          </ELEMENT>
+        </APPLICATION-ARRAY-DATA-TYPE>
+        <SW-BASE-TYPE>
+          <SHORT-NAME>SwBaseType</SHORT-NAME>
+          <CATEGORY>FIXED_LENGTH</CATEGORY>
+          <BASE-TYPE-SIZE>32</BASE-TYPE-SIZE>
+          <BASE-TYPE-ENCODING>2C</BASE-TYPE-ENCODING>
+        </SW-BASE-TYPE>
+        <IMPLEMENTATION-DATA-TYPE>
+          <SHORT-NAME>ImplementationDataType</SHORT-NAME>
+          <CATEGORY>VALUE</CATEGORY>
+          <SW-DATA-DEF-PROPS>
+            <SW-DATA-DEF-PROPS-VARIANTS>
+              <SW-DATA-DEF-PROPS-CONDITIONAL>
+                <BASE-TYPE-REF DEST="SW-BASE-TYPE">/package/SwBaseType</BASE-TYPE-REF>
+              </SW-DATA-DEF-PROPS-CONDITIONAL>
+            </SW-DATA-DEF-PROPS-VARIANTS>
+          </SW-DATA-DEF-PROPS>
+        </IMPLEMENTATION-DATA-TYPE>
+        <DATA-TYPE-MAPPING-SET>
+          <SHORT-NAME>DataTypeMappingSet</SHORT-NAME>
+          <DATA-TYPE-MAPS>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/package/Element_ApplicationPrimitiveDataType</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/package/ImplementationDataType</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+          </DATA-TYPE-MAPS>
+        </DATA-TYPE-MAPPING-SET>
+      </ELEMENTS>
+    </AR-PACKAGE>
+  </AR-PACKAGES>
+</AUTOSAR>

@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "upstream": "https://github.com/DanielT/autosar-data-py",
+  "commit": "1e064d751eadcb184961f025754e0605099b56eb",
+  "autosar_data": "0.17.0",
+  "license": "UPSTREAM-LICENSE-MIT",
+  "fixtures": [
+    {
+      "file": "upstream_impl_array.arxml",
+      "schema_version": "AUTOSAR R25-11",
+      "sha256": "07995cbc106a78e4310dfa56cc6c430715ef395c09b8614343869f20322152b7",
+      "source": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/implementation_data_type_test.py",
+      "function": "test_implmentation_data_type_array",
+      "state": "Constructed definitions before name/settings mutations; omit API round-trip assertions.",
+      "adaptations": []
+    },
+    {
+      "file": "upstream_impl_structure.arxml",
+      "schema_version": "AUTOSAR R25-11",
+      "sha256": "599b065682e700f836d327a76795c2a35d4eac0c75b5e45611a80047e8c3f3d4",
+      "source": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/implementation_data_type_test.py",
+      "function": "test_implmentation_data_type_structure",
+      "state": "Constructed definitions before name/settings mutations; omit API round-trip assertions.",
+      "adaptations": []
+    },
+    {
+      "file": "upstream_impl_type_reference.arxml",
+      "schema_version": "AUTOSAR R25-11",
+      "sha256": "4dd03ea98dc7515bb0f0087450d2a86fe5cc6ac434c77b13fe27ec1975c754a1",
+      "source": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/implementation_data_type_test.py",
+      "function": "test_implmentation_data_type_type_reference",
+      "state": "Constructed definitions before name/settings mutations; omit API round-trip assertions.",
+      "adaptations": []
+    },
+    {
+      "file": "upstream_application_mapping.arxml",
+      "schema_version": "AUTOSAR R25-11",
+      "sha256": "8a23cc37c16f7abcbce2e99d1087152bfc823dfcb544104baea26ec3f4f5f54c",
+      "source": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/datatype_test.py",
+      "function": "test_data_type_mapping_set",
+      "state": "Constructed definitions before name/settings mutations; omit API round-trip assertions.",
+      "adaptations": []
+    },
+    {
+      "file": "upstream_application_arrays.arxml",
+      "schema_version": "AUTOSAR R25-11",
+      "sha256": "95fcd15953577fdc36a3fb9ce393a6dfa058de38070ecb8af65e1a42ff4c5d1e",
+      "source": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/datatype_test.py",
+      "function": "test_application_array_data_type",
+      "state": "Constructed definitions before name/settings mutations; omit API round-trip assertions.",
+      "adaptations": [
+        "Add signed 32-bit SW base, implementation VALUE, and application mapping.",
+        "Add an explicit empty ELEMENTS container to the empty record."
+      ]
+    },
+    {
+      "file": "upstream_application_record.arxml",
+      "schema_version": "AUTOSAR R25-11",
+      "sha256": "6ffd939aa704a5298c53ad45d61bb55a2b0a1c19c0149d86dcf7b5b3f8542a20",
+      "source": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/datatype_test.py",
+      "function": "test_application_record_data_type",
+      "state": "Constructed definitions before name/settings mutations; omit API round-trip assertions.",
+      "adaptations": [
+        "Add signed 32-bit SW base, implementation VALUE, and application mapping.",
+        "Add an explicit empty ELEMENTS container to the nested empty record."
+      ]
+    }
+  ]
+}

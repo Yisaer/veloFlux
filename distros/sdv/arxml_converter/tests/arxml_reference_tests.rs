@@ -72,9 +72,30 @@ fn normalize(dt: &DataType) -> Value {
     json!({"name": dt.short_name, "category": dt.category, "definition": definition})
 }
 
+fn cp_mappings(doc: &roxmltree::Document<'_>) -> Result<HashMap<String, String>, String> {
+    doc.descendants()
+        .filter(|node| node.has_tag_name("DATA-TYPE-MAP"))
+        .map(|node| {
+            let reference = |tag| {
+                node.children()
+                    .find(|child| child.has_tag_name(tag))
+                    .and_then(|child| child.text())
+                    .ok_or_else(|| format!("missing {tag}"))
+            };
+            Ok((
+                reference("APPLICATION-DATA-TYPE-REF")?.to_string(),
+                reference("IMPLEMENTATION-DATA-TYPE-REF")?.to_string(),
+            ))
+        })
+        .collect()
+}
+
 fn inspect(case: &Value, path: &Path) -> Result<Value, String> {
     let query = &case["input"]["query"];
-    if matches!(text(query, "operation"), "implementation_type" | "ap_type") {
+    if matches!(
+        text(query, "operation"),
+        "cp_type" | "implementation_type" | "ap_type"
+    ) {
         let xml = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let doc = roxmltree::Document::parse(&xml).map_err(|e| e.to_string())?;
         if text(query, "operation") == "ap_type" {
@@ -94,7 +115,7 @@ fn inspect(case: &Value, path: &Path) -> Result<Value, String> {
                 .map(normalize)
                 .ok_or_else(|| "type not found".into());
         }
-        let mut parser = DataTypesParser::new(HashMap::new());
+        let mut parser = DataTypesParser::new(cp_mappings(&doc)?);
         parser.parse_data_types(doc.root_element())?;
         let types = parser.merged_data_types();
         let name = short(text(query, "type_path"));

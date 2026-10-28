@@ -2,10 +2,10 @@
 
 The complete inventory checks every type definition in the documents selected by
 [`inventory.json`](../../arxml_converter/tests/reference/inventory.json) against
-`autosar-data-py` 0.17.0. It extends the original 17 selected input/output cases
-without replacing them. The current run enumerates 2,813 definitions across six
-strictly loaded documents. Two additional existing CP fixtures fail reference
-loading and are reported separately.
+`autosar-data-py` 0.17.0. It supplements 30 selected input/output cases, including
+thirteen migrated upstream cases. The current run enumerates 2,850 definitions
+across sixteen strictly loaded documents. Two additional existing CP fixtures
+fail reference loading and are reported separately.
 
 ## Results by Document
 
@@ -17,9 +17,19 @@ loading and are reported separately.
 | Official structure adaptation | 7 | 5 | 0 | 0 | 2 | 0 |
 | Upstream unsigned VALUE adaptation | 2 | 2 | 0 | 0 | 0 | 0 |
 | Upstream arbitrary-base-name adaptation | 2 | 2 | 0 | 0 | 0 | 0 |
-| Total | 2,813 | 2,798 | 0 | 0 | 15 | 0 |
+| Upstream implementation ARRAY | 2 | 2 | 0 | 0 | 0 | 0 |
+| Upstream implementation STRUCTURE | 2 | 2 | 0 | 0 | 0 | 0 |
+| Upstream implementation TYPE_REFERENCE | 3 | 3 | 0 | 0 | 0 | 0 |
+| Upstream application mapping | 3 | 3 | 0 | 0 | 0 | 0 |
+| Upstream application arrays | 7 | 7 | 0 | 0 | 0 | 0 |
+| Upstream application record | 6 | 6 | 0 | 0 | 0 | 0 |
+| Upstream linear variable application array | 4 | 4 | 0 | 0 | 0 | 0 |
+| Upstream supported mixed implementation members | 3 | 3 | 0 | 0 | 0 | 0 |
+| Upstream implementation array of structures | 2 | 2 | 0 | 0 | 0 | 0 |
+| Upstream implementation composite aliases | 5 | 5 | 0 | 0 | 0 | 0 |
+| Total | 2,850 | 2,835 | 0 | 0 | 15 | 0 |
 
-There are no reference-adapter gaps or per-type reference errors in these six
+There are no reference-adapter gaps or per-type reference errors in these sixteen
 documents. This does not imply coverage of constructs absent from the inputs.
 `matched` means agreement under the current converter contract, not full
 AUTOSAR conformance or complete payload verification. Expected short-reference
@@ -30,9 +40,34 @@ provide the required traits without repeated SW base declarations.
 
 The reference rejects `minimal_cp.arxml` because it lacks the required ARXML file
 header. It rejects `s1_cp_test.xml` in strict mode because `HAS-INTERNAL-STATE` is
-not allowed at its position in the declared AUTOSAR 4.2.2 version. Neither file contributes types to the 2,813-definition total. The minimal CP
+not allowed at its position in the declared AUTOSAR 4.2.2 version. Neither file contributes types to the 2,850-definition total. The minimal CP
 fixture's type references were corrected to their actual package paths for exact
 lookup; its missing header remains. The legacy CP fixture is unchanged.
+
+## Upstream Batch 1 Migration
+
+Six generated R25-11 documents add 23 matching definitions. They independently
+cover implementation fixed arrays, inline structures, aliases, application
+mappings, fixed application arrays, nested records, arrays of empty records, and
+arrays of arrays. The application adaptations add explicit signed 32-bit mappings
+and empty `ELEMENTS` containers where needed. Existing document checksums remain
+unchanged. See the [migration details](../../arxml_converter/tests/reference/README.md#upstream-case-migration)
+for exact upstream sources, generation commands, provenance, and deferred cases.
+These are definition checks, not SOME/IP payload comparisons.
+
+## Upstream Batch 2 Happy Paths
+
+Four generated R25-11 documents add five matching selected cases and 14 matching
+inventory definitions. They cover a linear variable application array with
+maximum 20, a structure retaining the four supported upstream inline members,
+a fixed array of inline structures, and aliases to fixed array and structure
+targets. The selected-case Python adapter now marks inline CP composites as
+in-place fields; recursive definitions and exact paths are audited by the
+inventory. All fourteen earlier document checksums and fixture bytes remain
+unchanged. Generation and provenance are recorded in the
+[migration details](../../arxml_converter/tests/reference/README.md#batch-2-supported-type-happy-paths-implemented).
+These happy paths add no unsupported-type or rejection cases and do not validate
+payload bytes, dynamic implementation-array decoding, or maximum enforcement.
 
 ## CP Implementation Composite Support
 
@@ -239,10 +274,11 @@ implemented: its serialization length policy remains deferred as described above
 
 ## Independent SW Base Comparison
 
-All 16 `SW-BASE-TYPE` definitions now have independent comparison rows: 12 in
-`baq.arxml`, two in the implementation fixture, and one in each upstream
-adaptation. The Rust side looks up the exact full path in the production merged
-registry; no builtin fallback synthesizes a missing definition. Each row checks
+All 26 `SW-BASE-TYPE` definitions now have independent comparison rows: 12 in
+`baq.arxml`, two in the implementation fixture, one in each original upstream
+adaptation, six in the migrated upstream Batch 1 fixtures, and four in Batch 2.
+The Rust side looks up the exact full path in the production merged registry;
+no builtin fallback synthesizes a missing definition. Each row checks
 the source name, terminal runtime category (`SW-BASE-TYPE`), bit width, and
 encoding against the Python model. The independent Python expected values are
 read from `BASE-TYPE-SIZE` and `BASE-TYPE-ENCODING`; actual traits come from the
@@ -252,7 +288,7 @@ Boolean, UTF-8, and the arbitrary name `SwBaseType`.
 The source category (such as `FIXED_LENGTH`) is lowered to a terminal primitive
 and recorded as an expected normalization. This comparison does not audit
 source-category preservation, byte-order attributes, native declarations, memory
-alignment, or binary payload decoding. All 16 rows match on the audited traits.
+alignment, or binary payload decoding. All 26 rows match on the audited traits.
 
 ## Remaining Unrepresented Definitions
 

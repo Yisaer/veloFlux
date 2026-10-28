@@ -8,6 +8,16 @@
     { "id": "upstream_uint32", "file": "fixtures/upstream_uint32.arxml", "parser": "cp_types", "strict": true },
     { "id": "upstream_arbitrary_base", "file": "fixtures/upstream_value.arxml", "parser": "cp_types", "strict": true },
     { "id": "repository_minimal_cp", "file": "../test_data/minimal_cp.arxml", "parser": "cp", "strict": true },
-    { "id": "repository_legacy_cp", "file": "../test_data/s1_cp_test.xml", "parser": "cp", "strict": true }
+    { "id": "repository_legacy_cp", "file": "../test_data/s1_cp_test.xml", "parser": "cp", "strict": true },
+    { "id": "upstream_impl_array", "file": "fixtures/upstream_impl_array.arxml", "parser": "cp_types", "strict": true },
+    { "id": "upstream_impl_structure", "file": "fixtures/upstream_impl_structure.arxml", "parser": "cp_types", "strict": true },
+    { "id": "upstream_impl_type_reference", "file": "fixtures/upstream_impl_type_reference.arxml", "parser": "cp_types", "strict": true },
+    { "id": "upstream_application_mapping", "file": "fixtures/upstream_application_mapping.arxml", "parser": "cp_types", "strict": true },
+    { "id": "upstream_application_arrays", "file": "fixtures/upstream_application_arrays.arxml", "parser": "cp_types", "strict": true },
+    { "id": "upstream_application_record", "file": "fixtures/upstream_application_record.arxml", "parser": "cp_types", "strict": true },
+    { "id": "upstream_application_array_variable", "file": "fixtures/upstream_application_array_variable.arxml", "parser": "cp_types", "strict": true },
+    { "id": "upstream_impl_mixed_members", "file": "fixtures/upstream_impl_mixed_members.arxml", "parser": "cp_types", "strict": true },
+    { "id": "upstream_impl_array_of_structures", "file": "fixtures/upstream_impl_array_of_structures.arxml", "parser": "cp_types", "strict": true },
+    { "id": "upstream_impl_composite_aliases", "file": "fixtures/upstream_impl_composite_aliases.arxml", "parser": "cp_types", "strict": true }
   ]
 }

@@ -8,10 +8,10 @@ resulting veloFlux output.
 
 The initial `autosar-data-py` input/output framework is implemented in
 [`arxml_converter/tests/reference`](../../arxml_converter/tests/reference/README.md).
-Its 17 cases cover repository samples, generated adaptations of an upstream
-example, and a locally authored adaptation of an official structure illustration.
+Its 30 cases cover repository samples, generated adaptations of upstream
+examples, and a locally authored adaptation of an official structure illustration.
 Both the Rust regression and the live reference comparison have been executed.
-Fourteen cases match, one is rejected by both implementations, and two record
+Twenty-seven cases match, one is rejected by both implementations, and two record
 known differences. A complete type inventory now supplements those selected
 cases: it enumerates every type in each reference-loadable document, compares
 definitions, retained references, and declared base traits, and reports partial
@@ -19,12 +19,12 @@ coverage separately. Status follows the current computation contract: short
 references for unqualified lookup and resolved mapping normalization are expected,
 and retained maximum
 lengths do not require runtime enforcement. These are not partial support. The
-current inventory has 2,798 matching rows, no partial rows, 15 unrepresented rows,
+current inventory has 2,835 matching rows, no partial rows, 15 unrepresented rows,
 and no Rust parser errors. Supported native builtin names provide their traits
 without repeated SW base declarations. Qualified references require exact loaded
 identities; neither short-name lookup nor builtin name guessing can recover a
 missing path. CP application and AP definitions register their actual paths,
-and application fields and array elements retain scoped references. All 16 explicit SW base definitions are
+and application fields and array elements retain scoped references. All 26 explicit SW base definitions are
 also compared independently by full-path lookup, name, runtime category, bit
 width, and encoding. See the [inventory findings](arxml_type_inventory.md) and
 framework documentation for counts, commands, and coverage limits.
@@ -53,8 +53,19 @@ CP application array/string maxima are retained as converter-only metadata for
 inspection and future policies, without changing SQL types or decoder length
 behavior. Mapping and short-name coverage flags are distinguished from SQL
 projection and confirmed decoding defects in the inventory findings.
-Binary payload checks with `someipy` and the later steps below remain
-planned. The Go original and `esrlabs/someip-payload` are outside this investigation.
+The upstream Batch 1 migration is implemented: six generated fixtures add eight
+selected cases and 23 matching inventory definitions, with reproducible generation
+and source attribution. Application examples have explicit implementation
+mappings and empty record containers where needed. The original inventory
+results are unchanged. See the [migration details](../../arxml_converter/tests/reference/README.md#upstream-case-migration)
+for exact cases and the completed second batch of supported-type happy paths.
+Batch 2 adds four generated fixtures, five matching selected cases, and 14 matching
+inventory definitions. It checks a linear variable application array, supported
+inline nesting, a fixed array of structures, and composite aliases. All fourteen
+earlier inventory results remain unchanged. No unsupported-type or rejection
+cases were added; binary payload validation remains separate.
+Binary payload checks with `someipy` and the later steps below remain planned.
+The Go original and `esrlabs/someip-payload` are outside this investigation.
 
 ## Reference Libraries and Boundaries
 

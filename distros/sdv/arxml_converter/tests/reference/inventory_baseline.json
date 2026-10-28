@@ -200,6 +200,265 @@
       "results_checksum": "401f0fd45070969a",
       "sha256": "41b5b1ded0719358067882f5dc165f7afb85587eb4bcf31d8d423cdcbb52ca8d",
       "type_count": 0
+    },
+    {
+      "categories": {
+        "IMPLEMENTATION-DATA-TYPE:ARRAY": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 2
+      },
+      "id": "upstream_impl_array",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "82ae75bdc0fe5f77",
+      "sha256": "07995cbc106a78e4310dfa56cc6c430715ef395c09b8614343869f20322152b7",
+      "type_count": 2
+    },
+    {
+      "categories": {
+        "IMPLEMENTATION-DATA-TYPE:STRUCTURE": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 2
+      },
+      "id": "upstream_impl_structure",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "26e89aec33cc2671",
+      "sha256": "599b065682e700f836d327a76795c2a35d4eac0c75b5e45611a80047e8c3f3d4",
+      "type_count": 2
+    },
+    {
+      "categories": {
+        "IMPLEMENTATION-DATA-TYPE:TYPE_REFERENCE": {
+          "matched": 1
+        },
+        "IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 3
+      },
+      "id": "upstream_impl_type_reference",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "7ef41a08a111659c",
+      "sha256": "4dd03ea98dc7515bb0f0087450d2a86fe5cc6ac434c77b13fe27ec1975c754a1",
+      "type_count": 3
+    },
+    {
+      "categories": {
+        "APPLICATION-PRIMITIVE-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 3
+      },
+      "id": "upstream_application_mapping",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "9a959b85f94e592c",
+      "sha256": "8a23cc37c16f7abcbce2e99d1087152bfc823dfcb544104baea26ec3f4f5f54c",
+      "type_count": 3
+    },
+    {
+      "categories": {
+        "APPLICATION-ARRAY-DATA-TYPE:ARRAY": {
+          "matched": 3
+        },
+        "APPLICATION-PRIMITIVE-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "APPLICATION-RECORD-DATA-TYPE:STRUCTURE": {
+          "matched": 1
+        },
+        "IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 7
+      },
+      "id": "upstream_application_arrays",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "30eec6884168cce7",
+      "sha256": "95fcd15953577fdc36a3fb9ce393a6dfa058de38070ecb8af65e1a42ff4c5d1e",
+      "type_count": 7
+    },
+    {
+      "categories": {
+        "APPLICATION-ARRAY-DATA-TYPE:ARRAY": {
+          "matched": 1
+        },
+        "APPLICATION-PRIMITIVE-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "APPLICATION-RECORD-DATA-TYPE:STRUCTURE": {
+          "matched": 2
+        },
+        "IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 6
+      },
+      "id": "upstream_application_record",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "05c0d507b1e3c512",
+      "sha256": "6ffd939aa704a5298c53ad45d61bb55a2b0a1c19c0149d86dcf7b5b3f8542a20",
+      "type_count": 6
+    },
+    {
+      "categories": {
+        "APPLICATION-ARRAY-DATA-TYPE:ARRAY": {
+          "matched": 1
+        },
+        "APPLICATION-PRIMITIVE-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 4
+      },
+      "id": "upstream_application_array_variable",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "2b92911283127158",
+      "sha256": "e95a87b6900315a418ab72362e3b9e8f02586f81568573a9997ad7bb608d5cfc",
+      "type_count": 4
+    },
+    {
+      "categories": {
+        "IMPLEMENTATION-DATA-TYPE:STRUCTURE": {
+          "matched": 1
+        },
+        "IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 3
+      },
+      "id": "upstream_impl_mixed_members",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "5e0a693bc5029fcf",
+      "sha256": "d9e404eacc63969553ce7b30d64cba8261304376095400eb5c8ebb301155f8f3",
+      "type_count": 3
+    },
+    {
+      "categories": {
+        "IMPLEMENTATION-DATA-TYPE:ARRAY": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 2
+      },
+      "id": "upstream_impl_array_of_structures",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "d81cd97a3f836304",
+      "sha256": "6c15ff77d672753c56a17cc4555b699175ac5c16513fc43dc2c5f6003b50535f",
+      "type_count": 2
+    },
+    {
+      "categories": {
+        "IMPLEMENTATION-DATA-TYPE:ARRAY": {
+          "matched": 1
+        },
+        "IMPLEMENTATION-DATA-TYPE:STRUCTURE": {
+          "matched": 1
+        },
+        "IMPLEMENTATION-DATA-TYPE:TYPE_REFERENCE": {
+          "matched": 2
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 5
+      },
+      "id": "upstream_impl_composite_aliases",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "55e27e68f8f55196",
+      "sha256": "fe8ed781fbd038bccbc5c828525e8b6cdf315465e676e0222429a23e94ca3b59",
+      "type_count": 5
     }
   ],
   "version": 1

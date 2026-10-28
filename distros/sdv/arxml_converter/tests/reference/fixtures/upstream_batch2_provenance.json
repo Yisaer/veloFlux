@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "upstream": "https://github.com/DanielT/autosar-data-py",
+  "commit": "1e064d751eadcb184961f025754e0605099b56eb",
+  "autosar_data": "0.17.0",
+  "license": "UPSTREAM-LICENSE-MIT",
+  "fixtures": [
+    {
+      "file": "upstream_application_array_variable.arxml",
+      "schema_version": "AUTOSAR R25-11",
+      "sha256": "e95a87b6900315a418ab72362e3b9e8f02586f81568573a9997ad7bb608d5cfc",
+      "source": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/datatype_test.py",
+      "function": "test_application_array_size",
+      "state": "Constructed definitions before name/settings mutations; omit API round-trip assertions.",
+      "adaptations": [
+        "Select the VariableLinear(20) state and omit later size-mode mutations.",
+        "Add signed 32-bit SW base, implementation VALUE, and application mapping."
+      ]
+    },
+    {
+      "file": "upstream_impl_mixed_members.arxml",
+      "schema_version": "AUTOSAR R25-11",
+      "sha256": "d9e404eacc63969553ce7b30d64cba8261304376095400eb5c8ebb301155f8f3",
+      "source": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/implementation_data_type_test.py",
+      "function": "test_implmentation_data_type_element",
+      "state": "Constructed definitions before name/settings mutations; omit API round-trip assertions.",
+      "adaptations": [
+        "Retain only VALUE, STRUCTURE, ARRAY, and TYPE_REFERENCE members in source order.",
+        "Omit UNION, DATA_REFERENCE, and FUNCTION_REFERENCE members."
+      ]
+    },
+    {
+      "file": "upstream_impl_array_of_structures.arxml",
+      "schema_version": "AUTOSAR R25-11",
+      "sha256": "6c15ff77d672753c56a17cc4555b699175ac5c16513fc43dc2c5f6003b50535f",
+      "source": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/implementation_data_type_test.py",
+      "function": "test_implmentation_data_type_array",
+      "state": "Constructed definitions before name/settings mutations; omit API round-trip assertions.",
+      "adaptations": [
+        "Replace the inline VALUE element with the STRUCTURE pattern from test_implmentation_data_type_structure."
+      ]
+    },
+    {
+      "file": "upstream_impl_composite_aliases.arxml",
+      "schema_version": "AUTOSAR R25-11",
+      "sha256": "fe8ed781fbd038bccbc5c828525e8b6cdf315465e676e0222429a23e94ca3b59",
+      "source": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/implementation_data_type_test.py",
+      "function": "test_implmentation_data_type_type_reference",
+      "state": "Constructed definitions before name/settings mutations; omit API round-trip assertions.",
+      "adaptations": [
+        "Use the ARRAY and STRUCTURE patterns from test_implmentation_data_type_array and test_implmentation_data_type_structure as alias targets.",
+        "Name the aliases ImplArrayRef and ImplStructRef; omit optional compu method and constraint."
+      ]
+    }
+  ]
+}

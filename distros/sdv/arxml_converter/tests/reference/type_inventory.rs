@@ -8,7 +8,7 @@ use arxml_converter::ast::types::{ApplicationTypeConstraints, DataType, DataType
 use arxml_converter::parser::datatypes::DataTypesParser;
 use serde_json::{Value, json};
 
-use super::{normalize, root, short, text};
+use super::{cp_mappings, normalize, root, short, text};
 
 #[derive(Default)]
 struct Registry {
@@ -32,22 +32,7 @@ impl Registry {
             "cp" | "cp_types" => {
                 // Supply the existing CP parser's mapping input. Expected types
                 // and reference facts come independently from the Python model.
-                let mappings = doc
-                    .descendants()
-                    .filter(|n| n.has_tag_name("DATA-TYPE-MAP"))
-                    .map(|node| {
-                        let reference = |tag| {
-                            node.children()
-                                .find(|n| n.has_tag_name(tag))
-                                .and_then(|n| n.text())
-                                .ok_or_else(|| format!("missing {tag}"))
-                        };
-                        Ok((
-                            reference("APPLICATION-DATA-TYPE-REF")?.to_string(),
-                            reference("IMPLEMENTATION-DATA-TYPE-REF")?.to_string(),
-                        ))
-                    })
-                    .collect::<Result<HashMap<_, _>, String>>()?;
+                let mappings = cp_mappings(&doc)?;
                 let mut parser = DataTypesParser::new(mappings);
                 let package = if mode == "cp_types" {
                     doc.root_element()

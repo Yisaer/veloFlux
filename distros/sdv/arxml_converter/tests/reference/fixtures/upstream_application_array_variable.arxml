@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AUTOSAR xsi:schemaLocation="http://autosar.org/schema/r4.0 AUTOSAR_00054.xsd" xmlns="http://autosar.org/schema/r4.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <AR-PACKAGES>
+    <AR-PACKAGE>
+      <SHORT-NAME>package</SHORT-NAME>
+      <ELEMENTS>
+        <APPLICATION-PRIMITIVE-DATA-TYPE>
+          <SHORT-NAME>ApplicationPrimitiveDataType</SHORT-NAME>
+          <CATEGORY>VALUE</CATEGORY>
+        </APPLICATION-PRIMITIVE-DATA-TYPE>
+        <APPLICATION-ARRAY-DATA-TYPE>
+          <SHORT-NAME>ApplicationArrayDataType</SHORT-NAME>
+          <CATEGORY>ARRAY</CATEGORY>
+          <DYNAMIC-ARRAY-SIZE-PROFILE>VSA_LINEAR</DYNAMIC-ARRAY-SIZE-PROFILE>
+          <ELEMENT>
+            <SHORT-NAME>Element</SHORT-NAME>
+            <CATEGORY>VALUE</CATEGORY>
+            <TYPE-TREF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/package/ApplicationPrimitiveDataType</TYPE-TREF>
+            <ARRAY-SIZE-HANDLING>ALL-INDICES-SAME-ARRAY-SIZE</ARRAY-SIZE-HANDLING>
+            <ARRAY-SIZE-SEMANTICS>VARIABLE-SIZE</ARRAY-SIZE-SEMANTICS>
+            <MAX-NUMBER-OF-ELEMENTS>20</MAX-NUMBER-OF-ELEMENTS>
+          </ELEMENT>
+        </APPLICATION-ARRAY-DATA-TYPE>
+        <SW-BASE-TYPE>
+          <SHORT-NAME>SwBaseType</SHORT-NAME>
+          <CATEGORY>FIXED_LENGTH</CATEGORY>
+          <BASE-TYPE-SIZE>32</BASE-TYPE-SIZE>
+          <BASE-TYPE-ENCODING>2C</BASE-TYPE-ENCODING>
+        </SW-BASE-TYPE>
+        <IMPLEMENTATION-DATA-TYPE>
+          <SHORT-NAME>ImplementationDataType</SHORT-NAME>
+          <CATEGORY>VALUE</CATEGORY>
+          <SW-DATA-DEF-PROPS>
+            <SW-DATA-DEF-PROPS-VARIANTS>
+              <SW-DATA-DEF-PROPS-CONDITIONAL>
+                <BASE-TYPE-REF DEST="SW-BASE-TYPE">/package/SwBaseType</BASE-TYPE-REF>
+              </SW-DATA-DEF-PROPS-CONDITIONAL>
+            </SW-DATA-DEF-PROPS-VARIANTS>
+          </SW-DATA-DEF-PROPS>
+        </IMPLEMENTATION-DATA-TYPE>
+        <DATA-TYPE-MAPPING-SET>
+          <SHORT-NAME>DataTypeMappingSet</SHORT-NAME>
+          <DATA-TYPE-MAPS>
+            <DATA-TYPE-MAP>
+              <APPLICATION-DATA-TYPE-REF DEST="APPLICATION-PRIMITIVE-DATA-TYPE">/package/ApplicationPrimitiveDataType</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/package/ImplementationDataType</IMPLEMENTATION-DATA-TYPE-REF>
+            </DATA-TYPE-MAP>
+          </DATA-TYPE-MAPS>
+        </DATA-TYPE-MAPPING-SET>
+      </ELEMENTS>
+    </AR-PACKAGE>
+  </AR-PACKAGES>
+</AUTOSAR>

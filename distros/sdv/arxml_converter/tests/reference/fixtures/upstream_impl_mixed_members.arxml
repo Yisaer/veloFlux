@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AUTOSAR xsi:schemaLocation="http://autosar.org/schema/r4.0 AUTOSAR_00054.xsd" xmlns="http://autosar.org/schema/r4.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <AR-PACKAGES>
+    <AR-PACKAGE>
+      <SHORT-NAME>package</SHORT-NAME>
+      <ELEMENTS>
+        <SW-BASE-TYPE>
+          <SHORT-NAME>SwBaseType</SHORT-NAME>
+          <CATEGORY>FIXED_LENGTH</CATEGORY>
+          <BASE-TYPE-SIZE>32</BASE-TYPE-SIZE>
+          <BASE-TYPE-ENCODING>2C</BASE-TYPE-ENCODING>
+        </SW-BASE-TYPE>
+        <IMPLEMENTATION-DATA-TYPE>
+          <SHORT-NAME>OtherImplType</SHORT-NAME>
+          <CATEGORY>VALUE</CATEGORY>
+          <SW-DATA-DEF-PROPS>
+            <SW-DATA-DEF-PROPS-VARIANTS>
+              <SW-DATA-DEF-PROPS-CONDITIONAL>
+                <BASE-TYPE-REF DEST="SW-BASE-TYPE">/package/SwBaseType</BASE-TYPE-REF>
+              </SW-DATA-DEF-PROPS-CONDITIONAL>
+            </SW-DATA-DEF-PROPS-VARIANTS>
+          </SW-DATA-DEF-PROPS>
+        </IMPLEMENTATION-DATA-TYPE>
+        <IMPLEMENTATION-DATA-TYPE>
+          <SHORT-NAME>ImpleDataType</SHORT-NAME>
+          <CATEGORY>STRUCTURE</CATEGORY>
+          <SUB-ELEMENTS>
+            <IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              <SHORT-NAME>ImplValue</SHORT-NAME>
+              <CATEGORY>VALUE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <BASE-TYPE-REF DEST="SW-BASE-TYPE">/package/SwBaseType</BASE-TYPE-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+            <IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              <SHORT-NAME>ImplStruct</SHORT-NAME>
+              <CATEGORY>STRUCTURE</CATEGORY>
+              <SUB-ELEMENTS>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                  <SHORT-NAME>StructImplValue</SHORT-NAME>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <BASE-TYPE-REF DEST="SW-BASE-TYPE">/package/SwBaseType</BASE-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              </SUB-ELEMENTS>
+            </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+            <IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              <SHORT-NAME>ImplArray</SHORT-NAME>
+              <CATEGORY>ARRAY</CATEGORY>
+              <SUB-ELEMENTS>
+                <IMPLEMENTATION-DATA-TYPE-ELEMENT>
+                  <SHORT-NAME>ArrayImplValue</SHORT-NAME>
+                  <CATEGORY>VALUE</CATEGORY>
+                  <ARRAY-SIZE>10</ARRAY-SIZE>
+                  <ARRAY-SIZE-SEMANTICS>FIXED-SIZE</ARRAY-SIZE-SEMANTICS>
+                  <SW-DATA-DEF-PROPS>
+                    <SW-DATA-DEF-PROPS-VARIANTS>
+                      <SW-DATA-DEF-PROPS-CONDITIONAL>
+                        <BASE-TYPE-REF DEST="SW-BASE-TYPE">/package/SwBaseType</BASE-TYPE-REF>
+                      </SW-DATA-DEF-PROPS-CONDITIONAL>
+                    </SW-DATA-DEF-PROPS-VARIANTS>
+                  </SW-DATA-DEF-PROPS>
+                </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              </SUB-ELEMENTS>
+            </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+            <IMPLEMENTATION-DATA-TYPE-ELEMENT>
+              <SHORT-NAME>ImplTypeRef</SHORT-NAME>
+              <CATEGORY>TYPE_REFERENCE</CATEGORY>
+              <SW-DATA-DEF-PROPS>
+                <SW-DATA-DEF-PROPS-VARIANTS>
+                  <SW-DATA-DEF-PROPS-CONDITIONAL>
+                    <IMPLEMENTATION-DATA-TYPE-REF DEST="IMPLEMENTATION-DATA-TYPE">/package/OtherImplType</IMPLEMENTATION-DATA-TYPE-REF>
+                  </SW-DATA-DEF-PROPS-CONDITIONAL>
+                </SW-DATA-DEF-PROPS-VARIANTS>
+              </SW-DATA-DEF-PROPS>
+            </IMPLEMENTATION-DATA-TYPE-ELEMENT>
+          </SUB-ELEMENTS>
+        </IMPLEMENTATION-DATA-TYPE>
+      </ELEMENTS>
+    </AR-PACKAGE>
+  </AR-PACKAGES>
+</AUTOSAR>

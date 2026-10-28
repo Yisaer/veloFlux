@@ -76,7 +76,10 @@ class Reference:
                           "target": reference.character_data.rsplit("/", 1)[-1].lower(),
                           "string_size": None}
         elif category == "TYPE_REFERENCE":
-            reference = child(element, "TYPE-REFERENCE-REF")
+            reference = (only(descendants(element, "IMPLEMENTATION-DATA-TYPE-REF"),
+                              "implementation reference")
+                         if element.element_name == "IMPLEMENTATION-DATA-TYPE"
+                         else child(element, "TYPE-REFERENCE-REF"))
             self.follow(reference)
             target = reference.character_data.rsplit("/", 1)[-1].lower()
             size = element.get_sub_element("ARRAY-SIZE")
@@ -93,6 +96,12 @@ class Reference:
                     target = self.follow(reference)
                     fields.append({"name": member.item_name, "target": target.item_name,
                                    "in_place": False})
+            elif element.element_name == "IMPLEMENTATION-DATA-TYPE":
+                for member in child(element, "SUB-ELEMENTS").sub_elements:
+                    # Inline composites occupy the field directly; references
+                    # remain separate member definitions in the scoped registry.
+                    fields.append({"name": member.item_name, "target": member.item_name,
+                                   "in_place": data(member, "CATEGORY") in ("STRUCTURE", "ARRAY")})
             else:
                 for member in child(element, "SUB-ELEMENTS").sub_elements:
                     type_ref = child(member, "TYPE-REFERENCE")
@@ -106,6 +115,11 @@ class Reference:
                 target = self.follow(child(member, "TYPE-TREF"))
                 dynamic = data(member, "ARRAY-SIZE-SEMANTICS") == "VARIABLE-SIZE"
                 size = 0 if dynamic else int(data(member, "MAX-NUMBER-OF-ELEMENTS"))
+                in_place = False
+            elif element.element_name == "IMPLEMENTATION-DATA-TYPE":
+                target = only(child(element, "SUB-ELEMENTS").sub_elements, "array member")
+                dynamic = data(target, "ARRAY-SIZE-SEMANTICS") == "VARIABLE-SIZE"
+                size = 0 if dynamic else int(data(target, "ARRAY-SIZE"))
                 in_place = False
             else:
                 argument = child(child(element, "TEMPLATE-ARGUMENTS"), "CPP-TEMPLATE-ARGUMENT")
@@ -176,7 +190,7 @@ class Reference:
 
     def inspect(self, query):
         operation = query["operation"]
-        if operation in ("type", "implementation_type", "ap_type"):
+        if operation in ("type", "cp_type", "implementation_type", "ap_type"):
             target = self.model.get_element_by_path(query["type_path"])
             if target is None:
                 raise ValueError(f"type not found: {query['type_path']}")

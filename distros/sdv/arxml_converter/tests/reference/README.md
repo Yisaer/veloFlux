@@ -44,10 +44,11 @@ Cases use strict reference loading unless `input.strict` is explicitly false.
 - `resolve_cp`: select a CP payload using a service ID and a raw 32-bit header ID.
 - `type`: inspect a type through the loaded codec.
 - `ap_type`: inspect an AP type package without requiring service deployment.
-- `implementation_type`: inspect a standalone CP implementation VALUE type.
+- `cp_type`: inspect a standalone CP application or implementation type, including application mappings.
+- `implementation_type`: compatibility operation for standalone CP implementation types.
 
-The last two operations exercise existing type parsers directly. Their success
-does not establish that `ArxmlCodec::load` accepts those standalone documents.
+The standalone CP and AP operations exercise existing type parsers directly.
+Their success does not establish that `ArxmlCodec::load` accepts those standalone documents.
 
 An example table entry is:
 
@@ -93,7 +94,7 @@ The comparison modes are:
   resolved difference, require updating the case rather than silently passing.
 
 These modes do not make known differences equivalent to conformance. The current
-17 cases contain 14 matching outputs, one shared rejection, and two explicitly
+30 cases contain 27 matching outputs, one shared rejection, and two explicitly
 recorded differences. The suite passes when those expectations hold.
 
 ## Selected Case Traversal and Coverage
@@ -104,7 +105,7 @@ it traverses header/PDU/signal references and reverse system-signal mappings; fo
 AP messages it follows event or notifier deployment references. Multiple CP
 routes are accepted only if they converge on one payload type.
 
-The 17 selected cases cover type names, categories, base reference names,
+The 30 selected cases cover type names, categories, base reference names,
 ordered structure fields, array sizes, vector elements, string sizes, and
 in-place flags. Each selected type is inspected one level deep; nested types
 need their own cases. The reference validates the traversed targets and records
@@ -129,8 +130,8 @@ adapter enumerates every named `*-DATA-TYPE` and every `SW-BASE-TYPE` in each
 loaded document by full AUTOSAR path. New type names are included automatically.
 An unfamiliar type element or category becomes an explicit adapter gap rather
 than disappearing from the results. All four original `test_data` documents,
-the new implementation-composite fixture, and the three reference fixtures are
-selected.
+the implementation-composite fixture, and thirteen reference fixtures are selected.
+Ten of those reference fixtures implement the two upstream migration batches below.
 
 Run the inventory with the same reference environment:
 
@@ -183,7 +184,7 @@ not reduce status. Variable strings are checked against their existing
 `uint32_t`, `float`, and `String` in the current samples) are checked against an
 explicit builtin-trait table independent of the Rust resolver. Repeated SW base
 declarations are not required; unknown native types retain a verification gap.
-All 16 explicit `SW-BASE-TYPE` definitions are compared independently using exact
+All 26 explicit `SW-BASE-TYPE` definitions are compared independently using exact
 full-path registry lookup, name, terminal runtime category, bit width, and
 encoding. Expected traits come from Python model declarations; actual traits
 come from stored Rust primitives. Source-category preservation, byte order, native
@@ -301,6 +302,157 @@ unspecified `Struct_3` continuation is excluded and the types are named
 an AP ARXML representation of the example, not an official distributed ARXML
 file. Strict loading validates its declared ARXML structure; these tests do not
 claim to validate the illustration's binary serialization.
+
+## Upstream Case Migration
+
+Batch 1 is implemented with six generated fixtures, eight selected cases, and
+23 independently compared type definitions. All new rows match. The original
+eight inventory document results, including their checksums, remain unchanged.
+Batch 2 is implemented with four additional fixtures, five happy-path cases, and
+14 matching type definitions. All fourteen previous inventory document results
+retain their exact checksums.
+
+### Sources and Scope
+
+The generator uses `autosar-data` 0.17.0 and upstream commit
+`1e064d751eadcb184961f025754e0605099b56eb`, matching the existing VALUE fixture
+provenance. The upstream tree at this commit has no standalone `.arxml` or `.xml`
+fixtures. Its Python tests construct models that can be serialized into ARXML.
+The relevant sources are:
+
+- [Implementation datatype tests](https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/implementation_data_type_test.py): VALUE, ARRAY, STRUCTURE, TYPE_REFERENCE, unsupported categories, and mixed inline members.
+- [Application datatype and mapping tests](https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/datatype_test.py): application arrays and records, array size modes, mappings, and SW base declarations.
+
+The existing `upstream_value.arxml` and `upstream_uint32.arxml` already cover the
+VALUE construction pattern. Keep them unchanged and add complementary examples.
+The goal is independent source coverage beyond BAQ and locally authored fixtures;
+some constructs intentionally overlap existing implementation tests.
+
+This migration concerns ARXML definitions and reference resolution. These
+upstream tests provide neither SOME/IP payload bytes nor independent decoded
+payload values. Service deployment, complete codec loading, binary decoding,
+SQL output, and performance are outside this migration. The separate validation
+plan retains the proposed `someipy` payload work.
+
+### Batch 1: Supported Definitions and Reference Chains (Implemented)
+
+The following IDs are entries in `cases.json`. All six fixtures strictly reload
+with the pinned Python library and have no unresolved references. They use
+`AUTOSAR_00054.xsd` (R25-11). The selected cases compare one-level normalized
+outputs; the inventory additionally audits inline definitions and full references.
+
+| Case | Upstream construction | Verified expected result |
+| --- | --- | --- |
+| `upstream_impl_array_fixed` | `test_implmentation_data_type_array` | ARRAY of 10 values described by one inline VALUE element; the element references `SwBaseType`, declared as signed 32-bit. Preserve fixed bounds and the full base path. |
+| `upstream_impl_structure` | `test_implmentation_data_type_structure` | STRUCTURE containing the ordered inline member `ImplValue`, resolving to the declared signed 32-bit base. |
+| `upstream_impl_type_reference` | `test_implmentation_data_type_type_reference` | `ImplRef` references the exact `ImplValue` path; runtime base traits resolve through the alias to signed 32-bit. |
+| `upstream_application_mapping` | `test_data_type_mapping_set` | The application VALUE maps to the exact implementation VALUE, which references the exact SW base. Lowering preserves the application identity and yields signed 32-bit traits. |
+| `upstream_application_array_fixed` | `test_application_array_data_type` | Fixed application array with 10 elements and retained maximum 10; its element reference resolves exactly. |
+| `upstream_application_record` | `test_application_record_data_type` | Record members remain ordered as `Element1`, `Element2`, `Element3`, targeting the primitive, nested record, and fixed array respectively. Preserve the empty nested record. |
+| `upstream_application_array_of_records` | `test_application_array_data_type` | Fixed array of 10 records, retaining the referenced record identity, including its empty member list. |
+| `upstream_application_array_of_arrays` | `test_application_array_data_type` | Fixed outer length 10 referencing a fixed inner array of length 10; retain both array definitions and their full reference paths. |
+
+The upstream application array and record examples create application VALUE
+types without implementation mappings. Their adaptations add explicit signed
+32-bit implementation VALUE and SW base definitions plus DATA-TYPE-MAP entries,
+following the upstream mapping example. Empty records receive explicit empty
+`ELEMENTS` containers for the current parser and reference adapter. No members
+are added. These changes are recorded in the provenance manifest. The mapping
+case preserves the upstream mapping construction. Compu methods, units, and
+constraints are retained where the source constructs them, but their
+physical-value semantics are outside the comparison.
+
+### Batch 2: Supported-Type Happy Paths (Implemented)
+
+All five selected cases strictly load in Python, parse successfully in Rust, and
+match their explicit expected outputs. All 14 new inventory definitions match.
+Each fixture uses the same pinned dependency, upstream commit, and R25-11 schema
+as Batch 1. The following cases cover the confirmed supported-type scope:
+
+| Case | Upstream construction | Verified expected result |
+| --- | --- | --- |
+| `upstream_application_array_variable` | `test_application_array_size`, selecting `VariableLinear(20)` | Variable application array with lowered size zero, retained maximum 20, and exact element reference to `ApplicationPrimitiveDataType`. The adaptation adds an explicit signed 32-bit implementation mapping. |
+| `upstream_impl_mixed_members` | Adapt `test_implmentation_data_type_element` | The four retained members remain ordered as `ImplValue`, `ImplStruct`, `ImplArray`, `ImplTypeRef`. The inventory recursively checks supported nested members, fixed array length 10, and the exact alias target `OtherImplType`. The selected output marks inline STRUCTURE and ARRAY fields as in-place. |
+| `upstream_impl_array_of_structures` | Compose the upstream ARRAY and STRUCTURE patterns | `ImplArray` has fixed count 10 and inline element `ImplStruct`, which contains VALUE member `ImplValue` referencing the exact signed 32-bit SW base. |
+| `upstream_impl_array_alias` | Apply the upstream TYPE_REFERENCE pattern to a fixed array | `ImplArrayRef` retains the exact target `/package/ImplArray`; the target's count 10 and inline VALUE definition match independently. |
+| `upstream_impl_structure_alias` | Apply the upstream TYPE_REFERENCE pattern to a structure | `ImplStructRef` retains the exact target `/package/ImplStruct`; the target's ordered VALUE member and full base reference match independently. |
+
+The array and structure alias cases share
+`upstream_impl_composite_aliases.arxml`; the other cases each have their own
+fixture. Mixed-member selection, composed layouts, changed alias targets, and the
+variable application's added mapping are explicit local adaptations recorded in
+[`upstream_batch2_provenance.json`](fixtures/upstream_batch2_provenance.json).
+
+UNION, DATA_REFERENCE, FUNCTION_REFERENCE, unsupported encodings, and expected
+rejection cases are excluded from this migration. Square, rectangular, and fully
+flexible array modes are also excluded because their dimensional semantics are
+not established by the current type contract. Existing rejection tests elsewhere
+remain unchanged.
+
+Byte order, alignment, native declarations, compu-method interpretation,
+client/server deployment, and Ethernet routing remain outside this batch.
+Successful comparison of a variable-array definition does not establish dynamic
+implementation-array payload decoding or maximum-length enforcement. The separate
+payload validation plan retains the `someipy` work.
+
+### Fixture Generation and Framework Integration
+
+[`generate_upstream_fixtures.py`](generate_upstream_fixtures.py) contains the
+reviewable construction patterns. It performs no downloads and does not use Rust
+output. It selects the constructed state before upstream name/settings mutations
+and omits API round-trip assertions. Arrays of records and arrays of arrays share
+`upstream_application_arrays.arxml` with the fixed application-array case; the
+remaining five Batch 1 cases each use a separate fixture. The same generator
+constructs the four Batch 2 fixtures and selects the linear variable-array state
+without generating other size modes.
+
+[`upstream_batch1_provenance.json`](fixtures/upstream_batch1_provenance.json)
+and [`upstream_batch2_provenance.json`](fixtures/upstream_batch2_provenance.json)
+record the source functions, commit, selected states, local adaptations, schema
+version, and generated SHA-256 hashes. The generator and fixtures use the upstream
+MIT license, retained in [`UPSTREAM-LICENSE-MIT`](fixtures/UPSTREAM-LICENSE-MIT).
+From the repository root, regenerate with the pinned environment:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /tmp/veloflux-arxml-reference/bin/python distros/sdv/arxml_converter/tests/reference/generate_upstream_fixtures.py
+```
+
+Check byte-for-byte reproducibility, including provenance, without writing:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 /tmp/veloflux-arxml-reference/bin/python distros/sdv/arxml_converter/tests/reference/generate_upstream_fixtures.py --check
+```
+
+For each batch, generation strictly reloads every document and checks that all
+model references resolve before writing its fixtures. Ordinary comparison runs only read committed
+files. Explicit fixture regeneration and inventory baseline updates remain
+separate operations.
+
+The new inventory documents use `parser: cp_types`, exercising production type
+parsing from standalone `/package` definitions without claiming complete CP codec
+loading. The selected `cp_type` operation uses the same source mapping extraction
+as the inventory. The Python selected-case adapter distinguishes CP implementation
+ARRAY, STRUCTURE, and TYPE_REFERENCE layouts from AP layouts. CP structure and
+array outputs name their inline members; the inventory recursively checks those
+members' actual definitions and references. Production parser behavior is
+unchanged.
+
+### Validation and Results
+
+The Rust regression, live Python differential comparison, complete inventory, and
+fixture reproducibility check pass for both batches. Batch 1 documents have
+2, 2, 3, 3, 7, and 6 definitions respectively; Batch 2 documents have 4, 3, 2, and 5.
+All 37 migrated definitions are `matched`. The full inventory contains 2,850
+definitions: 2,835 matched and the existing 15 unrepresented AP definitions. The
+two existing reference-load failures remain recorded separately. All fourteen
+inventory documents predating Batch 2 retain their exact checksums.
+
+Run the Rust and live reference commands above to check all 30 selected cases
+and the complete inventory. Review `target/arxml-reference/type_inventory.json`
+before deliberately updating a baseline, then rerun without
+`ARXML_UPDATE_INVENTORY`. All new Batch 2 rows match; adapter gaps or unexpected
+differences must be investigated rather than accepted into the baseline as
+successful coverage. No payload or timing success is claimed by this migration.
 
 ## Adding Cases
 
