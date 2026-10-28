@@ -133,3 +133,10 @@ REST API docs:
 - Narrow tests while iterating, e.g. `cargo test -p flow convert::`.
 - Use `test_simple/` for isolated end-to-end experiments without touching main data.
 - Extensibility for connectors/codecs lives in `docs/runtime/extensibility/registry_extensibility.md`; windowing plan in `docs/syntax/windows/watermarks.md`.
+
+## Linux release compatibility
+
+Linux binary and FFI releases target glibc 2.28 or newer. Video builds additionally
+require compatible GStreamer runtime libraries. Builds use a fixed compatibility
+userland and pass ELF ABI checks and a native runtime smoke test before packaging.
+See [Linux release compatibility](docs/development/linux-release-compatibility.md).

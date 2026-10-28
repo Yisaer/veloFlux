@@ -1,0 +1,77 @@
+name: Build compatible Linux release
+description: Build and smoke-test native GNU/Linux artifacts against glibc 2.28
+inputs:
+  variant:
+    description: release, debug, thin, video, or ffi
+    required: true
+  asset-suffix:
+    description: Artifact directory suffix
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: docker/setup-buildx-action@v3
+    - name: Prepare cached glibc 2.28 builder
+      uses: docker/build-push-action@v6
+      with:
+        context: .github/linux-release
+        target: builder
+        load: true
+        tags: veloflux-linux-builder:local
+        cache-from: type=gha,scope=linux-glibc228-${{ runner.arch }}
+        cache-to: type=gha,mode=max,scope=linux-glibc228-${{ runner.arch }}
+    - name: Prepare clean runtime image
+      uses: docker/build-push-action@v6
+      with:
+        context: .github/linux-release
+        target: ${{ inputs.variant == 'video' && 'video-runtime' || 'runtime' }}
+        load: true
+        tags: veloflux-linux-runtime:local
+        cache-from: type=gha,scope=linux-glibc228-${{ runner.arch }}
+    - name: Cache Cargo downloads
+      uses: actions/cache@v5
+      with:
+        path: |
+          target/linux-release-cargo/registry/index
+          target/linux-release-cargo/registry/cache
+          target/linux-release-cargo/git/db
+        key: linux-release-cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          linux-release-cargo-${{ runner.arch }}-
+    - name: Cache native compiler outputs
+      uses: actions/cache@v5
+      with:
+        path: target/linux-release
+        key: linux-glibc228-${{ runner.arch }}-${{ hashFiles('.github/linux-release/**', 'Cargo.lock') }}-${{ inputs.variant }}-${{ github.sha }}
+        restore-keys: |
+          linux-glibc228-${{ runner.arch }}-${{ hashFiles('.github/linux-release/**', 'Cargo.lock') }}-${{ inputs.variant }}-
+    - name: Build and audit artifact
+      shell: bash
+      env:
+        VARIANT: ${{ inputs.variant }}
+        ASSET_SUFFIX: ${{ inputs.asset-suffix }}
+      run: |
+        mkdir -p target/linux-release-cargo
+        docker run --rm \
+          -v "$PWD:/workspace" -w /workspace \
+          -e CARGO_HOME=/workspace/target/linux-release-cargo \
+          -e CARGO_TARGET_DIR=/workspace/target/linux-release \
+          -e CARGO_BUILD_JOBS=2 -e CARGO_INCREMENTAL=0 \
+          veloflux-linux-builder:local \
+          bash scripts/ci/build_linux_release.sh "$VARIANT" "target/release-artifacts/$ASSET_SUFFIX"
+        sudo chown -R "$(id -u):$(id -g)" target/linux-release target/linux-release-cargo target/release-artifacts
+    - name: Smoke-test in clean glibc 2.28 userland
+      shell: bash
+      env:
+        VARIANT: ${{ inputs.variant }}
+        ASSET_SUFFIX: ${{ inputs.asset-suffix }}
+      run: |
+        artifact="/workspace/target/release-artifacts/$ASSET_SUFFIX"
+        if [ "$VARIANT" = ffi ]; then
+          smoke_args=("$artifact/ffi-smoke-host" --ffi)
+        else
+          smoke_args=("$artifact/veloflux")
+        fi
+        docker run --rm -v "$PWD:/workspace:ro" -w /tmp \
+          veloflux-linux-runtime:local \
+          python3 /workspace/scripts/ci/smoke_linux_release.py "${smoke_args[@]}"

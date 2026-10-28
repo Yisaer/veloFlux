@@ -1,0 +1,62 @@
+name: Linux Release Compatibility
+on:
+  pull_request:
+    paths:
+      - '.github/linux-release/**'
+      - '.github/actions/build-linux-release/**'
+      - '.github/workflows/linux-release-compat.yml'
+      - '.github/workflows/release.yml'
+      - 'scripts/ci/*linux*'
+      - 'Cargo.lock'
+  push:
+    branches: [main]
+    paths:
+      - '.github/linux-release/**'
+      - '.github/actions/build-linux-release/**'
+      - '.github/workflows/linux-release-compat.yml'
+      - '.github/workflows/release.yml'
+      - 'scripts/ci/*linux*'
+      - 'Cargo.lock'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: linux-release-compat-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  baseline:
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            suffix: linux-x86_64
+            variant: release
+          - runner: ubuntu-24.04-arm
+            suffix: linux-arm64
+            variant: release
+          - runner: ubuntu-24.04
+            suffix: linux-x86_64-video
+            variant: video
+          - runner: ubuntu-24.04-arm
+            suffix: linux-arm64-video
+            variant: video
+          - runner: ubuntu-24.04
+            suffix: linux-x86_64-thin
+            variant: thin
+          - runner: ubuntu-24.04
+            suffix: linux-x86_64-debug
+            variant: debug
+          - runner: ubuntu-24.04
+            suffix: ffi-linux-x86_64
+            variant: ffi
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/build-linux-release
+        with:
+          variant: ${{ matrix.variant }}
+          asset-suffix: ${{ matrix.suffix }}
