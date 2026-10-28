@@ -36,14 +36,14 @@ veloFlux executes sinks over `Collection`s. For the Kuksa sink:
 
 ## Configuration
 
-Kuksa sink properties:
+See [common sink properties](README.md#common-sink-properties) for sink-level fields shared by connectors.
 
-- `addr` (string, required): Kuksa DataBroker address (for example `localhost:55575`).
-- `vss_path` (string, required): file path to the VSS mapping JSON.
-
-Manager defaults:
-
-- When a sink is of type `kuksa`, the encoder is implicitly set to `none` (users do not need to specify an encoder in the pipeline definition).
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `type` | string | Yes | - | Must be `kuksa`. |
+| `props.addr` | string | Yes | - | Kuksa DataBroker address, for example `localhost:55575`. |
+| `props.vss_path` | string | Yes | - | Path to the JSON mapping file. Relative paths are resolved against Manager `data_dir`. |
+| `encoder.type` | string | No | `none` | Manager forces `none`; the sink consumes collections directly. |
 
 ## VSS Mapping File
 

@@ -5,13 +5,16 @@ peer is expected to use an NNG `sub0` socket and subscribe to the configured top
 
 ## Configuration
 
-Runtime sink properties:
+See [common sink properties](README.md#common-sink-properties) for sink-level fields shared by connectors.
 
-| Field | Required | Default | Description |
-|---|---:|---|---|
-| `url` | yes | none | NNG endpoint to dial. Supported schemes: `tcp://`, `ipc://`, `inproc://`. |
-| `topic` | yes | none | Topic prefix prepended to every published message. Empty topics are rejected. |
-| `topic_delimiter` | no | `":"` | Application-level separator inserted between topic bytes and payload bytes. |
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `type` | string | Yes | - | Must be `nng_pubsub`. |
+| `props.url` | string | Yes | - | NNG endpoint to dial: `tcp://`, `ipc://`, or `inproc://`. |
+| `props.topic` | string | Yes | - | Non-empty topic prefix prepended to every published message. |
+| `props.topic_delimiter` | string | No | `":"` | Separator between topic bytes and payload bytes. |
+| `props.topicDelimiter` | string | No | - | Alias for `topic_delimiter`; the snake_case field takes precedence when both are set. |
+| `encoder.type` | string | No | `json` | Encoder producing the published bytes; collection delivery is unsupported. |
 
 The sink does not inspect or reshape tuple data. It receives the final bytes from the configured
 encoder and publishes this frame:

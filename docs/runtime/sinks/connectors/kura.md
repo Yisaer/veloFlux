@@ -41,15 +41,14 @@ veloFlux executes sinks over `Collection`s. For the Kura sink:
 
 ## Configuration
 
-Kura sink properties:
+See [common sink properties](README.md#common-sink-properties) for sink-level fields shared by connectors.
 
-- `addr` (string, required): Kura gRPC endpoint, e.g. `http://127.0.0.1:50053` or `127.0.0.1:50053`.
-- `mapping_path` (string, required): file path to the JSON mapping file.
-
-Manager defaults:
-
-- When a sink is of type `kura`, the encoder is implicitly set to `none` (users do not need to
-  specify an encoder in the pipeline definition).
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `type` | string | Yes | - | Must be `kura`. |
+| `props.addr` | string | Yes | - | Kura gRPC endpoint, for example `http://127.0.0.1:50053` or `127.0.0.1:50053`. |
+| `props.mapping_path` | string | Yes | - | Path to the JSON mapping file. Relative paths are resolved against Manager `data_dir`. |
+| `encoder.type` | string | No | `none` | Manager forces `none`; the sink consumes collections directly. |
 
 ## Mapping File
 

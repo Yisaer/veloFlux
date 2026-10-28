@@ -19,6 +19,22 @@ Implementation:
 The GStreamer-backed runtime is compiled only when the `video_gstreamer` feature is enabled. When
 that feature is not enabled, the video sink connector reports that the backend is unavailable.
 
+## Configuration
+
+See [common sink properties](README.md#common-sink-properties) for sink-level fields shared by connectors.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `type` | string | Yes | - | Must be `video`. |
+| `props.path` | string | Yes | - | Non-empty local output directory. |
+| `props.filename_prefix` | string | No | Pipeline ID | Non-empty output filename prefix; must not contain path separators. |
+| `props.codec` | string | No | `h264` | Video codec: `h264` or `h265`. |
+| `props.container` | string | No | `mp4` | Output container; currently only `mp4`. |
+| `props.rolling` | object | No | `{"type":"duration","seconds":60}` | File rolling policy. |
+| `props.rolling.type` | string | No | `duration` | Rolling policy kind; currently only `duration`. |
+| `props.rolling.seconds` | integer | No | `60` | Rolling duration in seconds; must be greater than zero. |
+| `encoder.type` | string | No | `none` | Manager selects `none` when omitted. Explicit `none` with empty props is supported; custom encoder settings are rejected. |
+
 ## Input Contract
 
 The video sink consumes materialized tuple data from its upstream flow branch. It does not read

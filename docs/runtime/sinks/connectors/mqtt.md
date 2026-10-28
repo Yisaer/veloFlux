@@ -24,24 +24,23 @@ selected by `connector_key`.
 
 ## Configuration Model
 
-MQTT sink definitions currently accept:
+See [common sink properties](README.md#common-sink-properties) for sink-level fields shared by connectors.
 
-- `broker_url`
-- `topic`
-- `qos`
-- optional `retain`
-- optional `client_id`
-- optional `connector_key`
-- optional `max_packet_size`
-- optional `protocol_version` (`v3` or `v5`)
-- optional ordered `user_properties`
-- encoder config
-- sink output config (`full` / `delta`, `omit_if_empty`, encoder selection, batching, common sink
-  props)
-
-Manager validates `topic` as required. The topic may use property templates
-such as `vehicle/{{ prop("vin") }}/telemetry`. `broker_url` is required only when `connector_key` is
-absent. `retain` defaults to `false`, and `qos` falls back to the manager default when omitted.
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `type` | string | Yes | - | Must be `mqtt`. |
+| `props.broker_url` | string | If `connector_key` is absent | - | Standalone MQTT broker URL. |
+| `props.topic` | string | Yes | - | Non-empty publish topic; supports property templates. |
+| `props.qos` | integer | No | `0` | Publish QoS: `0`, `1`, or `2`; remains sink-local with a shared client. |
+| `props.retain` | boolean | No | `false` | Retain flag on each publish. |
+| `props.client_id` | string | No | `<pipeline_id>-<sink_id>` | Standalone client ID; shared clients own their connection settings. |
+| `props.connector_key` | string | No | - | Shared MQTT client resource key. When set, the resource owns connection settings. |
+| `props.max_packet_size` | integer | No | `67108864` (64 MiB) | Standalone connection packet limit in bytes. Shared clients use their resource setting; see protocol-specific semantics below. |
+| `props.protocol_version` | string | No | `v3` (standalone) | `v3` (MQTT 3.1.1) or `v5`. Must be omitted when `connector_key` is set. |
+| `props.user_properties` | array of objects | No | `[]` | Ordered MQTT 5 User Properties; requires effective protocol `v5`. Duplicate keys are allowed. |
+| `props.user_properties[].key` | string | Yes, for each entry | - | Literal MQTT User Property key. |
+| `props.user_properties[].value` | string | Yes, for each entry | - | MQTT User Property value; supports property templates. |
+| `encoder.type` | string | No | `json` | Encoder producing the published bytes; collection delivery is unsupported. |
 
 `protocol_version` defaults to `v3`, meaning MQTT 3.1.1. User Properties require effective
 protocol `v5`. Each entry has a literal string `key` and a string `value`. The value may use a

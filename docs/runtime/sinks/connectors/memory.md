@@ -29,16 +29,21 @@ Declare the topic before creating a pipeline that uses a memory sink:
 }
 ```
 
-Notes:
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `topic` | string | Yes | - | Topic resource name. |
+| `revision` | integer | Yes | - | Topic resource revision. |
+| `kind` | string | Yes | - | `bytes` or `collection`; must match the sink encoder mode. |
+| `capacity` | integer | No | `1024` | Bounded broadcast buffer capacity; must be greater than zero. |
 
-- `capacity` defaults to `1024` when omitted.
-- Declaring an existing topic with a different `kind`/`capacity` is rejected.
-- The persisted topic resource is documented in
-  [`memory_topics.md`](../../instances/memory_topics.md).
+Declaring an existing topic with a different `kind` or `capacity` is rejected. The persisted topic
+resource is documented in [memory topics](../../instances/memory_topics.md).
 
 ## Sink Configuration (Manager)
 
 Add a sink of type `memory` to a pipeline:
+
+See [common sink properties](README.md#common-sink-properties) for sink-level fields shared by connectors.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|

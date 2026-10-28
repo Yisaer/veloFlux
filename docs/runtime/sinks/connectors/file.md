@@ -38,11 +38,14 @@ so checkpoint replay may produce duplicates under the existing at-least-once con
 }
 ```
 
+See [common sink properties](README.md#common-sink-properties) for sink-level fields shared by connectors.
+
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `type` | string | Yes | - | Must be `file`. |
 | `props.path` | string | Yes | - | Local output directory. |
 | `props.filename_pattern` | string | No | `"{write_start_ms}_{seq}"` | Complete final filename pattern. It may use property templates and the runtime placeholders described below. Runtime placeholders are optional. |
+| `props.retention` | object | No | `{}` | Optional retention policy; omitted limits disable pruning. |
 | `props.retention.max_file_count` | integer | No | `0` | Maximum generated files to keep for this filename pattern scope. `0` disables count pruning. |
 | `props.retention.max_file_age_days` | integer | No | `0` | Maximum generated file age in days. `0` disables age pruning. |
 | `encoder.type` | string | No | `json` | Encoder kind. `none` is rejected for file sinks. |

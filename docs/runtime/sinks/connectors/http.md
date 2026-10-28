@@ -26,31 +26,39 @@ affects what is sent. The HTTP sink requires an encoder (e.g. `json`, `csv`, `pr
 
 ## Configuration Model
 
-HTTP sink definitions accept:
+See [common sink properties](README.md#common-sink-properties) for sink-level fields shared by connectors.
 
-- `url` (required) — target URL
-- Optional `method` (default: `"POST"`) — `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`
-- Optional `timeout_secs` (default: `30`) — per-request timeout
-- Optional `headers` (default: `{}`) — extra HTTP headers
-- Optional `content_type` — explicit `Content-Type`. When omitted, inferred from encoder kind and
-  JSON format (`application/json` for JSON arrays, `application/x-ndjson` for NDJSON,
-  `text/csv; charset=utf-8` for CSV,
-  `application/octet-stream` for protobuf)
-- Optional `max_body_size` (default: 64 MiB) — single-delivery body limit
-- Optional `body` (default: `{ "type": "raw" }`) — raw or multipart request body mode
-- Optional common sink-level `retry` config:
-  - `retry_up_to` (default: `uncertain`) — `transient`, `uncertain`, or `all`; selects eligible errors
-  - `max_attempts` (default: none) — maximum delivery attempts including the first
-  - `initial_backoff_ms` (default: `1000`) — initial backoff, doubles each retry
-  - `max_backoff_ms` (default: `30000`) — backoff upper bound
-  - `jitter` (accepted, not yet applied; current backoff is deterministic)
-- encoder config (required)
-- sink output config (`full` / `delta`, `omit_if_empty`, encoder selection, batching, common sink
-  props)
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `type` | string | Yes | - | Must be `http`. |
+| `props.url` | string | Yes | - | Target HTTP URL. |
+| `props.method` | string | No | `POST` | HTTP method: `GET`, `POST`, `PUT`, `PATCH`, or `DELETE`. |
+| `props.timeout_secs` | integer | No | `30` | Per-request timeout in seconds; non-negative. |
+| `props.headers` | object (string values) | No | `{}` | Extra HTTP headers. Values support property templates; sensitive headers must use `auth` or `secret_headers`. |
+| `props.auth` | object | No | - | Structured authentication; see the authentication fields below. |
+| `props.secret_headers` | object (string values) | No | `{}` | Header names mapped to `SecretRef` strings; no property templates. |
+| `props.content_type` | string | No | Inferred from encoder | Explicit request `Content-Type` in raw mode; rejected in multipart mode. |
+| `props.max_body_size` | integer | No | `67108864` (64 MiB) | Maximum encoded delivery payload bytes; excludes multipart envelope overhead. |
+| `props.body` | object | No | `{"type":"raw"}` | Request body configuration; see the body fields below. |
+| `props.retry_max_attempts` | integer | No | - | Legacy input for `retry.max_attempts`; maximum attempts including the first, greater than zero. |
+| `props.retry_backoff_ms` | integer | No | `1000` | Legacy input for `retry.initial_backoff_ms`. |
+| `props.retry_max_backoff_ms` | integer | No | `30000` | Legacy input for `retry.max_backoff_ms`. |
+| `encoder.type` | string | No | `json` | Encoder kind; `none` is rejected. |
 
-Manager validates `url` as required and rejects `encoder.type=none`. Legacy HTTP props
-`retry_max_attempts`, `retry_backoff_ms`, and `retry_max_backoff_ms` are still accepted as
-compatibility input and are converted to the common sink-level retry config.
+Legacy retry properties are converted to common sink-level retry settings. Explicit `retry` fields
+override the corresponding legacy values.
+
+### Authentication fields
+
+`SecretRef` is a string such as `store:NAME`, or an inline literal subject to the configured secret
+policy. Secret-bearing fields do not support property templates.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `props.auth.type` | string | Yes, if `auth` is set | - | `bearer` or `basic`. |
+| `props.auth.token` | string (`SecretRef`) | For `bearer` | - | Bearer token secret reference. |
+| `props.auth.username` | string | For `basic` | - | Basic authentication username. |
+| `props.auth.password` | string (`SecretRef`) | For `basic` | - | Basic authentication password secret reference. |
 
 Ordinary header values may use process property templates:
 
@@ -93,12 +101,12 @@ parts:
 }
 ```
 
-| Field | Required | Default | Meaning |
-|---|---:|---|---|
-| `type` | yes | — | Must be `multipart` |
-| `file_field_name` | yes | — | Form field name for the file part |
-| `file_name` | no | `payload.bin` | Filename in the part's `Content-Disposition` |
-| `fields` | no | `{}` | Static text field name/value pairs |
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `props.body.type` | string | Yes, if `body` is set | `raw` when `body` is omitted | `raw` or `multipart`. Remaining fields apply only to `multipart`. |
+| `props.body.file_field_name` | string | For `multipart` | - | Form field name for the file part. |
+| `props.body.file_name` | string | No | `payload.bin` | Filename in the file part's `Content-Disposition`. |
+| `props.body.fields` | object (string values) | No | `{}` | UTF-8 text field name/value pairs; values support property templates. |
 
 Field names and the filename are trimmed. Empty names and names containing CR, LF, or NUL are
 rejected. A text field cannot use the file field name. Text values are preserved exactly after
