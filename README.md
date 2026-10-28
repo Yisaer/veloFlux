@@ -14,9 +14,9 @@ Build and test:
 - `make test`
 - `make fmt` / `make clippy`
 
-Run the server (defaults to metrics + profiling features):
+Run the server with built-in defaults (profiling support is compiled in, but profiling endpoints are disabled):
 ```bash
-cargo run --bin veloFlux -- --data-dir ./tmp/data
+cargo run --bin veloflux -- --data-dir ./tmp/data
 ```
 
 Run a release binary directly:
@@ -31,17 +31,36 @@ Flags:
 For production deployments, pass an explicit `--data-dir` so metadata is not tied
 to the process working directory.
 
-Config (`config.yaml`):
+The repository provides one configuration template, `etc/config.example.yaml`.
+Load it explicitly to use its settings; profiling endpoints remain disabled:
+
+```bash
+./veloflux --config etc/config.example.yaml --data-dir ./data
+```
+
+You can also copy the template to a local `config.yaml`, which is loaded automatically
+from the current working directory when `--config` is omitted. If that file does not
+exist, the server uses built-in defaults and supported environment overrides.
+
+Example configuration:
 ```yaml
 profiling:
-  enabled: true
-  addr: "0.0.0.0:6060"
+  enabled: false
+  addr: "127.0.0.1:6060"
 metrics:
   poll_interval_secs: 5
 server:
-  manager_addr: "0.0.0.0:8080"
+  manager_addr: "127.0.0.1:8080"
 ```
-Precedence: CLI flags > `config.yaml` > built-in defaults.
+Precedence: CLI flags > supported environment variables > configuration file > built-in defaults.
+
+For diagnostics, explicitly set `profiling.enabled: true` or
+`VELOFLUX_PROFILING__ENABLED=true` before starting the server.
+
+Manager and profiling listeners bind to loopback by default. Manager is a trusted
+control plane without built-in authentication; expose it only through an authenticated
+gateway. Cross-container or remote gateways require an explicit bind address and
+network isolation. See [deployment security](docs/runtime/deployment_security.md).
 
 ## Managing streams and pipelines
 The manager exposes HTTP endpoints once the server is running.

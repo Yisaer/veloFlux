@@ -326,6 +326,10 @@ single HTTP request. The common sink-level `retry` object controls eligible erro
 the attempt count independently. Retry uses deterministic exponential backoff; `jitter` is
 accepted but is not applied yet.
 
+Redirects are not followed. A 3xx response is an `Uncertain` delivery failure and
+eligible retries target the original URL. Configure the final endpoint URL
+directly; custom secret headers and payloads are never forwarded via redirects.
+
 - `url: string` (required) — target URL (e.g. `https://example.com/api/metrics`)
 - Optional `method: string` (default: `"POST"`) — HTTP method: `GET`, `POST`, `PUT`, `PATCH`, `DELETE`
 - Optional `timeout_secs: number` (default: `30`) — per-request timeout in seconds

@@ -4,6 +4,7 @@ properties:
 
 # Optional runtime overrides from the local MQTT broker at 127.0.0.1:1883.
 # The final topic level is the declared property key.
+# Restrict publishing to trusted control-plane identities with broker ACLs.
 # property_registry:
 #   mqtt:
 #     topic: "$local/notification/+"
@@ -29,8 +30,8 @@ logging:
     address: /var/run/syslog
 
 profiling:
-  enabled: true
-  addr: "0.0.0.0:6060"
+  enabled: false
+  addr: "127.0.0.1:6060"
   cpu_profile_freq_hz: 100
 
 metrics:
@@ -38,8 +39,10 @@ metrics:
   stage_handling_time_enabled: false
   poll_interval_secs: 5
 
+# For a gateway in another container or host, explicitly set the reachable bind
+# address and restrict inbound access to that gateway.
 server:
-  manager_addr: "0.0.0.0:8080"
+  manager_addr: "127.0.0.1:8080"
   flow_instances:
     - id: "default"
       backend: "in_process"

@@ -11,6 +11,12 @@ Like all byte-delivery connectors, encoder/output behavior upstream of the conne
 affects what is sent. The HTTP sink requires an encoder (e.g. `json`, `csv`, `protobuf`) and rejects
 `encoder.type=none`.
 
+HTTP redirects are disabled. A 3xx response is an `Uncertain` delivery failure;
+eligible retries use the original configured URL. Configure the final endpoint
+directly so redirects cannot forward custom secret headers or payloads to another
+destination. See [deployment security](../../deployment_security.md) for the
+trusted control-plane and runtime property boundaries.
+
 ## Goals
 
 - Define the runtime contract of the HTTP sink connector.

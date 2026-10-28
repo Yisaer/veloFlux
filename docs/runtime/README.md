@@ -2,6 +2,8 @@
 
 This section contains runtime architecture and execution behavior.
 
+- [Deployment security](deployment_security.md): Trusted control-plane boundaries,
+  listener defaults, gateway isolation, and runtime property publishers.
 - `instances/`: Flow instance hosting and cgroup binding.
 - `startup/`: Startup-time bootstrap and cache/lifecycle behavior.
 - `pipelines/`: Pipeline lifecycle, desired-state handling, and runtime observability.

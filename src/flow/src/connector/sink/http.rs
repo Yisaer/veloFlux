@@ -270,6 +270,7 @@ impl HttpSinkConnector {
     fn build_client(&self) -> Result<Client, SinkConnectorError> {
         reqwest::Client::builder()
             .timeout(self.config.timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|err| {
                 SinkConnectorError::Uncertain(format!(
@@ -661,6 +662,66 @@ mod tests {
         assert!(!is_transient_status(StatusCode::OK));
         assert!(!is_transient_status(StatusCode::CREATED));
         assert!(!is_transient_status(StatusCode::NO_CONTENT));
+    }
+
+    #[tokio::test]
+    async fn redirects_do_not_forward_headers_or_payload_to_another_target() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        for status in [302, 307, 308] {
+            let target = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind redirect target");
+            let location = format!("http://{}/target", target.local_addr().unwrap());
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind redirect source");
+            let address = listener.local_addr().unwrap();
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let app = Router::new().route(
+                "/redirect",
+                post(move |headers: HeaderMap, body: bytes::Bytes| {
+                    let sender = sender.clone();
+                    let location = location.clone();
+                    async move {
+                        sender.send((headers, body)).unwrap();
+                        (
+                            StatusCode::from_u16(status).unwrap(),
+                            [(axum::http::header::LOCATION, location)],
+                        )
+                    }
+                }),
+            );
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let config = HttpSinkConfig::new(format!("http://{address}/redirect"))
+                .with_header("Authorization", ConnectorString::sensitive("Bearer token"))
+                .with_header("X-API-Key", ConnectorString::sensitive("custom-secret"));
+            let mut connector = HttpSinkConnector::new("redirect-test", config);
+            connector.ready().await.unwrap();
+            connector
+                .start_delivery(&crate::PropertyContext::default())
+                .await
+                .unwrap();
+            connector.write_chunk(b"private-payload").await.unwrap();
+
+            let error = connector.finish_delivery().await.unwrap_err();
+            assert!(matches!(error, SinkConnectorError::Uncertain(_)));
+            assert!(error.to_string().contains(&status.to_string()));
+            let (headers, body) = receiver.try_recv().expect("source received request");
+            assert_eq!(headers["authorization"], "Bearer token");
+            assert_eq!(headers["x-api-key"], "custom-secret");
+            assert_eq!(body.as_ref(), b"private-payload");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), target.accept())
+                    .await
+                    .is_err(),
+                "redirect target received a connection for status {status}"
+            );
+            assert!(receiver.try_recv().is_err());
+            server.abort();
+        }
     }
 
     #[tokio::test]

@@ -466,6 +466,8 @@ profiling:
 metrics:
   poll_interval_secs: 2
   stage_handling_time_enabled: true
+server:
+  manager_addr: "0.0.0.0:8080"
 "#;
         let path = unique_temp_path("addr");
         std::fs::write(&path, yaml).unwrap();
@@ -474,6 +476,7 @@ metrics:
         let opts = cfg.to_server_options();
         assert_eq!(opts.profile_addr.as_deref(), Some("127.0.0.1:6060"));
         assert_eq!(opts.metrics_poll_interval_secs, Some(2));
+        assert_eq!(opts.manager_addr.as_deref(), Some("0.0.0.0:8080"));
         assert!(opts.stage_handling_time_enabled);
 
         let _ = std::fs::remove_file(&path);
@@ -509,10 +512,7 @@ server:
     #[test]
     fn default_manager_addr_is_set() {
         let cfg = AppConfig::default();
-        assert_eq!(
-            cfg.server.manager_addr.as_deref(),
-            Some(crate::server::DEFAULT_MANAGER_ADDR)
-        );
+        assert_eq!(cfg.server.manager_addr.as_deref(), Some("127.0.0.1:8080"));
     }
 
     #[test]

@@ -48,7 +48,7 @@ use veloflux_metrics::{
 };
 
 #[cfg(feature = "profiling")]
-const DEFAULT_PROFILE_ADDR: &str = "0.0.0.0:6060";
+const DEFAULT_PROFILE_ADDR: &str = "127.0.0.1:6060";
 #[cfg(feature = "profiling")]
 const DEFAULT_CPU_PROFILE_FREQUENCY_HZ: i32 = 100;
 #[cfg(feature = "profiling")]
@@ -57,7 +57,7 @@ const DEFAULT_CPU_PROFILE_BLOCKLIST: [&str; 4] = ["libc", "libgcc", "pthread", "
 const DEFAULT_METRICS_POLL_INTERVAL_SECS: u64 = 5;
 
 pub const DEFAULT_DATA_DIR: &str = "./tmp";
-pub const DEFAULT_MANAGER_ADDR: &str = "0.0.0.0:8080";
+pub const DEFAULT_MANAGER_ADDR: &str = "127.0.0.1:8080";
 
 #[cfg(all(
     feature = "profiling",

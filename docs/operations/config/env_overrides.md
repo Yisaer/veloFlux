@@ -2,7 +2,10 @@
 
 ## Background
 
-veloFlux currently loads process startup configuration from `config.yaml`.
+veloFlux loads an explicitly selected `--config` file or an optional `config.yaml`
+from the current working directory. If neither is provided, it uses built-in
+defaults with supported environment overrides. The repository ships
+`etc/config.example.yaml` as a template rather than a root runtime configuration.
 
 In real deployments, a small subset of configuration values changes across environments more
 frequently than the rest of the config file. Typical examples are bind addresses, log verbosity,
