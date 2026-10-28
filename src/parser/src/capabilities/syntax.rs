@@ -292,23 +292,53 @@ fn build_syntax_capabilities() -> SyntaxCapabilities {
     let from_constructs = group(
         "from",
         "FROM sources",
-        vec![feature(
-            "from.source",
-            "FROM source",
-            SyntaxFeatureStatus::Supported,
-            Some("Choose which input stream(s) or registered table(s) the query reads from."),
-            Some("The source name must match a stream or table exposed by the runtime catalog."),
-            Some(SyntaxPlacement {
-                clause: "FROM".to_string(),
-                contexts: vec!["select".to_string()],
-            }),
-            &["at_least_one_source_required"],
-            &[],
-            &["FROM <stream_or_table_name>"],
-            &["SELECT * FROM s", "SELECT * FROM history_table"],
-            &["DataSource", "TableScan"],
-            vec![],
-        )],
+        vec![
+            feature(
+                "from.source",
+                "FROM source",
+                SyntaxFeatureStatus::Supported,
+                Some("Choose which input stream(s) or registered table(s) the query reads from."),
+                Some(
+                    "The source name must match a stream or table exposed by the runtime catalog.",
+                ),
+                Some(SyntaxPlacement {
+                    clause: "FROM".to_string(),
+                    contexts: vec!["select".to_string()],
+                }),
+                &["at_least_one_source_required"],
+                &[],
+                &["FROM <stream_or_table_name>"],
+                &["SELECT * FROM s", "SELECT * FROM history_table"],
+                &["DataSource", "TableScan"],
+                vec![],
+            ),
+            feature(
+                "from.multi_source",
+                "Per-event multi-source FROM",
+                SyntaxFeatureStatus::Supported,
+                Some(
+                    "Each input event supplies one source row; all other sources supply NULL placeholder rows.",
+                ),
+                Some(
+                    "This is VeloFlux streaming-dialect behavior, not a relational Cartesian product. Field identity and types remain source-qualified.",
+                ),
+                Some(SyntaxPlacement {
+                    clause: "FROM".to_string(),
+                    contexts: vec!["select".to_string()],
+                }),
+                &[
+                    "streams_only",
+                    "processing_time_only",
+                    "qualify_ambiguous_columns",
+                    "relation_aliases_unsupported",
+                ],
+                &[],
+                &["FROM <stream> [, <stream> ...]"],
+                &["SELECT a.x AS ax, b.x AS bx FROM a, b"],
+                &["DataSource", "CollectionLayoutNormalize", "Barrier"],
+                vec![],
+            ),
+        ],
     );
 
     let expr_constructs = group(

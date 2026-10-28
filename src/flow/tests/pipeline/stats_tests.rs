@@ -113,6 +113,14 @@ async fn collect_pipeline_stats_declares_applicable_row_fields() {
             .all(|entry| entry.stats.error_count == 0 && entry.stats.last_error.is_none()),
         "fresh running pipeline should not report processor errors"
     );
+    let input = find_processor_stats(&stats, "PhysicalBarrier");
+    assert_eq!(input.stats.records_in, Some(0));
+    assert_eq!(input.stats.records_out, Some(0));
+    assert_eq!(input.stats.custom.get("collections_in"), Some(&0));
+    assert_eq!(input.stats.custom.get("collections_out"), Some(&0));
+    assert!(!input.stats.custom.contains_key("messages_in"));
+    assert!(!input.stats.custom.contains_key("messages_out"));
+
     let encoder = find_processor_stats(&stats, "PhysicalSinkEncoder");
     assert_eq!(encoder.stats.records_in, Some(0));
     assert_eq!(encoder.stats.records_out, None);
@@ -598,4 +606,104 @@ async fn collect_pipeline_stats_reports_decoder_errors_without_failing_collectio
         .delete_pipeline(pipeline_id)
         .await
         .expect("delete pipeline");
+}
+
+// coverage-covers: pipeline.runtime.stats
+#[tokio::test]
+async fn query_input_stats_count_rows_in_single_and_multi_source_batches() {
+    for (sources, sql) in [
+        (1, "SELECT a FROM stats_left"),
+        (
+            2,
+            "SELECT coalesce(stats_left.a, stats_right.a) AS combined FROM stats_left, stats_right",
+        ),
+    ] {
+        let instance = FlowInstance::new(
+            flow::instance::FlowInstanceOptions::shared_current_runtime("default", None),
+        )
+        .unwrap();
+        let (input_topic, output_topic) =
+            make_memory_topics("pipeline_stats", "query_input_batches");
+        let topics = [input_topic.clone(), format!("{input_topic}.right")];
+        for (topic, name) in topics
+            .iter()
+            .zip(["stats_left", "stats_right"])
+            .take(sources)
+        {
+            instance
+                .declare_memory_topic(
+                    topic,
+                    MemoryTopicKind::Bytes,
+                    DEFAULT_MEMORY_PUBSUB_CAPACITY,
+                )
+                .unwrap();
+            create_memory_json_stream(&instance, topic, name).await;
+        }
+        instance
+            .declare_memory_topic(
+                &output_topic,
+                MemoryTopicKind::Bytes,
+                DEFAULT_MEMORY_PUBSUB_CAPACITY,
+            )
+            .unwrap();
+        let mut output = instance.open_memory_subscribe_bytes(&output_topic).unwrap();
+        let definition = PipelineDefinition::new(
+            "query_input_stats",
+            sql,
+            vec![SinkDefinition::new(
+                "out",
+                SinkType::Memory,
+                SinkProps::Memory(MemorySinkProps::new(output_topic)),
+            )],
+        );
+        instance
+            .create_pipeline(CreatePipelineRequest::new(definition))
+            .unwrap();
+        instance.start_pipeline("query_input_stats").await.unwrap();
+        for (index, payload) in [json!([{"a":1},{"a":2}]), json!([{"a":3},{"a":4},{"a":5}])]
+            .into_iter()
+            .enumerate()
+        {
+            let topic = &topics[index % sources];
+            instance
+                .wait_for_memory_subscribers(
+                    topic,
+                    MemoryTopicKind::Bytes,
+                    1,
+                    Duration::from_secs(5),
+                )
+                .await
+                .unwrap();
+            instance
+                .open_memory_publisher_bytes(topic)
+                .unwrap()
+                .publish_bytes(serde_json::to_vec(&payload).unwrap())
+                .unwrap();
+            let received = recv_next_json(&mut output, Duration::from_secs(5)).await;
+            assert_eq!(
+                received.as_array().unwrap().len(),
+                payload.as_array().unwrap().len()
+            );
+        }
+        let stats = instance
+            .collect_pipeline_stats("query_input_stats", Duration::from_secs(1))
+            .await
+            .unwrap();
+        let input = find_processor_stats(&stats, "PhysicalBarrier");
+        assert_eq!(input.stats.records_in, Some(5), "{sql}");
+        assert_eq!(input.stats.records_out, Some(5), "{sql}");
+        assert_eq!(input.stats.custom.get("collections_in"), Some(&2));
+        assert_eq!(input.stats.custom.get("collections_out"), Some(&2));
+        for metric in ["messages_in", "messages_out", "bytes_in", "bytes_out"] {
+            assert!(!input.stats.custom.contains_key(metric), "{sql}: {metric}");
+        }
+        instance
+            .stop_pipeline(
+                "query_input_stats",
+                PipelineStopMode::Quick,
+                Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+    }
 }

@@ -42,3 +42,6 @@ mod lookup_join_tests;
 
 #[path = "pipeline/window_partition_tests.rs"]
 mod window_partition_tests;
+
+#[path = "pipeline/multi_source_tests.rs"]
+mod multi_source_tests;

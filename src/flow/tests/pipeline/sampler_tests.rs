@@ -821,7 +821,7 @@ async fn sampler_packer_emits_merged_payload_once_per_interval() {
             .unwrap();
         assert_eq!(
             region["stages"].as_array().unwrap().len(),
-            if inline { 3 } else { 1 }
+            if inline { 4 } else { 1 }
         );
         let mut pipeline = instance
             .build_pipeline("SELECT x, y FROM packer_stream", vec![build_result_sink()])

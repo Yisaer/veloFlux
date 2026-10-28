@@ -1383,7 +1383,11 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
     fn new(bindings: &'a SchemaBinding, eventtime_enabled: bool) -> Self {
         Self {
             bindings,
-            used_columns: HashMap::new(),
+            used_columns: bindings
+                .entries()
+                .iter()
+                .map(|entry| (entry.source_name.clone(), HashSet::new()))
+                .collect(),
             prune_disabled: HashSet::new(),
             eventtime_enabled,
         }
@@ -1426,6 +1430,10 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                 }
             }
             LogicalPlan::DataSource(ds) => {
+                // The file-line wire format has a fixed two-column decoder schema.
+                if ds.decoder().kind() == crate::codec::decoder::FILE_LINE_DECODER_KIND {
+                    self.prune_disabled.insert(ds.source_name.clone());
+                }
                 if self.eventtime_enabled {
                     if let Some(eventtime) = ds.eventtime() {
                         self.mark_column_used(&ds.source_name, eventtime.column());
@@ -1733,7 +1741,7 @@ impl<'a> TopLevelColumnUsageCollector<'a> {
                     .map(|col| col.name.clone())
                     .collect();
                 if cols.is_empty() {
-                    full.clone()
+                    full.first().cloned().into_iter().collect()
                 } else {
                     cols
                 }

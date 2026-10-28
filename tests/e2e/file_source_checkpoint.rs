@@ -299,3 +299,259 @@ async fn file_source_checkpoint_resumes_from_last_emitted_offset() {
     sink_server.abort();
     let _ = sink_server.await;
 }
+
+// coverage-covers: source.file.stream, pipeline.runtime.checkpoint_recovery
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_source_file_checkpoint_restores_both_cursors_through_manager() {
+    use flow::{CheckpointState, CheckpointStore};
+
+    let temp_dir = tempfile::tempdir().expect("create temp dir");
+    let source_paths = ["left.log", "right.log"].map(|name| temp_dir.path().join(name));
+    for (path, contents) in source_paths.iter().zip([
+        b"left-committed\n".as_slice(),
+        b"right-committed\n".as_slice(),
+    ]) {
+        std::fs::write(path, contents).expect("write committed source data");
+    }
+    let source_paths =
+        source_paths.map(|path| std::fs::canonicalize(path).expect("canonical source path"));
+    let recorder = Arc::new(RowRecorder::default());
+    let sink_app = Router::new()
+        .route("/rows", post(record_rows))
+        .with_state(Arc::clone(&recorder));
+    let Some(sink_listener) = bind_manager_listener_or_skip().await else {
+        return;
+    };
+    let sink_addr = sink_listener.local_addr().expect("sink address");
+    let sink_server = tokio::spawn(async move {
+        axum::serve(sink_listener, sink_app)
+            .await
+            .expect("start sink recorder");
+    });
+
+    let storage_dir = temp_dir.path().join("storage");
+    std::fs::create_dir(&storage_dir).expect("create storage dir");
+    let storage = storage::StorageManager::new(&storage_dir).expect("create durable storage");
+    let checkpoints = manager::DurableCheckpointStore::new(
+        storage.checkpoint_storage().expect("checkpoint storage"),
+    );
+    let instance = manager::new_default_flow_instance();
+    let Some(manager_listener) = bind_manager_listener_or_skip().await else {
+        sink_server.abort();
+        let _ = sink_server.await;
+        return;
+    };
+    let manager_addr = manager_listener.local_addr().expect("manager address");
+    let manager_server = tokio::spawn(async move {
+        manager::start_server_with_listener(
+            manager_listener,
+            instance,
+            storage,
+            default_flow_instances(),
+        )
+        .await
+        .expect("start manager");
+    });
+    let http = http_client();
+    let base = format!("http://{manager_addr}");
+    wait_for_manager(&http, &base).await;
+    let suffix = random_suffix();
+    let stream_names = [
+        format!("checkpoint_left_{suffix}"),
+        format!("checkpoint_right_{suffix}"),
+    ];
+    for (name, path) in stream_names.iter().zip(&source_paths) {
+        let response = http.post(format!("{base}/streams")).json(&serde_json::json!({
+            "name": name, "revision": 1, "type": "file", "props": {"path": path.to_string_lossy()},
+            "decoder": {"type": "file_line", "props": {}}
+        })).send().await.expect("create file stream request");
+        assert_response_status(
+            response,
+            StatusCode::CREATED,
+            "create multi-source file stream",
+        )
+        .await;
+    }
+    let pipeline_id = format!("multi_file_checkpoint_{suffix}");
+    let sql = format!("SELECT coalesce({0}.line, {1}.line) AS content, coalesce({0}.filename, {1}.filename) AS source_file FROM {0}, {1}", stream_names[0], stream_names[1]);
+    let response = http.post(format!("{base}/pipelines")).json(&serde_json::json!({
+        "id": pipeline_id, "revision": 1, "sql": sql,
+        "sinks": [{"id": "http_out", "type": "http", "props": {"url": format!("http://{sink_addr}/rows"), "content_type": "application/json"}, "encoder": {"type": "json", "props": {}}}],
+        "options": {"checkpoint": {"enabled": true}}
+    })).send().await.expect("create multi-source checkpoint pipeline request");
+    assert_response_status(
+        response,
+        StatusCode::CREATED,
+        "create multi-source checkpoint pipeline",
+    )
+    .await;
+
+    let sorted = |mut rows: Vec<JsonValue>| {
+        rows.sort_by_key(|row| {
+            row["source_file"]
+                .as_str()
+                .expect("source filename")
+                .to_owned()
+        });
+        rows
+    };
+    let committed = vec![
+        serde_json::json!({"content": "left-committed\n", "source_file": "left.log"}),
+        serde_json::json!({"content": "right-committed\n", "source_file": "right.log"}),
+    ];
+    let response = http
+        .post(format!("{base}/pipelines/{pipeline_id}/start"))
+        .send()
+        .await
+        .expect("start pipeline request");
+    assert_response_status(
+        response,
+        StatusCode::OK,
+        "start multi-source checkpoint pipeline",
+    )
+    .await;
+    assert_eq!(
+        sorted(wait_for_row_count(recorder.as_ref(), 2).await),
+        committed
+    );
+
+    let response = http
+        .post(format!(
+            "{base}/pipelines/{pipeline_id}/stop?mode=graceful&timeout_ms=5000"
+        ))
+        .send()
+        .await
+        .expect("stop pipeline request");
+    assert_response_status(
+        response,
+        StatusCode::OK,
+        "commit multi-source final checkpoint",
+    )
+    .await;
+    assert_eq!(sorted(recorder.rows()), committed);
+
+    // Read the manager's committed durable manifest, without replacing its store.
+    let manifest = checkpoints
+        .load_latest("default", &pipeline_id)
+        .expect("read durable checkpoint")
+        .expect("manager committed a checkpoint");
+    let source_snapshots = manifest
+        .operator_snapshots
+        .iter()
+        .filter(|snapshot| snapshot.operator_kind == "datasource")
+        .collect::<Vec<_>>();
+    assert_eq!(source_snapshots.len(), 2);
+    let persisted_paths = source_snapshots
+        .iter()
+        .map(|snapshot| {
+            let CheckpointState::Map(state) = &snapshot.state else {
+                panic!("file source snapshot must be a map");
+            };
+            let Some(CheckpointState::String(path)) = state.get("source_path") else {
+                panic!("file source snapshot must identify its path");
+            };
+            path.clone()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        persisted_paths,
+        source_paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    );
+    recorder.clear();
+
+    // Both appends happen while the pipeline is stopped, before restore through the API.
+    for (path, contents) in source_paths.iter().zip([
+        b"left-appended\n".as_slice(),
+        b"right-appended\n".as_slice(),
+    ]) {
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(path)
+            .expect("open stopped source file");
+        file.write_all(contents)
+            .expect("append stopped source data");
+        file.sync_all().expect("sync appended source data");
+    }
+    let response = http
+        .post(format!("{base}/pipelines/{pipeline_id}/start"))
+        .send()
+        .await
+        .expect("restore pipeline request");
+    assert_response_status(
+        response,
+        StatusCode::OK,
+        "restore both file sources through manager",
+    )
+    .await;
+    let appended = vec![
+        serde_json::json!({"content": "left-appended\n", "source_file": "left.log"}),
+        serde_json::json!({"content": "right-appended\n", "source_file": "right.log"}),
+    ];
+    assert_eq!(
+        sorted(wait_for_row_count(recorder.as_ref(), 2).await),
+        appended
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        sorted(recorder.rows()),
+        appended,
+        "both appended rows must arrive once, without committed-row replay"
+    );
+
+    let response = http
+        .post(format!(
+            "{base}/pipelines/{pipeline_id}/stop?mode=graceful&timeout_ms=5000"
+        ))
+        .send()
+        .await
+        .expect("stop restored pipeline request");
+    assert_response_status(
+        response,
+        StatusCode::OK,
+        "stop restored multi-source pipeline",
+    )
+    .await;
+    assert_eq!(
+        sorted(recorder.rows()),
+        appended,
+        "graceful shutdown must not produce extra rows"
+    );
+    let next = checkpoints
+        .load_latest("default", &pipeline_id)
+        .expect("read next durable checkpoint")
+        .expect("next checkpoint committed");
+    assert!(next.checkpoint_id > manifest.checkpoint_id);
+    assert_eq!(
+        next.operator_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.operator_kind == "datasource")
+            .count(),
+        2
+    );
+    let response = http
+        .delete(format!("{base}/pipelines/{pipeline_id}"))
+        .send()
+        .await
+        .expect("delete pipeline request");
+    assert_response_status(
+        response,
+        StatusCode::OK,
+        "delete multi-source checkpoint pipeline",
+    )
+    .await;
+    for name in &stream_names {
+        let response = http
+            .delete(format!("{base}/streams/{name}"))
+            .send()
+            .await
+            .expect("delete stream request");
+        assert_response_status(response, StatusCode::OK, "delete multi-source file stream").await;
+    }
+    manager_server.abort();
+    let _ = manager_server.await;
+    sink_server.abort();
+    let _ = sink_server.await;
+}

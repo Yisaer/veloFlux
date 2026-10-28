@@ -161,11 +161,7 @@ impl ExecutionPlan {
                 let reason = policy_boundary(from.class)
                     .or_else(|| policy_boundary(to.class))
                     .or_else(|| (consumers[&upstream] > 1).then_some(BoundaryReason::FanOut))
-                    .or_else(|| {
-                        (node.children().len() > 1
-                            || matches!(node.as_ref(), PhysicalPlan::Barrier(_)))
-                        .then_some(BoundaryReason::FanIn)
-                    })
+                    .or_else(|| (node.children().len() > 1).then_some(BoundaryReason::FanIn))
                     .or_else(|| {
                         (!from.inline_adapter || !to.inline_adapter)
                             .then_some(BoundaryReason::StageAdapterMissing)

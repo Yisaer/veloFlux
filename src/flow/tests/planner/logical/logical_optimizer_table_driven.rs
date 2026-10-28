@@ -510,7 +510,7 @@ fn logical_optimizer_table_driven() {
             name: "logical_planner_binds_schema_version_as_literal",
             sql: "SELECT schema_version() FROM stream WHERE schema_version() >= 7",
             covers: &["planner.logical.schema_version_binding"],
-            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[a, b, flag, k1, k2]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=7 >= 7"],"operator":"Filter"}],"id":"Project_2","info":["fields=[7 as schema_version()]"],"operator":"Project"}"##,
+            expected: r##"{"children":[{"children":[{"children":[],"id":"DataSource_0","info":["source=stream","decoder=json","schema=[]"],"operator":"DataSource"}],"id":"Filter_1","info":["predicate=7 >= 7"],"operator":"Filter"}],"id":"Project_2","info":["fields=[7 as schema_version()]"],"operator":"Project"}"##,
         },
         LogicalOptimizerCase {
             name: "logical_optimizer_select_star_disables_top_level_pruning",

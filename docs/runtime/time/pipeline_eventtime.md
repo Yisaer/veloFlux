@@ -6,7 +6,17 @@ This document describes how veloFlux adds **event-time** support to the `flow` m
 
 Today the pipeline uses **processing time** by default:
 
-- `Tuple.timestamp` is populated from the system clock when decoding/parsing input tuples.
+- Decoding/parsing initially populates `Tuple.timestamp`. Every query then uses one
+  input-preparation boundary after sampling/decoding, for both single-source and
+  multi-source queries. In processing-time mode this boundary replaces tuple time
+  with the collection's consumption time, reading the system clock once per collection.
+- Rows in a collection share that processing time. The running input boundary clamps
+  assigned timestamps to its previous timestamp if the wall clock moves backward.
+  Payload timestamp fields are unchanged. Queued data is timed when this query consumes it.
+- The same input layout preparation and time policy apply to ordinary streams,
+  shared inputs, native memory inputs, and bounded table scans. An identity layout
+  reuses the existing message storage. A one-input boundary can fuse with decoding
+  and downstream engine stages; it does not require another task or channel.
 - Time-aware operators (windows, streaming aggregations) are advanced by watermarks produced by the watermark stage.
 
 To support **event time**, `Tuple.timestamp` must be derived from a column in the incoming data (not from the decode-time system clock). In event-time mode, input tuples may arrive **out of order** by timestamp. The watermark stage becomes responsible for:
@@ -56,8 +66,8 @@ The pipeline options gain:
 
 Semantics:
 
-- When `eventtime.enabled=false`, the pipeline behaves as processing time (today's behavior).
-- When `eventtime.enabled=true`, the planner requires a valid `StreamDefinition.eventtime` configuration and builds an event-time watermark plan.
+- When `eventtime.enabled=false`, the query input boundary assigns processing time as described above.
+- When `eventtime.enabled=true`, the planner requires a valid `StreamDefinition.eventtime` configuration and builds an event-time watermark plan. The query input boundary preserves parsed tuple timestamps. Multi-source comma FROM currently rejects this mode.
 
 ## Runtime extensibility: EventtimeTypeRegistry
 
@@ -189,7 +199,7 @@ On end-of-stream / shutdown:
 4. Split `PhysicalWatermark` into `PhysicalProcessTimeWatermark` and `PhysicalEventtimeWatermark`.
 5. Implement `PhysicalEventtimeWatermark` processor using `StreamData::Watermark` emission semantics described above.
 6. Add tests covering:
-   - processing-time mode regression (no behavior change),
+   - processing-time input assignment and single/multi-input consistency,
    - event-time ordering + watermark advancement,
    - late events beyond `late_tolerance_ms`,
    - unknown `eventtime.type` and missing `eventtime.column` validation.

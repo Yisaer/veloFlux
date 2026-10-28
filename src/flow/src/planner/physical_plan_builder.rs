@@ -537,6 +537,13 @@ pub fn create_physical_plan(
     registries: &PipelineRegistries,
 ) -> Result<Arc<PhysicalPlan>, String> {
     let mut builder = PhysicalPlanBuilder::new();
+    prepare_query_inputs(
+        &logical_plan,
+        bindings,
+        registries,
+        &PhysicalPlanBuildOptions::default(),
+        &mut builder,
+    )?;
     create_physical_plan_with_builder_cached_with_options(
         logical_plan,
         bindings,
@@ -554,6 +561,7 @@ pub fn create_physical_plan_with_build_options(
 ) -> Result<Arc<PhysicalPlan>, String> {
     let mut builder =
         PhysicalPlanBuilder::new().with_slot_versions(options.shared_slot_versions.clone());
+    prepare_query_inputs(&logical_plan, bindings, registries, options, &mut builder)?;
     create_physical_plan_with_builder_cached_with_options(
         logical_plan,
         bindings,
@@ -573,6 +581,13 @@ pub fn create_physical_plan_with_builder(
     registries: &PipelineRegistries,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
+    prepare_query_inputs(
+        &logical_plan,
+        bindings,
+        registries,
+        &PhysicalPlanBuildOptions::default(),
+        builder,
+    )?;
     create_physical_plan_with_builder_cached_with_options(
         logical_plan,
         bindings,
@@ -580,6 +595,145 @@ pub fn create_physical_plan_with_builder(
         &PhysicalPlanBuildOptions::default(),
         builder,
     )
+}
+
+/// Prepare source-specific layouts before any consumer compiles fixed message slots.
+fn prepare_query_inputs(
+    plan: &Arc<LogicalPlan>,
+    bindings: &SchemaBinding,
+    registries: &PipelineRegistries,
+    options: &PhysicalPlanBuildOptions,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<(), String> {
+    use crate::planner::physical::output_layout::{OutputLayout, OutputValueRef, PlanLayout};
+    use crate::planner::physical::physical_collection_layout_normalize::SourceAlignment;
+    fn collect(plan: &Arc<LogicalPlan>, sources: &mut Vec<Arc<LogicalPlan>>) {
+        if matches!(
+            plan.as_ref(),
+            LogicalPlan::DataSource(_) | LogicalPlan::TableScan(_)
+        ) && !sources
+            .iter()
+            .any(|source| source.get_plan_index() == plan.get_plan_index())
+        {
+            sources.push(Arc::clone(plan));
+        }
+        for child in plan.children() {
+            collect(child, sources);
+        }
+    }
+    let mut sources = Vec::new();
+    collect(plan, &mut sources);
+    if sources.is_empty() {
+        return Ok(());
+    }
+    if options.eventtime_enabled && sources.len() > 1 {
+        return Err("multi-source FROM currently supports processing time only".to_string());
+    }
+    if sources
+        .iter()
+        .all(|source| builder.get_cached_node(source.get_plan_index()).is_some())
+    {
+        return Ok(());
+    }
+    let mut names = HashSet::new();
+    let mut prepared = Vec::new();
+    let mut messages = Vec::new();
+    let mut output = Vec::new();
+    for source in sources {
+        let index = builder.allocate_index();
+        let (source_name, raw) = match source.as_ref() {
+            LogicalPlan::DataSource(ds) => (
+                ds.source_name.as_str(),
+                create_physical_data_source_with_builder(
+                    ds, &source, index, bindings, registries, options, builder,
+                )?,
+            ),
+            LogicalPlan::TableScan(table) => (
+                table.table_name.as_str(),
+                create_physical_table_scan(table, index),
+            ),
+            _ => return Err("invalid query input plan".to_string()),
+        };
+        if !names.insert(source_name.to_string()) {
+            return Err(format!(
+                "FROM repeats source `{source_name}`; relation aliases are not supported"
+            ));
+        }
+        let layout = raw.runtime_layout()?;
+        if layout.messages.len() != 1 || layout.affiliate_len != 0 {
+            return Err("query input requires one message per decoded source".to_string());
+        }
+        let source_index = messages.len();
+        for column in layout.output.columns.iter() {
+            let mut column = column.clone();
+            let OutputValueRef::Message { message_index, .. } = &mut column.value_ref else {
+                return Err("unexpected source output slot".to_string());
+            };
+            *message_index += source_index;
+            output.push(column);
+        }
+        messages.extend(layout.messages);
+        prepared.push((source, raw, source_index));
+    }
+    let null_messages: Arc<[_]> = messages
+        .iter()
+        .map(|message| {
+            Arc::new(crate::model::Message::new_shared_keys(
+                Arc::clone(&message.source_name),
+                message
+                    .columns
+                    .iter()
+                    .map(|column| Arc::clone(&column.name))
+                    .collect::<Vec<_>>()
+                    .into(),
+                vec![datatypes::Value::Null; message.columns.len()],
+            ))
+        })
+        .collect::<Vec<_>>()
+        .into();
+    let layout = PlanLayout {
+        output: OutputLayout::new(output),
+        messages,
+        affiliate_len: 0,
+    };
+    let mut logical_indices = Vec::new();
+    let mut inputs = Vec::new();
+    for (source, raw, source_index) in prepared {
+        logical_indices.push(source.get_plan_index());
+        // An identity mapping uses the existing tuple storage without an adapter.
+        if raw.runtime_layout()? == layout {
+            inputs.push(raw);
+            continue;
+        }
+        let (schema, name) = match source.as_ref() {
+            LogicalPlan::DataSource(ds) => (ds.schema(), ds.source_name.as_str()),
+            LogicalPlan::TableScan(table) => (table.schema(), table.table_name.as_str()),
+            _ => return Err("invalid query input plan".to_string()),
+        };
+        let index = builder.allocate_index();
+        let mut adapter = crate::planner::physical::PhysicalCollectionLayoutNormalize::new(
+            schema,
+            Arc::from(name),
+            vec![raw],
+            index,
+        );
+        adapter.source_alignment = Some(SourceAlignment {
+            layout: layout.clone(),
+            source_index,
+            null_messages: Arc::clone(&null_messages),
+        });
+        inputs.push(Arc::new(PhysicalPlan::CollectionLayoutNormalize(adapter)));
+    }
+    let mut input =
+        crate::planner::physical::PhysicalBarrier::new(inputs, builder.allocate_index());
+    input.assign_processing_time = !options.eventtime_enabled;
+    let input = Arc::new(PhysicalPlan::Barrier(input));
+    // FROM leaves name individual sources; their consumer sees one prepared event
+    // input. Child construction deduplicates this shared node by physical index.
+    for index in logical_indices {
+        builder.cache_node(index, Arc::clone(&input));
+    }
+    Ok(())
 }
 
 /// Create a physical plan from a logical plan using centralized index management with node caching
@@ -710,6 +864,32 @@ fn create_physical_plan_with_builder_cached_with_options(
     Ok(physical_plan)
 }
 
+/// Resolve source leaves through the prepared query input, retaining each shared
+/// physical input only once before batch lowering or scalar evaluation.
+fn create_physical_data_children(
+    logical_plan: &Arc<LogicalPlan>,
+    bindings: &SchemaBinding,
+    registries: &PipelineRegistries,
+    options: &PhysicalPlanBuildOptions,
+    builder: &mut PhysicalPlanBuilder,
+) -> Result<Vec<Arc<PhysicalPlan>>, String> {
+    let mut children = Vec::new();
+    let mut seen = HashSet::new();
+    for child in logical_plan.children() {
+        let child = create_physical_plan_with_builder_cached_with_options(
+            Arc::clone(child),
+            bindings,
+            registries,
+            options,
+            builder,
+        )?;
+        if seen.insert(child.get_plan_index()) {
+            children.push(child);
+        }
+    }
+    Ok(children)
+}
+
 fn create_physical_stateful_function_with_builder(
     logical_stateful: &LogicalStatefulFunction,
     logical_plan: &Arc<LogicalPlan>,
@@ -718,17 +898,8 @@ fn create_physical_stateful_function_with_builder(
     options: &PhysicalPlanBuildOptions,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    let mut physical_children = Vec::new();
-    for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached_with_options(
-            child.clone(),
-            bindings,
-            registries,
-            options,
-            builder,
-        )?;
-        physical_children.push(physical_child);
-    }
+    let mut physical_children =
+        create_physical_data_children(logical_plan, bindings, registries, options, builder)?;
 
     let mut stateful_specs: Vec<_> = logical_stateful
         .calls
@@ -884,17 +1055,8 @@ fn create_physical_window_with_builder(
     options: &PhysicalPlanBuildOptions,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    let mut physical_children = Vec::new();
-    for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached_with_options(
-            child.clone(),
-            bindings,
-            registries,
-            options,
-            builder,
-        )?;
-        physical_children.push(physical_child);
-    }
+    let mut physical_children =
+        create_physical_data_children(logical_plan, bindings, registries, options, builder)?;
 
     let mut window_spec = logical_window.spec.clone();
     let custom_registry = registries.custom_func_registry();
@@ -1171,17 +1333,8 @@ fn create_physical_aggregation_with_builder(
     options: &PhysicalPlanBuildOptions,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    let mut physical_children = Vec::new();
-    for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached_with_options(
-            child.clone(),
-            bindings,
-            registries,
-            options,
-            builder,
-        )?;
-        physical_children.push(physical_child);
-    }
+    let mut physical_children =
+        create_physical_data_children(logical_plan, bindings, registries, options, builder)?;
     let mut aggregate_mappings = logical_agg.aggregate_mappings.clone();
     let mapping_keys: Vec<String> = aggregate_mappings.keys().cloned().collect();
     let mut expressions: Vec<Expr> = mapping_keys
@@ -1540,17 +1693,8 @@ fn create_physical_filter_with_builder_cached(
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
-    let mut physical_children = Vec::new();
-    for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached_with_options(
-            child.clone(),
-            bindings,
-            registries,
-            options,
-            builder,
-        )?;
-        physical_children.push(physical_child);
-    }
+    let mut physical_children =
+        create_physical_data_children(logical_plan, bindings, registries, options, builder)?;
 
     let mut predicate = logical_filter.predicate.clone();
     let child = physical_children
@@ -1601,17 +1745,8 @@ fn create_physical_order_with_builder_cached(
     options: &PhysicalPlanBuildOptions,
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
-    let mut physical_children = Vec::new();
-    for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached_with_options(
-            child.clone(),
-            bindings,
-            registries,
-            options,
-            builder,
-        )?;
-        physical_children.push(physical_child);
-    }
+    let mut physical_children =
+        create_physical_data_children(logical_plan, bindings, registries, options, builder)?;
 
     let mut order_exprs: Vec<Expr> = logical_order
         .items
@@ -1659,17 +1794,8 @@ fn create_physical_compute_with_builder_cached(
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
-    let mut physical_children = Vec::new();
-    for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached_with_options(
-            child.clone(),
-            bindings,
-            registries,
-            options,
-            builder,
-        )?;
-        physical_children.push(physical_child);
-    }
+    let mut physical_children =
+        create_physical_data_children(logical_plan, bindings, registries, options, builder)?;
 
     let mut expressions: Vec<Expr> = logical_compute
         .fields
@@ -1712,17 +1838,8 @@ fn create_physical_project_with_builder_cached(
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
-    let mut physical_children = Vec::new();
-    for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached_with_options(
-            child.clone(),
-            bindings,
-            registries,
-            options,
-            builder,
-        )?;
-        physical_children.push(physical_child);
-    }
+    let mut physical_children =
+        create_physical_data_children(logical_plan, bindings, registries, options, builder)?;
 
     let mut expressions: Vec<Expr> = logical_project
         .fields
@@ -1784,17 +1901,8 @@ fn create_physical_data_sink_with_builder_cached(
     builder: &mut PhysicalPlanBuilder,
 ) -> Result<Arc<PhysicalPlan>, String> {
     // Convert children first using the builder with caching
-    let mut physical_children = Vec::new();
-    for child in logical_plan.children() {
-        let physical_child = create_physical_plan_with_builder_cached_with_options(
-            child.clone(),
-            bindings,
-            registries,
-            options,
-            builder,
-        )?;
-        physical_children.push(physical_child);
-    }
+    let physical_children =
+        create_physical_data_children(logical_plan, bindings, registries, options, builder)?;
     if physical_children.len() != 1 {
         return Err("DataSink plan must have exactly one child".to_string());
     }
@@ -2496,6 +2604,98 @@ mod tests {
     use super::*;
     use crate::processor::SamplerConfig;
     use serde_json::{Map as JsonMap, Value as JsonValue};
+
+    #[test]
+    fn wildcard_output_layout_preserves_source_and_field_order() {
+        use crate::catalog::{MockStreamProps, StreamDecoderConfig, StreamDefinition, StreamProps};
+        use crate::planner::physical::output_layout::OutputValueRef;
+        use datatypes::{ColumnSchema, Int64Type};
+        let definitions: HashMap<_, _> = [
+            ("a", vec!["a2", "a1"]),
+            ("b", vec!["b1"]),
+            ("c", vec!["c1"]),
+        ]
+        .into_iter()
+        .map(|(name, fields)| {
+            let schema = Arc::new(Schema::new(
+                fields
+                    .into_iter()
+                    .map(|field| {
+                        ColumnSchema::new(
+                            name.to_string(),
+                            field.to_string(),
+                            ConcreteDatatype::Int64(Int64Type),
+                        )
+                    })
+                    .collect(),
+            ));
+            (
+                name.to_string(),
+                Arc::new(StreamDefinition::new(
+                    name,
+                    schema,
+                    StreamProps::Mock(MockStreamProps::default()),
+                    StreamDecoderConfig::json(),
+                )),
+            )
+        })
+        .collect();
+        struct Case {
+            sql: &'static str,
+            expected: &'static [(&'static str, usize, usize)],
+        }
+        for case in [
+            Case {
+                sql: "SELECT * FROM a",
+                expected: &[("a2", 0, 0), ("a1", 0, 1)],
+            },
+            Case {
+                sql: "SELECT * FROM a, b",
+                expected: &[("a2", 0, 0), ("a1", 0, 1), ("b1", 1, 0)],
+            },
+            Case {
+                sql: "SELECT * FROM a, b, c",
+                expected: &[("a2", 0, 0), ("a1", 0, 1), ("b1", 1, 0), ("c1", 2, 0)],
+            },
+        ] {
+            let statement = parser::parse_sql(case.sql).unwrap();
+            let bindings = SchemaBinding::new(
+                statement
+                    .source_infos
+                    .iter()
+                    .map(|source| SchemaBindingEntry {
+                        source_name: source.name.clone(),
+                        alias: None,
+                        schema: definitions[&source.name].schema(),
+                        kind: SourceBindingKind::Regular,
+                    })
+                    .collect(),
+            );
+            let logical =
+                crate::planner::logical::create_logical_plan(statement, vec![], &definitions)
+                    .unwrap();
+            let (logical, bindings) = crate::optimize_logical_plan(logical, &bindings);
+            let physical =
+                create_physical_plan(logical, &bindings, &PipelineRegistries::new_with_builtin())
+                    .unwrap();
+            let layout = physical.output_layout().unwrap();
+            let actual = layout
+                .columns
+                .iter()
+                .map(|column| {
+                    let OutputValueRef::Message {
+                        message_index,
+                        value_index,
+                    } = column.value_ref
+                    else {
+                        panic!("expected fixed message slot");
+                    };
+                    (column.name.as_ref(), message_index, value_index)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, case.expected, "{}", case.sql);
+        }
+    }
 
     #[test]
     fn test_physical_plan_builder_creation() {

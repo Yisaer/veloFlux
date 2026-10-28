@@ -217,6 +217,14 @@ impl DataMetricDomains {
         self
     }
 
+    pub(crate) const fn input_domain(self) -> Option<DataDomain> {
+        match (self.messages_in, self.collections_in) {
+            (true, false) => Some(DataDomain::Message),
+            (false, true) => Some(DataDomain::Collection),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn with_output(mut self, domain: DataDomain) -> Self {
         match domain {
             DataDomain::Message => self.messages_out = true,

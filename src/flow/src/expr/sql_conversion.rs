@@ -535,6 +535,7 @@ fn convert_identifier_to_column(
             ScalarExpr::column_with_index(source_name, column_name.to_string(), Some(index))
                 .map_err(ConversionError::InvalidColumnReference)
         }
+        Err(error @ ConversionError::InvalidColumnReference(_)) => Err(error),
         Err(_err) => Err(ConversionError::ColumnNotFound(format!(
             "No schema bindings available for identifier '{}",
             column_name

@@ -779,6 +779,42 @@ fn build_physical_node_with_prefix(
         }
         PhysicalPlan::CollectionLayoutNormalize(normalize) => {
             info.push(format!("source={}", normalize.output_source_name()));
+            if let Some(alignment) = &normalize.source_alignment {
+                info.push(format!(
+                    "mode=source_alignment, sources=[{}]",
+                    alignment
+                        .layout
+                        .messages
+                        .iter()
+                        .map(|message| message.source_name.as_ref())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if let Some(alignment) = &normalize.source_alignment {
+                let slots = alignment
+                    .layout
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(message_index, message)| {
+                        message
+                            .columns
+                            .iter()
+                            .enumerate()
+                            .map(move |(value_index, column)| {
+                                format!(
+                                    "{}.{}@{}:{}",
+                                    message.source_name, column.name, message_index, value_index
+                                )
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                info.push(format!(
+                    "slots=[{}]",
+                    format_items(&slots, EXPLAIN_MAX_SCHEMA_ITEMS, |slot| slot.clone())
+                ));
+            }
             info.push(format_schema(normalize.schema().as_ref()));
         }
         PhysicalPlan::MemoryCollectionMaterialize(_) => {
@@ -1411,7 +1447,16 @@ mod tests {
             &crate::PipelineRegistries::new_with_builtin(),
         )
         .expect("shared physical plan should build");
-        let shared_stream = match physical_plan.as_ref() {
+        let input = match physical_plan.as_ref() {
+            PhysicalPlan::Barrier(plan) => plan,
+            other => panic!(
+                "expected query input boundary, got {}",
+                other.get_plan_type()
+            ),
+        };
+        assert!(input.assign_processing_time);
+        assert_eq!(input.base.children.len(), 1);
+        let shared_stream = match input.base.children[0].as_ref() {
             PhysicalPlan::SharedStream(plan) => plan,
             other => panic!(
                 "expected shared stream physical plan, got {}",

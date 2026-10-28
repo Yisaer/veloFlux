@@ -8,7 +8,7 @@ veloFlux currently accepts exactly one SQL statement, and it must be a `SELECT`.
 
 ```text
 SELECT <projection>
-FROM <source_name>
+FROM <source_name> [, <source_name> ...]
 [WHERE <expr>]
 [GROUP BY <expr> [, <expr> ...]]
 [HAVING <expr>]
@@ -51,6 +51,33 @@ SELECT * FROM source_stream
 SELECT * FROM history_table
 ```
 
+### Multiple streams
+
+Comma-separated inputs use VeloFlux per-event evaluation:
+
+```sql
+SELECT faults.ts AS fault_ts, messages.ts AS message_ts, payload
+FROM faults, messages
+```
+
+Each event supplies its own source row; all other sources supply a NULL placeholder
+row. No historical or latest values are joined to the current event. Collections
+use the same behavior per row. This NULL-padding rule differs from standard SQL
+Cartesian-product semantics for comma FROM.
+
+Fields retain their source identity and type. Same-name columns require source
+qualification and may have different types. Unique column names may be unqualified.
+Unknown or ambiguous references fail planning; valid fields of an absent source
+are NULL. Use aliases when necessary to produce distinct sink output column names.
+
+Each source keeps its own sampling, decoding, and projection. Shared inputs are
+supported. Multi-source queries currently support processing time only. All processing-time queries, including single-source queries,
+assign time when each collection is consumed at the query input boundary, replacing
+source tuple timestamps; payload timestamp fields are unchanged. All rows in a
+collection share this processing time.
+See [Multi-source FROM](../../docs/syntax/multi_source_from.md) for execution and
+conditional-window examples.
+
 ### Table Sources
 
 Table sources are finite scan sources. A table scan reads the available table data once and then ends
@@ -66,14 +93,17 @@ SELECT speed + 1 AS next_speed FROM history_table WHERE ts > 1
 Current limitations for table sources:
 
 - table aliases are not supported
-- stream-table joins are not supported
+- explicit INNER/LEFT stream-table lookup joins use the existing provider lookup contract; see
+  [Lookup joins](../../docs/runtime/sources/table_lookup_join.md)
 - aggregate functions over table scans require `GROUP BY eoswindow()`
 
 ## WHERE
 
 `WHERE <expr>`
 
-Filters rows before any grouping/windowing.
+Filters rows after windowing and aggregation in the current VeloFlux execution order.
+For conditional windows, trigger events therefore remain available before the final
+output filter. A window-owned `FILTER (WHERE ...)` instead filters input collection.
 
 Example:
 

@@ -13,6 +13,8 @@ pub struct PhysicalCollectionLayoutNormalize {
     pub schema: Arc<Schema>,
     /// The message `source` to write in the normalized output tuple.
     pub output_source_name: Arc<str>,
+    /// Source-preserving NULL padding for comma-separated FROM inputs.
+    pub(crate) source_alignment: Option<SourceAlignment>,
 }
 
 impl PhysicalCollectionLayoutNormalize {
@@ -26,6 +28,7 @@ impl PhysicalCollectionLayoutNormalize {
             base: BasePhysicalPlan::new(children, index),
             schema,
             output_source_name,
+            source_alignment: None,
         }
     }
 
@@ -36,4 +39,12 @@ impl PhysicalCollectionLayoutNormalize {
     pub fn output_source_name(&self) -> &str {
         self.output_source_name.as_ref()
     }
+}
+
+/// One common tuple layout, with immutable NULL messages shared across all events.
+#[derive(Debug, Clone)]
+pub(crate) struct SourceAlignment {
+    pub layout: crate::planner::physical::output_layout::PlanLayout,
+    pub source_index: usize,
+    pub null_messages: Arc<[Arc<crate::model::Message>]>,
 }

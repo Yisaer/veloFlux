@@ -15,3 +15,5 @@ This directory contains source connector behavior and shared-source runtime topi
 - `checkpoint_quiesce.md`: Source quiesce and final-checkpoint fence coordination.
 - `shared_mqtt_client.md`: Shared MQTT client lifecycle and `connector_key` semantics.
 - `shared/`: Shared-stream runtime behavior and optimizations.
+
+See [Multi-source FROM](../../syntax/multi_source_from.md) for source-qualified per-event evaluation across heterogeneous streams.

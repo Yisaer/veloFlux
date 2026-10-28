@@ -20,7 +20,9 @@ use crate::processor::batch_function_compute_processor::{
 };
 use crate::processor::batch_policy::BatchPolicy;
 use crate::processor::byte_stage::{ByteTransformStage, CompressDriver, EncryptDriver};
-use crate::processor::collection_layout_normalize_processor::normalize_collection;
+use crate::processor::collection_layout_normalize_processor::{
+    align_sources, normalize_collection,
+};
 use crate::processor::compute_processor::{apply_compute, compute_fields, ComputeExpr};
 use crate::processor::count_window_stage::{CountWindowOutput, CountWindowStage};
 use crate::processor::data_metrics::DataMetricDomains;
@@ -91,6 +93,8 @@ enum CollectionStage {
     Normalize {
         source: Arc<str>,
         keys: Arc<[Arc<str>]>,
+        alignment:
+            Option<crate::planner::physical::physical_collection_layout_normalize::SourceAlignment>,
     },
     Materialize {
         source: Arc<str>,
@@ -380,9 +384,10 @@ impl Stage {
                         ProcessorError::InvalidConfiguration("missing bound decoder stage".into())
                     })?,
             ),
-            PhysicalPlan::Barrier(p) => {
-                CollectionStage::Barrier(BarrierStage::new(p.base.children().len()))
-            }
+            PhysicalPlan::Barrier(p) => CollectionStage::Barrier(BarrierStage::new(
+                p.base.children().len(),
+                p.assign_processing_time,
+            )),
             PhysicalPlan::ProcessTimeWatermark(p) => {
                 CollectionStage::Watermark(WatermarkStage::from_processing(p))
             }
@@ -395,6 +400,7 @@ impl Stage {
             PhysicalPlan::Order(p) => CollectionStage::Order(OrderStage::from_plan(p)),
             PhysicalPlan::EmptySuppress(p) => CollectionStage::EmptySuppress(p.omit_if_empty),
             PhysicalPlan::CollectionLayoutNormalize(p) => CollectionStage::Normalize {
+                alignment: p.source_alignment.clone(),
                 source: Arc::clone(&p.output_source_name),
                 keys: p
                     .schema
@@ -507,22 +513,22 @@ impl Stage {
                 stats.configure_stage_handling_time();
                 Arc::new(stats)
             });
-        let domains = resources
-            .stage_domains
-            .get(&plan.get_plan_index())
-            .copied()
-            .unwrap_or_else(|| {
-                if matches!(
-                    plan,
-                    PhysicalPlan::Decoder(_) | PhysicalPlan::Barrier(_) | PhysicalPlan::Sampler(_)
-                ) {
-                    resources.stage_default_domains
-                } else {
-                    DataMetricDomains::NONE.passthrough(DataDomain::Collection)
-                }
-            });
-        let passthrough =
-            matches!(plan, PhysicalPlan::Barrier(_)).then_some(resources.input_domain);
+        let planned_domains = resources.stage_domains.get(&plan.get_plan_index()).copied();
+        let domains = planned_domains.unwrap_or_else(|| {
+            if matches!(
+                plan,
+                PhysicalPlan::Decoder(_) | PhysicalPlan::Barrier(_) | PhysicalPlan::Sampler(_)
+            ) {
+                resources.stage_default_domains
+            } else {
+                DataMetricDomains::NONE.passthrough(DataDomain::Collection)
+            }
+        });
+        let passthrough = matches!(plan, PhysicalPlan::Barrier(_)).then(|| {
+            planned_domains
+                .and_then(DataMetricDomains::input_domain)
+                .unwrap_or(resources.input_domain)
+        });
         let metrics = Self::metrics_for(&engine, &stats, domains, passthrough);
         let mut stage = Self {
             stats: Arc::clone(&stats),
@@ -621,8 +627,13 @@ impl Stage {
     #[inline]
     fn process_single(&mut self, data: StreamData) -> Result<Option<StreamData>, ProcessorError> {
         let stats = self.stats.as_ref();
-        let _timer =
-            (!matches!(self.engine, CollectionStage::Barrier(_))).then(|| StageTimer::new(stats));
+        let measure = match &self.engine {
+            CollectionStage::Barrier(stage) => {
+                stage.assigns_processing_time() && matches!(&data, StreamData::Collection(_))
+            }
+            _ => true,
+        };
+        let _timer = measure.then(|| StageTimer::new(stats));
         self.metrics
             .record_input(stats, &data)
             .inspect_err(|error| {
@@ -630,7 +641,7 @@ impl Stage {
             })?;
         let result = match &mut self.engine {
             CollectionStage::Decoder(stage) => Ok(stage.process(data, stats)),
-            CollectionStage::Barrier(_) => Ok(Some(data)),
+            CollectionStage::Barrier(stage) => stage.prepare_data(data).map(Some),
             engine => match data {
                 StreamData::Collection(collection) => Self::apply(
                     engine,
@@ -730,7 +741,9 @@ impl Stage {
             CollectionStage::TimedBatch(stage) => Ok(StageOutput::TimedBatch(stage.process(data))),
             CollectionStage::Decoder(stage) => Ok(StageOutput::Single(stage.process(data, stats))),
             // Input-port alignment is performed at the region input boundary.
-            CollectionStage::Barrier(_) => Ok(StageOutput::Single(Some(data))),
+            CollectionStage::Barrier(stage) => stage
+                .prepare_data(data)
+                .map(|data| StageOutput::Single(Some(data))),
             CollectionStage::Watermark(stage) => {
                 stage.process(data, stats).map(StageOutput::immediate)
             }
@@ -1017,9 +1030,15 @@ impl Stage {
         suppression_counters: &Option<(CounterHandle, CounterHandle)>,
     ) -> Result<Option<Box<dyn Collection>>, ProcessorError> {
         match engine {
-            CollectionStage::Normalize { source, keys } => {
-                normalize_collection(keys.as_ref(), source, keys, input.as_ref(), name).map(Some)
-            }
+            CollectionStage::Normalize {
+                source,
+                keys,
+                alignment,
+            } => match alignment {
+                Some(alignment) => align_sources(alignment, input).map(Some),
+                None => normalize_collection(keys.as_ref(), source, keys, input.as_ref(), name)
+                    .map(Some),
+            },
             CollectionStage::Materialize {
                 source,
                 keys,
@@ -1302,13 +1321,12 @@ impl RegionProcessor {
     ) -> Result<Self, ProcessorError> {
         if (resources.isolate_opaque && plans.len() != 1)
             || plans.is_empty()
-            || plans
-                .iter()
-                .skip(1)
-                .any(|p| matches!(p, PhysicalPlan::Barrier(_)))
+            || plans.iter().skip(1).any(
+                |p| matches!(p, PhysicalPlan::Barrier(barrier) if barrier.base.children.len() != 1),
+            )
         {
             return Err(ProcessorError::InvalidConfiguration(
-                "region requires stages and Barrier must be its first stage".into(),
+                "region requires stages and multi-input Barrier must be its first stage".into(),
             ));
         }
         Ok(Self {

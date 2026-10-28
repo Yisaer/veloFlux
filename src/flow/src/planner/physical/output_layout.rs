@@ -87,20 +87,20 @@ impl OutputLayout {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MessageColumnLayout {
     pub(crate) name: Arc<str>,
     pub(crate) data_type: ConcreteDatatype,
     pub(crate) logical_index: usize,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MessageLayout {
     pub(crate) source_name: Arc<str>,
     pub(crate) columns: Vec<MessageColumnLayout>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PlanLayout {
     pub(crate) output: OutputLayout,
     pub(crate) messages: Vec<MessageLayout>,
@@ -137,7 +137,11 @@ impl PhysicalPlan {
                 layout_from_schema(plan.schema().as_ref(), plan.stream_name(), None)
             }
             PhysicalPlan::CollectionLayoutNormalize(plan) => {
-                layout_from_schema(plan.schema.as_ref(), plan.output_source_name(), None)
+                if let Some(alignment) = &plan.source_alignment {
+                    Ok(alignment.layout.clone())
+                } else {
+                    layout_from_schema(plan.schema.as_ref(), plan.output_source_name(), None)
+                }
             }
             PhysicalPlan::MemoryCollectionMaterialize(plan) => {
                 Ok(plan_layout_from_materialized_output(&plan.output_layout))

@@ -325,6 +325,9 @@ impl ScalarExpr {
             }
             ScalarExpr::FieldAccess { expr, field_name } => {
                 let struct_val = expr.eval_with_context(context)?;
+                if matches!(struct_val, Value::Null) {
+                    return Ok(Value::Null);
+                }
                 if let Value::Struct(struct_val) = struct_val {
                     struct_val.get_field(field_name).cloned().ok_or_else(|| {
                         EvalError::FieldNotFound {
@@ -344,6 +347,7 @@ impl ScalarExpr {
                 let index_val = index_expr.eval_with_context(context)?;
 
                 match (list_val, index_val) {
+                    (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
                     (Value::List(list), Value::Int64(index)) => {
                         if index < 0 || (index as usize) >= list.len() {
                             return Err(EvalError::ListIndexOutOfBounds {

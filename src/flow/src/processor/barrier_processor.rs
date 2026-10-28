@@ -9,6 +9,8 @@ use crate::processor::{
     BarrierControlSignal, BarrierControlSignalKind, ControlSignal, ProcessorError, StreamData,
 };
 
+use std::time::SystemTime;
+
 struct PendingCheckpoint {
     checkpoint_id: u64,
     kind: BarrierControlSignalKind,
@@ -112,6 +114,8 @@ pub(crate) struct BarrierStage {
     data: BarrierAligner,
     control: BarrierAligner,
     pending_checkpoint: Option<PendingCheckpoint>,
+    assign_processing_time: bool,
+    last_processing_time: Option<SystemTime>,
 }
 
 pub(crate) enum BarrierAction {
@@ -121,13 +125,42 @@ pub(crate) enum BarrierAction {
 }
 
 impl BarrierStage {
-    pub(crate) fn new(expected_upstreams: usize) -> Self {
+    pub(crate) fn new(expected_upstreams: usize, assign_processing_time: bool) -> Self {
         Self {
             expected_upstreams,
             data: BarrierAligner::new("data", expected_upstreams),
             control: BarrierAligner::new("control", expected_upstreams),
             pending_checkpoint: None,
+            assign_processing_time,
+            last_processing_time: None,
         }
+    }
+    pub(crate) fn prepare_data(&mut self, data: StreamData) -> Result<StreamData, ProcessorError> {
+        match data {
+            StreamData::Collection(collection) if self.assign_processing_time => {
+                let timestamp = self
+                    .last_processing_time
+                    .map_or_else(SystemTime::now, |last| last.max(SystemTime::now()));
+                let metadata = collection.metadata().clone();
+                let mut rows = collection.into_rows().map_err(|error| {
+                    ProcessorError::ProcessingError(format!("processing-time input: {error}"))
+                })?;
+                for row in &mut rows {
+                    row.timestamp = timestamp;
+                }
+                self.last_processing_time = Some(timestamp);
+                let batch = crate::model::RecordBatch::new_with_metadata(rows, metadata).map_err(
+                    |error| {
+                        ProcessorError::ProcessingError(format!("processing-time batch: {error}"))
+                    },
+                )?;
+                Ok(StreamData::collection(Box::new(batch)))
+            }
+            data => Ok(data),
+        }
+    }
+    pub(crate) fn assigns_processing_time(&self) -> bool {
+        self.assign_processing_time
     }
     pub(crate) fn expected_upstreams(&self) -> usize {
         self.expected_upstreams
@@ -182,6 +215,60 @@ mod tests {
     use std::time::SystemTime;
     use tokio::time::{timeout, Duration};
 
+    #[test]
+    fn multi_source_processing_time_is_assigned_after_fan_in() {
+        use super::{BarrierAction, BarrierStage};
+        use crate::model::{Message, RecordBatch, Tuple};
+        use datatypes::Value;
+        use std::time::UNIX_EPOCH;
+
+        for (inputs, assign) in [(1, false), (1, true), (2, false), (2, true), (3, true)] {
+            let mut barrier = BarrierStage::new(inputs, assign);
+            let mut previous = UNIX_EPOCH;
+            let message = Arc::new(Message::new(
+                "source",
+                vec![Arc::from("value")],
+                vec![Value::Int64(7)],
+            ));
+            for (upstream, seconds) in [(0, 200), (inputs - 1, 100)] {
+                let original = UNIX_EPOCH + Duration::from_secs(seconds);
+                let batch = RecordBatch::new(vec![
+                    Tuple::with_timestamp(Arc::from(vec![Arc::clone(&message)]), original),
+                    Tuple::with_timestamp(Arc::from(vec![Arc::clone(&message)]), original),
+                ])
+                .unwrap();
+                let started = SystemTime::now();
+                let BarrierAction::Forward(Some(data)) = barrier
+                    .process(upstream, StreamData::collection(Box::new(batch)))
+                    .unwrap()
+                else {
+                    panic!("expected data");
+                };
+                let StreamData::Collection(output) = barrier.prepare_data(data).unwrap() else {
+                    panic!("expected collection");
+                };
+                assert_eq!(output.num_rows(), 2);
+                for row in output.rows() {
+                    assert!(Arc::ptr_eq(&row.messages()[0], &message));
+                    if assign {
+                        assert!(row.timestamp >= started);
+                        assert!(row.timestamp <= SystemTime::now());
+                        assert!(row.timestamp >= previous);
+                    } else {
+                        assert_eq!(row.timestamp, original);
+                    }
+                }
+                assert_eq!(output.rows()[0].timestamp, output.rows()[1].timestamp);
+                previous = output.rows()[0].timestamp;
+            }
+            let watermark = UNIX_EPOCH + Duration::from_secs(300);
+            assert!(
+                matches!(barrier.process(0, StreamData::watermark(watermark)).unwrap(),
+                BarrierAction::Forward(Some(StreamData::Watermark(at))) if at == watermark)
+            );
+        }
+    }
+
     fn test_spawner() -> TaskSpawner {
         TaskSpawner::new(
             tokio::runtime::Builder::new_multi_thread()
@@ -206,8 +293,8 @@ mod tests {
     ) {
         let mut processor = crate::processor::region_processor::RegionProcessor::new(
             "test_barrier".into(),
-            &[crate::planner::physical::PhysicalPlan::Barrier(
-                crate::planner::physical::PhysicalBarrier::new(
+            &[crate::planner::physical::PhysicalPlan::Barrier({
+                let mut barrier = crate::planner::physical::PhysicalBarrier::new(
                     (0..upstreams)
                         .map(|index| {
                             Arc::new(PhysicalPlan::Compute(PhysicalCompute::new(
@@ -218,8 +305,10 @@ mod tests {
                         })
                         .collect(),
                     0,
-                ),
-            )],
+                );
+                barrier.assign_processing_time = true;
+                barrier
+            })],
             crate::processor::region_processor::RegionResources::default(),
             crate::processor::base::default_channel_capacities(),
         )
@@ -328,6 +417,16 @@ mod tests {
             .send(StreamData::watermark(SystemTime::UNIX_EPOCH))
             .expect("send post-barrier data (data upstream 0)");
 
+        let row = crate::model::Tuple::with_timestamp(
+            crate::model::Tuple::empty_messages(),
+            SystemTime::UNIX_EPOCH,
+        );
+        upstreams.data[0]
+            .send(StreamData::collection(Box::new(
+                crate::model::RecordBatch::new(vec![row]).unwrap(),
+            )))
+            .unwrap();
+
         assert!(
             timeout(Duration::from_millis(200), out.recv())
                 .await
@@ -335,6 +434,7 @@ mod tests {
             "post-barrier data must stay paused until all upstreams arrive"
         );
 
+        let resumed_at = SystemTime::now();
         upstreams
             .data
             .get(1)
@@ -361,6 +461,19 @@ mod tests {
             post_barrier_data,
             StreamData::Watermark(SystemTime::UNIX_EPOCH)
         ));
+
+        let StreamData::Collection(rows) = timeout(Duration::from_millis(200), out.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        else {
+            panic!("expected post-checkpoint collection");
+        };
+        assert_eq!(rows.num_rows(), 1);
+        assert!(
+            rows.rows()[0].timestamp >= resumed_at,
+            "processing time must be assigned only after checkpoint alignment resumes the input"
+        );
 
         upstreams
             .control

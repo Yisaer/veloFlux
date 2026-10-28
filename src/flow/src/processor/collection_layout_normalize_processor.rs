@@ -134,6 +134,47 @@ pub(crate) fn normalize_collection(
     Ok(Box::new(batch))
 }
 
+/// Align one source event without copying its values or rebuilding missing rows.
+pub(crate) fn align_sources(
+    alignment: &crate::planner::physical::physical_collection_layout_normalize::SourceAlignment,
+    input: Box<dyn Collection>,
+) -> Result<Box<dyn Collection>, ProcessorError> {
+    let source = alignment
+        .layout
+        .messages
+        .get(alignment.source_index)
+        .ok_or_else(|| {
+            ProcessorError::ProcessingError("invalid source alignment index".to_string())
+        })?;
+    let metadata = input.metadata().clone();
+    let mut rows = input.into_rows().map_err(|error| {
+        ProcessorError::ProcessingError(format!("source alignment input: {error}"))
+    })?;
+    for tuple in &mut rows {
+        let [message] = tuple.messages() else {
+            return Err(ProcessorError::ProcessingError(
+                "source alignment requires one source message".to_string(),
+            ));
+        };
+        if message.source() != source.source_name.as_ref()
+            || (!source.columns.is_empty()
+                && message.value_by_index(source.columns.len() - 1).is_none())
+        {
+            return Err(ProcessorError::ProcessingError(format!(
+                "source alignment layout mismatch for `{}`",
+                source.source_name
+            )));
+        }
+        let mut messages = Arc::clone(&alignment.null_messages);
+        Arc::make_mut(&mut messages)[alignment.source_index] = Arc::clone(message);
+        tuple.messages = messages;
+    }
+    let output = RecordBatch::new_with_metadata(rows, metadata).map_err(|error| {
+        ProcessorError::ProcessingError(format!("invalid aligned batch: {error}"))
+    })?;
+    Ok(Box::new(output))
+}
+
 #[cfg(test)]
 mod tests {
 

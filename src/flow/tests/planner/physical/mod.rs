@@ -44,3 +44,5 @@ fn assert_region_suffix(execution: &serde_json::Value, suffix: &[&str]) {
             .any(|region| region["stages"] == serde_json::json!([stage["index"]])));
     }
 }
+
+mod multi_source_tests;

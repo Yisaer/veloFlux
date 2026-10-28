@@ -184,7 +184,12 @@ alignment state, while its region driver owns input polling and transport. Toget
 - forward one aligned barrier through the region suffix
 - stop after draining/forwarding a final barrier
 
+Query input preparation uses the same boundary for one or more inputs. A one-input
+boundary can run inline; data-channel order already provides its checkpoint boundary.
+A multi-input boundary retains indexed pause/resume alignment. Input layout alignment
+and processing-time assignment do not alter checkpoint or other control signals.
 `BarrierStage` does not own business state and normally does not produce a business snapshot.
+Its processing-time clamp is local to the running query and is not a durable window snapshot.
 
 Checkpoint support requires post-barrier data isolation. The current checkpoint-aware alignment
 state tracks each data upstream separately. After an upstream delivers a checkpoint barrier, the

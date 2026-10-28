@@ -60,10 +60,10 @@ fn assert_explain_eq(actual: &str, expected: &str, context: &str) {
             .as_array()
             .unwrap()
             .iter()
-            .any(|region| region["stages"] == serde_json::json!([1, 2, 4])),
-        "[{context}] decoder/project/encoder region: {execution}"
+            .any(|region| region["stages"] == serde_json::json!([1, 2, 3, 5])),
+        "[{context}] decoder/input/project/encoder region: {execution}"
     );
-    for index in [0, 3, 5] {
+    for index in [0, 4, 6] {
         assert!(
             execution["regions"]
                 .as_array()
@@ -135,12 +135,13 @@ async fn someip_explain() {
             "",
             "Physical Plan Explain:",
             "- id                               | info",
-            "  PhysicalResultCollect_5          |",
-            &format!("  └─PhysicalSinkConnector_3        | sink_id={sink_id}, connector=nop"),
-            &format!("    └─PhysicalSinkEncoder_4     | sink_id={sink_id}, encoder=json"),
-            "      └─PhysicalProject_2          | fields=[ts; DTE_SlotID; DTE_SlotType; DTE_SlotStatus]",
-            "        └─PhysicalDecoder_1          | decoder=gbf, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]",
-            &format!("          └─PhysicalDataSource_0     | source={name}, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]"),
+            "  PhysicalResultCollect_6          |",
+            &format!("  └─PhysicalSinkConnector_4        | sink_id={sink_id}, connector=nop"),
+            &format!("    └─PhysicalSinkEncoder_5     | sink_id={sink_id}, encoder=json"),
+            "      └─PhysicalProject_3          | fields=[ts; DTE_SlotID; DTE_SlotType; DTE_SlotStatus]",
+            "        └─PhysicalBarrier_2 | upstream_count=1",
+            "          └─PhysicalDecoder_1          | decoder=gbf, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]",
+            &format!("            └─PhysicalDataSource_0     | source={name}, schema=[ts, DTE_SlotID, DTE_SlotType, DTE_SlotStatus]"),
         ].join("\n");
         assert_explain_eq(&explain, &expected, "case1");
     }
@@ -193,13 +194,16 @@ async fn someip_explain() {
             "",
             "Physical Plan Explain:",
             "- id                               | info",
-            "  PhysicalResultCollect_5          |",
-            &format!("  └─PhysicalSinkConnector_3        | sink_id={sink_id}, connector=nop"),
-            &format!("    └─PhysicalSinkEncoder_4     | sink_id={sink_id}, encoder=json"),
-            &format!("      └─PhysicalProject_2          | fields=[ts; {project_fields}]"),
-            &format!("        └─PhysicalDecoder_1          | decoder=gbf, schema=[ts, {col_flat}]"),
+            "  PhysicalResultCollect_6          |",
+            &format!("  └─PhysicalSinkConnector_4        | sink_id={sink_id}, connector=nop"),
+            &format!("    └─PhysicalSinkEncoder_5     | sink_id={sink_id}, encoder=json"),
+            &format!("      └─PhysicalProject_3          | fields=[ts; {project_fields}]"),
+            "        └─PhysicalBarrier_2 | upstream_count=1",
             &format!(
-                "          └─PhysicalDataSource_0     | source={name}, schema=[ts, {col_flat}]"
+                "          └─PhysicalDecoder_1          | decoder=gbf, schema=[ts, {col_flat}]"
+            ),
+            &format!(
+                "            └─PhysicalDataSource_0     | source={name}, schema=[ts, {col_flat}]"
             ),
         ]
         .join("\n");
