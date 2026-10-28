@@ -9,7 +9,8 @@ use std::collections::HashMap;
 
 use roxmltree::Node;
 
-use crate::ast::types::{ArrayType, DataType, StructureField, VectorType};
+use crate::ast::resolver::legacy_builtin_name;
+use crate::ast::types::{ArrayType, DataType, DataTypeKind, StructureField, VectorType};
 use crate::util::{convert, xml};
 
 /// Parse `STD-CPP-IMPLEMENTATION-DATA-TYPE` elements from the
@@ -24,7 +25,36 @@ pub fn parse_data_types(node: Node) -> Result<HashMap<String, DataType>, String>
         .enumerate()
     {
         let dt = parse_single(dt_el).map_err(|e| format!("index {i}: {e}"))?;
+        let path = xml::named_type_path(dt_el)?;
+        if types.insert(path.clone(), dt.clone()).is_some() {
+            return Err(format!("duplicate AP type path: {path}"));
+        }
         types.insert(dt.short_name.to_lowercase(), dt);
+    }
+    let references = types
+        .values()
+        .flat_map(|dt| match &dt.kind {
+            DataTypeKind::Unsupported { .. } => Vec::new(),
+            DataTypeKind::TypeReference(reference) => vec![reference.type_name.clone()],
+            DataTypeKind::Structure(structure) => structure
+                .fields
+                .iter()
+                .map(|f| f.type_ref.clone())
+                .collect(),
+            DataTypeKind::Array(array) => vec![array.element_ref.clone()],
+            DataTypeKind::Vector(vector) => vec![vector.element_ref.clone()],
+        })
+        .collect::<Vec<_>>();
+    for reference in references {
+        if let Some(name) = legacy_builtin_name(&reference) {
+            types.entry(reference.clone()).or_insert_with(|| {
+                DataType::new_type_reference(
+                    convert::extract_last(&reference).into(),
+                    "SW-BASE-TYPE".into(),
+                    name,
+                )
+            });
+        }
     }
     Ok(types)
 }
@@ -99,6 +129,7 @@ fn parse_array(node: Node, sn: &str, category: &str) -> Result<DataType, String>
             size,
             in_place,
             element_ref: typ_ref.text().unwrap_or("").to_string(),
+            bounds: None,
         }),
     })
 }

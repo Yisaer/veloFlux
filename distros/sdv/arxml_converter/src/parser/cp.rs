@@ -7,7 +7,7 @@ use std::collections::HashMap;
 
 use roxmltree::{Document, Node};
 
-use crate::ast::types::DataType;
+use crate::ast::types::{ApplicationTypeConstraints, DataType};
 use crate::parser::{
     communication::CommunicationParser, datatypes::DataTypesParser,
     software_types::SoftwareTypesParser, system::SystemParser, topology::TopologyParser,
@@ -110,12 +110,21 @@ impl CpParser {
         &self.data_types_parser.application_data_types
     }
 
+    pub(crate) fn application_type_constraints(
+        &self,
+        path: &str,
+    ) -> Option<&ApplicationTypeConstraints> {
+        self.data_types_parser.application_constraints.get(path)
+    }
+
     /// Build a merged type map: application data types fall back to
     /// their implementation type counterparts via [`DataTypeMappingSet`].
     /// Use this for the binary decoder so that ADT references resolve
     /// to actual type definitions.
     pub fn merged_data_types(&self) -> HashMap<String, DataType> {
-        self.data_types_parser.merged_data_types()
+        let mut types = self.data_types_parser.merged_data_types();
+        types.extend(self.software_types_parser.request_payloads.clone());
+        types
     }
 
     /// Access the topology parser (for service name lookups).
@@ -185,12 +194,11 @@ impl CpParser {
             .get(&cso_key)
             .ok_or_else(|| format!("no operation '{cso_key}' in interface '{csi_key}'"))?;
 
-        // 9. extractLast(tRef) → DataType
-        let dt_key = convert::extract_last(t_ref).to_lowercase();
-        self.data_types_parser
-            .application_data_types
-            .get(&dt_key)
-            .ok_or_else(|| format!("no data type for {t_ref}"))
+        // 9. Qualified type references require an exact loaded identity.
+        if let Some(request) = self.software_types_parser.request_payloads.get(t_ref) {
+            return Ok(request);
+        }
+        self.data_types_parser.resolve_type_reference(t_ref)
     }
 
     // ---- internal lookup helpers ----
@@ -288,9 +296,8 @@ fn parse_data_type_mapping_sets(node: Node) -> Result<HashMap<String, String>, S
     {
         let adtr = xml::require_child(sub_dtm, "APPLICATION-DATA-TYPE-REF")?;
         let idtr = xml::require_child(sub_dtm, "IMPLEMENTATION-DATA-TYPE-REF")?;
-        let adtr_key = convert::extract_last(adtr.text().ok_or("empty APPLICATION-DATA-TYPE-REF")?);
-        let idtr_key =
-            convert::extract_last(idtr.text().ok_or("empty IMPLEMENTATION-DATA-TYPE-REF")?);
+        let adtr_key = adtr.text().ok_or("empty APPLICATION-DATA-TYPE-REF")?;
+        let idtr_key = idtr.text().ok_or("empty IMPLEMENTATION-DATA-TYPE-REF")?;
 
         if mappings
             .insert(adtr_key.to_string(), idtr_key.to_string())
@@ -347,12 +354,12 @@ mod tests {
           <SHORT-NAME>Data_Type_Mappings</SHORT-NAME>
           <DATA-TYPE-MAPS>
             <DATA-TYPE-MAP>
-              <APPLICATION-DATA-TYPE-REF>/DataTypes/SpeedType</APPLICATION-DATA-TYPE-REF>
-              <IMPLEMENTATION-DATA-TYPE-REF>/Impl/uint32_impl</IMPLEMENTATION-DATA-TYPE-REF>
+              <APPLICATION-DATA-TYPE-REF>/DataTypes/App/SpeedType</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF>/DataTypes/Impl/uint32_impl</IMPLEMENTATION-DATA-TYPE-REF>
             </DATA-TYPE-MAP>
             <DATA-TYPE-MAP>
-              <APPLICATION-DATA-TYPE-REF>/DataTypes/HeaderType</APPLICATION-DATA-TYPE-REF>
-              <IMPLEMENTATION-DATA-TYPE-REF>/Impl/uint16_impl</IMPLEMENTATION-DATA-TYPE-REF>
+              <APPLICATION-DATA-TYPE-REF>/DataTypes/App/HeaderType</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF>/DataTypes/Impl/uint16_impl</IMPLEMENTATION-DATA-TYPE-REF>
             </DATA-TYPE-MAP>
           </DATA-TYPE-MAPS>
         </DATA-TYPE-MAPPING-SET>
@@ -515,7 +522,7 @@ mod tests {
               <DATA-ELEMENTS>
                 <VARIABLE-DATA-PROTOTYPE>
                   <SHORT-NAME>Speed</SHORT-NAME>
-                  <TYPE-TREF>/DataTypes/SpeedType</TYPE-TREF>
+                  <TYPE-TREF>/DataTypes/App/SpeedType</TYPE-TREF>
                 </VARIABLE-DATA-PROTOTYPE>
               </DATA-ELEMENTS>
             </SENDER-RECEIVER-INTERFACE>

@@ -1,0 +1,649 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "ap_wifi_list",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/s1_ap_test.xml",
+        "strict": true,
+        "query": {
+          "operation": "resolve",
+          "service_id": 33282,
+          "entry_id": 32769
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "WiFiApList",
+            "category": "STRUCTURE",
+            "definition": {
+              "kind": "structure",
+              "fields": [
+                {
+                  "name": "wiFiApNum",
+                  "target": "WiFiApNum",
+                  "in_place": false
+                },
+                {
+                  "name": "wiFiApArray",
+                  "target": "WiFiApArray",
+                  "in_place": false
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "ap_wifi_connection",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/s1_ap_test.xml",
+        "strict": true,
+        "query": {
+          "operation": "resolve",
+          "service_id": 33282,
+          "entry_id": 32770
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "WiFiConnStatus",
+            "category": "STRUCTURE",
+            "definition": {
+              "kind": "structure",
+              "fields": [
+                {
+                  "name": "wiFiApName",
+                  "target": "WiFiApName",
+                  "in_place": false
+                },
+                {
+                  "name": "wiFiCurConnStatus",
+                  "target": "WiFiCurConnStatus",
+                  "in_place": false
+                },
+                {
+                  "name": "wiFiStrength",
+                  "target": "WiFiStrength",
+                  "in_place": false
+                },
+                {
+                  "name": "wiFiUploadDataStatus",
+                  "target": "WiFiUploadDataStatus",
+                  "in_place": false
+                },
+                {
+                  "name": "wiFiDownloadDataStatus",
+                  "target": "WiFiDownloadDataStatus",
+                  "in_place": false
+                },
+                {
+                  "name": "wiFiLinkedInternet",
+                  "target": "WiFiLinkedInternet",
+                  "in_place": false
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "ap_wifi_switch",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/s1_ap_test.xml",
+        "strict": true,
+        "query": {
+          "operation": "resolve",
+          "service_id": 33282,
+          "entry_id": 32771
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "WiFiSwitchStatus",
+            "category": "TYPE_REFERENCE",
+            "definition": {
+              "kind": "reference",
+              "target": "int32_t",
+              "string_size": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "ap_wifi_vector",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/s1_ap_test.xml",
+        "strict": true,
+        "query": {
+          "operation": "type",
+          "type_path": "/dataTypes/WiFiApArray"
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "WiFiApArray",
+            "category": "VECTOR",
+            "definition": {
+              "kind": "vector",
+              "element": "WiFiApInfo"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "ap_wifi_string",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/s1_ap_test.xml",
+        "strict": true,
+        "query": {
+          "operation": "type",
+          "type_path": "/dataTypes/WiFiApName"
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "WiFiApName",
+            "category": "TYPE_REFERENCE",
+            "definition": {
+              "kind": "reference",
+              "target": "string",
+              "string_size": 64
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "cp_parking_message",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/baq.arxml",
+        "strict": true,
+        "query": {
+          "operation": "resolve",
+          "service_id": 43780,
+          "entry_id": 32771
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "ADT_ADAS_arr_ParkingSlot",
+            "category": "ARRAY",
+            "definition": {
+              "kind": "array",
+              "size": 0,
+              "element": "ADT_ADAS_strt_ParkingSlot",
+              "in_place": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "cp_parking_fields",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/baq.arxml",
+        "strict": true,
+        "query": {
+          "operation": "type",
+          "type_path": "/DataTypes/ApplicationDataTypes/ADT_ADAS_strt_ParkingSlot"
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "ADT_ADAS_strt_ParkingSlot",
+            "category": "STRUCTURE",
+            "definition": {
+              "kind": "structure",
+              "fields": [
+                {
+                  "name": "DTE_SlotID",
+                  "target": "ADT_ADAS_val_SlotID",
+                  "in_place": false
+                },
+                {
+                  "name": "DTE_SlotType",
+                  "target": "ADT_ADAS_enum_SlotType",
+                  "in_place": false
+                },
+                {
+                  "name": "DTE_SlotStatus",
+                  "target": "ADT_ADAS_enum_SlotStatus",
+                  "in_place": false
+                },
+                {
+                  "name": "DTE_SlotPointTop1",
+                  "target": "ADT_ADAS_strt_SlotPoint",
+                  "in_place": false
+                },
+                {
+                  "name": "DTE_SlotPointTop2",
+                  "target": "ADT_ADAS_strt_SlotPoint",
+                  "in_place": false
+                },
+                {
+                  "name": "DTE_SlotPointBottom1",
+                  "target": "ADT_ADAS_strt_SlotPoint",
+                  "in_place": false
+                },
+                {
+                  "name": "DTE_SlotPointBottom2",
+                  "target": "ADT_ADAS_strt_SlotPoint",
+                  "in_place": false
+                },
+                {
+                  "name": "DTE_SlotNum",
+                  "target": "ADT_Gen_val_ID",
+                  "in_place": false
+                },
+                {
+                  "name": "DTE_SlotWheelStopperInfo",
+                  "target": "ADT_ADAS_strt_SlotWheelStopperInfo",
+                  "in_place": false
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "cp_parking_slot_id",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/baq.arxml",
+        "strict": true,
+        "query": {
+          "operation": "type",
+          "type_path": "/DataTypes/ApplicationDataTypes/ADT_ADAS_val_SlotID"
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "ADT_ADAS_val_SlotID",
+            "category": "VALUE",
+            "definition": {
+              "kind": "reference",
+              "target": "uint16",
+              "string_size": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "cp_parking_point",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/baq.arxml",
+        "strict": true,
+        "query": {
+          "operation": "type",
+          "type_path": "/DataTypes/ApplicationDataTypes/ADT_ADAS_strt_SlotPoint"
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "ADT_ADAS_strt_SlotPoint",
+            "category": "STRUCTURE",
+            "definition": {
+              "kind": "structure",
+              "fields": [
+                {
+                  "name": "DTE_Point_X",
+                  "target": "ADT_ADAS_float_Point",
+                  "in_place": false
+                },
+                {
+                  "name": "DTE_Point_Y",
+                  "target": "ADT_ADAS_float_Point",
+                  "in_place": false
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "official_struct_prefix",
+      "source": {
+        "kind": "official_adaptation",
+        "url": "https://www.autosar.org/fileadmin/standards/R24-11/FO/AUTOSAR_FO_PRS_SOMEIPProtocol.pdf",
+        "section": "4.1.4.2, Figure 4.1, page 29",
+        "note": "Locally authored ARXML for the finite illustrated prefix. Struct_3 is unspecified in the figure and excluded; this is not official ARXML."
+      },
+      "input": {
+        "file": "fixtures/autosar_struct_prefix.arxml",
+        "strict": true,
+        "query": {
+          "operation": "ap_type",
+          "type_path": "/dataTypes/Struct1Prefix"
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "Struct1Prefix",
+            "category": "STRUCTURE",
+            "definition": {
+              "kind": "structure",
+              "fields": [
+                {
+                  "name": "a",
+                  "target": "Uint32",
+                  "in_place": false
+                },
+                {
+                  "name": "b",
+                  "target": "FloatPair",
+                  "in_place": false
+                },
+                {
+                  "name": "c",
+                  "target": "Struct2Prefix",
+                  "in_place": false
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "official_nested_struct_prefix",
+      "source": {
+        "kind": "official_adaptation",
+        "url": "https://www.autosar.org/fileadmin/standards/R24-11/FO/AUTOSAR_FO_PRS_SOMEIPProtocol.pdf",
+        "section": "4.1.4.2, Figure 4.1, page 29",
+        "note": "Locally authored ARXML for the finite illustrated prefix. Struct_3 is unspecified in the figure and excluded; this is not official ARXML."
+      },
+      "input": {
+        "file": "fixtures/autosar_struct_prefix.arxml",
+        "strict": true,
+        "query": {
+          "operation": "ap_type",
+          "type_path": "/dataTypes/Struct2Prefix"
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "Struct2Prefix",
+            "category": "STRUCTURE",
+            "definition": {
+              "kind": "structure",
+              "fields": [
+                {
+                  "name": "d",
+                  "target": "Uint32",
+                  "in_place": false
+                },
+                {
+                  "name": "e",
+                  "target": "FloatPair",
+                  "in_place": false
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "official_float_array",
+      "source": {
+        "kind": "official_adaptation",
+        "url": "https://www.autosar.org/fileadmin/standards/R24-11/FO/AUTOSAR_FO_PRS_SOMEIPProtocol.pdf",
+        "section": "4.1.4.2, Figure 4.1, page 29",
+        "note": "Locally authored ARXML for the finite illustrated prefix. Struct_3 is unspecified in the figure and excluded; this is not official ARXML."
+      },
+      "input": {
+        "file": "fixtures/autosar_struct_prefix.arxml",
+        "strict": true,
+        "query": {
+          "operation": "ap_type",
+          "type_path": "/dataTypes/FloatPair"
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "FloatPair",
+            "category": "ARRAY",
+            "definition": {
+              "kind": "array",
+              "size": 2,
+              "element": "Float32",
+              "in_place": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "upstream_value_named_uint32",
+      "source": {
+        "kind": "upstream_adaptation",
+        "url": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/implementation_data_type_test.py",
+        "note": "Generated with autosar-data 0.17.0 using the upstream Value example; base renamed uint32 with NoEncoding for a supported unsigned-name case."
+      },
+      "input": {
+        "file": "fixtures/upstream_uint32.arxml",
+        "strict": true,
+        "query": {
+          "operation": "implementation_type",
+          "type_path": "/package/ImplValue"
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "ImplValue",
+            "category": "VALUE",
+            "definition": {
+              "kind": "reference",
+              "target": "uint32",
+              "string_size": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "upstream_value_arbitrary_base_name",
+      "source": {
+        "kind": "upstream_adaptation",
+        "url": "https://github.com/DanielT/autosar-data-py/blob/1e064d751eadcb184961f025754e0605099b56eb/test/abstraction/implementation_data_type_test.py",
+        "note": "Generated with autosar-data 0.17.0 using the upstream ImplValue/SwBaseType example; optional compu method and constraint omitted."
+      },
+      "input": {
+        "file": "fixtures/upstream_value.arxml",
+        "strict": true,
+        "query": {
+          "operation": "implementation_type",
+          "type_path": "/package/ImplValue"
+        }
+      },
+      "comparison": "equal",
+      "expected": {
+        "both": {
+          "ok": {
+            "name": "ImplValue",
+            "category": "VALUE",
+            "definition": {
+              "kind": "reference",
+              "target": "swbasetype",
+              "string_size": null
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "cp_minimal_missing_header_metadata",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing minimal fixture with type references corrected to actual package paths; missing ARXML header preserved."
+      },
+      "input": {
+        "file": "../test_data/minimal_cp.arxml",
+        "strict": true,
+        "query": {
+          "operation": "resolve_cp",
+          "service_id": 10,
+          "header_id": 100
+        }
+      },
+      "comparison": "known_difference",
+      "reason": "The minimal fixture lacks the ARXML header required by autosar-data; type references now identify their actual package paths.",
+      "expected": {
+        "rust": {
+          "ok": {
+            "name": "SpeedType",
+            "category": "VALUE",
+            "definition": {
+              "kind": "reference",
+              "target": "uint32",
+              "string_size": null
+            }
+          }
+        },
+        "python": {
+          "error_contains": "bad file header"
+        }
+      }
+    },
+    {
+      "id": "cp_legacy_schema_incompatibility",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/s1_cp_test.xml",
+        "strict": true,
+        "query": {
+          "operation": "resolve_cp",
+          "service_id": 33282,
+          "header_id": 2181169157
+        }
+      },
+      "comparison": "known_difference",
+      "reason": "Reference strict loading rejects an element unavailable in the declared AUTOSAR 4.2.2 version. No payload equivalence is asserted.",
+      "expected": {
+        "rust": {
+          "ok": {
+            "name": "adt_WiFiApName",
+            "category": "STRING",
+            "definition": {
+              "kind": "reference",
+              "target": "string",
+              "string_size": 0
+            }
+          }
+        },
+        "python": {
+          "error_contains": "HAS-INTERNAL-STATE"
+        }
+      }
+    },
+    {
+      "id": "ap_unknown_service",
+      "source": {
+        "kind": "repository",
+        "url": "https://github.com/Yisaer/veloFlux",
+        "note": "Existing fixture, unchanged."
+      },
+      "input": {
+        "file": "../test_data/s1_ap_test.xml",
+        "strict": true,
+        "query": {
+          "operation": "resolve",
+          "service_id": 55555,
+          "entry_id": 32769
+        }
+      },
+      "comparison": "both_error",
+      "expected": {
+        "rust": {
+          "error_contains": "service 55555 not found"
+        },
+        "python": {
+          "error_contains": "deployment for service 55555"
+        }
+      }
+    }
+  ]
+}

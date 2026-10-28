@@ -25,7 +25,7 @@ use self::interfaces::ServiceInterface;
 /// for a given `(service_id, event_id)` pair.
 #[derive(Debug)]
 pub struct ApParser {
-    /// keyed by lowercased short-name
+    /// Exact type paths plus lowercased short-name compatibility entries.
     pub data_types: HashMap<String, DataType>,
     /// keyed by lowercased short-name
     pub interfaces: HashMap<String, ServiceInterface>,
@@ -107,10 +107,15 @@ impl ApParser {
                     iface.short_name
                 )
             })?;
-            let type_ref = convert::extract_last(&si_event.type_ref).to_lowercase();
+            let type_ref = &si_event.type_ref;
             return self
                 .data_types
-                .get(&type_ref)
+                .get(type_ref)
+                .or_else(|| {
+                    (!type_ref.contains('/'))
+                        .then(|| self.data_types.get(&type_ref.to_lowercase()))
+                        .flatten()
+                })
                 .ok_or_else(|| format!("type '{type_ref}' not found for event {event_id}"));
         }
 
@@ -123,10 +128,15 @@ impl ApParser {
                     iface.short_name
                 )
             })?;
-            let type_ref = convert::extract_last(&si_field.type_ref).to_lowercase();
+            let type_ref = &si_field.type_ref;
             return self
                 .data_types
-                .get(&type_ref)
+                .get(type_ref)
+                .or_else(|| {
+                    (!type_ref.contains('/'))
+                        .then(|| self.data_types.get(&type_ref.to_lowercase()))
+                        .flatten()
+                })
                 .ok_or_else(|| format!("type '{type_ref}' not found for field-notify {event_id}"));
         }
 
@@ -205,7 +215,7 @@ mod tests {
           <EVENTS>
             <VARIABLE-DATA-PROTOTYPE>
               <SHORT-NAME>BrakeEvent</SHORT-NAME>
-              <TYPE-TREF>/DataTypes/BrakeCmd</TYPE-TREF>
+              <TYPE-TREF>/dataTypes/BrakeCmd</TYPE-TREF>
             </VARIABLE-DATA-PROTOTYPE>
           </EVENTS>
         </SERVICE-INTERFACE>
@@ -251,5 +261,32 @@ mod tests {
 
         let err = parser.resolve_type(999, 1).unwrap_err();
         assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn qualified_ap_event_types_require_exact_identity() {
+        for (reference, resolves) in [
+            ("/dataTypes/BrakeCmd", true),
+            ("BrakeCmd", true),
+            ("/Other/BrakeCmd", false),
+            ("/DataTypes/BrakeCmd", false),
+            ("/Other/uint32", false),
+        ] {
+            let xml = AP_FULL_XML.replace("/dataTypes/BrakeCmd", reference);
+            let xml = xml.replace("</EVENTS>", &format!(
+                "</EVENTS><FIELDS><FIELD><SHORT-NAME>BrakeField</SHORT-NAME><TYPE-TREF>{reference}</TYPE-TREF></FIELD></FIELDS>"
+            )).replace("</EVENT-DEPLOYMENTS>",
+                "</EVENT-DEPLOYMENTS><FIELD-DEPLOYMENTS><SOMEIP-FIELD-DEPLOYMENT><SHORT-NAME>BrakeFieldDeploy</SHORT-NAME><FIELD-REF>/Interfaces/RadarSvc/BrakeField</FIELD-REF><NOTIFIER><EVENT-ID>2</EVENT-ID></NOTIFIER></SOMEIP-FIELD-DEPLOYMENT></FIELD-DEPLOYMENTS>"
+            );
+            let doc = Document::parse(&xml).unwrap();
+            let mut parser = ApParser::new();
+            parser.parse(&doc).unwrap();
+            assert_eq!(parser.resolve_type(100, 1).is_ok(), resolves, "{reference}");
+            assert_eq!(
+                parser.resolve_type(100, 2).is_ok(),
+                resolves,
+                "field: {reference}"
+            );
+        }
     }
 }

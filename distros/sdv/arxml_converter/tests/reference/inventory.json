@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "documents": [
+    { "id": "repository_implementation_types", "file": "../test_data/implementation_types.arxml", "parser": "cp_types", "strict": true },
+    { "id": "repository_ap", "file": "../test_data/s1_ap_test.xml", "parser": "ap", "strict": true },
+    { "id": "repository_baq", "file": "../test_data/baq.arxml", "parser": "cp", "strict": true },
+    { "id": "official_structure", "file": "fixtures/autosar_struct_prefix.arxml", "parser": "ap", "strict": true },
+    { "id": "upstream_uint32", "file": "fixtures/upstream_uint32.arxml", "parser": "cp_types", "strict": true },
+    { "id": "upstream_arbitrary_base", "file": "fixtures/upstream_value.arxml", "parser": "cp_types", "strict": true },
+    { "id": "repository_minimal_cp", "file": "../test_data/minimal_cp.arxml", "parser": "cp", "strict": true },
+    { "id": "repository_legacy_cp", "file": "../test_data/s1_cp_test.xml", "parser": "cp", "strict": true }
+  ]
+}

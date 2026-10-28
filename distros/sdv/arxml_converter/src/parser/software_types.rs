@@ -7,13 +7,17 @@ use std::collections::HashMap;
 
 use roxmltree::Node;
 
+use crate::ast::types::{DataType, StructureField};
 use crate::util::xml;
 
 /// Two-level map: client-server interface short-name → operation
-/// short-name → TYPE-TREF text.
+/// short-name → request type reference or derived request layout path.
 #[derive(Debug, Default)]
 pub struct SoftwareTypesParser {
     pub interface_ref_map: HashMap<String, HashMap<String, String>>,
+    /// Derived request layouts for empty or multi-argument operations, keyed by
+    /// the operation's exact source path. Single inputs keep their original type.
+    pub(crate) request_payloads: HashMap<String, DataType>,
 }
 
 impl SoftwareTypesParser {
@@ -83,25 +87,35 @@ impl SoftwareTypesParser {
         Ok(())
     }
 
-    fn parse_client_server_operation(&self, node: Node) -> Result<(String, String), String> {
+    fn parse_client_server_operation(&mut self, node: Node) -> Result<(String, String), String> {
         let sn = xml::get_shortname(node)?;
-
-        let arguments = match xml::find_child(node, "ARGUMENTS") {
-            Some(n) => n,
-            None => return Ok((String::new(), String::new())),
-        };
-
-        for argument in arguments
-            .children()
-            .filter(|n| n.tag_name().name() == "ARGUMENT-DATA-PROTOTYPE")
-        {
-            if xml::child_text(argument, "DIRECTION") == Some("IN") {
-                let type_ref = xml::require_child(argument, "TYPE-TREF")?;
-                return Ok((sn.to_string(), type_ref.text().unwrap_or("").to_string()));
+        let mut inputs = Vec::new();
+        if let Some(arguments) = xml::find_child(node, "ARGUMENTS") {
+            for argument in arguments
+                .children()
+                .filter(|n| n.has_tag_name("ARGUMENT-DATA-PROTOTYPE"))
+            {
+                match xml::require_child_text(argument, "DIRECTION")? {
+                    "IN" | "INOUT" => inputs.push(StructureField {
+                        name: xml::get_shortname(argument)?.into(),
+                        type_ref: xml::require_child_text(argument, "TYPE-TREF")?.into(),
+                        in_place: false,
+                    }),
+                    "OUT" => {}
+                    other => return Err(format!("invalid argument direction in {sn}: {other}")),
+                }
             }
         }
-
-        Ok((String::new(), String::new()))
+        // Retain the existing flat shape for a single request argument.
+        if let [input] = inputs.as_slice() {
+            return Ok((sn.into(), input.type_ref.clone()));
+        }
+        let path = xml::named_type_path(node)?;
+        self.request_payloads.insert(
+            path.clone(),
+            DataType::new_structure(sn.into(), "REQUEST".into(), inputs),
+        );
+        Ok((sn.into(), path))
     }
 
     fn parse_sender_receiver_interface(&mut self, node: Node) -> Result<(), String> {

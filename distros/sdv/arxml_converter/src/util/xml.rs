@@ -8,6 +8,20 @@
 
 use roxmltree::Node;
 
+/// Exact AUTOSAR identity assembled from named ancestors.
+pub(crate) fn named_type_path(node: Node) -> Result<String, String> {
+    let mut names = node
+        .ancestors()
+        .filter(|ancestor| ancestor.is_element())
+        .filter_map(|ancestor| child_text(ancestor, "SHORT-NAME"))
+        .collect::<Vec<_>>();
+    names.reverse();
+    if names.is_empty() {
+        return Err("data type node has no named path".into());
+    }
+    Ok(format!("/{}", names.join("/")))
+}
+
 // ---------------------------------------------------------------------------
 // Generic helpers
 // ---------------------------------------------------------------------------

@@ -61,16 +61,26 @@ pub fn compile_arxml_schema(
 ) -> Result<(Schema, Arc<CompiledArxmlSchema>), String> {
     let codec = ArxmlCodec::load(arxml_path).map_err(|e| format!("failed to load ARXML: {e}"))?;
 
-    // Enumerate all known entries and collect their field name/type specs.
-    let known = codec.known_entries();
-
+    // Enumerate configuration independently of successful payload resolution.
+    let configured = codec.configured_entries();
     let mut field_specs: Vec<(String, ConcreteDatatype)> =
         vec![("ts".to_string(), ConcreteDatatype::Int64(Int64Type))];
 
-    for (service_id, event_id) in known {
-        let Ok(resolved) = codec.resolve(service_id, event_id) else {
+    for (service_id, event_id) in configured {
+        // PRS_SOMEIPSD_00151/00152 reserve this identity for discovery control
+        // traffic, which has no application ARXML payload schema.
+        if (service_id, event_id) == (0xFFFF, 0x8100) {
             continue;
+        }
+        let with_entry = |error| {
+            format!(
+                "failed to infer ARXML message (service_id={service_id}, event_id={event_id}): {error}"
+            )
         };
+        let resolved = codec.resolve(service_id, event_id).map_err(with_entry)?;
+        // Validate the complete payload even when its shape yields no columns
+        // or field-name deduplication would omit some fields below.
+        concrete_datatype(&codec, resolved).map_err(with_entry)?;
 
         let (service_name, entry_name) = codec
             .resolve_entry_names(service_id, event_id)
@@ -83,7 +93,8 @@ pub fn compile_arxml_schema(
             }
             _ => Some(resolved.clone()),
         };
-        let Some(type_dt) = type_dt else { continue };
+        let type_dt =
+            type_dt.ok_or_else(|| with_entry("unresolved array element type".to_string()))?;
 
         if let arxml_converter::ast::types::DataTypeKind::Structure(st) = &type_dt.kind {
             for f in &st.fields {
@@ -96,7 +107,7 @@ pub fn compile_arxml_schema(
                 if field_specs.iter().any(|(n, _)| n == &name) {
                     continue;
                 }
-                let dt = resolve_concrete_datatype(&codec, &f.type_ref);
+                let dt = resolve_concrete_datatype(&codec, &f.type_ref).map_err(with_entry)?;
                 field_specs.push((name, dt));
             }
         }
@@ -115,34 +126,54 @@ pub fn compile_arxml_schema(
 }
 
 /// Recursively resolve an ARXML type reference to a ConcreteDatatype.
-fn resolve_concrete_datatype(codec: &ArxmlCodec, type_ref: &str) -> ConcreteDatatype {
-    let Some(dt) = codec.resolve_ref(type_ref) else {
-        return ConcreteDatatype::String(StringType);
-    };
-    match &dt.kind {
+fn resolve_concrete_datatype(
+    codec: &ArxmlCodec,
+    type_ref: &str,
+) -> Result<ConcreteDatatype, String> {
+    let dt = codec
+        .resolve_ref(type_ref)
+        .ok_or_else(|| format!("unresolved ARXML type: {type_ref}"))?;
+    concrete_datatype(codec, &dt)
+}
+
+/// Convert a resolved layout, preserving diagnostics for every nested type.
+fn concrete_datatype(
+    codec: &ArxmlCodec,
+    dt: &arxml_converter::ast::types::DataType,
+) -> Result<ConcreteDatatype, String> {
+    Ok(match &dt.kind {
+        arxml_converter::ast::types::DataTypeKind::Unsupported { reason } => {
+            return Err(reason.clone());
+        }
         arxml_converter::ast::types::DataTypeKind::TypeReference(tr) => {
-            base_type_to_concrete(tr.type_name.rsplit('/').next().unwrap_or(&tr.type_name))
+            if tr.type_name.contains('/')
+                || arxml_converter::ast::resolver::resolve_basic_type(tr).is_none()
+            {
+                resolve_concrete_datatype(codec, &tr.type_name)?
+            } else {
+                base_type_to_concrete(&tr.type_name)
+            }
         }
         arxml_converter::ast::types::DataTypeKind::Structure(st) => {
             let fields: Vec<datatypes::StructField> = st
                 .fields
                 .iter()
                 .map(|f| {
-                    let fdt = resolve_concrete_datatype(codec, &f.type_ref);
-                    datatypes::StructField::new(f.name.clone(), fdt, true)
+                    let fdt = resolve_concrete_datatype(codec, &f.type_ref)?;
+                    Ok(datatypes::StructField::new(f.name.clone(), fdt, true))
                 })
-                .collect();
+                .collect::<Result<_, String>>()?;
             ConcreteDatatype::Struct(datatypes::StructType::new(Arc::new(fields)))
         }
         arxml_converter::ast::types::DataTypeKind::Array(arr) => {
-            let elem_dt = resolve_concrete_datatype(codec, &arr.element_ref);
+            let elem_dt = resolve_concrete_datatype(codec, &arr.element_ref)?;
             ConcreteDatatype::List(datatypes::ListType::new(Arc::new(elem_dt)))
         }
         arxml_converter::ast::types::DataTypeKind::Vector(vec) => {
-            let elem_dt = resolve_concrete_datatype(codec, &vec.element_ref);
+            let elem_dt = resolve_concrete_datatype(codec, &vec.element_ref)?;
             ConcreteDatatype::List(datatypes::ListType::new(Arc::new(elem_dt)))
         }
-    }
+    })
 }
 
 /// Map an ARXML base type name to a ConcreteDatatype (leaf types only).
@@ -186,6 +217,206 @@ pub(crate) fn apply_signal_name_pattern(
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_only_service_discovery_is_excluded_from_application_schema() {
+        let source =
+            include_str!("../../arxml_converter/tests/test_data/schema_message_entries.arxml");
+        for (service, event, succeeds) in [
+            (0xFFFFu16, 0x8100u16, true),
+            (0xFFFF, 0x8101, false),
+            (0xFFFE, 0x8100, false),
+        ] {
+            let header = (u32::from(service) << 16) | u32::from(event);
+            let xml = source.replace(
+                "<HEADER-ID>655461</HEADER-ID>",
+                &format!("<HEADER-ID>{header}</HEADER-ID>"),
+            );
+            let path = std::env::temp_dir().join(format!(
+                "veloflux-sd-schema-{}-{header}.arxml",
+                std::process::id()
+            ));
+            std::fs::write(&path, xml).unwrap();
+            let result = compile_arxml_schema("test", path.to_str().unwrap(), "{field}");
+            std::fs::remove_file(path).unwrap();
+            assert_eq!(result.is_ok(), succeeds, "service={service}, event={event}");
+            if let Err(error) = result {
+                assert!(error.contains("no service found"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_complete_baq_schema_includes_empty_getter_requests() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_data/baq.arxml");
+        let (schema, artifact) =
+            compile_arxml_schema("test", path, "{field}").expect("complete BAQ schema");
+        assert!(schema.column_schemas().len() > 1);
+        let codec = artifact.codec();
+        assert!(codec.configured_entries().contains(&(43529, 1)));
+        assert!(codec.known_entries().contains(&(43529, 1)));
+        let getter = codec.resolve(43529, 1).unwrap();
+        let arxml_converter::ast::types::DataTypeKind::Structure(request) = &getter.kind else {
+            panic!("expected empty request")
+        };
+        assert!(request.fields.is_empty());
+        assert_eq!(
+            codec.decode(43529, 1, &[]).unwrap(),
+            arxml_converter::Value::Struct(vec![])
+        );
+        assert!(
+            codec
+                .decode(43529, 1, &[1])
+                .unwrap_err()
+                .contains("zero payload bytes")
+        );
+    }
+
+    #[test]
+    fn test_ap_schema_reports_unresolved_configured_types_and_aliases() {
+        let source = include_str!("../../arxml_converter/tests/test_data/s1_ap_test.xml");
+        for (index, (xml, unresolved_path)) in [
+            (
+                source.replace("/dataTypes/WiFiSwitchStatus", "/Other/Missing"),
+                "/Other/Missing",
+            ),
+            (
+                source.replace("/AUTOSAR/StdTypes/int32_t", "/Other/Missing"),
+                "/dataTypes/WiFiApNum",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = std::env::temp_dir().join(format!(
+                "veloflux-ap-schema-message-{}-{index}.arxml",
+                std::process::id()
+            ));
+            std::fs::write(&path, xml).unwrap();
+            let result = compile_arxml_schema("test", path.to_str().unwrap(), "{field}");
+            std::fs::remove_file(path).unwrap();
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("configured AP type failures must not disappear"),
+            };
+            assert!(error.contains("service_id=33282"), "{error}");
+            assert!(error.contains(unresolved_path), "{error}");
+        }
+    }
+
+    #[test]
+    fn test_configured_message_layout_errors_fail_schema_inference() {
+        let source =
+            include_str!("../../arxml_converter/tests/test_data/schema_message_entries.arxml");
+        for (index, (target, diagnostic)) in [
+            ("/DataTypes/Impl/OptionalPayload", None),
+            (
+                "/DataTypes/Impl/UnsupportedPayload",
+                Some("unsupported implementation category: UNION"),
+            ),
+            (
+                "/DataTypes/Impl/UnsupportedAlias",
+                Some("unsupported implementation category: UNION"),
+            ),
+            (
+                "/DataTypes/Impl/UnsupportedRecord",
+                Some("unsupported implementation category: UNION"),
+            ),
+            (
+                "/DataTypes/Impl/UnsupportedArray",
+                Some("unsupported implementation category: UNION"),
+            ),
+            (
+                "/DataTypes/Impl/NestedUnsupportedArrays",
+                Some("unsupported implementation category: UNION"),
+            ),
+            (
+                "/DataTypes/App/UnresolvedElements",
+                Some("unresolved ARXML type: /Other/Missing"),
+            ),
+            ("/Other/Missing", Some("no data type for /Other/Missing")),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let xml = source.replace(
+                "<TYPE-TREF>/DataTypes/Impl/OptionalPayload</TYPE-TREF>",
+                &format!("<TYPE-TREF>{target}</TYPE-TREF>"),
+            );
+            let path = std::env::temp_dir().join(format!(
+                "veloflux-schema-message-{}-{index}.arxml",
+                std::process::id()
+            ));
+            std::fs::write(&path, xml).unwrap();
+            let codec = ArxmlCodec::load(&path).unwrap();
+            assert_eq!(codec.configured_entries(), vec![(10, 100), (10, 101)]);
+            assert!(
+                codec.resolve(10, 100).is_ok(),
+                "the unrelated message remains usable"
+            );
+            let result = compile_arxml_schema("test", path.to_str().unwrap(), "{field}");
+            std::fs::remove_file(path).unwrap();
+            match (result, diagnostic) {
+                (Ok((schema, _)), None) => {
+                    assert_eq!(schema.column_schemas().len(), 2);
+                    let value = schema
+                        .column_schemas()
+                        .iter()
+                        .find(|c| c.name == "value")
+                        .unwrap();
+                    assert!(matches!(value.data_type, ConcreteDatatype::Uint32(_)));
+                }
+                (Err(error), Some(diagnostic)) => {
+                    assert!(error.contains(diagnostic), "{target}: {error}");
+                    assert!(error.contains("service_id=10, event_id=101"), "{error}");
+                    if diagnostic.contains("UNION") {
+                        assert!(
+                            error.contains("/DataTypes/Impl/UnsupportedPayload"),
+                            "{error}"
+                        );
+                    }
+                }
+                (Err(error), None) => {
+                    panic!("unused unsupported definitions must not fail inference: {error}")
+                }
+                (Ok(_), Some(_)) => panic!("configured layout must not be omitted: {target}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_unsupported_field_is_rejected_during_schema_inference() {
+        let original = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_data/baq.arxml");
+        let mut xml = std::fs::read_to_string(original).unwrap();
+        let implementation = xml
+            .find("<SHORT-NAME>IDT_ADAS_val_SlotID</SHORT-NAME>")
+            .unwrap();
+        let original_category = "<CATEGORY>VALUE</CATEGORY>";
+        let category = implementation + xml[implementation..].find(original_category).unwrap();
+        xml.replace_range(
+            category..category + original_category.len(),
+            "<CATEGORY>UNION</CATEGORY>",
+        );
+        let path = std::env::temp_dir().join(format!(
+            "veloflux-unsupported-schema-{}.arxml",
+            std::process::id()
+        ));
+        std::fs::write(&path, xml).unwrap();
+        let result = compile_arxml_schema("test", path.to_str().unwrap(), "{field}");
+        std::fs::remove_file(path).unwrap();
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("unsupported fields must not become string columns"),
+        };
+        assert!(
+            error.contains("unsupported implementation category: UNION"),
+            "{error}"
+        );
+        assert!(
+            error.contains("/DataTypes/ImplementationDataTypes/IDT_ADAS_val_SlotID"),
+            "{error}"
+        );
+    }
+
     /// Verify `entry_fields` returns correct field names and types.
     #[test]
     fn test_entry_fields_from_baq_arxml() {
@@ -215,13 +446,8 @@ mod tests {
     #[test]
     fn test_arxml_schema_inference() {
         let arxml_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/test_data/baq.arxml");
-        let mut props = serde_json::Map::new();
-        props.insert(
-            "schema_path".to_string(),
-            serde_json::Value::String(arxml_path.to_string()),
-        );
-
-        let (schema, _, _) = parse_arxml_schema("test", &props).expect("parse schema");
+        let (schema, _) =
+            compile_arxml_schema("test", arxml_path, "{field}").expect("infer complete schema");
 
         assert!(
             schema.column_schemas().len() > 1,

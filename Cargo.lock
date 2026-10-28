@@ -441,6 +441,7 @@ name = "arxml_converter"
 version = "0.1.0"
 dependencies = [
  "roxmltree",
+ "serde_json",
 ]
 
 [[package]]

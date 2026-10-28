@@ -9,12 +9,25 @@ pub struct DataType {
     pub kind: DataTypeKind,
 }
 
+/// Retained CP application-type limits for inspection and future policies.
+/// These values do not change the existing decoder's length handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationTypeConstraints {
+    /// MAX-NUMBER-OF-ELEMENTS, measured in array elements.
+    Array { max_elements: u64 },
+    /// SW-MAX-TEXT-SIZE as declared; not interpreted as an on-wire byte count.
+    String { max_text_size: u64 },
+}
+
 /// Category-specific payload of a [`DataType`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataTypeKind {
-    /// A reference to a primitive / base type (e.g. `uint8`, `float`).
+    /// A declared type whose layout is not implemented. Retained so unrelated
+    /// messages can load while consumers receive the original diagnostic.
+    Unsupported { reason: String },
+    /// A reference to a primitive / base type or another stored data type.
     TypeReference(TypeReference),
-    /// A fixed-size array.
+    /// An array, optionally retaining explicit CP implementation bounds.
     Array(ArrayType),
     /// A variable-length sequence (vector).
     Vector(VectorType),
@@ -22,7 +35,7 @@ pub enum DataTypeKind {
     Structure(StructureType),
 }
 
-/// Describes a reference to a basic type, optionally with a fixed string size.
+/// Describes a basic or user-defined type reference, optionally with a fixed string size.
 ///
 /// Corresponds to Go `ast.TypReference`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +46,7 @@ pub struct TypeReference {
     pub string_size: Option<u64>,
 }
 
-/// A fixed-size array with a known element type.
+/// An array element reference and length, with optional explicit CP bounds.
 ///
 /// Corresponds to Go `ast.Array`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,6 +57,20 @@ pub struct ArrayType {
     pub in_place: bool,
     /// Reference to the element type (path string from ARXML).
     pub element_ref: String,
+    /// Explicit CP implementation-array bounds. None preserves the existing
+    /// application/AP array representation and its decoding behavior.
+    pub bounds: Option<ArrayBounds>,
+}
+
+/// Array properties declared on a CP implementation array's element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayBounds {
+    /// Declared element count for a fixed array, or maximum for a dynamic array.
+    pub max_size: u64,
+    /// Whether the declared count is a maximum rather than a fixed length.
+    pub is_dynamic: bool,
+    /// Preserved ARRAY-SIZE-HANDLING policy for nested dimensions.
+    pub size_handling: Option<String>,
 }
 
 /// A variable-length sequence (vector) with a known element type.
@@ -114,6 +141,7 @@ impl DataType {
                 size,
                 in_place: false,
                 element_ref,
+                bounds: None,
             }),
         }
     }

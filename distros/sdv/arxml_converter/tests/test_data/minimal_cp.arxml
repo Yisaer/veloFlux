@@ -7,12 +7,12 @@
           <SHORT-NAME>Data_Type_Mappings</SHORT-NAME>
           <DATA-TYPE-MAPS>
             <DATA-TYPE-MAP>
-              <APPLICATION-DATA-TYPE-REF>/DataTypes/SpeedType</APPLICATION-DATA-TYPE-REF>
-              <IMPLEMENTATION-DATA-TYPE-REF>/Impl/uint32_impl</IMPLEMENTATION-DATA-TYPE-REF>
+              <APPLICATION-DATA-TYPE-REF>/DataTypes/App/SpeedType</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF>/DataTypes/Impl/uint32_impl</IMPLEMENTATION-DATA-TYPE-REF>
             </DATA-TYPE-MAP>
             <DATA-TYPE-MAP>
-              <APPLICATION-DATA-TYPE-REF>/DataTypes/HeaderType</APPLICATION-DATA-TYPE-REF>
-              <IMPLEMENTATION-DATA-TYPE-REF>/Impl/uint16_impl</IMPLEMENTATION-DATA-TYPE-REF>
+              <APPLICATION-DATA-TYPE-REF>/DataTypes/App/HeaderType</APPLICATION-DATA-TYPE-REF>
+              <IMPLEMENTATION-DATA-TYPE-REF>/DataTypes/Impl/uint16_impl</IMPLEMENTATION-DATA-TYPE-REF>
             </DATA-TYPE-MAP>
           </DATA-TYPE-MAPS>
         </DATA-TYPE-MAPPING-SET>
@@ -175,7 +175,7 @@
               <DATA-ELEMENTS>
                 <VARIABLE-DATA-PROTOTYPE>
                   <SHORT-NAME>Speed</SHORT-NAME>
-                  <TYPE-TREF>/DataTypes/SpeedType</TYPE-TREF>
+                  <TYPE-TREF>/DataTypes/App/SpeedType</TYPE-TREF>
                 </VARIABLE-DATA-PROTOTYPE>
               </DATA-ELEMENTS>
             </SENDER-RECEIVER-INTERFACE>

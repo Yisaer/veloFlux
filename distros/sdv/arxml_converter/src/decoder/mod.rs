@@ -3,9 +3,12 @@
 //!
 //! This is the core runtime component consumed by veloFlux pipeline.
 
+mod plan;
 pub mod value;
 
-use std::collections::HashMap;
+pub use plan::DecodePlan;
+
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::types::{self, DataType, DataTypeKind};
 use crate::util::convert;
@@ -14,10 +17,29 @@ pub use value::Value;
 
 /// Decodes `&[u8]` payloads guided by a set of [`DataType`] definitions.
 ///
-/// The type map is keyed by **lowercased** short-name (matching the
-/// convention used by [`crate::parser::datatypes::DataTypesParser`]).
+/// The type map supports exact implementation paths and legacy lowercased
+/// short names from [`crate::parser::datatypes::DataTypesParser`].
 #[derive(Debug, Default)]
 pub struct Decoder;
+
+enum DecodeError {
+    Layout(String),
+    Payload(String),
+}
+
+impl DecodeError {
+    fn into_message(self) -> String {
+        match self {
+            Self::Layout(message) | Self::Payload(message) => message,
+        }
+    }
+}
+
+impl From<String> for DecodeError {
+    fn from(message: String) -> Self {
+        Self::Payload(message)
+    }
+}
 
 impl Decoder {
     pub fn new() -> Self {
@@ -35,91 +57,24 @@ impl Decoder {
         data: &[u8],
         dt: &DataType,
     ) -> Result<(usize, Value), String> {
-        match &dt.kind {
-            DataTypeKind::TypeReference(tr) => self.decode_type_reference(data, tr),
-
-            DataTypeKind::Array(arr) => {
-                let element_dt = self
-                    .resolve_ref(types, &arr.element_ref)
-                    .ok_or_else(|| format!("unknown array element type: {}", arr.element_ref))?;
-
-                if arr.size == 0 {
-                    // Variable-length array — consume bytes until exhausted,
-                    // gracefully stopping when the next element can't be decoded.
-                    let mut offset = 0;
-                    let mut elems = Vec::new();
-                    while offset < data.len() {
-                        match self.decode(types, &data[offset..], &element_dt) {
-                            Ok((n, v)) => {
-                                if n == 0 {
-                                    break;
-                                }
-                                offset += n;
-                                elems.push(v);
-                            }
-                            Err(_) => break,
-                        }
-                    }
-                    return Ok((offset, Value::Array(elems)));
-                }
-
-                let mut offset = 0;
-                let mut elems = Vec::with_capacity(arr.size as usize);
-                for _ in 0..arr.size {
-                    let (n, v) = self.decode(types, &data[offset..], &element_dt)?;
-                    offset += n;
-                    elems.push(v);
-                }
-                Ok((offset, Value::Array(elems)))
-            }
-
-            DataTypeKind::Vector(vec) => {
-                let element_dt = self
-                    .resolve_ref(types, &vec.element_ref)
-                    .ok_or_else(|| format!("unknown vector element type: {}", vec.element_ref))?;
-
-                // Variable-length: consume all remaining bytes.
-                let mut offset = 0;
-                let mut elems = Vec::new();
-                while offset < data.len() {
-                    let (n, v) = self.decode(types, &data[offset..], &element_dt)?;
-                    if n == 0 {
-                        break; // prevent infinite loop on zero-width types
-                    }
-                    offset += n;
-                    elems.push(v);
-                }
-                Ok((offset, Value::Array(elems)))
-            }
-
-            DataTypeKind::Structure(st) => {
-                let mut offset = 0;
-                let mut fields = Vec::with_capacity(st.fields.len());
-                for sf in &st.fields {
-                    let field_dt = self.resolve_ref(types, &sf.type_ref).ok_or_else(|| {
-                        format!("unknown type '{}' for field '{}'", sf.type_ref, sf.name)
-                    })?;
-                    let (n, v) = self.decode(types, &data[offset..], &field_dt)?;
-                    offset += n;
-                    fields.push((sf.name.clone(), v));
-                }
-                Ok((offset, Value::Struct(fields)))
-            }
-        }
+        self.compile(types, dt).decode(data)
     }
 
-    /// Decode a base-type reference.
-    fn decode_type_reference(
+    /// Compile an owned immutable layout. Reuse it when decoding repeatedly;
+    /// decode() compiles a fresh plan to respect changes to a caller's registry.
+    pub fn compile(&self, types: &HashMap<String, DataType>, dt: &DataType) -> DecodePlan {
+        DecodePlan::compile(types, dt)
+    }
+
+    /// Read a primitive whose semantics have already been resolved.
+    fn decode_basic_type(
         &self,
         data: &[u8],
-        tr: &types::TypeReference,
-    ) -> Result<(usize, Value), String> {
-        use crate::ast::resolver::{BasicType, resolve_basic_type};
+        bt: crate::ast::resolver::BasicType,
+    ) -> Result<(usize, Value), DecodeError> {
+        use crate::ast::resolver::BasicType;
 
-        let bt = resolve_basic_type(tr)
-            .ok_or_else(|| format!("unresolved basic type: {}", tr.type_name))?;
-
-        match bt {
+        let result = match bt {
             BasicType::Uint8 => read_u8(data).map(|(n, v)| (n, Value::U8(v))),
             BasicType::Uint16 => read_u16(data).map(|(n, v)| (n, Value::U16(v))),
             BasicType::Uint32 => read_u32(data).map(|(n, v)| (n, Value::U32(v))),
@@ -140,23 +95,27 @@ impl Decoder {
             BasicType::FixedLengthString(len) => {
                 let len = len as usize;
                 if data.len() < len {
-                    return Err(format!(
+                    return Err(DecodeError::Payload(format!(
                         "need {len} bytes for fixed-length string, have {}",
                         data.len()
-                    ));
+                    )));
                 }
                 let s = std::str::from_utf8(&data[..len])
                     .map_err(|e| format!("invalid UTF-8 fixed-string: {e}"))?;
                 Ok((len, Value::Str(s.to_string())))
             }
-        }
+        };
+        result.map_err(DecodeError::Payload)
     }
 
     /// Resolve a type-reference path (e.g. `"/DataTypes/SpeedType"` or
     /// `"uint8"`) into a [`DataType`].
     ///
     /// The returned value is either a clone of an entry in the type
-    /// map or a synthesised `DataType` for basic / built-in types.
+    /// map or a synthesised `DataType` for basic / built-in types. Stored
+    /// aliases are followed with cycle detection; fixed string sizes are kept.
+    /// Qualified paths require exact entries. Only unqualified names may use
+    /// short-name compatibility lookup or builtin synthesis.
     pub fn resolve_ref(
         &self,
         types: &HashMap<String, DataType>,
@@ -166,11 +125,30 @@ impl Decoder {
 
         let key = convert::extract_last(ref_path).to_lowercase();
 
-        // 1) Type-map lookup (application data types).
-        if let Some(dt) = types.get(&key) {
+        // Preserve scoped identities before using legacy short-name entries.
+        if let Some(mut dt) = lookup_type(types, ref_path) {
+            let mut visited = HashSet::new();
+            while let Some(target) = alias_target(types, dt) {
+                let DataTypeKind::TypeReference(reference) = &dt.kind else {
+                    unreachable!()
+                };
+                if !visited.insert(reference.type_name.as_str()) {
+                    return None;
+                }
+                dt = target;
+            }
+            if let DataTypeKind::TypeReference(reference) = &dt.kind
+                && reference.type_name.contains('/')
+                && !types.contains_key(&reference.type_name)
+            {
+                return None;
+            }
             return Some(dt.clone());
         }
 
+        if ref_path.contains('/') {
+            return None;
+        }
         // 2) Fallback: treat as a basic-type reference.
         let tr = types::TypeReference {
             type_name: ref_path.to_string(),
@@ -186,6 +164,48 @@ impl Decoder {
 
         None
     }
+}
+
+fn lookup_type<'a>(types: &'a HashMap<String, DataType>, reference: &str) -> Option<&'a DataType> {
+    types.get(reference).or_else(|| {
+        (!reference.contains('/'))
+            .then(|| types.get(&reference.to_lowercase()))
+            .flatten()
+    })
+}
+
+fn alias_target<'a>(types: &'a HashMap<String, DataType>, dt: &DataType) -> Option<&'a DataType> {
+    use crate::ast::resolver::resolve_basic_type;
+    // Declared bases are terminal primitives. Their canonical names may also
+    // be used by application/implementation aliases in the compatibility map.
+    if dt.category == "SW-BASE-TYPE" {
+        return None;
+    }
+    let DataTypeKind::TypeReference(reference) = &dt.kind else {
+        return None;
+    };
+    if reference.string_size.is_some() {
+        return None;
+    }
+    if let Some(target) = types.get(&reference.type_name) {
+        // Preserve existing VALUE identities when the old name already has
+        // exactly the declared primitive semantics.
+        if target.category == "SW-BASE-TYPE"
+            && let DataTypeKind::TypeReference(base) = &target.kind
+            && resolve_basic_type(reference).is_some()
+            && resolve_basic_type(reference) == resolve_basic_type(base)
+        {
+            return None;
+        }
+        return Some(target);
+    }
+    // Primitive base references can share a short name with their owner.
+    // Keep their existing primitive interpretation instead of making a
+    // spurious self-alias through the short-name compatibility lookup.
+    resolve_basic_type(reference)
+        .is_none()
+        .then(|| lookup_type(types, &reference.type_name))
+        .flatten()
 }
 
 // ---------------------------------------------------------------------------
@@ -282,7 +302,19 @@ mod tests {
             },
         ];
         let point_dt = DataType::new_structure("Point".into(), "STRUCTURE".into(), point_fields);
-        [("point".to_string(), point_dt)].into_iter().collect()
+        [
+            ("point".to_string(), point_dt),
+            (
+                "/Base/uint32".into(),
+                DataType::new_type_reference(
+                    "uint32".into(),
+                    "SW-BASE-TYPE".into(),
+                    "uint32".into(),
+                ),
+            ),
+        ]
+        .into_iter()
+        .collect()
     }
 
     struct TestDecoder {
@@ -314,6 +346,60 @@ mod tests {
         let (n, v) = d.decode(&[0xAB], &dt).unwrap();
         assert_eq!(n, 1);
         assert_eq!(v, Value::U8(0xAB));
+    }
+
+    #[test]
+    fn decode_numeric_aliases_and_preserve_next_field() {
+        let cases: &[(&str, &[u8], usize, Value)] = &[
+            ("sint8", &[0xFF, 0x7F], 1, Value::I8(-1)),
+            ("int8", &[0x80, 0x7F], 1, Value::I8(-128)),
+            ("int8_t", &[0xFF, 0x7F], 1, Value::I8(-1)),
+            ("uint8", &[0xFF, 0x7F], 1, Value::U8(255)),
+            ("uint8_t", &[0xFF, 0x7F], 1, Value::U8(255)),
+            (
+                "float64",
+                &[0x3F, 0xF0, 0, 0, 0, 0, 0, 1, 0x7F],
+                8,
+                Value::F64(f64::from_bits(0x3FF0_0000_0000_0001)),
+            ),
+            (
+                "float64_t",
+                &[0x3F, 0xF0, 0, 0, 0, 0, 0, 1, 0x7F],
+                8,
+                Value::F64(f64::from_bits(0x3FF0_0000_0000_0001)),
+            ),
+            (
+                "double",
+                &[0x3F, 0xF0, 0, 0, 0, 0, 0, 1, 0x7F],
+                8,
+                Value::F64(f64::from_bits(0x3FF0_0000_0000_0001)),
+            ),
+            (
+                "float32",
+                &[0x3F, 0x80, 0, 1, 0x7F],
+                4,
+                Value::F32(f32::from_bits(0x3F80_0001)),
+            ),
+            (
+                "float",
+                &[0x3F, 0x80, 0, 1, 0x7F],
+                4,
+                Value::F32(f32::from_bits(0x3F80_0001)),
+            ),
+        ];
+        let d = decoder();
+        let sentinel = DataType::new_type_reference("next".into(), "VALUE".into(), "uint8".into());
+        for (name, data, expected_size, expected) in cases {
+            let dt = DataType::new_type_reference("number".into(), "VALUE".into(), (*name).into());
+            let (consumed, value) = d.decode(data, &dt).unwrap();
+            assert_eq!(consumed, *expected_size, "{name}");
+            assert_eq!(&value, expected, "{name}");
+            assert_eq!(
+                d.decode(&data[consumed..], &sentinel).unwrap(),
+                (1, Value::U8(0x7F)),
+                "{name}: next field must remain aligned",
+            );
+        }
     }
 
     #[test]
@@ -394,6 +480,7 @@ mod tests {
                 size: 3,
                 in_place: false,
                 element_ref: "uint8".into(),
+                bounds: None,
             }),
         };
         let d = decoder();

@@ -10,6 +10,9 @@ bytes
   -> record batch
 ```
 
+See the [ARXML Decoder Validation Plan](arxml_validation_plan.md) for the planned
+SOME/IP checks using `autosar-data-py` and `someipy`.
+
 ## Configuration
 
 Install a named complete GBF schema through the schema management API first:

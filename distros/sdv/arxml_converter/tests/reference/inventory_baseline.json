@@ -1,0 +1,206 @@
+{
+  "documents": [
+    {
+      "categories": {
+        "IMPLEMENTATION-DATA-TYPE:ARRAY": {
+          "matched": 2
+        },
+        "IMPLEMENTATION-DATA-TYPE:STRUCTURE": {
+          "matched": 3
+        },
+        "IMPLEMENTATION-DATA-TYPE:TYPE_REFERENCE": {
+          "matched": 2
+        },
+        "IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "matched": 4
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 2
+        }
+      },
+      "counts": {
+        "matched": 13
+      },
+      "id": "repository_implementation_types",
+      "load": {
+        "schema_version": "AUTOSAR 4.5.0",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "8239e54a43f7672e",
+      "sha256": "349eee6054f66fa7419f4e7f235955ad9a5d04248971fa1096506393845fc9e0",
+      "type_count": 13
+    },
+    {
+      "categories": {
+        "STD-CPP-IMPLEMENTATION-DATA-TYPE:STRING": {
+          "unrepresented": 1
+        },
+        "STD-CPP-IMPLEMENTATION-DATA-TYPE:STRUCTURE": {
+          "matched": 3
+        },
+        "STD-CPP-IMPLEMENTATION-DATA-TYPE:TYPE_REFERENCE": {
+          "matched": 10
+        },
+        "STD-CPP-IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "unrepresented": 11
+        },
+        "STD-CPP-IMPLEMENTATION-DATA-TYPE:VECTOR": {
+          "matched": 1,
+          "unrepresented": 1
+        }
+      },
+      "counts": {
+        "matched": 14,
+        "unrepresented": 13
+      },
+      "id": "repository_ap",
+      "load": {
+        "schema_version": "AUTOSAR 4.5.0",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "e65ba1c1a372da60",
+      "sha256": "3d9fa01b371199438e5803a34168805d2658fb59f49c3a8755b371ddc6c3540d",
+      "type_count": 27
+    },
+    {
+      "categories": {
+        "APPLICATION-ARRAY-DATA-TYPE:ARRAY": {
+          "matched": 207
+        },
+        "APPLICATION-PRIMITIVE-DATA-TYPE:STRING": {
+          "matched": 75
+        },
+        "APPLICATION-PRIMITIVE-DATA-TYPE:VALUE": {
+          "matched": 830
+        },
+        "APPLICATION-RECORD-DATA-TYPE:STRUCTURE": {
+          "matched": 262
+        },
+        "IMPLEMENTATION-DATA-TYPE:ARRAY": {
+          "matched": 103
+        },
+        "IMPLEMENTATION-DATA-TYPE:STRUCTURE": {
+          "matched": 441
+        },
+        "IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "matched": 832
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 12
+        }
+      },
+      "counts": {
+        "matched": 2762
+      },
+      "id": "repository_baq",
+      "load": {
+        "schema_version": "AUTOSAR 4.5.0",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "eb70ed472cd698cb",
+      "sha256": "5a397ed2368540d208c0eef07fd51e5e58def5f4bd2fbf35392664e4a55e2935",
+      "type_count": 2762
+    },
+    {
+      "categories": {
+        "STD-CPP-IMPLEMENTATION-DATA-TYPE:ARRAY": {
+          "matched": 1
+        },
+        "STD-CPP-IMPLEMENTATION-DATA-TYPE:STRUCTURE": {
+          "matched": 2
+        },
+        "STD-CPP-IMPLEMENTATION-DATA-TYPE:TYPE_REFERENCE": {
+          "matched": 2
+        },
+        "STD-CPP-IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "unrepresented": 2
+        }
+      },
+      "counts": {
+        "matched": 5,
+        "unrepresented": 2
+      },
+      "id": "official_structure",
+      "load": {
+        "schema_version": "AUTOSAR 4.5.0",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "32dd344d981644fc",
+      "sha256": "bf93b88cbad123e62e50b9db17bd644edebcf2788b6a4c459cdba9200cd025df",
+      "type_count": 7
+    },
+    {
+      "categories": {
+        "IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 2
+      },
+      "id": "upstream_uint32",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "63083f025da3ef59",
+      "sha256": "627c5feeb0e82e0ba1b8acf2f643f8110a22989027b9ed9c775be040028c3e1d",
+      "type_count": 2
+    },
+    {
+      "categories": {
+        "IMPLEMENTATION-DATA-TYPE:VALUE": {
+          "matched": 1
+        },
+        "SW-BASE-TYPE:FIXED_LENGTH": {
+          "matched": 1
+        }
+      },
+      "counts": {
+        "matched": 2
+      },
+      "id": "upstream_arbitrary_base",
+      "load": {
+        "schema_version": "AUTOSAR R25-11",
+        "status": "ok",
+        "warnings": []
+      },
+      "results_checksum": "ce17883e57b5a72f",
+      "sha256": "2d1a87c45c9df8d2d01fc19755b7b7edad96ac9837b65a49906c35fccf7a679e",
+      "type_count": 2
+    },
+    {
+      "categories": {},
+      "counts": {},
+      "id": "repository_minimal_cp",
+      "load": {
+        "error": "Failed to parse $INPUT:1: Invalid arxml file: bad file header",
+        "status": "error"
+      },
+      "results_checksum": "a290a741564e1fc5",
+      "sha256": "be30995e2de7791bef40eb1756ff688eb535455c4e5b473818cee4905bdb1767",
+      "type_count": 0
+    },
+    {
+      "categories": {},
+      "counts": {},
+      "id": "repository_legacy_cp",
+      "load": {
+        "error": "Failed to parse $INPUT:1261: Element HAS-INTERNAL-STATE exists in TRANSFORMATION-TECHNOLOGY, but is not allowed in AUTOSAR 4.2.2",
+        "status": "error"
+      },
+      "results_checksum": "401f0fd45070969a",
+      "sha256": "41b5b1ded0719358067882f5dc165f7afb85587eb4bcf31d8d423cdcbb52ca8d",
+      "type_count": 0
+    }
+  ],
+  "version": 1
+}

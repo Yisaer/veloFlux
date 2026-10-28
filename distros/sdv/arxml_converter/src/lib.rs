@@ -9,9 +9,9 @@ use std::path::Path;
 
 use roxmltree::Document;
 
-use crate::ast::types::{DataType, DataTypeKind};
-use crate::decoder::Decoder;
+use crate::ast::types::{ApplicationTypeConstraints, DataType, DataTypeKind};
 pub use crate::decoder::value::Value;
+use crate::decoder::{DecodePlan, Decoder};
 use crate::parser::ap::ApParser;
 use crate::parser::cp::CpParser;
 use crate::util::xml;
@@ -46,10 +46,12 @@ enum CodecVariant {
         parser: Box<CpParser>,
         types: HashMap<String, DataType>,
         decoder: Decoder,
+        plans: HashMap<u32, Result<DecodePlan, String>>,
     },
     Ap {
         parser: Box<ApParser>,
         decoder: Decoder,
+        plans: HashMap<(u16, u16), Result<DecodePlan, String>>,
     },
 }
 
@@ -78,11 +80,33 @@ impl ArxmlCodec {
             let mut parser = CpParser::new();
             parser.parse(&doc)?;
             let types = parser.merged_data_types();
+            let decoder = Decoder::new();
+            // CP payload lookup is header-based. The supplied service ID is
+            // validated separately on each decode, as in the parser contract.
+            let plans =
+                if let Some(&service) = parser.topology_parser().service_id_map.keys().next() {
+                    parser
+                        .topology_parser()
+                        .header_id_ref
+                        .keys()
+                        .map(|&header| {
+                            (
+                                header,
+                                parser
+                                    .resolve_type(service, header)
+                                    .map(|dt| decoder.compile(&types, dt)),
+                            )
+                        })
+                        .collect()
+                } else {
+                    HashMap::new()
+                };
             Ok(Self {
                 variant: CodecVariant::Cp {
                     parser: Box::new(parser),
                     types,
-                    decoder: Decoder::new(),
+                    decoder,
+                    plans,
                 },
             })
         } else {
@@ -102,10 +126,23 @@ impl ArxmlCodec {
     fn load_as_ap(doc: &Document) -> Result<Self, String> {
         let mut parser = ApParser::new();
         parser.parse(doc)?;
+        let decoder = Decoder::new();
+        let mut plans = HashMap::new();
+        for (&service_id, service) in &parser.services {
+            for &event_id in service.events.keys().chain(service.field_notify.keys()) {
+                plans.insert(
+                    (service_id, event_id),
+                    parser
+                        .resolve_type(service_id, event_id)
+                        .map(|dt| decoder.compile(parser.data_types(), dt)),
+                );
+            }
+        }
         Ok(Self {
             variant: CodecVariant::Ap {
                 parser: Box::new(parser),
-                decoder: Decoder::new(),
+                decoder,
+                plans,
             },
         })
     }
@@ -133,14 +170,18 @@ impl ArxmlCodec {
     /// CP decode: resolve `(service_id, header_id)` then decode `data`.
     pub fn decode_cp(&self, service_id: u16, header_id: u32, data: &[u8]) -> Result<Value, String> {
         match &self.variant {
-            CodecVariant::Cp {
-                parser,
-                types,
-                decoder,
-            } => {
-                let dt = parser.resolve_type(service_id, header_id)?;
-                let (_consumed, value) = decoder.decode(types, data, dt)?;
-                Ok(value)
+            CodecVariant::Cp { parser, plans, .. } => {
+                if !parser
+                    .topology_parser()
+                    .service_id_map
+                    .contains_key(&service_id)
+                {
+                    return Err(format!("no service found for ID {service_id}"));
+                }
+                let plan = plans
+                    .get(&header_id)
+                    .ok_or_else(|| format!("no header ref for ID {header_id}"))?;
+                decode_cached(plan, data)
             }
             CodecVariant::Ap { .. } => panic!("decode_cp called on AP codec"),
         }
@@ -149,7 +190,14 @@ impl ArxmlCodec {
     /// AP decode: resolve `(service_id, event_id)` then decode `data`.
     pub fn decode_ap(&self, service_id: u16, event_id: u16, data: &[u8]) -> Result<Value, String> {
         match &self.variant {
-            CodecVariant::Ap { parser, decoder } => {
+            CodecVariant::Ap {
+                parser,
+                decoder,
+                plans,
+            } => {
+                if let Some(plan) = plans.get(&(service_id, event_id)) {
+                    return decode_cached(plan, data);
+                }
                 let dt = parser.resolve_type(service_id, event_id)?;
                 let (_consumed, value) = decoder.decode(parser.data_types(), data, dt)?;
                 Ok(value)
@@ -166,20 +214,10 @@ impl ArxmlCodec {
     /// - **AP**: resolves and decodes directly via `(service_id, event_id)`.
     pub fn decode(&self, service_id: u16, event_id: u16, data: &[u8]) -> Result<Value, String> {
         match &self.variant {
-            CodecVariant::Ap { parser, decoder } => {
-                let dt = parser.resolve_type(service_id, event_id)?;
-                let (_consumed, value) = decoder.decode(parser.data_types(), data, dt)?;
-                Ok(value)
-            }
-            CodecVariant::Cp {
-                parser,
-                types,
-                decoder,
-            } => {
+            CodecVariant::Ap { .. } => self.decode_ap(service_id, event_id, data),
+            CodecVariant::Cp { .. } => {
                 let header_id = crate::util::convert::merge_u16_to_u32(service_id, event_id);
-                let dt = parser.resolve_type(service_id, header_id)?;
-                let (_consumed, value) = decoder.decode(types, data, dt)?;
-                Ok(value)
+                self.decode_cp(service_id, header_id, data)
             }
         }
     }
@@ -200,10 +238,20 @@ impl ArxmlCodec {
     /// [`DataType`], searching the same type map used by the binary decoder.
     pub fn resolve_ref(&self, ref_path: &str) -> Option<DataType> {
         match &self.variant {
-            CodecVariant::Ap { parser, decoder } => {
-                decoder.resolve_ref(parser.data_types(), ref_path)
-            }
+            CodecVariant::Ap {
+                parser, decoder, ..
+            } => decoder.resolve_ref(parser.data_types(), ref_path),
             CodecVariant::Cp { types, decoder, .. } => decoder.resolve_ref(types, ref_path),
+        }
+    }
+
+    /// Inspect retained CP application limits by their full AUTOSAR type path.
+    /// These are metadata only; decoding does not enforce them. Returns None
+    /// for AP codecs, unknown paths, or types without a declared limit.
+    pub fn application_type_constraints(&self, path: &str) -> Option<&ApplicationTypeConstraints> {
+        match &self.variant {
+            CodecVariant::Cp { parser, .. } => parser.application_type_constraints(path),
+            CodecVariant::Ap { .. } => None,
         }
     }
 
@@ -303,6 +351,7 @@ impl ArxmlCodec {
             return "unknown".to_string();
         };
         match &resolved.kind {
+            DataTypeKind::Unsupported { .. } => "unknown".to_string(),
             DataTypeKind::TypeReference(tr) => {
                 // type_name may be a path like "/BaseTypes/uint16".
                 tr.type_name
@@ -317,19 +366,19 @@ impl ArxmlCodec {
         }
     }
 
-    /// Return all known `(service_id, event_id)` pairs that resolve
-    /// to a valid type.
-    pub fn known_entries(&self) -> Vec<(u16, u16)> {
-        match &self.variant {
+    /// Enumerate configured message identities without resolving payload types.
+    /// Includes entries whose resolution reports an error, so consumers can
+    /// surface diagnostics instead of silently omitting configured messages.
+    pub fn configured_entries(&self) -> Vec<(u16, u16)> {
+        let mut entries: Vec<_> = match &self.variant {
             CodecVariant::Cp { parser, .. } => parser
                 .topology_parser()
                 .header_id_ref
                 .keys()
-                .filter_map(|&header_id| {
+                .map(|&header_id| {
                     let service_id = (header_id >> 16) as u16;
                     let event_id = header_id as u16;
-                    self.resolve(service_id, event_id).ok()?;
-                    Some((service_id, event_id))
+                    (service_id, event_id)
                 })
                 .collect(),
             CodecVariant::Ap { parser, .. } => {
@@ -342,16 +391,34 @@ impl ArxmlCodec {
                         entries.push((service_id, field_id));
                     }
                 }
-                entries.retain(|&(sid, eid)| self.resolve(sid, eid).is_ok());
                 entries
             }
-        }
+        };
+        entries.sort_unstable();
+        entries.dedup();
+        entries
+    }
+
+    /// Return configured `(service_id, event_id)` pairs that resolve to a type.
+    /// Use `configured_entries` when resolution failures must be reported.
+    pub fn known_entries(&self) -> Vec<(u16, u16)> {
+        self.configured_entries()
+            .into_iter()
+            .filter(|&(service_id, event_id)| self.resolve(service_id, event_id).is_ok())
+            .collect()
     }
 }
 
 // ---------------------------------------------------------------------------
 // Auto-detection helpers
 // ---------------------------------------------------------------------------
+
+fn decode_cached(plan: &Result<DecodePlan, String>, data: &[u8]) -> Result<Value, String> {
+    match plan {
+        Ok(plan) => plan.decode(data).map(|(_, value)| value),
+        Err(error) => Err(error.clone()),
+    }
+}
 
 fn has_ar_package(node: roxmltree::Node, name: &str) -> bool {
     // Check direct children first.
@@ -396,6 +463,41 @@ mod tests {
     use super::*;
 
     const CP_ARXML: &str = include_str!("../tests/test_data/minimal_cp.arxml");
+
+    #[test]
+    fn configured_ap_entries_include_unresolvable_events_and_field_notifiers() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/test_data/s1_ap_test.xml"
+        );
+        let mut codec = ArxmlCodec::load(path).unwrap();
+        let supported = codec.known_entries();
+        let CodecVariant::Ap { parser, .. } = &mut codec.variant else {
+            panic!("expected AP")
+        };
+        let service = parser.services.get_mut(&33282).unwrap();
+        assert!(!service.events.contains_key(&65532));
+        let mut event = service.events.values().next().unwrap().clone();
+        event.event_id = 65532;
+        event.event_ref = "/interfaces/INI_WiFiStation/MissingEvent".into();
+        service.events.insert(65532, event);
+        service.field_notify.insert(
+            65533,
+            crate::parser::ap::iautosar::FieldNotify {
+                event_id: 65533,
+                short_name: "MissingField".into(),
+                field_ref: "/interfaces/INI_WiFiStation/MissingField".into(),
+            },
+        );
+        let configured = codec.configured_entries();
+        assert!(configured.contains(&(33282, 65532)));
+        assert!(configured.contains(&(33282, 65533)));
+        assert!(!codec.known_entries().contains(&(33282, 65532)));
+        assert!(!codec.known_entries().contains(&(33282, 65533)));
+        for pair in supported {
+            assert!(codec.known_entries().contains(&pair));
+        }
+    }
 
     #[test]
     fn detect_cp_arxml() {
