@@ -1958,15 +1958,26 @@ mod tests {
         .into_response();
         assert_eq!(create_response.status(), StatusCode::CREATED);
         state
+            .storage
+            .put_pipeline_run_state(storage::StoredPipelineRunState {
+                pipeline_id: "retry_pipe".to_string(),
+                desired_state: storage::StoredPipelineDesiredState::Running,
+            })
+            .expect("persist running intent before runtime recovery");
+        state
             .instances
             .default_instance()
             .mark_pipeline_failed("retry_pipe", "old_attempt", "old error".to_string())
             .expect("fail runtime");
 
+        let database_path = state.storage.metadata().path();
+        let before = std::fs::read(database_path).expect("read database before recovery");
+
         let response = start_pipeline_handler(State(state.clone()), Path("retry_pipe".to_string()))
             .await
             .into_response();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(std::fs::read(database_path).unwrap(), before);
         assert!(
             runtime_snapshot(&state, "default", "retry_pipe")
                 .expect("snapshot")

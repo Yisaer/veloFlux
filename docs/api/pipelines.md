@@ -207,6 +207,9 @@ processor counters.
 ### Runtime convergence matrix
 
 The manager persists `desired_state` before attempting runtime convergence. If the current runtime
+intent is already persisted, the metadata write transaction is skipped; runtime convergence and
+explicit failure recovery are still performed. Changed intent is committed durably before runtime
+convergence is attempted. If the current runtime
 status is `stopping`, lifecycle operations return `409 Conflict` and the caller must wait for the
 stop to finish.
 

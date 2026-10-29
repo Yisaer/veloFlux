@@ -436,6 +436,26 @@ impl MetadataStorage {
         state: StoredPipelineRunState,
     ) -> Result<(), StorageError> {
         let _guard = self.lock_db()?;
+        // Keep the comparison and update under the same lock as snapshot commits.
+        // Repeated lifecycle requests must not open a write transaction.
+        {
+            let txn = self
+                .backend
+                .db
+                .begin_read()
+                .map_err(StorageError::backend)?;
+            let table = txn
+                .open_table(PIPELINE_RUN_STATES_TABLE)
+                .map_err(StorageError::backend)?;
+            let current = table
+                .get(state.pipeline_id.as_str())
+                .map_err(StorageError::backend)?
+                .map(|raw| decode_record::<StoredPipelineRunState>(raw.value()))
+                .transpose()?;
+            if current.as_ref() == Some(&state) {
+                return Ok(());
+            }
+        }
         let txn = self
             .backend
             .db
@@ -1878,6 +1898,31 @@ mod tests {
             pipeline_id: "pipe_1".to_string(),
             desired_state: StoredPipelineDesiredState::Running,
         }
+    }
+
+    #[test]
+    fn unchanged_pipeline_run_state_does_not_write_and_changes_survive_reopen() {
+        let dir = tempdir().unwrap();
+        let store = MetadataStorage::open(dir.path()).unwrap();
+        let mut state = sample_pipeline_run_state();
+        store.put_pipeline_run_state(state.clone()).unwrap();
+        let running_bytes = std::fs::read(store.path()).unwrap();
+        store.put_pipeline_run_state(state.clone()).unwrap();
+        assert_eq!(std::fs::read(store.path()).unwrap(), running_bytes);
+
+        state.desired_state = StoredPipelineDesiredState::Stopped;
+        store.put_pipeline_run_state(state.clone()).unwrap();
+        let stopped_bytes = std::fs::read(store.path()).unwrap();
+        assert_ne!(stopped_bytes, running_bytes);
+        store.put_pipeline_run_state(state.clone()).unwrap();
+        assert_eq!(std::fs::read(store.path()).unwrap(), stopped_bytes);
+        drop(store);
+
+        let store = MetadataStorage::open(dir.path()).unwrap();
+        assert_eq!(
+            store.get_pipeline_run_state(&state.pipeline_id).unwrap(),
+            Some(state)
+        );
     }
 
     fn sample_memory_topic() -> StoredMemoryTopic {
