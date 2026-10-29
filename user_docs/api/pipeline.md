@@ -348,20 +348,15 @@ directly; custom secret headers and payloads are never forwarded via redirects.
   instead of encoder inference.
 - Optional `max_body_size: number` (default: `67108864`, i.e. 64 MiB) — maximum single-delivery body
   size in bytes. Exceeding this limit aborts the delivery.
-- Optional `retry_max_attempts: number` (default: none, i.e. no retry) — maximum delivery attempts
-  including the first one. Example: `3` means up to 2 retries.
-- Optional `retry_backoff_ms: number` (default: `1000`) — initial backoff in milliseconds between
-  retries, doubles after each failed attempt.
-- Optional `retry_max_backoff_ms: number` (default: `30000`) — upper bound on backoff duration.
 
 The common sink-level `retry.retry_up_to` accepts `transient`, `uncertain` (default), or `all`.
 `transient` retries connect/timeout/408/429/502/503/504 failures; `uncertain` also retries
 other reqwest send failures and ambiguous remote responses such as 500 and 404. `all` also retries
 `Permanent` delivery errors; startup validation errors still fail before delivery retry begins.
 The shared `retry.max_attempts` includes the first attempt, defaults to one attempt, and rejects
-`0`. The legacy HTTP `retry_*` fields above still configure the same shared attempt count and
-backoff. An empty common `retry` object or `max_attempts: null` leaves a legacy
-`retry_max_attempts` value in place; set `retry.max_attempts` to `1` to make a single attempt.
+`0`. Configure backoff using `retry.initial_backoff_ms` (default: `1000`) and
+`retry.max_backoff_ms` (default: `30000`). The `retry` object belongs at the sink level,
+outside `props`; unknown HTTP properties are rejected.
 The sink retry processor applies to encoded deliveries; collection-native sinks currently
 send each collection once.
 

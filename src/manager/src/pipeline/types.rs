@@ -686,7 +686,7 @@ pub struct NngPubSubSinkPropsRequest {
 }
 
 #[derive(Deserialize, Serialize, Default, Clone)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct HttpSinkPropsRequest {
     pub url: Option<String>,
     pub method: Option<String>,
@@ -698,9 +698,6 @@ pub struct HttpSinkPropsRequest {
     pub secret_headers: Option<BTreeMap<String, SecretRef>>,
     pub content_type: Option<String>,
     pub max_body_size: Option<usize>,
-    pub retry_max_attempts: Option<usize>,
-    pub retry_backoff_ms: Option<u64>,
-    pub retry_max_backoff_ms: Option<u64>,
     pub body: Option<HttpBodyConfigRequest>,
 }
 

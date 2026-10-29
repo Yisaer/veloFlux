@@ -4,8 +4,8 @@ use flow::EncoderRegistry;
 use flow::pipeline::{
     FileRetentionConfig, FileSinkProps, HttpSinkProps, KuksaSinkProps, KuraSinkProps,
     MemorySinkProps, MqttSinkProps, NngPubSubSinkProps, NopSinkProps, PipelineDefinition,
-    PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkRetryConfig, SinkType,
-    SourceDefinition, VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
+    PipelineOptions, PipelineStatus, SinkDefinition, SinkProps, SinkType, SourceDefinition,
+    VideoCodec, VideoContainer, VideoRollingConfig, VideoSinkProps,
 };
 use flow::planner::sink::{SinkEncoderConfig, SinkEncoderKind};
 use parser::SelectStmt;
@@ -676,19 +676,7 @@ pub(crate) fn build_pipeline_definition(
                 if let Some(max_size) = http_props.max_body_size {
                     props = props.with_max_body_size(max_size);
                 }
-                // Collect retry config from HTTP request props (applied at sink level below).
-                let mut http_retry = SinkRetryConfig::default();
-                if let Some(max_attempts) = http_props.retry_max_attempts {
-                    http_retry.max_attempts = Some(max_attempts);
-                }
-                if let Some(backoff_ms) = http_props.retry_backoff_ms {
-                    http_retry.initial_backoff_ms = backoff_ms;
-                }
-                if let Some(max_backoff_ms) = http_props.retry_max_backoff_ms {
-                    http_retry.max_backoff_ms = max_backoff_ms;
-                }
                 SinkDefinition::new(sink_id.clone(), SinkType::Http, SinkProps::Http(props))
-                    .with_retry(http_retry)
             }
             other => return Err(format!("unsupported sink type: {other}")),
         };
@@ -914,20 +902,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn common_retry_policy_preserves_legacy_http_attempts() {
+    async fn http_sink_uses_common_retry_policy() {
         let instance = test_instance();
         let request: CreatePipelineRequest = serde_json::from_value(json!({
-            "id": "pipe_http_retry_merge",
+            "id": "pipe_http_retry",
             "revision": 1,
             "sql": "SELECT 1 AS a",
             "sinks": [{
                 "id": "http_sink",
                 "type": "http",
                 "props": {
-                    "url": "http://localhost/upload",
-                    "retry_max_attempts": 5
+                    "url": "http://localhost/upload"
                 },
-                "retry": { "retry_up_to": "transient" },
+                "retry": {
+                    "retry_up_to": "transient",
+                    "max_attempts": 5,
+                    "initial_backoff_ms": 200,
+                    "max_backoff_ms": 2000
+                },
                 "encoder": { "type": "json" }
             }]
         }))
@@ -943,6 +935,8 @@ mod tests {
         .expect("build pipeline definition");
         let retry = &definition.sinks()[0].retry;
         assert_eq!(retry.max_attempts, Some(5));
+        assert_eq!(retry.initial_backoff_ms, 200);
+        assert_eq!(retry.max_backoff_ms, 2000);
         assert_eq!(retry.retry_up_to, flow::pipeline::SinkRetryUpTo::Transient);
     }
 

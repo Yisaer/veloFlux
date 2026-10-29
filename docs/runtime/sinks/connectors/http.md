@@ -46,13 +46,10 @@ See [common sink properties](README.md#common-sink-properties) for sink-level fi
 | `props.content_type` | string | No | Inferred from encoder | Explicit request `Content-Type` in raw mode; rejected in multipart mode. |
 | `props.max_body_size` | integer | No | `67108864` (64 MiB) | Maximum encoded delivery payload bytes; excludes multipart envelope overhead. |
 | `props.body` | object | No | `{"type":"raw"}` | Request body configuration; see the body fields below. |
-| `props.retry_max_attempts` | integer | No | - | Legacy input for `retry.max_attempts`; maximum attempts including the first, greater than zero. |
-| `props.retry_backoff_ms` | integer | No | `1000` | Legacy input for `retry.initial_backoff_ms`. |
-| `props.retry_max_backoff_ms` | integer | No | `30000` | Legacy input for `retry.max_backoff_ms`. |
 | `encoder.type` | string | No | `json` | Encoder kind; `none` is rejected. |
 
-Legacy retry properties are converted to common sink-level retry settings. Explicit `retry` fields
-override the corresponding legacy values.
+Retry is configured only through the common sink-level `retry` object, outside `props`.
+Unknown HTTP properties are rejected.
 
 ### Authentication fields
 
