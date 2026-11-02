@@ -34,7 +34,7 @@ jobs:
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ github.token }}
+          password: ${{ secrets.QNX_INSTALLER_TOKEN }}
 
       - name: Pull QNX 7.1 SDP image
         run: docker pull "$QNX_SDP_IMAGE"
