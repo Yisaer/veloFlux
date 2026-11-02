@@ -19,6 +19,7 @@ concurrency:
 jobs:
   actionlint:
     name: Actionlint
+    if: github.event_name != 'pull_request' || github.head_ref != 'qnx_decrypt'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

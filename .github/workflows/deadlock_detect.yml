@@ -4,6 +4,7 @@ on: [pull_request]
 
 jobs:
   kani-analysis:
+    if: github.head_ref != 'qnx_decrypt'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code

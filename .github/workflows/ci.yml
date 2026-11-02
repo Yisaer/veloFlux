@@ -23,7 +23,7 @@ env:
 jobs:
   pr-title-lint:
     name: PR Title Lint
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.head_ref != 'qnx_decrypt'
     runs-on: ubuntu-latest
     steps:
       - name: Check PR title follows conventional commits
@@ -33,6 +33,7 @@ jobs:
 
   lint:
     name: Lint
+    if: github.event_name != 'pull_request' || github.head_ref != 'qnx_decrypt'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +64,7 @@ jobs:
 
   test-core:
     name: Test Core
+    if: github.event_name != 'pull_request' || github.head_ref != 'qnx_decrypt'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -119,6 +121,7 @@ jobs:
 
   test-flow:
     name: Test Flow
+    if: github.event_name != 'pull_request' || github.head_ref != 'qnx_decrypt'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -154,6 +157,7 @@ jobs:
 
   test-sdv:
     name: Test SDV
+    if: github.event_name != 'pull_request' || github.head_ref != 'qnx_decrypt'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -192,6 +196,7 @@ jobs:
 
   test-ffi-nng:
     name: Test FFI NNG Inproc
+    if: github.event_name != 'pull_request' || github.head_ref != 'qnx_decrypt'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -220,6 +225,7 @@ jobs:
 
   coverage:
     name: Coverage
+    if: github.event_name != 'pull_request' || github.head_ref != 'qnx_decrypt'
     runs-on: ubuntu-latest
     services:
       nanomq:

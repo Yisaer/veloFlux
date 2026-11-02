@@ -1,0 +1,193 @@
+name: QNX PKI Crypto Probe
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+concurrency:
+  group: qnx-pki-crypto-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+env:
+  QNX_INSTALL_DIR: /opt/qnx710
+  QNX_QSC_DIR: /opt/qnxsoftwarecenter
+  QNX_RUST_TOOLCHAIN: qnx7
+  QNX_SDP_IMAGE: ghcr.io/emqx/veloflux-qnx-sdp:7.1-try
+  QNX_TARGET_TRIPLE: aarch64-unknown-nto-qnx710
+  QNX_VM_ASSET_SHA256: 51de37d71fa21673431ddc549929ef9a6ab54ee6557d3309819d41305554b1d8
+  PKI_ASSET_SHA256: 9d40383e2aaef16a1793a3960b410aba868d8621d936d9c4450667c011ef37a8
+
+jobs:
+  crypto-probe:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'qnx_decrypt'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Pull QNX 7.1 SDP image
+        run: docker pull "$QNX_SDP_IMAGE"
+
+      - name: Build Rust QNX crypto probe
+        env:
+          QNX_71_LICENSE_KEY: ${{ secrets.QNX_71_LICENSE_KEY }}
+          QNX_71_MYQNX_USER: ${{ secrets.QNX_71_MYQNX_USER }}
+          QNX_71_MYQNX_PASSWORD: ${{ secrets.QNX_71_MYQNX_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$QNX_71_LICENSE_KEY"
+          test -n "$QNX_71_MYQNX_USER"
+          test -n "$QNX_71_MYQNX_PASSWORD"
+          docker run --rm \
+            -v "$PWD:/workspace" -w /workspace \
+            -e QNX_INSTALL_DIR -e QNX_QSC_DIR -e QNX_RUST_TOOLCHAIN \
+            -e QNX_TARGET_TRIPLE -e QNX_71_LICENSE_KEY \
+            -e QNX_71_MYQNX_USER -e QNX_71_MYQNX_PASSWORD \
+            "$QNX_SDP_IMAGE" bash -lc '
+              set -euo pipefail
+              qnx_license_activation_attempted=false
+              cleanup() {
+                status=$?
+                set +e
+                if [ "$qnx_license_activation_attempted" = true ]; then
+                  deactivated=false
+                  for attempt in $(seq 1 20); do
+                    if timeout 180s "$QNX_QSC_DIR/qnxsoftwarecenter/qnxsoftwarecenter_clt" \
+                      -deactivateAll \
+                      -myqnx.user "$QNX_71_MYQNX_USER" \
+                      -myqnx.password "$QNX_71_MYQNX_PASSWORD"; then
+                      deactivated=true
+                      break
+                    fi
+                    if [ "$attempt" -lt 20 ]; then sleep 10; fi
+                  done
+                  if [ "$deactivated" != true ]; then status=1; fi
+                fi
+                exit "$status"
+              }
+              trap cleanup EXIT
+
+              apt-get update
+              apt-get install -y --no-install-recommends curl
+              source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
+              qnx_license_activation_attempted=true
+              "$QNX_QSC_DIR/qnxsoftwarecenter/qnxsoftwarecenter_clt" \
+                -addLicenseKey "$QNX_71_LICENSE_KEY" \
+                -myqnx.user "$QNX_71_MYQNX_USER" \
+                -myqnx.password "$QNX_71_MYQNX_PASSWORD"
+
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --default-toolchain stable
+              source "$HOME/.cargo/env"
+              toolchain_dir=/opt/qnx-rust-toolchain
+              curl -fsSL \
+                https://github.com/qorix-group/rust-lang-qnx8/releases/download/1.3.0/qnx7_rust_toolchain.tar.gz \
+                -o /tmp/qnx7_rust_toolchain.tar.gz
+              mkdir -p "$toolchain_dir"
+              tar -xzf /tmp/qnx7_rust_toolchain.tar.gz -C "$toolchain_dir" --strip-components=1
+              if [ ! -x "$toolchain_dir/bin/rustc" ]; then
+                inner="$(find "$toolchain_dir" -maxdepth 3 -type f -name rustc -perm -111 | head -n 1)"
+                test -n "$inner"
+                toolchain_dir="$(dirname "$(dirname "$inner")")"
+              fi
+              rustup toolchain link "$QNX_RUST_TOOLCHAIN" "$toolchain_dir"
+              mkdir -p tmp/qnx-pki
+              rustc +"$QNX_RUST_TOOLCHAIN" --edition=2021 \
+                --target "$QNX_TARGET_TRIPLE" \
+                scripts/qnx/pki_crypto_probe.rs -o tmp/qnx-pki/pki-crypto-probe
+            '
+
+      - name: Download QNX VM and PKI SDK assets
+        env:
+          QNX_INSTALLER_TOKEN: ${{ secrets.QNX_INSTALLER_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$QNX_INSTALLER_TOKEN"
+          mkdir -p tmp/qnx-pki/vm tmp/qnx-pki/sdk
+          GH_TOKEN="$QNX_INSTALLER_TOKEN" gh release download qnx-sdp-8-installer \
+            --repo Yisaer/qnx-private-assets \
+            --pattern qnx710-aarch64-vm-dist.tar.gz --dir tmp/qnx-pki
+          GH_TOKEN="$QNX_INSTALLER_TOKEN" gh release download sheng-an-pki-qnx-20261028 \
+            --repo Yisaer/qnx-private-assets \
+            --pattern shengan-pki-qnx-20261028.tar.gz --dir tmp/qnx-pki
+          echo "$QNX_VM_ASSET_SHA256  tmp/qnx-pki/qnx710-aarch64-vm-dist.tar.gz" | sha256sum --check --strict
+          echo "$PKI_ASSET_SHA256  tmp/qnx-pki/shengan-pki-qnx-20261028.tar.gz" | sha256sum --check --strict
+          tar -xzf tmp/qnx-pki/qnx710-aarch64-vm-dist.tar.gz --strip-components=1 -C tmp/qnx-pki/vm
+          tar -xzf tmp/qnx-pki/shengan-pki-qnx-20261028.tar.gz -C tmp/qnx-pki/sdk
+          test -f tmp/qnx-pki/sdk/lib/libcn_x509_proxy.so
+          test -f tmp/qnx-pki/sdk/lib/libcn_x509_crypto.so
+          test -f tmp/qnx-pki/sdk/lib/libcn_x509_common.so
+
+      - name: Run Rust crypto probe in ARM64 QNX VM
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged --network host \
+            -v "$PWD/tmp/qnx-pki:/workspace" -w /workspace \
+            -e QNX_INSTALL_DIR \
+            "$QNX_SDP_IMAGE" bash -lc '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends qemu-system-arm qemu-utils
+              export RUN_DIR=/workspace/run
+              export VM_OUTPUT_DIR=/workspace/vm/image
+              export HOST_QCONN_PORT=8001
+              export LOG_FILE=/workspace/console.log
+              export PIDFILE=/workspace/run/qemu.pid
+              /workspace/vm/scripts/start-vm.sh > /workspace/start.log 2>&1 &
+              vm_pid=$!
+              cleanup() {
+                status=$?
+                set +e
+                kill "$vm_pid" 2>/dev/null || true
+                wait "$vm_pid" 2>/dev/null || true
+                exit "$status"
+              }
+              trap cleanup EXIT
+
+              deadline=$((SECONDS + 300))
+              while [ "$SECONDS" -lt "$deadline" ]; do
+                kill -0 "$vm_pid" 2>/dev/null || { cat /workspace/start.log >&2; exit 1; }
+                if timeout 5 bash -c ": </dev/tcp/127.0.0.1/8001" 2>/dev/null; then break; fi
+                sleep 5
+              done
+              timeout 5 bash -c ": </dev/tcp/127.0.0.1/8001"
+              source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
+              gdb="$(command -v ntoaarch64-gdb)"
+              : > /workspace/probe.log
+              timeout 180s "$gdb" -q -batch \
+                -ex "target qnx 127.0.0.1:8001" \
+                -ex "upload /workspace/sdk/lib/libcn_x509_common.so /data/home/root/apps/libcn_x509_common.so" \
+                -ex "upload /workspace/sdk/lib/libcn_x509_crypto.so /data/home/root/apps/libcn_x509_crypto.so" \
+                -ex "upload /workspace/sdk/lib/libcn_x509_proxy.so /data/home/root/apps/libcn_x509_proxy.so" \
+                -ex "upload /workspace/sdk/conf/cn_x509_config.ini /data/home/root/apps/cn_x509_config.ini" \
+                -ex "upload /workspace/pki-crypto-probe /data/home/root/apps/pki-crypto-probe" \
+                -ex "set environment LD_LIBRARY_PATH /data/home/root/apps" \
+                -ex "set environment PKI_KEY_TYPE 1" \
+                -ex "file /workspace/pki-crypto-probe" \
+                -ex "run" 2>&1 | tee /workspace/probe.log
+              grep -q "PASS: empty AAD encryption and decryption round trip" /workspace/probe.log
+              grep -q "PASS: nonempty AAD encryption and decryption round trip" /workspace/probe.log
+              if grep -q "FAIL:" /workspace/probe.log; then exit 1; fi
+            '
+
+      - name: Upload QNX probe logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qnx-pki-crypto-probe-logs
+          path: |
+            tmp/qnx-pki/start.log
+            tmp/qnx-pki/console.log
+            tmp/qnx-pki/probe.log
+          if-no-files-found: warn

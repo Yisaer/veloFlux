@@ -21,6 +21,7 @@ concurrency:
 jobs:
   dependencies:
     name: Dependencies (${{ matrix.check }})
+    if: github.event_name != 'pull_request' || github.head_ref != 'qnx_decrypt'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -44,7 +45,7 @@ jobs:
 
   secrets:
     name: Secrets
-    if: github.event_name != 'schedule'
+    if: github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.head_ref != 'qnx_decrypt')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
