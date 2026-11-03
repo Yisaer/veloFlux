@@ -159,7 +159,12 @@ def main():
         print("QNX SSH login succeeded", flush=True)
 
         remote = "root@127.0.0.1"
-        run([*ssh, remote, "mkdir -p /data/home/root/apps /mnt/etc"])
+        run([
+            *ssh,
+            remote,
+            "mkdir -p /data/home/root/apps /data/home/root/pki-mnt/etc && "
+            "ln -sP /data/home/root/pki-mnt /mnt && test -d /mnt/etc",
+        ])
         run([
             *scp,
             str(ROOT / "sdk/lib/libcn_x509_common.so"),
