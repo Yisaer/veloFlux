@@ -176,6 +176,7 @@ def main():
         secureclient = ROOT / "libsecureclient.so.1"
         if secureclient.is_file():
             run([*scp, str(secureclient), f"{remote}:/data/home/root/apps/"])
+        run([*ssh, remote, "chmod 755 /data/home/root/apps/*.so*"])
         run([
             *scp,
             str(ROOT / "sdk/conf/cn_x509_config.ini"),
