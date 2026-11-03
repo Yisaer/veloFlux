@@ -1,0 +1,10 @@
+[package]
+name = "pki-crypto-probe"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pki-crypto-probe"
+path = "../pki_crypto_probe.rs"
+
+[workspace]
