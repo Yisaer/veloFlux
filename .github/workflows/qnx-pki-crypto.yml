@@ -92,18 +92,22 @@ jobs:
           test -f tmp/qnx-pki/sdk/lib/libcn_x509_common.so
 
       - name: Run Rust crypto probe in ARM64 QNX VM
+        env:
+          QNX_VM_SSH_PRI_KEY: ${{ secrets.QNX_VM_SSH_PRI_KEY }}
         run: |
           set -euo pipefail
+          test -n "$QNX_VM_SSH_PRI_KEY"
+          printf '%s\n' "$QNX_VM_SSH_PRI_KEY" > tmp/qnx-pki/vm-ssh-key
+          chmod 600 tmp/qnx-pki/vm-ssh-key
           docker run --rm --privileged --network host \
             -v "$PWD/tmp/qnx-pki:/workspace" -w /workspace \
-            -e QNX_INSTALL_DIR \
             "$QNX_SDP_IMAGE" bash -lc '
               set -euo pipefail
               apt-get update
-              apt-get install -y --no-install-recommends qemu-system-arm qemu-utils
+              apt-get install -y --no-install-recommends qemu-system-arm qemu-utils openssh-client
               export RUN_DIR=/workspace/run
               export VM_OUTPUT_DIR=/workspace/vm/image
-              export HOST_QCONN_PORT=8001
+              export HOST_SSH_PORT=2223
               export LOG_FILE=/workspace/console.log
               export PIDFILE=/workspace/run/qemu.pid
               /workspace/vm/scripts/start-vm.sh > /workspace/start.log 2>&1 &
@@ -117,42 +121,43 @@ jobs:
               }
               trap cleanup EXIT
 
-              deadline=$((SECONDS + 300))
+              ssh_args=(
+                -i /workspace/vm-ssh-key -p 2223
+                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+                -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1
+              )
+              scp_args=(
+                -i /workspace/vm-ssh-key -P 2223
+                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+                -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1
+              )
+              deadline=$((SECONDS + 600))
+              ssh_ready=false
               while [ "$SECONDS" -lt "$deadline" ]; do
                 kill -0 "$vm_pid" 2>/dev/null || { cat /workspace/start.log >&2; exit 1; }
-                if timeout 5 bash -c ": </dev/tcp/127.0.0.1/8001" 2>/dev/null; then break; fi
-                sleep 5
-              done
-              timeout 5 bash -c ": </dev/tcp/127.0.0.1/8001"
-              source "$QNX_INSTALL_DIR/qnxsdp-env.sh"
-              gdb="$(command -v ntoaarch64-gdb)"
-              : > /workspace/probe.log
-              probe_passed=false
-              for attempt in $(seq 1 20); do
-                echo "QConn probe attempt $attempt/20"
-                set +e
-                timeout 150s "$gdb" -q -batch \
-                  -ex "target qnx 127.0.0.1:8001" \
-                  -ex "upload /workspace/sdk/lib/libcn_x509_common.so /data/home/root/apps/libcn_x509_common.so" \
-                  -ex "upload /workspace/sdk/lib/libcn_x509_crypto.so /data/home/root/apps/libcn_x509_crypto.so" \
-                  -ex "upload /workspace/sdk/lib/libcn_x509_proxy.so /data/home/root/apps/libcn_x509_proxy.so" \
-                  -ex "upload /workspace/sdk/conf/cn_x509_config.ini /data/home/root/apps/cn_x509_config.ini" \
-                  -ex "upload /workspace/pki-crypto-probe /data/home/root/apps/pki-crypto-probe" \
-                  -ex "set environment LD_LIBRARY_PATH /data/home/root/apps" \
-                  -ex "set environment PKI_KEY_TYPE 1" \
-                  -ex "file /workspace/pki-crypto-probe" \
-                  -ex "run" 2>&1 | tee -a /workspace/probe.log
-                status="${PIPESTATUS[0]}"
-                set -e
-                if grep -q "FAIL:" /workspace/probe.log; then exit 1; fi
-                if grep -q "PASS: nonempty AAD encryption and decryption round trip" /workspace/probe.log; then
-                  probe_passed=true
+                if ssh "${ssh_args[@]}" root@127.0.0.1 true >/dev/null 2>&1; then
+                  ssh_ready=true
                   break
                 fi
-                echo "QConn probe attempt $attempt/20 failed with exit code $status."
-                if [ "$attempt" -lt 20 ]; then sleep 5; fi
+                sleep 5
               done
-              test "$probe_passed" = true
+              if [ "$ssh_ready" != true ]; then
+                echo "QNX VM SSH did not become ready within 600 seconds." >&2
+                exit 1
+              fi
+              ssh "${ssh_args[@]}" root@127.0.0.1 "mkdir -p /data/home/root/apps /mnt/etc"
+              scp "${scp_args[@]}" /workspace/sdk/lib/libcn_x509_common.so \
+                /workspace/sdk/lib/libcn_x509_crypto.so \
+                /workspace/sdk/lib/libcn_x509_proxy.so \
+                /workspace/pki-crypto-probe \
+                root@127.0.0.1:/data/home/root/apps/
+              scp "${scp_args[@]}" /workspace/sdk/conf/cn_x509_config.ini \
+                root@127.0.0.1:/mnt/etc/cn_x509_config.ini
+              ssh "${ssh_args[@]}" root@127.0.0.1 \
+                "LD_LIBRARY_PATH=/data/home/root/apps PKI_KEY_TYPE=1 /data/home/root/apps/pki-crypto-probe" \
+                2>&1 | tee /workspace/probe.log
+              grep -q "PASS: empty AAD encryption and decryption round trip" /workspace/probe.log
+              grep -q "PASS: nonempty AAD encryption and decryption round trip" /workspace/probe.log
             '
 
       - name: Upload QNX probe logs
