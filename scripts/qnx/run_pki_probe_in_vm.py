@@ -173,11 +173,28 @@ def main():
             str(ROOT / "pki-crypto-probe"),
             f"{remote}:/data/home/root/apps/",
         ])
+        secureclient = ROOT / "libsecureclient.so.1"
+        if secureclient.is_file():
+            run([*scp, str(secureclient), f"{remote}:/data/home/root/apps/"])
         run([
             *scp,
             str(ROOT / "sdk/conf/cn_x509_config.ini"),
             f"{remote}:/mnt/etc/cn_x509_config.ini",
         ])
+        dependencies = subprocess.run(
+            [
+                *ssh,
+                remote,
+                "LD_LIBRARY_PATH=/data/home/root/apps "
+                "ldd /data/home/root/apps/libcn_x509_proxy.so",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        print("QNX vendor library dependencies:\n" + dependencies.stdout, flush=True)
         output = run([
             *ssh,
             remote,

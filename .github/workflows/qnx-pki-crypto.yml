@@ -60,6 +60,13 @@ jobs:
           source "$QNX_ENV_FILE"
           export PATH="$QNX_HOST/usr/bin:$PATH"
           command -v ntoaarch64-gcc
+          secureclient="$(find "$QNX_TARGET" -name libsecureclient.so.1 -print -quit)"
+          if [ -n "$secureclient" ]; then
+            cp -L "$secureclient" tmp/qnx-pki/libsecureclient.so.1
+            file tmp/qnx-pki/libsecureclient.so.1
+          else
+            echo "libsecureclient.so.1 is not present in the public QNX NDK"
+          fi
           python3 - <<'PY'
           import json
           import os
