@@ -105,60 +105,9 @@ jobs:
           test -f tmp/qnx-pki/sdk/lib/libcn_x509_common.so
 
       - name: Run Rust crypto probe in ARM64 QNX VM
-        env:
-          QNX_VM_SSH_PRI_KEY: ${{ secrets.QNX_VM_SSH_PRI_KEY }}
         run: |
           set -euo pipefail
-          test -n "$QNX_VM_SSH_PRI_KEY"
-          printf '%s\n' "$QNX_VM_SSH_PRI_KEY" > tmp/qnx-pki/vm-ssh-key
-          chmod 600 tmp/qnx-pki/vm-ssh-key
-          export RUN_DIR="$PWD/tmp/qnx-pki/run"
-          export VM_OUTPUT_DIR="$PWD/tmp/qnx-pki/vm/image"
-          export HOST_SSH_PORT=2223
-          export LOG_FILE="$PWD/tmp/qnx-pki/console.log"
-          export PIDFILE="$PWD/tmp/qnx-pki/run/qemu.pid"
-          tmp/qnx-pki/vm/scripts/start-vm.sh > tmp/qnx-pki/start.log 2>&1 &
-          vm_pid=$!
-          cleanup() {
-            status=$?
-            set +e
-            kill "$vm_pid" 2>/dev/null || true
-            wait "$vm_pid" 2>/dev/null || true
-            exit "$status"
-          }
-          trap cleanup EXIT
-
-          ssh_args=(
-            -i "$PWD/tmp/qnx-pki/vm-ssh-key" -p 2223
-            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-            -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1
-          )
-          scp_args=(
-            -i "$PWD/tmp/qnx-pki/vm-ssh-key" -P 2223
-            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-            -o BatchMode=yes -o ConnectTimeout=5 -o ConnectionAttempts=1
-          )
-          deadline=$((SECONDS + 600))
-          ssh_ready=false
-          while [ "$SECONDS" -lt "$deadline" ]; do
-            kill -0 "$vm_pid" 2>/dev/null || { cat tmp/qnx-pki/start.log >&2; exit 1; }
-            if ssh "${ssh_args[@]}" root@127.0.0.1 true >/dev/null 2>&1; then
-              ssh_ready=true
-              break
-            fi
-            sleep 5
-          done
-          if [ "$ssh_ready" != true ]; then
-            echo "QNX VM SSH did not become ready within 600 seconds." >&2
-            exit 1
-          fi
-
-          ssh "${ssh_args[@]}" root@127.0.0.1 "mkdir -p /data/home/root/apps /mnt/etc"
-          scp "${scp_args[@]}" tmp/qnx-pki/sdk/lib/libcn_x509_common.so tmp/qnx-pki/sdk/lib/libcn_x509_crypto.so tmp/qnx-pki/sdk/lib/libcn_x509_proxy.so tmp/qnx-pki/pki-crypto-probe root@127.0.0.1:/data/home/root/apps/
-          scp "${scp_args[@]}" tmp/qnx-pki/sdk/conf/cn_x509_config.ini root@127.0.0.1:/mnt/etc/cn_x509_config.ini
-          ssh "${ssh_args[@]}" root@127.0.0.1 "LD_LIBRARY_PATH=/data/home/root/apps PKI_KEY_TYPE=1 /data/home/root/apps/pki-crypto-probe" 2>&1 | tee tmp/qnx-pki/probe.log
-          grep -q "PASS: empty AAD encryption and decryption round trip" tmp/qnx-pki/probe.log
-          grep -q "PASS: nonempty AAD encryption and decryption round trip" tmp/qnx-pki/probe.log
+          python3 scripts/qnx/run_pki_probe_in_vm.py
 
       - name: Upload QNX probe logs
         if: always()
