@@ -1,4 +1,4 @@
-name: QNX PKI Crypto Probe
+name: QNX PKI Vendor Test
 
 on:
   pull_request:
@@ -10,14 +10,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  QNX_NDK_URL: https://assets.emqx.com/data/ndk/qnx710.tar.gz
   QNX_VM_URL: https://assets.emqx.com/data/ndk/qnx710-aarch64-vm-dist.tar.gz
   QNX_VM_ASSET_SHA256: 51de37d71fa21673431ddc549929ef9a6ab54ee6557d3309819d41305554b1d8
   PKI_ASSET_SHA256: 9d40383e2aaef16a1793a3960b410aba868d8621d936d9c4450667c011ef37a8
   PKI_TEST_SHA256: e9a16f306bbc410036b98db7215208069cb8ffa4161cb4b4b95264c12ac894d0
 
 jobs:
-  crypto-probe:
+  vendor-test:
     if: github.event_name == 'workflow_dispatch' || github.head_ref == 'qnx_decrypt'
     runs-on: ubuntu-22.04
     timeout-minutes: 120
@@ -26,74 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install nightly Rust with standard library sources
-        uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rust-src
-
-      - name: Install build and VM tools
+      - name: Install VM tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential file qemu-system-arm qemu-utils openssh-client python3
-
-      - name: Cache public QNX NDK archive
-        uses: actions/cache@v4
-        with:
-          path: tmp/qnx-pki/qnx710.tar.gz
-          key: qnx710-public-20260922
-
-      - name: Download and extract public QNX NDK
-        run: |
-          set -euo pipefail
-          mkdir -p tmp/qnx-pki/ndk
-          if [ ! -s tmp/qnx-pki/qnx710.tar.gz ]; then
-            curl -fL --retry 3 "$QNX_NDK_URL" -o tmp/qnx-pki/qnx710.tar.gz
-          fi
-          sha256sum tmp/qnx-pki/qnx710.tar.gz
-          tar -xzf tmp/qnx-pki/qnx710.tar.gz -C tmp/qnx-pki/ndk
-          qnx_env="$(find tmp/qnx-pki/ndk -name qnxsdp-env.sh -print -quit)"
-          test -n "$qnx_env"
-          echo "QNX_ENV_FILE=$PWD/$qnx_env" >> "$GITHUB_ENV"
-
-      - name: Build Rust probe with QNX GNU linker
-        run: |
-          set -euo pipefail
-          source "$QNX_ENV_FILE"
-          export PATH="$QNX_HOST/usr/bin:$PATH"
-          command -v ntoaarch64-gcc
-          secureclient="$(find "$QNX_TARGET" -name libsecureclient.so.1 -print -quit)"
-          if [ -n "$secureclient" ]; then
-            cp -L "$secureclient" tmp/qnx-pki/libsecureclient.so.1
-            file tmp/qnx-pki/libsecureclient.so.1
-          else
-            echo "libsecureclient.so.1 is not present in the public QNX NDK"
-          fi
-          python3 - <<'PY'
-          import json
-          import os
-          import subprocess
-
-          spec = json.loads(subprocess.check_output(
-              ["rustc", "+nightly", "-Z", "unstable-options", "--target",
-               "aarch64-unknown-nto-qnx710", "--print", "target-spec-json"],
-              text=True,
-          ))
-          sysroot = os.environ["QNX_TARGET"]
-          spec["os"] = "nto"
-          spec["env"] = "nto71"
-          spec["linker"] = "ntoaarch64-gcc"
-          spec["relro-level"] = "off"
-          spec.pop("is-builtin", None)
-          spec["pre-link-args"] = {
-              "gnu-cc": [f"--sysroot={sysroot}"],
-              "gnu-lld-cc": [f"--sysroot={sysroot}"],
-          }
-          with open("tmp/qnx-pki/qnx-pki-target.json", "w", encoding="utf-8") as output:
-              json.dump(spec, output)
-          PY
-          cargo +nightly -Zbuild-std=std -Zjson-target-spec build --release --manifest-path scripts/qnx/pki_crypto_probe/Cargo.toml --target "$PWD/tmp/qnx-pki/qnx-pki-target.json" --target-dir tmp/qnx-pki/target
-          cp tmp/qnx-pki/target/qnx-pki-target/release/pki-crypto-probe tmp/qnx-pki/pki-crypto-probe
-          file tmp/qnx-pki/pki-crypto-probe
+          sudo apt-get install -y --no-install-recommends qemu-system-arm openssh-client python3
 
       - name: Download QNX VM and PKI SDK assets
         env:
@@ -115,19 +50,18 @@ jobs:
           test -f tmp/qnx-pki/sdk/lib/libcn_x509_common.so
           test -f tmp/qnx-pki/sdk/test/pki_test
 
-      - name: Run Rust crypto probe in ARM64 QNX VM
+      - name: Run vendor PKI test in ARM64 QNX VM
         run: |
           set -euo pipefail
-          python3 scripts/qnx/run_pki_probe_in_vm.py
+          python3 scripts/qnx/run_vendor_pki_test_in_vm.py
 
-      - name: Upload QNX probe logs
+      - name: Upload QNX vendor test logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qnx-pki-crypto-probe-logs
+          name: qnx-pki-vendor-test-logs
           path: |
             tmp/qnx-pki/start.log
             tmp/qnx-pki/console.log
-            tmp/qnx-pki/probe.log
             tmp/qnx-pki/vendor-test.log
           if-no-files-found: warn

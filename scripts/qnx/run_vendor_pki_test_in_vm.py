@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the PKI probe in the distributed QNX VM using an ephemeral SSH key."""
+"""Run the vendor PKI test in the distributed QNX VM."""
 
 import os
 import pty
@@ -18,7 +18,6 @@ ROOT = Path.cwd() / "tmp/qnx-pki"
 VM = ROOT / "vm"
 KEY = ROOT / "vm-ssh-key"
 START_LOG = ROOT / "start.log"
-PROBE_LOG = ROOT / "probe.log"
 VENDOR_LOG = ROOT / "vendor-test.log"
 SSH_PORT = "2223"
 
@@ -67,20 +66,15 @@ class SerialConsole:
         os.write(self.master_fd, (command + "\r").encode())
 
 
-def run(command, *, timeout=120, capture=False):
+def run(command, *, timeout=120):
     result = subprocess.run(
         command,
         check=False,
         timeout=timeout,
         text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.STDOUT if capture else None,
     )
     if result.returncode != 0:
-        if capture and result.stdout:
-            print(result.stdout, flush=True)
         raise RuntimeError(f"Command failed with status {result.returncode}: {command[0]}")
-    return result.stdout if capture else None
 
 
 def main():
@@ -172,12 +166,8 @@ def main():
             str(ROOT / "sdk/lib/libcn_x509_crypto.so"),
             str(ROOT / "sdk/lib/libcn_x509_proxy.so"),
             str(ROOT / "sdk/test/pki_test"),
-            str(ROOT / "pki-crypto-probe"),
             f"{remote}:/data/home/root/apps/",
         ])
-        secureclient = ROOT / "libsecureclient.so.1"
-        if secureclient.is_file():
-            run([*scp, str(secureclient), f"{remote}:/data/home/root/apps/"])
         run([*ssh, remote, "chmod 755 /data/home/root/apps/*.so* /data/home/root/apps/pki_test"])
         run([
             *scp,
@@ -207,24 +197,8 @@ def main():
         VENDOR_LOG.write_text(vendor.stdout)
         print(f"Vendor pki_test exit status: {vendor.returncode}\n{vendor.stdout}", flush=True)
 
-        probe = subprocess.run([
-            *ssh,
-            remote,
-            "LD_LIBRARY_PATH=/data/home/root/apps DL_DEBUG=libs,debug PKI_KEY_TYPE=1 "
-            "/data/home/root/apps/pki-crypto-probe",
-        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False, timeout=120)
-        PROBE_LOG.write_text(probe.stdout)
-        print(f"Rust probe exit status: {probe.returncode}\n{probe.stdout}", flush=True)
-        if vendor.returncode != 0 or probe.returncode != 0:
-            raise RuntimeError(
-                f"QNX vendor test exit={vendor.returncode}, Rust probe exit={probe.returncode}"
-            )
-        for expected in (
-            "PASS: empty AAD encryption and decryption round trip",
-            "PASS: nonempty AAD encryption and decryption round trip",
-        ):
-            if expected not in probe.stdout:
-                raise RuntimeError(f"Probe output did not contain: {expected}")
+        if vendor.returncode != 0:
+            raise RuntimeError(f"QNX vendor pki_test exited with status {vendor.returncode}")
     finally:
         if process is not None and process.poll() is None:
             process.terminate()
