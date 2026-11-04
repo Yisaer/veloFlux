@@ -19,6 +19,7 @@ VM = ROOT / "vm"
 KEY = ROOT / "vm-ssh-key"
 START_LOG = ROOT / "start.log"
 PROBE_LOG = ROOT / "probe.log"
+VENDOR_LOG = ROOT / "vendor-test.log"
 SSH_PORT = "2223"
 
 
@@ -170,13 +171,14 @@ def main():
             str(ROOT / "sdk/lib/libcn_x509_common.so"),
             str(ROOT / "sdk/lib/libcn_x509_crypto.so"),
             str(ROOT / "sdk/lib/libcn_x509_proxy.so"),
+            str(ROOT / "sdk/test/pki_test"),
             str(ROOT / "pki-crypto-probe"),
             f"{remote}:/data/home/root/apps/",
         ])
         secureclient = ROOT / "libsecureclient.so.1"
         if secureclient.is_file():
             run([*scp, str(secureclient), f"{remote}:/data/home/root/apps/"])
-        run([*ssh, remote, "chmod 755 /data/home/root/apps/*.so*"])
+        run([*ssh, remote, "chmod 755 /data/home/root/apps/*.so* /data/home/root/apps/pki_test"])
         run([
             *scp,
             str(ROOT / "sdk/conf/cn_x509_config.ini"),
@@ -196,19 +198,32 @@ def main():
             timeout=30,
         )
         print("QNX vendor library dependencies:\n" + dependencies.stdout, flush=True)
-        output = run([
+        vendor = subprocess.run([
             *ssh,
             remote,
-            "LD_LIBRARY_PATH=/data/home/root/apps PKI_KEY_TYPE=1 "
+            "LD_LIBRARY_PATH=/data/home/root/apps DL_DEBUG=libs,debug "
+            "/data/home/root/apps/pki_test 2",
+        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False, timeout=120)
+        VENDOR_LOG.write_text(vendor.stdout)
+        print(f"Vendor pki_test exit status: {vendor.returncode}\n{vendor.stdout}", flush=True)
+
+        probe = subprocess.run([
+            *ssh,
+            remote,
+            "LD_LIBRARY_PATH=/data/home/root/apps DL_DEBUG=libs,debug PKI_KEY_TYPE=1 "
             "/data/home/root/apps/pki-crypto-probe",
-        ], capture=True)
-        PROBE_LOG.write_text(output)
-        print(output, end="", flush=True)
+        ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False, timeout=120)
+        PROBE_LOG.write_text(probe.stdout)
+        print(f"Rust probe exit status: {probe.returncode}\n{probe.stdout}", flush=True)
+        if vendor.returncode != 0 or probe.returncode != 0:
+            raise RuntimeError(
+                f"QNX vendor test exit={vendor.returncode}, Rust probe exit={probe.returncode}"
+            )
         for expected in (
             "PASS: empty AAD encryption and decryption round trip",
             "PASS: nonempty AAD encryption and decryption round trip",
         ):
-            if expected not in output:
+            if expected not in probe.stdout:
                 raise RuntimeError(f"Probe output did not contain: {expected}")
     finally:
         if process is not None and process.poll() is None:

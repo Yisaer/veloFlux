@@ -14,6 +14,7 @@ env:
   QNX_VM_URL: https://assets.emqx.com/data/ndk/qnx710-aarch64-vm-dist.tar.gz
   QNX_VM_ASSET_SHA256: 51de37d71fa21673431ddc549929ef9a6ab54ee6557d3309819d41305554b1d8
   PKI_ASSET_SHA256: 9d40383e2aaef16a1793a3960b410aba868d8621d936d9c4450667c011ef37a8
+  PKI_TEST_SHA256: e9a16f306bbc410036b98db7215208069cb8ffa4161cb4b4b95264c12ac894d0
 
 jobs:
   crypto-probe:
@@ -100,16 +101,19 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$QNX_INSTALLER_TOKEN"
-          mkdir -p tmp/qnx-pki/vm tmp/qnx-pki/sdk
+          mkdir -p tmp/qnx-pki/vm tmp/qnx-pki/sdk/test
           curl -fL --retry 3 "$QNX_VM_URL" -o tmp/qnx-pki/qnx710-aarch64-vm-dist.tar.gz
           GH_TOKEN="$QNX_INSTALLER_TOKEN" gh release download sheng-an-pki-qnx-20261028 --repo Yisaer/qnx-private-assets --pattern shengan-pki-qnx-20261028.tar.gz --dir tmp/qnx-pki
+          GH_TOKEN="$QNX_INSTALLER_TOKEN" gh release download sheng-an-pki-qnx-20261028 --repo Yisaer/qnx-private-assets --pattern pki_test --dir tmp/qnx-pki/sdk/test
           echo "$QNX_VM_ASSET_SHA256  tmp/qnx-pki/qnx710-aarch64-vm-dist.tar.gz" | sha256sum --check --strict
           echo "$PKI_ASSET_SHA256  tmp/qnx-pki/shengan-pki-qnx-20261028.tar.gz" | sha256sum --check --strict
+          echo "$PKI_TEST_SHA256  tmp/qnx-pki/sdk/test/pki_test" | sha256sum --check --strict
           tar -xzf tmp/qnx-pki/qnx710-aarch64-vm-dist.tar.gz --strip-components=1 -C tmp/qnx-pki/vm
           tar -xzf tmp/qnx-pki/shengan-pki-qnx-20261028.tar.gz -C tmp/qnx-pki/sdk
           test -f tmp/qnx-pki/sdk/lib/libcn_x509_proxy.so
           test -f tmp/qnx-pki/sdk/lib/libcn_x509_crypto.so
           test -f tmp/qnx-pki/sdk/lib/libcn_x509_common.so
+          test -f tmp/qnx-pki/sdk/test/pki_test
 
       - name: Run Rust crypto probe in ARM64 QNX VM
         run: |
@@ -125,4 +129,5 @@ jobs:
             tmp/qnx-pki/start.log
             tmp/qnx-pki/console.log
             tmp/qnx-pki/probe.log
+            tmp/qnx-pki/vendor-test.log
           if-no-files-found: warn
